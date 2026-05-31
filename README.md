@@ -68,9 +68,23 @@ legal-terminal은 PC에 설치된 **Claude Code**와 **변호사용 플러그인
 
 - 압축 파일이 필요하면: [Apple Silicon zip](https://github.com/jurisupport/legal-terminal/releases/latest/download/legal-terminal-mac-arm64.zip)
 
-아직 코드서명/공증 전 빌드는 Gatekeeper 경고가 뜰 수 있습니다. 막히면 Finder에서 앱을 우클릭 → **열기**로 실행하세요.
+### 2) "손상되었기 때문에 휴지통으로 이동" 경고가 뜨면
 
-### 2) 처음이라면 먼저 준비하세요
+아직 코드서명/공증 전 빌드라서 macOS Gatekeeper가 앱을 막을 수 있습니다. 실제 파일이 깨진 것이 아니라 격리(quarantine) 속성 때문에 생기는 경우가 많습니다.
+
+테스트용으로 실행할 때는 앱 위치에 맞춰 아래 명령을 실행한 뒤 Finder에서 앱을 우클릭 → **열기**로 실행하세요.
+
+```bash
+# /Applications에 설치한 경우
+xattr -dr com.apple.quarantine /Applications/legal-terminal.app
+
+# Downloads에서 압축을 풀고 바로 실행하는 경우
+xattr -dr com.apple.quarantine ~/Downloads/legal-terminal.app
+```
+
+정식 배포에서는 Apple Developer ID 서명과 notarization을 붙이면 이 경고가 사라집니다.
+
+### 3) 처음이라면 먼저 준비하세요
 
 - Node.js 20 이상
 - Claude Code CLI (`claude`) 로그인 1회
