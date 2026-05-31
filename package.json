@@ -1,0 +1,44 @@
+{
+  "name": "legal-terminal",
+  "version": "0.0.1",
+  "description": "대한민국 변호사를 위한 VS Code 유사 데스크톱 앱 — Claude Code + Markdown + 전자소송기록 뷰어",
+  "main": "./out/main/index.js",
+  "author": "lawpid",
+  "license": "MIT",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "preview": "electron-vite preview",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "@codemirror/commands": "^6.10.3",
+    "@codemirror/lang-markdown": "^6.5.0",
+    "@codemirror/language": "^6.12.3",
+    "@codemirror/state": "^6.6.0",
+    "@codemirror/view": "^6.43.0",
+    "@lezer/highlight": "^1.2.3",
+    "@lezer/markdown": "^1.6.4",
+    "@lydell/node-pty": "^1.1.0",
+    "@xterm/addon-canvas": "^0.7.0",
+    "@xterm/addon-fit": "^0.10.0",
+    "@xterm/addon-webgl": "^0.18.0",
+    "@xterm/xterm": "^5.5.0",
+    "dompurify": "^3.4.7",
+    "hwp.js": "^0.0.3",
+    "marked": "^14.1.4",
+    "pdfjs-dist": "^4.10.38"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.3.4",
+    "electron": "^33.2.1",
+    "electron-vite": "^2.3.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "typescript": "^5.7.2",
+    "vite": "^5.4.11"
+  }
+}

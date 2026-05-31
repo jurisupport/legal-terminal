@@ -1,0 +1,18 @@
+node_modules/
+out/
+dist/
+*.log
+.DS_Store
+.env
+.env.local
+
+# 개인/로컬 설정
+.claude/settings.local.json
+
+# 외부 참조 코드(업스트림 viewer-windows) — 빌드에 불필요
+reference/
+
+# 의뢰인 정보 보호: 사건 데이터·산출물은 절대 커밋하지 않음
+사건/
+*_index.csv
+*.pdf
