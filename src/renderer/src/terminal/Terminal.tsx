@@ -11,7 +11,7 @@ import type { SshConn } from '../env'
 const DEFAULT_FONT = "'D2Coding', 'Cascadia Mono', Consolas, monospace"
 
 /**
- * 하나의 사건 터미널. main의 node-pty(powershell)를 띄우고 자동으로 `claude`를 실행한다.
+ * 하나의 사건 터미널. main의 node-pty(플랫폼 기본 셸)를 띄우고 자동으로 `claude`를 실행한다.
  * 폰트/글자크기는 설정(termFont, termFontSize)에서 읽는다(새 터미널에 적용).
  */
 export default function Terminal({
@@ -94,8 +94,9 @@ export default function Terminal({
     let disposed = false
     let cleanup: () => void = () => {}
 
-    window.lt.settings.get().then(async (s) => {
+    Promise.all([window.lt.settings.get(), window.lt.app.info()]).then(async ([s, appInfo]) => {
       const fontSize = s.termFontSize || 13
+      const isMac = appInfo.platform === 'darwin'
       // 번들 폰트가 로드된 뒤 xterm을 생성해야 글자 폭 측정이 정확하다.
       try {
         await document.fonts.load(`${fontSize}px "D2Coding"`)
@@ -110,8 +111,12 @@ export default function Terminal({
         fontSize: fontSize,
         cursorBlink: true,
         allowProposedApi: true,
-        // ConPTY(node-pty) 백엔드임을 알려 커서 열 추적/리플로우를 정확히 (IME 조합 위치 어긋남 완화)
-        windowsPty: { backend: 'conpty', buildNumber: 22621 },
+        ...(appInfo.platform === 'win32'
+          ? {
+              // ConPTY(node-pty) 백엔드임을 알려 커서 열 추적/리플로우를 정확히 (IME 조합 위치 어긋남 완화)
+              windowsPty: { backend: 'conpty' as const, buildNumber: 22621 }
+            }
+          : {}),
         theme: { background: '#181818', foreground: '#cccccc', cursor: '#cccccc' }
       })
       const fit = new FitAddon()
@@ -143,28 +148,29 @@ export default function Terminal({
       }
       // 복사/붙여넣기 키 처리. true=xterm/pty로 전달, false=가로채서 기본동작 차단.
       term.attachCustomKeyEventHandler((e) => {
-        if (e.type !== 'keydown' || !e.ctrlKey) return true
+        const primary = isMac ? e.metaKey && !e.ctrlKey : e.ctrlKey
+        if (e.type !== 'keydown' || !primary) return true
         const k = e.key.toLowerCase()
         if (k === 't' && !e.shiftKey && !e.altKey) {
-          // Ctrl+T: 새 터미널 (같은 사건, claude 실행)
+          // Ctrl/Cmd+T: 새 터미널 (같은 사건, claude 실행)
           e.stopPropagation()
           onNewTermRef.current?.()
           return false
         }
         if (k === 'w' && !e.shiftKey && !e.altKey) {
-          // Ctrl+W: 이 터미널 닫기 (작업 중이면 App에서 확인). claude 단어삭제 대신 탭 닫기.
+          // Ctrl/Cmd+W: 이 터미널 닫기 (작업 중이면 App에서 확인).
           e.stopPropagation()
           onCloseRef.current?.()
           return false
         }
         if (k === 'tab') {
-          // Ctrl+Tab / Ctrl+Shift+Tab: 터미널 탭 순환
+          // Ctrl/Cmd+Tab / Ctrl/Cmd+Shift+Tab: 터미널 탭 순환
           e.stopPropagation()
           onCycleRef.current?.(e.shiftKey ? -1 : 1)
           return false
         }
         if (k === 'pageup' || k === 'pagedown') {
-          // Ctrl+PageUp/PageDown: 터미널 탭 이동
+          // Ctrl/Cmd+PageUp/PageDown: 터미널 탭 이동
           e.stopPropagation()
           onCycleRef.current?.(k === 'pageup' ? -1 : 1)
           return false
@@ -176,6 +182,7 @@ export default function Terminal({
             navigator.clipboard.writeText(sel)
             return false
           }
+          if (isMac) return false // 선택 없는 Cmd+C는 셸 인터럽트로 보내지 않는다. Ctrl+C는 위 primary 조건 밖이라 통과.
           if (e.shiftKey) return false // Ctrl+Shift+C: 선택 없으면 무동작
           return true // 선택 없는 Ctrl+C → 인터럽트
         }

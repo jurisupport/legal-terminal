@@ -10,7 +10,10 @@ interface Session {
 const sessions = new Map<string, Session>()
 
 const defaultShell =
-  process.platform === 'win32' ? 'powershell.exe' : process.env.SHELL || '/bin/bash'
+  process.platform === 'win32'
+    ? 'powershell.exe'
+    : process.env.SHELL || (process.platform === 'darwin' ? '/bin/zsh' : '/bin/bash')
+const defaultShellArgs = process.platform === 'darwin' ? ['-l'] : []
 
 /**
  * pty에 넘길 깨끗한 환경을 만든다.
@@ -110,7 +113,7 @@ export function createPty(opts: CreatePtyOptions, webContents: WebContents): voi
         rows: Math.max(rows, 1),
         env: cleanEnv()
       })
-    : pty.spawn(defaultShell, [], {
+    : pty.spawn(defaultShell, defaultShellArgs, {
         name: 'xterm-256color',
         cwd,
         cols: Math.max(cols, 2),

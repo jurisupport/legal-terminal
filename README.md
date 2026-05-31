@@ -5,7 +5,7 @@
 > 쥬리서포트 주식회사 ([jurisupport.com](https://jurisupport.com))
 
 ![License](https://img.shields.io/badge/License-MIT-blue.svg)
-![Platform](https://img.shields.io/badge/Platform-Windows-lightgrey)
+![Platform](https://img.shields.io/badge/Platform-macOS%20%7C%20Windows-lightgrey)
 ![Locale](https://img.shields.io/badge/Locale-ko--KR-red)
 ![Claude Code](https://img.shields.io/badge/Claude%20Code-Required-orange)
 
@@ -30,7 +30,51 @@
 - **사건 대시보드 → 원격 열기** — 사건 우클릭 **"○○에서 열기"** 로 원격 작업환경 진입. 작성서류·**소송기록 폴더 자동 매칭**(이전에 고른 짝은 기억).
 - **OneDrive 동기화(rclone)** — 원격 사건폴더 ↔ OneDrive 클라우드 **가져오기/보내기**(맥에서 rclone 실행, `copy --update`로 삭제 전파 없이 안전).
 - **설정에서 원격 루트를 '찾아보기'로 지정** — 경로를 외워 입력할 필요 없이, 접속해 원격 폴더를 탐색·선택.
-- 그 외: 터미널 **Ctrl+W로 탭 닫기**(작업 중이면 확인), **사건 지정 해제** 버튼, 저장 안 된 새 문서 **닫기 보호**, 사건 목록 로딩 멈춤(타임아웃) 수정.
+- 그 외: 터미널 **Cmd/Ctrl+W로 탭 닫기**(작업 중이면 확인), **사건 지정 해제** 버튼, 저장 안 된 새 문서 **닫기 보호**, 사건 목록 로딩 멈춤(타임아웃) 수정.
+
+## 다운로드 (macOS)
+
+### 1) 이 파일을 받으세요
+
+👉 **[Mac Apple Silicon용 내려받기](https://github.com/jurisupport/legal-terminal/releases/latest/download/legal-terminal-mac-arm64.dmg)** — M1/M2/M3/M4 Mac용
+
+👉 **[Mac Intel용 내려받기](https://github.com/jurisupport/legal-terminal/releases/latest/download/legal-terminal-mac-x64.dmg)** — Intel Mac용
+
+- 압축 파일이 필요하면: [Apple Silicon zip](https://github.com/jurisupport/legal-terminal/releases/latest/download/legal-terminal-mac-arm64.zip) / [Intel zip](https://github.com/jurisupport/legal-terminal/releases/latest/download/legal-terminal-mac-x64.zip)
+
+아직 코드서명/공증 전 빌드는 Gatekeeper 경고가 뜰 수 있습니다. 막히면 Finder에서 앱을 우클릭 → **열기**로 실행하세요.
+
+### 2) 처음이라면 먼저 준비하세요
+
+- Node.js 20 이상
+- Claude Code CLI (`claude`) 로그인 1회
+- [`jurisupport-plugins`](https://github.com/jurisupport/jurisupport-plugins) 설치: macOS/Linux용 `install.sh`
+- 원격 동기화를 쓸 경우: 원격 Mac에 `rclone` 설정, 로컬/원격 SSH 키 또는 ssh-agent
+
+## 개발 / 패키징 (macOS)
+
+### 개발 모드로 실행
+
+```bash
+npm ci
+npm run dev
+```
+
+앱 안의 터미널은 macOS에서 로그인 셸(`/bin/zsh -l` 또는 `$SHELL -l`)로 뜨므로 Homebrew·Claude Code 경로를 일반 터미널과 최대한 비슷하게 읽습니다.
+
+### Mac 앱으로 패키징
+
+```bash
+npm run dist:mac
+```
+
+결과물은 `dist/` 아래에 `legal-terminal-mac-<arch>.dmg`와 `.zip`으로 생성됩니다. 서명하지 않은 로컬 빌드를 직접 열 때 macOS가 차단하면, Finder에서 우클릭 → 열기를 사용하거나 테스트용으로 다음 명령을 실행하세요.
+
+```bash
+xattr -dr com.apple.quarantine /Applications/legal-terminal.app
+```
+
+배포용 릴리스는 Apple Developer ID 인증서와 notarization 설정을 붙인 뒤 `electron-builder.yml`의 `mac.identity: null`을 제거하세요.
 
 ## 다운로드 (Windows)
 
@@ -87,7 +131,7 @@ legal-terminal은 **실제 `claude` CLI를 그대로 실행**하므로, [`jurisu
 - 사건 1개 = 터미널 1개. **세션 이름 자동 생성**(법원·사건번호·사건명·당사자) + claude 세션 제목(transcript ai-title) 반영
 - **세션 목록(☰)** — 열린 세션 + **과거 세션(`claude --resume`로 이어서 열기)**, 사건별 필터
 - 탭 상태 표시: **작업 중(⟳) / 완료(●) / 질문 대기(❓)**, 완료 시 알림음, 질문 시 팝업
-- 복사/붙여넣기, Ctrl+T 새 터미널, **Ctrl+W 터미널 닫기(작업 중이면 확인)**, Ctrl+Tab·Ctrl+PageUp/Down 탭 이동
+- 복사/붙여넣기, Cmd/Ctrl+T 새 터미널, **Cmd/Ctrl+W 터미널 닫기(작업 중이면 확인)**, Cmd/Ctrl+Tab·Cmd/Ctrl+PageUp/Down 탭 이동
 - 탐색기·기록뷰어의 문서를 **터미널로 드래그**하면 그 파일을 Claude에 질문
 - 터미널을 모두 닫아도 사건 컨텍스트 유지 → **사건 지정 해제** 버튼으로 비우기
 
@@ -111,14 +155,16 @@ Electron 33 · electron-vite · React 18 · TypeScript · xterm.js(+WebGL) · `@
 ## 개발
 
 ```bash
-npm install
+npm ci
 npm run dev        # 개발 모드 (HMR)
 npm run build      # 프로덕션 빌드 (out/)
 npm run preview    # 빌드 결과 실행
 npm run typecheck  # 타입 검사
+npm run dist:mac   # macOS dmg/zip 패키징
+npm run dist:win   # Windows nsis/portable 패키징
 ```
 
-> Windows 기준. `@lydell/node-pty`는 prebuilt N-API라 별도 컴파일러가 필요 없습니다.
+`@lydell/node-pty`는 prebuilt N-API라 일반적인 macOS/Windows 개발 환경에서는 별도 컴파일러 없이 설치됩니다.
 
 ## 라이선스
 
