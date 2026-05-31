@@ -32,6 +32,32 @@
 - **설정에서 원격 루트를 '찾아보기'로 지정** — 경로를 외워 입력할 필요 없이, 접속해 원격 폴더를 탐색·선택.
 - 그 외: 터미널 **Cmd/Ctrl+W로 탭 닫기**(작업 중이면 확인), **사건 지정 해제** 버튼, 저장 안 된 새 문서 **닫기 보호**, 사건 목록 로딩 멈춤(타임아웃) 수정.
 
+## 다운로드 (Windows)
+
+### 1) 이 파일을 받으세요
+
+👉 **[legal-terminal 설치 (Setup) 내려받기](https://github.com/jurisupport/legal-terminal/releases/latest/download/legal-terminal-Setup.exe)** — 대부분 이 파일 하나면 됩니다. 받은 뒤 더블클릭해서 설치하세요.
+
+- 설치하기 싫고 바로 실행만: **[포터블 버전](https://github.com/jurisupport/legal-terminal/releases/latest/download/legal-terminal-portable.exe)** (다운로드 후 더블클릭, 설치 불필요)
+
+### 2) 설치할 때 "Windows의 PC 보호" 경고 푸는 법
+
+아직 코드서명 전이라 처음 실행하면 파란색 **"Windows의 PC 보호(Windows protected your PC)"** 창이 뜹니다. 정상이며, 이렇게 통과합니다.
+
+1. 창에서 **추가 정보(More info)** 클릭
+2. 아래에 나타나는 **실행(Run anyway)** 클릭
+
+> 그래도 막히면: 받은 `.exe`를 **우클릭 → 속성 → 하단 "차단 해제(Unblock)" 체크 → 확인** 후 다시 실행하세요.
+
+### 3) 처음이라면 — `jurisupport-plugins`부터 설치하세요
+
+legal-terminal은 PC에 설치된 **Claude Code**와 **변호사용 플러그인**을 그대로 사용합니다. 아직 이것들이 없다면, **먼저 [`jurisupport-plugins`](https://github.com/jurisupport/jurisupport-plugins)를 설치**하세요. 설치 스크립트가 의존성(Node 등)·**Claude Code**·송무 플러그인·판례·법령·사건기록 검색 도구·PII 보호 훅까지 한 번에 구성해 줍니다.
+
+- Windows: `windows-bootstrap.ps1`
+- macOS/Linux/WSL: `install.sh`
+
+설치 후 `claude` 1회 로그인 → 그다음 legal-terminal 설치본을 실행하면 됩니다. (사건 대시보드의 JuriSupport 연동은 선택 사항 — 아래 참고)
+
 ## 다운로드 (macOS)
 
 ### 1) 이 파일을 받으세요
@@ -75,32 +101,6 @@ xattr -dr com.apple.quarantine /Applications/legal-terminal.app
 ```
 
 배포용 릴리스는 Apple Developer ID 인증서와 notarization 설정을 붙인 뒤 `electron-builder.yml`의 `mac.identity: null`을 제거하세요.
-
-## 다운로드 (Windows)
-
-### 1) 이 파일을 받으세요
-
-👉 **[legal-terminal 설치 (Setup) 내려받기](https://github.com/jurisupport/legal-terminal/releases/latest/download/legal-terminal-Setup.exe)** — 대부분 이 파일 하나면 됩니다. 받은 뒤 더블클릭해서 설치하세요.
-
-- 설치하기 싫고 바로 실행만: **[포터블 버전](https://github.com/jurisupport/legal-terminal/releases/latest/download/legal-terminal-portable.exe)** (다운로드 후 더블클릭, 설치 불필요)
-
-### 2) 설치할 때 "Windows의 PC 보호" 경고 푸는 법
-
-아직 코드서명 전이라 처음 실행하면 파란색 **"Windows의 PC 보호(Windows protected your PC)"** 창이 뜹니다. 정상이며, 이렇게 통과합니다.
-
-1. 창에서 **추가 정보(More info)** 클릭
-2. 아래에 나타나는 **실행(Run anyway)** 클릭
-
-> 그래도 막히면: 받은 `.exe`를 **우클릭 → 속성 → 하단 "차단 해제(Unblock)" 체크 → 확인** 후 다시 실행하세요.
-
-### 3) 처음이라면 — `jurisupport-plugins`부터 설치하세요
-
-legal-terminal은 PC에 설치된 **Claude Code**와 **변호사용 플러그인**을 그대로 사용합니다. 아직 이것들이 없다면, **먼저 [`jurisupport-plugins`](https://github.com/jurisupport/jurisupport-plugins)를 설치**하세요. 설치 스크립트가 의존성(Node 등)·**Claude Code**·송무 플러그인·판례·법령·사건기록 검색 도구·PII 보호 훅까지 한 번에 구성해 줍니다.
-
-- Windows: `windows-bootstrap.ps1`
-- macOS/Linux/WSL: `install.sh`
-
-설치 후 `claude` 1회 로그인 → 그다음 legal-terminal 설치본을 실행하면 됩니다. (사건 대시보드의 JuriSupport 연동은 선택 사항 — 아래 참고)
 
 ## jurisupport-plugins와 함께 사용
 
