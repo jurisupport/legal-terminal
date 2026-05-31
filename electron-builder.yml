@@ -29,7 +29,7 @@ mac:
   identity: null
   hardenedRuntime: false
   gatekeeperAssess: false
-  artifactName: legal-terminal-${version}-mac-${arch}.${ext}
+  artifactName: legal-terminal-mac-${arch}.${ext}
 
 win:
   target:

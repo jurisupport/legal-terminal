@@ -32,18 +32,28 @@
 - **설정에서 원격 루트를 '찾아보기'로 지정** — 경로를 외워 입력할 필요 없이, 접속해 원격 폴더를 탐색·선택.
 - 그 외: 터미널 **Cmd/Ctrl+W로 탭 닫기**(작업 중이면 확인), **사건 지정 해제** 버튼, 저장 안 된 새 문서 **닫기 보호**, 사건 목록 로딩 멈춤(타임아웃) 수정.
 
-## 다운로드 / 실행 (macOS)
+## 다운로드 (macOS)
 
-이 브랜치는 Mac에서 바로 개발·패키징할 수 있도록 `electron-builder --mac` 경로를 추가했습니다. 아직 코드서명/공증 전 빌드는 Gatekeeper 경고가 뜰 수 있습니다.
+### 1) 이 파일을 받으세요
 
-### 1) 먼저 준비하세요
+👉 **[Mac Apple Silicon용 내려받기](https://github.com/jurisupport/legal-terminal/releases/latest/download/legal-terminal-mac-arm64.dmg)** — M1/M2/M3/M4 Mac용
+
+👉 **[Mac Intel용 내려받기](https://github.com/jurisupport/legal-terminal/releases/latest/download/legal-terminal-mac-x64.dmg)** — Intel Mac용
+
+- 압축 파일이 필요하면: [Apple Silicon zip](https://github.com/jurisupport/legal-terminal/releases/latest/download/legal-terminal-mac-arm64.zip) / [Intel zip](https://github.com/jurisupport/legal-terminal/releases/latest/download/legal-terminal-mac-x64.zip)
+
+아직 코드서명/공증 전 빌드는 Gatekeeper 경고가 뜰 수 있습니다. 막히면 Finder에서 앱을 우클릭 → **열기**로 실행하세요.
+
+### 2) 처음이라면 먼저 준비하세요
 
 - Node.js 20 이상
 - Claude Code CLI (`claude`) 로그인 1회
 - [`jurisupport-plugins`](https://github.com/jurisupport/jurisupport-plugins) 설치: macOS/Linux용 `install.sh`
 - 원격 동기화를 쓸 경우: 원격 Mac에 `rclone` 설정, 로컬/원격 SSH 키 또는 ssh-agent
 
-### 2) 개발 모드로 실행
+## 개발 / 패키징 (macOS)
+
+### 개발 모드로 실행
 
 ```bash
 npm ci
@@ -52,13 +62,13 @@ npm run dev
 
 앱 안의 터미널은 macOS에서 로그인 셸(`/bin/zsh -l` 또는 `$SHELL -l`)로 뜨므로 Homebrew·Claude Code 경로를 일반 터미널과 최대한 비슷하게 읽습니다.
 
-### 3) Mac 앱으로 패키징
+### Mac 앱으로 패키징
 
 ```bash
 npm run dist:mac
 ```
 
-결과물은 `dist/` 아래에 `legal-terminal-<version>-mac-<arch>.dmg`와 `.zip`으로 생성됩니다. 서명하지 않은 로컬 빌드를 직접 열 때 macOS가 차단하면, Finder에서 우클릭 → 열기를 사용하거나 테스트용으로 다음 명령을 실행하세요.
+결과물은 `dist/` 아래에 `legal-terminal-mac-<arch>.dmg`와 `.zip`으로 생성됩니다. 서명하지 않은 로컬 빌드를 직접 열 때 macOS가 차단하면, Finder에서 우클릭 → 열기를 사용하거나 테스트용으로 다음 명령을 실행하세요.
 
 ```bash
 xattr -dr com.apple.quarantine /Applications/legal-terminal.app
