@@ -10,7 +10,7 @@
 
 ![legal-terminal](screenshots/app.png)
 
-> 흩어져 있던 터미널의 `claude`, 별도 에디터, 전자소송기록 뷰어를 **하나의 송무 콕핏**으로 묶었습니다. 기존 `jurisupport-plugins` 생태계(songmu-legal 플러그인, korean-law MCP, 법령·판례·사건기록 토킷, PII 보호 훅)는 **교체가 아니라 그대로 살려** 동작합니다.
+> 따로 떠 있던 터미널의 `claude`, 별도 에디터, 전자소송기록 뷰어를 **한 화면에 통합**했습니다. 기존 `jurisupport-plugins` 생태계(songmu-legal 플러그인, korean-law MCP, 법령·판례·사건기록 토킷, PII 보호 훅)는 **교체가 아니라 그대로 살려** 동작합니다.
 
 ## 다운로드 / 설치
 
@@ -21,9 +21,14 @@
 
 > 코드서명 전이라 처음 실행 시 Windows SmartScreen 경고가 뜰 수 있습니다 — **추가 정보 → 실행**을 누르세요.
 
-내장된 `claude`가 동작하려면 PC에 **Claude Code**가 설치·로그인돼 있어야 합니다
-(`npm i -g @anthropic-ai/claude-code` 후 `claude` 1회 로그인). 사건 대시보드(JuriSupport 연동)는
-선택 사항입니다(아래 참고).
+### 처음이라면 — `jurisupport-plugins`부터 설치하세요
+
+legal-terminal은 PC에 설치된 **Claude Code**와 **변호사용 플러그인**을 그대로 사용합니다. 아직 이것들이 없다면, **먼저 [`jurisupport-plugins`](https://github.com/jurisupport/jurisupport-plugins)를 설치**하세요. 설치 스크립트가 의존성(Node 등)·**Claude Code**·송무 플러그인·검색 토킷·PII 보호 훅까지 한 번에 구성해 줍니다.
+
+- Windows: `windows-bootstrap.ps1`
+- macOS/Linux/WSL: `install.sh`
+
+설치 후 `claude` 1회 로그인 → 그다음 legal-terminal 설치본을 실행하면 됩니다. (사건 대시보드의 JuriSupport 연동은 선택 사항 — 아래 참고)
 
 ## jurisupport-plugins와 함께 사용
 

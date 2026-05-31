@@ -39,4 +39,4 @@ publish:
   provider: github
   owner: jurisupport
   repo: legal-terminal
-  releaseType: draft
+  releaseType: release
