@@ -19,8 +19,10 @@ jobs:
         include:
           - os: macos-15-intel
             arch: x64
+            mac_targets: zip
           - os: macos-15
             arch: arm64
+            mac_targets: dmg zip
     steps:
       - uses: actions/checkout@v4
 
@@ -35,7 +37,7 @@ jobs:
         run: npm run build
 
       - name: Package & publish macOS
-        run: npx electron-builder --mac --${{ matrix.arch }} --publish always
+        run: npx electron-builder --mac ${{ matrix.mac_targets }} --${{ matrix.arch }} --publish always
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 

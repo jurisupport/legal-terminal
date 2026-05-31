@@ -38,9 +38,9 @@
 
 👉 **[Mac Apple Silicon용 내려받기](https://github.com/jurisupport/legal-terminal/releases/latest/download/legal-terminal-mac-arm64.dmg)** — M1/M2/M3/M4 Mac용
 
-👉 **[Mac Intel용 내려받기](https://github.com/jurisupport/legal-terminal/releases/latest/download/legal-terminal-mac-x64.dmg)** — Intel Mac용
+👉 **[Mac Intel용 내려받기](https://github.com/jurisupport/legal-terminal/releases/latest/download/legal-terminal-mac-x64.zip)** — Intel Mac용
 
-- 압축 파일이 필요하면: [Apple Silicon zip](https://github.com/jurisupport/legal-terminal/releases/latest/download/legal-terminal-mac-arm64.zip) / [Intel zip](https://github.com/jurisupport/legal-terminal/releases/latest/download/legal-terminal-mac-x64.zip)
+- 압축 파일이 필요하면: [Apple Silicon zip](https://github.com/jurisupport/legal-terminal/releases/latest/download/legal-terminal-mac-arm64.zip)
 
 아직 코드서명/공증 전 빌드는 Gatekeeper 경고가 뜰 수 있습니다. 막히면 Finder에서 앱을 우클릭 → **열기**로 실행하세요.
 
