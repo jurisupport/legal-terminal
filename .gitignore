@@ -1,6 +1,7 @@
 node_modules/
 out/
 dist/
+.omx/
 *.log
 .DS_Store
 .env

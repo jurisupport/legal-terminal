@@ -19,6 +19,18 @@ asarUnpack:
 # prebuilt 네이티브(@lydell/node-pty) 사용 — 재빌드 안 함
 npmRebuild: false
 
+mac:
+  category: public.app-category.productivity
+  target:
+    - dmg
+    - zip
+  # 코드서명/공증 인증서가 없는 로컬 Mac 빌드도 만들 수 있게 둔다.
+  # 배포용 서명은 CSC_NAME 또는 Apple 인증서 설정을 추가한 뒤 이 값을 제거한다.
+  identity: null
+  hardenedRuntime: false
+  gatekeeperAssess: false
+  artifactName: legal-terminal-${version}-mac-${arch}.${ext}
+
 win:
   target:
     - target: nsis

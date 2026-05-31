@@ -122,6 +122,7 @@ const newId = (): string =>
 export default function App(): JSX.Element {
   const [mode, setMode] = useState<Mode>('explorer')
   const [info, setInfo] = useState<string>('')
+  const [platform, setPlatform] = useState<string>('')
 
   const [docTabs, setDocTabs] = useState<DocTab[]>([
     { id: 'doc-welcome', title: '시작하기.md', kind: 'welcome' }
@@ -171,9 +172,10 @@ export default function App(): JSX.Element {
   useEffect(() => {
     window.lt?.app
       .info()
-      .then((i) =>
+      .then((i) => {
+        setPlatform(i.platform)
         setInfo(`Electron ${i.versions.electron} · Node ${i.versions.node} · ${i.platform}`)
-      )
+      })
       .catch(() => setInfo('preload 브리지 미연결'))
     window.lt?.settings.get().then((s) => {
       setDraftsRoot(s.draftsRoot)
@@ -225,10 +227,11 @@ export default function App(): JSX.Element {
     setDocTabs((tabs) => closeTab(tabs, id, activeDoc, setActiveDoc))
   }
 
-  // 단축키: Ctrl+W 탭 닫기 / Ctrl+N 새 문서 / Ctrl+Shift+N 새 터미널
+  // 단축키: Ctrl/Cmd+W 탭 닫기 / Ctrl/Cmd+N 새 문서 / Ctrl/Cmd+Shift+N 새 작업환경
   useEffect(() => {
     const onKey = (e: KeyboardEvent): void => {
-      if (!e.ctrlKey || e.altKey) return
+      const primary = platform === 'darwin' ? e.metaKey && !e.ctrlKey : e.ctrlKey
+      if (!primary || e.altKey) return
       const k = e.key.toLowerCase()
       const inTerm = (document.activeElement as HTMLElement | null)?.closest?.('.term-col')
       if (k === 'w' && !e.shiftKey) {
@@ -242,12 +245,12 @@ export default function App(): JSX.Element {
         e.preventDefault()
         addDoc()
       } else if (k === 'tab') {
-        // Ctrl+Tab: 문서 탭 순환 (터미널 포커스 시엔 터미널이 자체 처리)
+        // Ctrl/Cmd+Tab: 문서 탭 순환 (터미널 포커스 시엔 터미널이 자체 처리)
         if (inTerm) return
         e.preventDefault()
         cycleDoc(e.shiftKey ? -1 : 1)
       } else if (k === 'pageup' || k === 'pagedown') {
-        // Ctrl+PageUp/PageDown: 문서 탭 이동 (터미널 포커스 시엔 터미널이 자체 처리)
+        // Ctrl/Cmd+PageUp/PageDown: 문서 탭 이동 (터미널 포커스 시엔 터미널이 자체 처리)
         if (inTerm) return
         e.preventDefault()
         cycleDoc(k === 'pageup' ? -1 : 1)
@@ -255,7 +258,7 @@ export default function App(): JSX.Element {
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [activeDoc, activeTerm, termTabs, docTabs]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [activeDoc, activeTerm, termTabs, docTabs, platform]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const openSettings = (): void => {
     const existing = docTabs.find((t) => t.kind === 'settings')
@@ -2753,7 +2756,7 @@ function SshProfilesEditor(): JSX.Element {
               개인키 파일 <span className="muted small">(비우면 ssh-agent·기본 키)</span>
               <input
                 className="setting-input"
-                placeholder="C:\Users\me\.ssh\id_ed25519"
+                placeholder="/Users/me/.ssh/id_ed25519"
                 defaultValue={p.identityFile ?? ''}
                 onBlur={(e) => update(p.id, { identityFile: e.target.value.trim() || undefined })}
               />

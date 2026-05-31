@@ -14,7 +14,9 @@
     "build": "electron-vite build",
     "preview": "electron-vite preview",
     "typecheck": "tsc --noEmit -p tsconfig.json",
-    "dist": "electron-vite build && electron-builder --win"
+    "dist": "electron-vite build && electron-builder --mac",
+    "dist:mac": "electron-vite build && electron-builder --mac",
+    "dist:win": "electron-vite build && electron-builder --win"
   },
   "dependencies": {
     "@codemirror/commands": "^6.10.3",
@@ -40,13 +42,13 @@
     "@types/react": "^18.3.12",
     "@types/react-dom": "^18.3.1",
     "@types/ssh2": "^1.15.5",
-    "@vitejs/plugin-react": "^4.3.4",
-    "electron": "^33.2.1",
+    "@vitejs/plugin-react": "^5.1.4",
+    "electron": "^42.3.0",
     "electron-builder": "^26.8.1",
-    "electron-vite": "^2.3.0",
+    "electron-vite": "^5.0.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "typescript": "^5.7.2",
-    "vite": "^5.4.11"
+    "vite": "^7.3.3"
   }
 }
