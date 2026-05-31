@@ -647,9 +647,8 @@ body {
   background: #fff;
   box-shadow: 0 2px 12px rgba(0, 0, 0, 0.5);
 }
-.image-wrap img.fit {
-  max-width: 100%;
-  height: auto;
+.image-wrap.center {
+  align-items: center;
 }
 
 /* ── 사건 대시보드 (JuriSupport) ── */

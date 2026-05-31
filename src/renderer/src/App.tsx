@@ -252,6 +252,28 @@ export default function App(): JSX.Element {
     setActiveDoc(tab.id)
   }
 
+  // 이미지 뷰어: 같은 폴더의 정렬순 이전/다음 이미지로 현재 탭에서 이동
+  const IMG_RE = /\.(png|jpe?g|gif|webp|bmp|svg|ico|tiff?|avif)$/i
+  const navigateImage = async (curPath: string, dir: 1 | -1): Promise<void> => {
+    const parent = curPath.replace(/[\\/][^\\/]*$/, '')
+    if (!parent || parent === curPath) return
+    try {
+      const list = await window.lt.fs.list(parent)
+      const imgs = list.filter((e) => !e.isDir && IMG_RE.test(e.name))
+      const i = imgs.findIndex((e) => e.path === curPath)
+      if (i < 0) return
+      const next = imgs[i + dir]
+      if (!next) return
+      setDocTabs((tabs) =>
+        tabs.map((t) =>
+          t.kind === 'image' && t.path === curPath ? { ...t, path: next.path, title: next.name } : t
+        )
+      )
+    } catch {
+      /* 무시 */
+    }
+  }
+
   // 다른 창에서 찢겨/이동돼 온 탭 수신 → 파일 열기 (최신 openFile 클로저를 ref로 사용)
   const openFileRef = useRef(openFile)
   openFileRef.current = openFile
@@ -780,7 +802,11 @@ export default function App(): JSX.Element {
         <FileView key={activeDocTab.path} path={activeDocTab.path as string} />
       )}
       {activeDocTab?.kind === 'image' && (
-        <ImageViewer key={activeDocTab.path} path={activeDocTab.path as string} />
+        <ImageViewer
+          key={activeDocTab.path}
+          path={activeDocTab.path as string}
+          onNavigate={(dir) => navigateImage(activeDocTab.path as string, dir)}
+        />
       )}
       {activeDocTab?.kind === 'hwp' && (
         <HwpView key={activeDocTab.path} path={activeDocTab.path as string} />
@@ -2039,11 +2065,19 @@ function CsvView({ path }: { path: string }): JSX.Element {
 }
 
 /** 이미지 뷰어 — 폭맞춤(기본)/원본, Ctrl+휠 줌 */
-function ImageViewer({ path }: { path: string }): JSX.Element {
+function ImageViewer({
+  path,
+  onNavigate
+}: {
+  path: string
+  onNavigate?: (dir: 1 | -1) => void
+}): JSX.Element {
   const [url, setUrl] = useState('')
   const [err, setErr] = useState('')
-  const [fit, setFit] = useState(true)
+  const [mode, setMode] = useState<'fit_page' | 'fit_width' | 'custom'>('fit_page')
   const [scale, setScale] = useState(1)
+  const wrapRef = useRef<HTMLDivElement>(null)
+  const navLock = useRef(false)
 
   useEffect(() => {
     let alive = true
@@ -2063,39 +2097,70 @@ function ImageViewer({ path }: { path: string }): JSX.Element {
     }
   }, [path])
 
-  const onWheel = (e: React.WheelEvent): void => {
-    if (!e.ctrlKey) return
-    e.preventDefault()
-    setFit(false)
-    setScale((s) => Math.max(0.1, Math.min(8, +(s * (e.deltaY < 0 ? 1.1 : 1 / 1.1)).toFixed(3))))
+  const zoomBy = (f: number): void => {
+    setMode('custom')
+    setScale((s) => Math.max(0.1, Math.min(8, +(s * f).toFixed(3))))
   }
+
+  const onWheel = (e: React.WheelEvent): void => {
+    if (e.ctrlKey) {
+      e.preventDefault()
+      zoomBy(e.deltaY < 0 ? 1.1 : 1 / 1.1)
+      return
+    }
+    // 스크롤이 끝(위/아래)에 닿으면 정렬순 이전/다음 이미지로 이동
+    const el = wrapRef.current
+    if (!el || !onNavigate) return
+    const atBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 2
+    const atTop = el.scrollTop <= 2
+    if (e.deltaY > 0 && atBottom && !navLock.current) {
+      navLock.current = true
+      onNavigate(1)
+      setTimeout(() => (navLock.current = false), 400)
+    } else if (e.deltaY < 0 && atTop && !navLock.current) {
+      navLock.current = true
+      onNavigate(-1)
+      setTimeout(() => (navLock.current = false), 400)
+    }
+  }
+
+  const imgStyle: React.CSSProperties =
+    mode === 'fit_page'
+      ? { maxWidth: '100%', maxHeight: '100%' }
+      : mode === 'fit_width'
+        ? { width: '100%', height: 'auto' }
+        : { width: `${scale * 100}%`, height: 'auto' }
 
   if (err) return <div className="welcome"><p className="muted">이미지 열기 실패: {err}</p></div>
   return (
     <div className="image-doc">
       <div className="pdf-toolbar">
-        <button className={`tb-btn ${fit ? 'on' : ''}`} title="폭 맞춤" onClick={() => setFit(true)}>
+        <button
+          className={`tb-btn ${mode === 'fit_page' ? 'on' : ''}`}
+          title="쪽 맞춤"
+          onClick={() => setMode('fit_page')}
+        >
+          쪽맞춤
+        </button>
+        <button
+          className={`tb-btn ${mode === 'fit_width' ? 'on' : ''}`}
+          title="폭 맞춤"
+          onClick={() => setMode('fit_width')}
+        >
           폭맞춤
         </button>
-        <button className="tb-btn" onClick={() => { setFit(false); setScale((s) => Math.max(0.1, +(s / 1.1).toFixed(3))) }}>
+        <button className="tb-btn" title="축소" onClick={() => zoomBy(1 / 1.1)}>
           －
         </button>
-        <button className="tb-btn pct" onClick={() => { setFit(false); setScale(1) }}>
-          {fit ? '맞춤' : `${Math.round(scale * 100)}%`}
+        <button className="tb-btn pct" onClick={() => setMode('fit_page')}>
+          {mode === 'custom' ? `${Math.round(scale * 100)}%` : '맞춤'}
         </button>
-        <button className="tb-btn" onClick={() => { setFit(false); setScale((s) => Math.min(8, +(s * 1.1).toFixed(3))) }}>
+        <button className="tb-btn" title="확대" onClick={() => zoomBy(1.1)}>
           ＋
         </button>
       </div>
-      <div className="image-wrap" onWheel={onWheel}>
-        {url && (
-          <img
-            src={url}
-            className={fit ? 'fit' : ''}
-            style={fit ? undefined : { width: `${scale * 100}%` }}
-            alt=""
-          />
-        )}
+      <div className={`image-wrap ${mode === 'fit_page' ? 'center' : ''}`} ref={wrapRef} onWheel={onWheel}>
+        {url && <img src={url} style={imgStyle} alt="" />}
       </div>
     </div>
   )
