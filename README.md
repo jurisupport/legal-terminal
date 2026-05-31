@@ -7,6 +7,8 @@
 - **전자소송기록 뷰어** — 전자소송기록 PDF를 문서/서증/첨부서류로 분류해 탐색
 - **사건 대시보드** — JuriSupport(본체)와 MCP로 연동, 사건·기일·당사자 조회
 
+![legal-terminal](screenshots/app.png)
+
 > 송무 워크플로우(`jurisupport-plugins`: songmu-legal 플러그인, korean-law MCP, 법령·판례·사건기록 토킷)를 **교체가 아니라 그대로 표면화**하는 셸입니다.
 
 ## 주요 기능
