@@ -1,7 +1,15 @@
 # legal-terminal
 
-**대한민국 송무 변호사를 위한 AI 통합 작업환경.**
-사건 기록을 **읽고**, AI와 함께 서면을 **쓰고**, 사건·기일을 **관리하는** 흐름을 한 화면에 담았습니다.
+> **대한민국 송무 변호사를 위한 AI 통합 작업환경** — 사건 기록을 읽고, AI와 함께 서면을 쓰고, 사건·기일을 관리하는 흐름을 한 화면에
+>
+> 쥬리서포트 주식회사 ([jurisupport.com](https://jurisupport.com))
+
+![License](https://img.shields.io/badge/License-MIT-blue.svg)
+![Platform](https://img.shields.io/badge/Platform-Windows-lightgrey)
+![Locale](https://img.shields.io/badge/Locale-ko--KR-red)
+![Claude Code](https://img.shields.io/badge/Claude%20Code-Required-orange)
+
+---
 
 - **내 사건을 직접 읽는 Claude** — 사건 폴더에서 Claude Code가 돌며, 기록 분석·인용 검증·서면 초안을 같은 화면에서
 - **준비서면 에디터** — 라이브 프리뷰·편집 가능한 표·PDF 내보내기까지 (Markdown 기반)
