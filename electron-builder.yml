@@ -1,0 +1,42 @@
+appId: kr.lawpid.legalterminal
+productName: legal-terminal
+copyright: © lawpid
+
+directories:
+  output: dist
+  buildResources: build
+
+files:
+  - out/**
+  - package.json
+
+# node-pty 네이티브 모듈은 asar 밖으로 풀어야 실행됨
+asar: true
+asarUnpack:
+  - '**/node_modules/@lydell/**'
+  - '**/*.node'
+
+# prebuilt 네이티브(@lydell/node-pty) 사용 — 재빌드 안 함
+npmRebuild: false
+
+win:
+  target:
+    - target: nsis
+      arch: [x64]
+    - target: portable
+      arch: [x64]
+
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  shortcutName: legal-terminal
+
+portable:
+  artifactName: legal-terminal-${version}-portable.exe
+
+publish:
+  provider: github
+  owner: jurisupport
+  repo: legal-terminal
+  releaseType: draft

@@ -1,15 +1,20 @@
 {
   "name": "legal-terminal",
   "version": "0.0.1",
-  "description": "대한민국 변호사를 위한 VS Code 유사 데스크톱 앱 — Claude Code + Markdown + 전자소송기록 뷰어",
+  "description": "대한민국 송무 변호사를 위한 AI 통합 작업환경 — Claude Code + 준비서면 에디터 + 전자소송기록 뷰어 + 사건 대시보드",
   "main": "./out/main/index.js",
   "author": "lawpid",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/jurisupport/legal-terminal.git"
+  },
   "scripts": {
     "dev": "electron-vite dev",
     "build": "electron-vite build",
     "preview": "electron-vite preview",
-    "typecheck": "tsc --noEmit -p tsconfig.json"
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "dist": "electron-vite build && electron-builder --win"
   },
   "dependencies": {
     "@codemirror/commands": "^6.10.3",
@@ -35,6 +40,7 @@
     "@types/react-dom": "^18.3.1",
     "@vitejs/plugin-react": "^4.3.4",
     "electron": "^33.2.1",
+    "electron-builder": "^26.8.1",
     "electron-vite": "^2.3.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
