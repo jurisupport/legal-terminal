@@ -31,9 +31,10 @@ nsis:
   perMachine: false
   allowToChangeInstallationDirectory: true
   shortcutName: legal-terminal
+  artifactName: legal-terminal-Setup.exe
 
 portable:
-  artifactName: legal-terminal-${version}-portable.exe
+  artifactName: legal-terminal-portable.exe
 
 publish:
   provider: github

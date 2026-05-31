@@ -12,16 +12,25 @@
 
 > 따로 떠 있던 터미널의 `claude`, 별도 에디터, 전자소송기록 뷰어를 **한 화면에 통합**했습니다. 기존 `jurisupport-plugins` 생태계(songmu-legal 플러그인, korean-law MCP, 법령·판례·사건기록 토킷, PII 보호 훅)는 **교체가 아니라 그대로 살려** 동작합니다.
 
-## 다운로드 / 설치
+## 다운로드 (Windows)
 
-[**Releases**](https://github.com/jurisupport/legal-terminal/releases)에서 Windows용 설치본을 받으세요.
+### 1) 이 파일을 받으세요
 
-- `legal-terminal-Setup-x.y.z.exe` — 설치형(NSIS). 실행 후 설치 경로 선택 가능
-- `legal-terminal-x.y.z-portable.exe` — 무설치 포터블(더블클릭 실행)
+👉 **[legal-terminal 설치 (Setup) 내려받기](https://github.com/jurisupport/legal-terminal/releases/latest/download/legal-terminal-Setup.exe)** — 대부분 이 파일 하나면 됩니다. 받은 뒤 더블클릭해서 설치하세요.
 
-> 코드서명 전이라 처음 실행 시 Windows SmartScreen 경고가 뜰 수 있습니다 — **추가 정보 → 실행**을 누르세요.
+- 설치하기 싫고 바로 실행만: **[포터블 버전](https://github.com/jurisupport/legal-terminal/releases/latest/download/legal-terminal-portable.exe)** (다운로드 후 더블클릭, 설치 불필요)
+- 다른/이전 버전: [전체 릴리스 목록](https://github.com/jurisupport/legal-terminal/releases)
 
-### 처음이라면 — `jurisupport-plugins`부터 설치하세요
+### 2) 설치할 때 "Windows의 PC 보호" 경고 푸는 법
+
+아직 코드서명 전이라 처음 실행하면 파란색 **"Windows의 PC 보호(Windows protected your PC)"** 창이 뜹니다. 정상이며, 이렇게 통과합니다.
+
+1. 창에서 **추가 정보(More info)** 클릭
+2. 아래에 나타나는 **실행(Run anyway)** 클릭
+
+> 그래도 막히면: 받은 `.exe`를 **우클릭 → 속성 → 하단 "차단 해제(Unblock)" 체크 → 확인** 후 다시 실행하세요.
+
+### 3) 처음이라면 — `jurisupport-plugins`부터 설치하세요
 
 legal-terminal은 PC에 설치된 **Claude Code**와 **변호사용 플러그인**을 그대로 사용합니다. 아직 이것들이 없다면, **먼저 [`jurisupport-plugins`](https://github.com/jurisupport/jurisupport-plugins)를 설치**하세요. 설치 스크립트가 의존성(Node 등)·**Claude Code**·송무 플러그인·검색 토킷·PII 보호 훅까지 한 번에 구성해 줍니다.
 
