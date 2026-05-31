@@ -1673,6 +1673,9 @@ body {
 .empty-action:hover {
   filter: brightness(1.12);
 }
+.empty-secondary {
+  margin-top: 10px;
+}
 
 /* ── 상태바 ── */
 .statusbar {
@@ -1695,4 +1698,210 @@ body {
 }
 .glyph {
   line-height: 1;
+}
+
+/* ── 모달 (접속 선택 / 원격 폴더 선택) ── */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1100;
+}
+.modal {
+  background: #252526;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.55);
+  width: 460px;
+  max-width: 92vw;
+  max-height: 80vh;
+  display: flex;
+  flex-direction: column;
+  padding: 16px;
+}
+.modal-title {
+  font-size: 14px;
+  font-weight: 600;
+  margin-bottom: 12px;
+  color: var(--fg);
+}
+.modal-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  margin-top: 14px;
+}
+.conn-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  text-align: left;
+  background: var(--bg-alt);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 10px 12px;
+  margin-bottom: 8px;
+  cursor: pointer;
+  color: var(--fg);
+}
+.conn-row:hover {
+  background: #2f2f30;
+}
+.conn-ic {
+  font-size: 20px;
+  flex-shrink: 0;
+}
+.conn-main {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+/* 원격 폴더 선택 */
+.remote-picker {
+  width: 560px;
+}
+.remote-path {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.remote-cwd {
+  flex: 1;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 6px 10px;
+  word-break: break-all;
+  color: var(--fg);
+}
+.remote-list {
+  flex: 1;
+  min-height: 160px;
+  max-height: 46vh;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+}
+.remote-row {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: none;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+  color: var(--fg);
+  padding: 8px 12px;
+  font-size: 13px;
+  cursor: pointer;
+}
+.remote-row:hover {
+  background: var(--bg-alt);
+}
+.remote-err {
+  white-space: pre-wrap;
+  word-break: break-all;
+  font-size: 11px;
+  color: #e0785c;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 8px;
+  margin: 6px 0;
+}
+.remote-manual {
+  display: flex;
+  gap: 8px;
+}
+
+/* SSH 프로필 편집기 (설정) */
+.setting-row.col {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 10px;
+}
+.ssh-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.ssh-card {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 12px;
+  background: var(--bg-alt);
+}
+.ssh-card-head {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.ssh-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+.ssh-grid label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--fg-muted);
+}
+.ssh-grid label.wide {
+  grid-column: 1 / -1;
+}
+.root-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.root-row .setting-input {
+  flex: 1;
+}
+.header-btn.danger {
+  color: #e0785c;
+}
+
+/* rclone 동기화 모달 */
+.sync-modal {
+  width: 600px;
+}
+.sync-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--fg-muted);
+  margin-bottom: 10px;
+}
+.sync-buttons {
+  display: flex;
+  gap: 10px;
+  margin: 10px 0;
+}
+.sync-buttons .empty-action {
+  flex: 1;
+}
+.sync-log {
+  height: 200px;
+  overflow: auto;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 10px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--fg);
+  white-space: pre-wrap;
+  word-break: break-all;
+  margin: 0;
 }

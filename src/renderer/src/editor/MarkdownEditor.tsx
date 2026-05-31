@@ -31,13 +31,18 @@ export default function MarkdownEditor({
   path,
   defaultDir,
   onPath,
-  onAsk
+  onAsk,
+  onDirty
 }: {
   path?: string
   defaultDir?: string
   onPath?: (path: string) => void
   onAsk?: () => void
+  // 닫으면 데이터가 사라질 위험(저장 안 된 새 문서에 내용 있음)을 알린다
+  onDirty?: (dirty: boolean) => void
 }): JSX.Element {
+  const onDirtyRef = useRef(onDirty)
+  onDirtyRef.current = onDirty
   const hostRef = useRef<HTMLDivElement>(null)
   const viewRef = useRef<EditorView | null>(null)
   const previewComp = useRef(new Compartment())
@@ -63,6 +68,7 @@ export default function MarkdownEditor({
           pathRef.current = r.path
           onPath?.(r.path)
           setSaved(true)
+          onDirtyRef.current?.(false) // 이제 경로가 있으니 닫아도 안전
         }
       })
     }
@@ -103,6 +109,8 @@ export default function MarkdownEditor({
               if (u.docChanged) {
                 setSaved(false)
                 scheduleSave()
+                // 경로 없는(스크래치) 문서에 내용이 있으면 닫을 때 사라짐 → dirty
+                onDirtyRef.current?.(!pathRef.current && u.state.doc.length > 0)
               }
             })
           ]

@@ -1,5 +1,25 @@
 /// <reference types="vite/client" />
 
+export interface SshConn {
+  host: string
+  user: string
+  port?: number
+  identityFile?: string
+}
+
+export interface SshProfile extends SshConn {
+  id: string
+  label: string
+  draftsRoot?: string
+  recordsRoot?: string
+}
+
+export interface RemoteEntry {
+  name: string
+  path: string
+  isDir: boolean
+}
+
 export interface PtyCreateOpts {
   id: string
   cwd?: string
@@ -7,6 +27,7 @@ export interface PtyCreateOpts {
   rows: number
   autoLaunchClaude?: boolean
   resumeSessionId?: string
+  ssh?: SshConn
 }
 
 export interface AppSettings {
@@ -17,6 +38,7 @@ export interface AppSettings {
   termFontSize?: number
   mdFont?: string
   mdFontSize?: number
+  sshProfiles?: SshProfile[]
 }
 
 export interface JsParty {
@@ -92,6 +114,7 @@ export interface LtApi {
     ) => Promise<{ ok: boolean; path?: string; error?: string }>
     copyInto: (destDir: string, srcPaths: string[]) => Promise<{ copied: string[] }>
     move: (src: string, destDir: string) => Promise<{ ok: boolean; path?: string; error?: string }>
+    delete: (path: string) => Promise<{ ok: boolean; error?: string }>
     mkdir: (dir: string, name: string) => Promise<{ ok: boolean; error?: string }>
     createFile: (
       dir: string,
@@ -119,6 +142,27 @@ export interface LtApi {
       records?: string
       name: string
     }) => Promise<{ drafts: string; records?: string; name: string; ts: number }[]>
+  }
+  ssh: {
+    listDir: (
+      profile: SshProfile,
+      path: string
+    ) => Promise<
+      { ok: true; entries: RemoteEntry[]; cwd: string } | { ok: false; error: string }
+    >
+  }
+  sync: {
+    remoteInfo: (
+      profile: SshProfile
+    ) => Promise<{ installed: boolean; remotes: string[]; error?: string }>
+    run: (opts: {
+      profile: SshProfile
+      direction: 'pull' | 'push'
+      macFolder: string
+      dest: string
+    }) => Promise<{ ok: boolean; code: number | null; error?: string }>
+    cancel: () => void
+    onProgress: (cb: (line: string) => void) => () => void
   }
   sessions: {
     current: (

@@ -8,7 +8,7 @@ import { IconExplorer, IconCases, IconViewer, IconSettings } from './icons/Icons
 import MarkdownEditor from './editor/MarkdownEditor'
 import CasesDashboard from './dashboard/CasesDashboard'
 import UpcomingHearings from './dashboard/UpcomingHearings'
-import type { JsCase } from './env'
+import type { JsCase, SshConn, SshProfile, RemoteEntry } from './env'
 
 type Mode = 'explorer' | 'cases' | 'viewer'
 
@@ -50,7 +50,14 @@ interface TermTab {
   renamed?: boolean // 사용자가 직접 이름 변경 → 자동 반영 중단
   createdAt?: number // 세션 시작 시각 — 이 이후의 transcript만 현재 세션으로 매칭
   resumeSessionId?: string // 과거 세션 이어서 열기
+  ssh?: SshConn // 주어지면 원격(SSH) 사건 — cwd는 원격 경로, claude도 원격에서 실행
+  sshLabel?: string // 접속 프로필 이름 (탭 툴팁/표시용)
+  profileId?: string // 원격 파일 패널 라우팅용 (ssh://<profileId>/<경로>)
 }
+
+// 원격 파일 패널이 쓰는 ssh:// URI 빌더 (main의 remoteFs와 동일 스킴)
+const remoteUri = (profileId: string, p: string): string =>
+  'ssh://' + profileId + (p.startsWith('/') ? p : '/' + p)
 interface CaseMeta {
   jsId?: string
   court?: string
@@ -120,11 +127,22 @@ export default function App(): JSX.Element {
     { id: 'doc-welcome', title: '시작하기.md', kind: 'welcome' }
   ])
   const [activeDoc, setActiveDoc] = useState<string>('doc-welcome')
+  // 닫으면 내용이 사라지는 문서(저장 안 된 새 문서) id 집합 — 닫기 전 확인용
+  const [dirtyDocs, setDirtyDocs] = useState<Set<string>>(new Set())
 
   const [termTabs, setTermTabs] = useState<TermTab[]>([])
   const [activeTerm, setActiveTerm] = useState<string>('')
   const [draftsRoot, setDraftsRoot] = useState<string | undefined>()
   const [recordsRoot, setRecordsRoot] = useState<string | undefined>()
+  // SSH 접속 프로필 + 접속 선택/원격 폴더 선택 모달 상태
+  const [sshProfiles, setSshProfiles] = useState<SshProfile[]>([])
+  const [connMenu, setConnMenu] = useState(false)
+  const [remotePick, setRemotePick] = useState<SshProfile | null>(null)
+  const [recordsPick, setRecordsPick] = useState<SshProfile | null>(null)
+  const [syncInit, setSyncInit] = useState<{
+    profile: SshProfile
+    macFolder: string
+  } | null>(null)
 
   // 활성 PDF의 목차 분류 결과 + 페이지 점프 신호
   const [pdfRecord, setPdfRecord] = useState<{ path: string; parsed: ParsedRecord } | null>(null)
@@ -160,6 +178,7 @@ export default function App(): JSX.Element {
     window.lt?.settings.get().then((s) => {
       setDraftsRoot(s.draftsRoot)
       setRecordsRoot(s.recordsRoot)
+      setSshProfiles(s.sshProfiles ?? [])
     })
     window.lt?.case.history().then(setRecent)
   }, [])
@@ -167,7 +186,9 @@ export default function App(): JSX.Element {
   // ── 본문(문서) 탭 ──
   // 활성 사건 폴더가 있으면 거기에 실제 파일을 만들어 연다(VS Code식). 없으면 메모리 스크래치.
   const addDoc = (): void => {
-    const dir = termTabs.find((t) => t.id === activeTerm)?.cwd
+    const t = termTabs.find((t) => t.id === activeTerm)
+    // 원격 사건이면 ssh:// URI로 만들어 원격에 생성 (plain cwd면 로컬에 잘못 생성됨)
+    const dir = t ? (t.ssh && t.profileId ? remoteUri(t.profileId, t.cwd) : t.cwd) : undefined
     if (dir) {
       window.lt.fs.createFile(dir, '새 문서.md').then((r) => {
         if (r.ok && r.path) {
@@ -188,8 +209,21 @@ export default function App(): JSX.Element {
         t.id === id ? { ...t, path, title: path.split(/[\\/]/).pop() ?? t.title } : t
       )
     )
-  const closeDoc = (id: string): void =>
+  const closeDoc = (id: string): void => {
+    // 저장 안 된 새 문서면 확인 (경로 있는 문서는 자동저장되므로 그냥 닫음)
+    if (
+      dirtyDocs.has(id) &&
+      !window.confirm('저장하지 않은 새 문서입니다. 닫으면 내용이 사라집니다. 닫을까요?')
+    )
+      return
+    setDirtyDocs((s) => {
+      if (!s.has(id)) return s
+      const n = new Set(s)
+      n.delete(id)
+      return n
+    })
     setDocTabs((tabs) => closeTab(tabs, id, activeDoc, setActiveDoc))
+  }
 
   // 단축키: Ctrl+W 탭 닫기 / Ctrl+N 새 문서 / Ctrl+Shift+N 새 터미널
   useEffect(() => {
@@ -290,7 +324,7 @@ export default function App(): JSX.Element {
     let alive = true
     const tick = (): void => {
       termTabs.forEach((t) => {
-        if (t.renamed) return
+        if (t.renamed || t.ssh) return // 원격 transcript는 로컬에 없어 자동명명 불가
         // 이 터미널이 시작된 이후의 세션만 매칭 (과거 세션 제목 방지)
         window.lt.sessions.current(t.cwd, (t.createdAt ?? 0) - 3000).then((r) => {
           if (!alive || !r?.title) return
@@ -361,6 +395,107 @@ export default function App(): JSX.Element {
     createCase(picked.path, picked.name, undefined, paired ?? undefined)
   }
 
+  // 원격(SSH) 사건 터미널 — cwd는 원격 경로, claude도 원격에서 실행.
+  // 파일 패널(탐색기·뷰어·에디터)은 ssh://<profileId>/<경로> URI로 원격 파일을 다룬다.
+  const createRemoteCase = (
+    profile: SshProfile,
+    remotePath: string,
+    name?: string,
+    meta?: CaseMeta,
+    records?: string
+  ): void => {
+    const title = name || remotePath.replace(/\/+$/, '').split('/').pop() || profile.label
+    const tab: TermTab = {
+      id: newId(),
+      title,
+      cwd: remotePath,
+      recordsFolder: records,
+      autoClaude: true,
+      createdAt: Date.now(),
+      ssh: { host: profile.host, user: profile.user, port: profile.port, identityFile: profile.identityFile },
+      sshLabel: profile.label,
+      profileId: profile.id,
+      ...meta
+    }
+    setTermTabs((t) => [...t, tab])
+    setActiveTerm(tab.id)
+    // 소송기록이 정해졌으면 페어링 기억(다음에 자동 적용) — 로컬과 동일
+    if (records) window.lt.case.setPairing(remoteUri(profile.id, remotePath), records)
+  }
+
+  // ssh:// URI에서 원격 plain 경로만 추출 (createRemoteCase의 cwd용)
+  const remotePlain = (uri: string, profileId: string): string =>
+    uri.startsWith('ssh://' + profileId) ? uri.slice(('ssh://' + profileId).length) : uri
+
+  // 원격 사건의 소송기록 폴더를 로컬과 동일한 우선순위로 결정:
+  // ① 기억된 페어링(getPairing) → ② 소송기록 루트에서 사건번호/폴더명 매칭.
+  // draftsRemotePath = 원격 작성서류(사건) 폴더 plain 경로, c = (있으면) JuriSupport 사건.
+  const resolveRemoteRecords = async (
+    profile: SshProfile,
+    draftsRemotePath: string,
+    c?: JsCase
+  ): Promise<string | undefined> => {
+    const draftsKey = remoteUri(profile.id, draftsRemotePath)
+    const paired = await window.lt.case.getPairing(draftsKey)
+    if (paired) return paired
+    if (!profile.recordsRoot) return undefined
+    const recRoot = remoteUri(profile.id, profile.recordsRoot)
+    if (c) return await matchCaseFolder(recRoot, c)
+    const name = draftsRemotePath.replace(/\/+$/, '').split('/').pop() ?? ''
+    return await matchRemoteByName(recRoot, name)
+  }
+
+  // 원격 루트(ssh:// URI)에서 폴더명으로 매칭 — 소송기록 폴더 자동 지정용. 매칭 항목의 ssh:// URI 반환.
+  const matchRemoteByName = async (rootUri: string, name: string): Promise<string | undefined> => {
+    try {
+      const list = await window.lt.fs.list(rootUri)
+      const dirs = list.filter((e) => e.isDir)
+      const norm = (s: string): string => s.replace(/\s+/g, '').toLowerCase()
+      const n = norm(name)
+      if (n.length < 2) return undefined
+      return (
+        dirs.find((d) => norm(d.name) === n)?.path ??
+        dirs.find((d) => norm(d.name).includes(n) || n.includes(norm(d.name)))?.path
+      )
+    } catch {
+      return undefined
+    }
+  }
+
+  // rclone 동기화 모달 열기 — 맥의 사건 폴더(원격 경로)를 추정해 프리필.
+  // (클라우드 경유 모델: 맥에서 rclone 실행 → 맥 폴더 ↔ OneDrive 클라우드)
+  const openSync = (): void => {
+    if (sshProfiles.length === 0) {
+      window.alert('먼저 설정에서 SSH 접속 프로필을 추가하세요.')
+      return
+    }
+    const cur = termTabs.find((t) => t.id === activeTerm)
+    const baseName = (p: string): string => p.replace(/[\\/]+$/, '').split(/[\\/]/).pop() ?? ''
+    if (cur?.ssh && cur.profileId) {
+      // 활성 사건이 원격 → 그 맥 폴더를 그대로 사용
+      const profile = sshProfiles.find((p) => p.id === cur.profileId) ?? sshProfiles[0]
+      setSyncInit({ profile, macFolder: cur.cwd })
+    } else {
+      // 활성 사건이 로컬 → 첫 프로필의 원격 작성서류 루트 하위 동일 폴더명으로 추정
+      const localPath = cur?.cwd ?? currentCase?.drafts ?? ''
+      const name = baseName(localPath)
+      const profile = sshProfiles[0]
+      setSyncInit({
+        profile,
+        macFolder: profile.draftsRoot ? profile.draftsRoot.replace(/\/+$/, '') + '/' + name : ''
+      })
+    }
+  }
+
+  // 📁/＋ 클릭: 저장된 SSH 프로필이 있으면 접속 선택 메뉴, 없으면 바로 로컬 폴더 선택.
+  const openConnOrLocal = async (): Promise<void> => {
+    const s = await window.lt.settings.get()
+    const profs = s.sshProfiles ?? []
+    setSshProfiles(profs)
+    if (profs.length > 0) setConnMenu(true)
+    else void addTerm()
+  }
+
   // 최근 사건은 사용자가 명시적으로 고른 것이므로 연결된 소송기록을 바로 적용
   const openRecent = (entry: { drafts: string; records?: string; name: string }): void =>
     createCase(entry.drafts, entry.name, entry.records)
@@ -406,7 +541,10 @@ export default function App(): JSX.Element {
       court: cur.court,
       caseNumber: cur.caseNumber,
       caseName: cur.caseName,
-      client: cur.client
+      client: cur.client,
+      ssh: cur.ssh, // 원격 사건이면 같은 접속으로 새 터미널
+      sshLabel: cur.sshLabel,
+      profileId: cur.profileId
     }
     setTermTabs((t) => [...t, tab])
     setActiveTerm(tab.id)
@@ -490,6 +628,14 @@ export default function App(): JSX.Element {
   // 터미널이 닫혀 있어도 현재 사건 컨텍스트에 적용된다.
   const pickRecords = async (): Promise<void> => {
     const cur = termTabs.find((t) => t.id === activeTerm)
+    // 원격 사건이면 원격 폴더 선택기(기록 모드)를 띄운다.
+    if (cur?.ssh && cur.profileId) {
+      const prof = sshProfiles.find((p) => p.id === cur.profileId)
+      if (prof) {
+        setRecordsPick(prof)
+        return
+      }
+    }
     const draftsForPair = cur?.cwd ?? currentCase?.drafts
     const r = await window.lt.dialog.pickFolder({
       title: '소송기록 폴더 선택',
@@ -525,10 +671,22 @@ export default function App(): JSX.Element {
     meta?: CaseMeta
   } | null>(null)
 
+  // 사건 지정 해제 — 마지막 사건 컨텍스트를 비워 '+'·'이 사건에서 열기'가 더는 그 사건을 열지 않게.
+  // (탐색기·뷰어 패널도 활성 터미널이 없으면 비워진다)
+  const clearCase = (): void => {
+    setCurrentCase(null)
+    setFolderRecord(null)
+    setPdfRecord(null)
+  }
+
   const activeDocTab = docTabs.find((t) => t.id === activeDoc)
   const activeTermTab = termTabs.find((t) => t.id === activeTerm)
   // 활성 터미널이 있으면 그 사건, 없으면(터미널 다 닫힘) 마지막 사건 컨텍스트 유지
-  const activeDraftsFolder = activeTermTab?.cwd ?? currentCase?.drafts
+  // 원격 탭의 작성서류 폴더는 ssh:// URI로 변환(패널·탐색기용). 터미널은 plain cwd를 그대로 씀.
+  const activeDraftsFolder =
+    activeTermTab && activeTermTab.ssh && activeTermTab.profileId
+      ? remoteUri(activeTermTab.profileId, activeTermTab.cwd)
+      : (activeTermTab?.cwd ?? currentCase?.drafts)
   const activeRecordsFolder = activeTermTab?.recordsFolder ?? currentCase?.records
   const activeSuggestedRecords = activeTermTab?.suggestedRecords
   const isViewer = mode === 'viewer'
@@ -549,6 +707,25 @@ export default function App(): JSX.Element {
     window.lt.fs.move(src, destDir).then((r) => {
       if (r.ok) setTreeRefresh((n) => n + 1)
       else if (r.error) console.warn('[move]', r.error)
+    })
+  }
+
+  // 파일/폴더 삭제 (확인은 FileTree에서 받음) — 삭제 후 트리 새로고침 + 해당 문서 탭 닫기
+  const deleteEntry = (path: string): void => {
+    window.lt.fs.delete(path).then((r) => {
+      if (!r.ok) {
+        if (r.error) window.alert('삭제 실패: ' + r.error)
+        return
+      }
+      setTreeRefresh((n) => n + 1)
+      // 삭제된 파일(또는 폴더 하위)을 열어둔 문서 탭이 있으면 닫는다
+      setDocTabs((tabs) => {
+        const dead = tabs.filter((t) => t.path && (t.path === path || t.path.startsWith(path + '/') || t.path.startsWith(path + '\\')))
+        if (dead.length === 0) return tabs
+        let next = tabs
+        for (const d of dead) next = closeTab(next, d.id, activeDoc, setActiveDoc)
+        return next
+      })
     })
   }
 
@@ -678,6 +855,15 @@ export default function App(): JSX.Element {
     new Map()
   )
   const [toasts, setToasts] = useState<{ key: number; termId: string; title: string }[]>([])
+
+  // Ctrl+W 등으로 터미널 닫기 — claude가 작업 중이면 확인 후 닫는다.
+  const closeTermWithConfirm = (id: string): void => {
+    if (termStatus.get(id) === 'working') {
+      if (!window.confirm('claude가 아직 작업 중입니다. 이 터미널을 닫을까요?')) return
+    }
+    closeTerm(id)
+  }
+
   const caseRef = (c: JsCase): string => `${c.caseNumber ?? ''} ${c.caseName ?? ''}`.trim() || c.id
 
   // 폴더명 자동 매칭 (사건번호 우선 → 사건명/당사자명 부분일치)
@@ -752,6 +938,44 @@ export default function App(): JSX.Element {
     setMode('explorer')
   }
 
+  // 우클릭: 사건을 원격(SSH 프로필)에서 열기 — 원격 draftsRoot에서 폴더명 매칭, 실패 시 수동 선택.
+  const [remoteCasePick, setRemoteCasePick] = useState<{
+    profile: SshProfile
+    name: string
+    meta: CaseMeta
+  } | null>(null)
+  const openCaseRemote = async (c: JsCase, profile: SshProfile): Promise<void> => {
+    const court = c.court || ''
+    const client = c.parties
+      .filter((p) => p.role === 'client')
+      .map((p) => p.party.name)
+      .join(', ')
+    const name =
+      [court && abbrevCourt(court), c.caseNumber, c.caseName, client].filter(Boolean).join(' ') ||
+      caseRef(c)
+    const meta: CaseMeta = {
+      jsId: c.id,
+      court: court || undefined,
+      caseNumber: c.caseNumber || undefined,
+      caseName: c.caseName || undefined,
+      client: client || undefined
+    }
+    // 원격 작성서류 루트에서 폴더명(사건번호/당사자) 자동 매칭
+    let matchedUri: string | undefined
+    if (profile.draftsRoot) {
+      matchedUri = await matchCaseFolder(remoteUri(profile.id, profile.draftsRoot), c)
+    }
+    if (matchedUri) {
+      // 소송기록: 페어링 기억 → 사건번호 매칭 (로컬과 동일 우선순위)
+      const recordsUri = await resolveRemoteRecords(profile, remotePlain(matchedUri, profile.id), c)
+      createRemoteCase(profile, remotePlain(matchedUri, profile.id), name, meta, recordsUri)
+      setMode('explorer')
+    } else {
+      // 작성서류 매칭 실패 → 폴더 선택기로 직접 지정 (소송기록은 picker onPick에서 resolve)
+      setRemoteCasePick({ profile, name, meta })
+    }
+  }
+
   // 우클릭: Claude에 사건 브리핑 요청
   const briefCaseToClaude = (c: JsCase): void => {
     sendClaude(
@@ -821,6 +1045,16 @@ export default function App(): JSX.Element {
           defaultDir={draftsRoot}
           onPath={(p) => setDocPath(activeDocTab.id, p)}
           onAsk={() => askClaude('')}
+          onDirty={(d) =>
+            setDirtyDocs((s) => {
+              const has = s.has(activeDocTab.id)
+              if (d === has) return s
+              const n = new Set(s)
+              if (d) n.add(activeDocTab.id)
+              else n.delete(activeDocTab.id)
+              return n
+            })
+          }
         />
       )}
       {activeDocTab?.kind === 'pdf' &&
@@ -922,12 +1156,14 @@ export default function App(): JSX.Element {
         onOpenFile={openFile}
         onDropTo={copyFilesTo}
         onMove={moveEntry}
+        onDelete={deleteEntry}
         onPickRecords={pickRecords}
         onApplySuggested={applySuggested}
         onOpenItem={onOpenItem}
         onDropFiles={onDropFiles}
         onNewFolder={newFolder}
         onNewFile={newFile}
+        onSync={sshProfiles.length > 0 ? openSync : undefined}
         onOpenCase={openCaseWorkspace}
         jsNonce={jsNonce}
         pendingCreate={pendingCreate}
@@ -940,6 +1176,8 @@ export default function App(): JSX.Element {
         {mode === 'cases' ? (
           <CasesDashboard
             onOpenWorkspace={openCaseWorkspace}
+            onOpenRemote={openCaseRemote}
+            sshProfiles={sshProfiles}
             onBrief={briefCaseToClaude}
             onDraft={draftCaseWithClaude}
             onChanged={() => setJsNonce((n) => n + 1)}
@@ -969,6 +1207,7 @@ export default function App(): JSX.Element {
             working: termStatus.get(t.id) === 'working',
             question: termStatus.get(t.id) === 'question' && termAttention.has(t.id),
             tooltip: [
+              t.ssh && `🔗 ${t.sshLabel ?? '원격'} (${t.ssh.user}@${t.ssh.host})`,
               t.court && `${t.court}`,
               t.caseNumber,
               t.caseName,
@@ -999,7 +1238,7 @@ export default function App(): JSX.Element {
               setSessionListOpen((v) => !v)
             }
           }}
-          extra={{ label: '📁', title: '사건 폴더 열기', onClick: () => void addTerm() }}
+          extra={{ label: '📁', title: '사건 폴더 열기', onClick: () => void openConnOrLocal() }}
         />
         {sessionListOpen && (
           <SessionList
@@ -1026,12 +1265,14 @@ export default function App(): JSX.Element {
                 label={`「${currentCase.name}」 — 터미널이 모두 닫혔습니다`}
                 actionLabel="이 사건에서 터미널 열기"
                 onAction={addTermSame}
+                secondaryLabel="✕ 사건 지정 해제"
+                onSecondary={clearCase}
               />
             ) : (
               <Empty
                 label="사건 폴더를 열어 시작하세요 (작성문서 또는 사건기록 폴더)"
                 actionLabel="사건 폴더 열기"
-                onAction={addTerm}
+                onAction={() => void openConnOrLocal()}
               />
             ))}
           {termTabs.map((t) => (
@@ -1045,9 +1286,11 @@ export default function App(): JSX.Element {
                 cwd={t.cwd}
                 autoClaude={t.autoClaude ?? false}
                 resumeSessionId={t.resumeSessionId}
+                ssh={t.ssh}
                 visible={t.id === activeTerm}
                 onDropPaths={(paths) => dropFilesToTerm(t.id, paths)}
                 onNewTerminal={addTermSame}
+                onRequestClose={() => closeTermWithConfirm(t.id)}
                 onStatus={(s) => onTermStatus(t.id, s)}
                 onCycleTab={cycleTerm}
               />
@@ -1063,6 +1306,90 @@ export default function App(): JSX.Element {
 
       <SelectionAsk onAsk={askClaude} />
       <SelectionMenu onAsk={askClaude} />
+
+      {/* 접속 선택 (로컬 / 저장된 SSH 프로필) */}
+      {connMenu && (
+        <ConnMenu
+          profiles={sshProfiles}
+          onLocal={() => {
+            setConnMenu(false)
+            void addTerm()
+          }}
+          onRemote={(p) => {
+            setConnMenu(false)
+            setRemotePick(p)
+          }}
+          onManage={() => {
+            setConnMenu(false)
+            openSettings()
+          }}
+          onClose={() => setConnMenu(false)}
+        />
+      )}
+
+      {/* 원격 사건(작성서류) 폴더 선택 */}
+      {remotePick && (
+        <RemoteFolderPicker
+          profile={remotePick}
+          onCancel={() => setRemotePick(null)}
+          onPick={async (remotePath) => {
+            const prof = remotePick
+            setRemotePick(null)
+            // 소송기록: 페어링 기억 → 폴더명 매칭 (로컬과 동일)
+            const records = await resolveRemoteRecords(prof, remotePath)
+            createRemoteCase(prof, remotePath, undefined, undefined, records)
+          }}
+        />
+      )}
+
+      {/* 사건(JuriSupport) 원격 열기 — 자동 매칭 실패 시 폴더 직접 선택 */}
+      {remoteCasePick && (
+        <RemoteFolderPicker
+          profile={remoteCasePick.profile}
+          title={`「${remoteCasePick.name}」 작성서류 폴더 선택`}
+          onCancel={() => setRemoteCasePick(null)}
+          onPick={async (remotePath) => {
+            const { profile, name, meta } = remoteCasePick
+            setRemoteCasePick(null)
+            const records = await resolveRemoteRecords(profile, remotePath)
+            createRemoteCase(profile, remotePath, name, meta, records)
+            setMode('explorer')
+          }}
+        />
+      )}
+
+      {/* rclone 동기화 모달 */}
+      {syncInit && (
+        <SyncModal
+          profiles={sshProfiles}
+          init={syncInit}
+          onClose={() => setSyncInit(null)}
+        />
+      )}
+
+      {/* 원격 소송기록 폴더 선택 (기록뷰어) */}
+      {recordsPick && (
+        <RemoteFolderPicker
+          profile={recordsPick}
+          title="소송기록 폴더 선택"
+          confirmLabel="이 폴더로 지정"
+          startPath={recordsPick.recordsRoot}
+          onCancel={() => setRecordsPick(null)}
+          onPick={(remotePath) => {
+            const uri = remoteUri(recordsPick.id, remotePath)
+            const cur = termTabs.find((t) => t.id === activeTerm)
+            setTermTabs((tabs) =>
+              tabs.map((t) => (t.id === activeTerm ? { ...t, recordsFolder: uri } : t))
+            )
+            setCurrentCase((c) => (c ? { ...c, records: uri } : c))
+            // 페어링 기억 → 다음에 이 사건을 열면 자동 적용
+            if (cur?.ssh && cur.profileId) {
+              window.lt.case.setPairing(remoteUri(cur.profileId, cur.cwd), uri)
+            }
+            setRecordsPick(null)
+          }}
+        />
+      )}
 
       {/* claude 질문/확인 대기 팝업 */}
       {toasts.length > 0 && (
@@ -1240,12 +1567,14 @@ function DocsPanel({
   onOpenFile,
   onDropTo,
   onMove,
+  onDelete,
   onPickRecords,
   onApplySuggested,
   onOpenItem,
   onDropFiles,
   onNewFolder,
   onNewFile,
+  onSync,
   onOpenCase,
   jsNonce,
   pendingCreate,
@@ -1261,12 +1590,14 @@ function DocsPanel({
   onOpenFile: (path: string, name: string) => void
   onDropTo: (dir: string, files: FileList) => void
   onMove: (src: string, destDir: string) => void
+  onDelete: (path: string, name: string, isDir: boolean) => void
   onPickRecords: () => void
   onApplySuggested: () => void
   onOpenItem: (it: OutlineItem) => void
   onDropFiles: (files: FileList) => void
   onNewFolder: () => void
   onNewFile: () => void
+  onSync?: () => void
   onOpenCase: (c: JsCase) => void
   jsNonce: number
   pendingCreate: 'file' | 'folder' | null
@@ -1303,6 +1634,11 @@ function DocsPanel({
             <button className="header-btn" title="새 폴더" onClick={onNewFolder}>
               ＋폴더
             </button>
+            {onSync && (
+              <button className="header-btn" title="rclone 동기화 (로컬 ↔ 맥미니)" onClick={onSync}>
+                ⇅동기화
+              </button>
+            )}
           </span>
         )}
         {mode === 'viewer' && recordsFolder && (
@@ -1320,6 +1656,7 @@ function DocsPanel({
               onOpenFile={onOpenFile}
               onDropTo={onDropTo}
               onMove={onMove}
+              onDelete={onDelete}
               pendingCreate={pendingCreate}
               onCreate={onCreateEntry}
               onCancelCreate={onCancelCreate}
@@ -2323,7 +2660,511 @@ function SettingsView(): JSX.Element {
         </div>
       </section>
 
+      <section className="setting-row col">
+        <div className="setting-label">
+          SSH 접속 프로필{' '}
+          <span className="muted small">— 원격 서버에서 사건·claude 실행 (사건 열기 → 접속 선택)</span>
+        </div>
+        <SshProfilesEditor />
+      </section>
+
       <p className="muted small">{loaded ? '변경 즉시 저장됩니다 (마크다운은 새로 열 때 적용).' : '불러오는 중…'}</p>
+    </div>
+  )
+}
+
+// 설정 화면의 SSH 프로필 목록 편집기 (추가/수정/삭제 즉시 저장)
+function SshProfilesEditor(): JSX.Element {
+  const [profiles, setProfiles] = useState<SshProfile[]>([])
+  // 루트 '찾아보기' — 해당 ssh에 접속해 원격 폴더를 탐색·선택
+  const [picking, setPicking] = useState<{
+    profile: SshProfile
+    field: 'draftsRoot' | 'recordsRoot'
+  } | null>(null)
+
+  useEffect(() => {
+    window.lt.settings.get().then((s) => setProfiles(s.sshProfiles ?? []))
+  }, [])
+
+  const save = (next: SshProfile[]): void => {
+    setProfiles(next)
+    void window.lt.settings.set({ sshProfiles: next })
+  }
+  const update = (id: string, patch: Partial<SshProfile>): void =>
+    save(profiles.map((p) => (p.id === id ? { ...p, ...patch } : p)))
+  const add = (): void => {
+    const id =
+      typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : `ssh-${Date.now()}`
+    save([...profiles, { id, label: '새 서버', host: '', user: '' }])
+  }
+  const remove = (id: string): void => save(profiles.filter((p) => p.id !== id))
+
+  return (
+    <div className="ssh-editor">
+      {profiles.length === 0 && (
+        <p className="muted small">저장된 프로필이 없습니다. 아래에서 추가하세요.</p>
+      )}
+      {profiles.map((p) => (
+        <div key={p.id} className="ssh-card">
+          <div className="ssh-card-head">
+            <input
+              className="setting-input"
+              placeholder="이름 (예: 사무실 서버)"
+              defaultValue={p.label}
+              onBlur={(e) => update(p.id, { label: e.target.value.trim() || '서버' })}
+            />
+            <button className="header-btn danger" onClick={() => remove(p.id)} title="삭제">
+              삭제
+            </button>
+          </div>
+          <div className="ssh-grid">
+            <label>
+              호스트
+              <input
+                className="setting-input"
+                placeholder="example.com 또는 192.168.0.10"
+                defaultValue={p.host}
+                onBlur={(e) => update(p.id, { host: e.target.value.trim() })}
+              />
+            </label>
+            <label>
+              사용자
+              <input
+                className="setting-input"
+                placeholder="ubuntu"
+                defaultValue={p.user}
+                onBlur={(e) => update(p.id, { user: e.target.value.trim() })}
+              />
+            </label>
+            <label>
+              포트
+              <input
+                className="setting-input narrow"
+                type="number"
+                placeholder="22"
+                defaultValue={p.port ?? ''}
+                onBlur={(e) => {
+                  const n = parseInt(e.target.value, 10)
+                  update(p.id, { port: Number.isNaN(n) ? undefined : n })
+                }}
+              />
+            </label>
+            <label className="wide">
+              개인키 파일 <span className="muted small">(비우면 ssh-agent·기본 키)</span>
+              <input
+                className="setting-input"
+                placeholder="C:\Users\me\.ssh\id_ed25519"
+                defaultValue={p.identityFile ?? ''}
+                onBlur={(e) => update(p.id, { identityFile: e.target.value.trim() || undefined })}
+              />
+            </label>
+            <label className="wide">
+              원격 작성서류 루트 <span className="muted small">(사건 폴더 고를 때 시작 위치)</span>
+              <div className="root-row">
+                <input
+                  key={'d:' + (p.draftsRoot ?? '')}
+                  className="setting-input"
+                  placeholder="/Users/me/OneDrive/진행중사건"
+                  defaultValue={p.draftsRoot ?? ''}
+                  onBlur={(e) => update(p.id, { draftsRoot: e.target.value.trim() || undefined })}
+                />
+                <button
+                  className="header-btn"
+                  type="button"
+                  disabled={!p.host || !p.user}
+                  title={!p.host || !p.user ? '호스트·사용자를 먼저 입력하세요' : '원격에서 폴더 찾기'}
+                  onClick={() => setPicking({ profile: p, field: 'draftsRoot' })}
+                >
+                  찾아보기
+                </button>
+              </div>
+            </label>
+            <label className="wide">
+              원격 소송기록 루트 <span className="muted small">(기록뷰어에서 소송기록 폴더 고를 때 시작 위치)</span>
+              <div className="root-row">
+                <input
+                  key={'r:' + (p.recordsRoot ?? '')}
+                  className="setting-input"
+                  placeholder="/Users/me/OneDrive/소송기록"
+                  defaultValue={p.recordsRoot ?? ''}
+                  onBlur={(e) => update(p.id, { recordsRoot: e.target.value.trim() || undefined })}
+                />
+                <button
+                  className="header-btn"
+                  type="button"
+                  disabled={!p.host || !p.user}
+                  title={!p.host || !p.user ? '호스트·사용자를 먼저 입력하세요' : '원격에서 폴더 찾기'}
+                  onClick={() => setPicking({ profile: p, field: 'recordsRoot' })}
+                >
+                  찾아보기
+                </button>
+              </div>
+            </label>
+          </div>
+        </div>
+      ))}
+      <button className="empty-action" onClick={add}>
+        ＋ 프로필 추가
+      </button>
+
+      {picking && (
+        <RemoteFolderPicker
+          profile={picking.profile}
+          title={picking.field === 'draftsRoot' ? '작성서류 루트 선택' : '소송기록 루트 선택'}
+          confirmLabel="이 폴더로 지정"
+          startPath={
+            picking.field === 'draftsRoot'
+              ? picking.profile.draftsRoot
+              : picking.profile.recordsRoot
+          }
+          onCancel={() => setPicking(null)}
+          onPick={(remotePath) => {
+            update(picking.profile.id, { [picking.field]: remotePath } as Partial<SshProfile>)
+            setPicking(null)
+          }}
+        />
+      )}
+    </div>
+  )
+}
+
+// 사건 열기 시 접속 선택 (로컬 / 저장된 SSH 프로필)
+function ConnMenu({
+  profiles,
+  onLocal,
+  onRemote,
+  onManage,
+  onClose
+}: {
+  profiles: SshProfile[]
+  onLocal: () => void
+  onRemote: (p: SshProfile) => void
+  onManage: () => void
+  onClose: () => void
+}): JSX.Element {
+  return (
+    <div className="modal-overlay" onMouseDown={onClose}>
+      <div className="modal conn-menu" onMouseDown={(e) => e.stopPropagation()}>
+        <div className="modal-title">사건 열기 — 접속 선택</div>
+        <button className="conn-row" onClick={onLocal}>
+          <span className="conn-ic">💻</span>
+          <span className="conn-main">
+            <b>이 컴퓨터 (로컬)</b>
+            <span className="muted small">로컬 폴더에서 사건 선택</span>
+          </span>
+        </button>
+        {profiles.map((p) => (
+          <button key={p.id} className="conn-row" onClick={() => onRemote(p)}>
+            <span className="conn-ic">🔗</span>
+            <span className="conn-main">
+              <b>{p.label}</b>
+              <span className="muted small">
+                {p.user}@{p.host}
+                {p.port ? `:${p.port}` : ''}
+              </span>
+            </span>
+          </button>
+        ))}
+        <div className="modal-actions">
+          <button className="header-btn" onClick={onManage}>
+            ＋ 프로필 관리…
+          </button>
+          <button className="header-btn" onClick={onClose}>
+            닫기
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// 원격(SSH) 사건 폴더 탐색·선택. ssh.listDir(키/agent 인증)로 목록을 받고,
+// 실패 시(비밀번호 인증 등) 원격 경로를 직접 입력하는 폴백을 제공한다.
+function RemoteFolderPicker({
+  profile,
+  title = '사건(작성서류) 폴더 선택',
+  startPath,
+  confirmLabel = '이 폴더로 사건 열기',
+  onPick,
+  onCancel
+}: {
+  profile: SshProfile
+  title?: string
+  startPath?: string
+  confirmLabel?: string
+  onPick: (remotePath: string) => void
+  onCancel: () => void
+}): JSX.Element {
+  const initial = (startPath ?? profile.draftsRoot)?.trim() || '~'
+  const [cwd, setCwd] = useState<string>(initial)
+  const [entries, setEntries] = useState<RemoteEntry[] | null>(null)
+  const [err, setErr] = useState<string>('')
+  const [loading, setLoading] = useState(false)
+  const [manual, setManual] = useState('')
+
+  const load = (path: string): void => {
+    setLoading(true)
+    setErr('')
+    window.lt.ssh.listDir(profile, path).then((r) => {
+      setLoading(false)
+      if (r.ok) {
+        setCwd(r.cwd)
+        setEntries(r.entries)
+      } else {
+        setErr(r.error)
+        setEntries(null)
+      }
+    })
+  }
+
+  useEffect(() => {
+    load(initial)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  const up = (): void => {
+    const parent = cwd.replace(/\/+$/, '').replace(/\/[^/]*$/, '') || '/'
+    load(parent)
+  }
+  const dirs = entries?.filter((e) => e.isDir) ?? []
+
+  return (
+    <div className="modal-overlay" onMouseDown={onCancel}>
+      <div className="modal remote-picker" onMouseDown={(e) => e.stopPropagation()}>
+        <div className="modal-title">
+          🔗 {profile.label} — {title}
+        </div>
+        <div className="remote-path">
+          <button className="header-btn" onClick={up} title="상위 폴더">
+            ↑
+          </button>
+          <code className="remote-cwd">{cwd}</code>
+          <button className="header-btn" onClick={() => load(cwd)} title="새로고침">
+            ⟳
+          </button>
+        </div>
+        <div className="remote-list">
+          {loading && <p className="muted pad small">불러오는 중…</p>}
+          {!loading && err && (
+            <div className="pad">
+              <p className="muted small">
+                목록을 가져오지 못했습니다 (키/ssh-agent 인증이 아닐 수 있습니다).
+              </p>
+              <pre className="remote-err">{err}</pre>
+              <p className="muted small">원격 사건 폴더 경로를 직접 입력하세요:</p>
+              <div className="remote-manual">
+                <input
+                  className="setting-input"
+                  placeholder="예: /home/me/cases/2025가합12345"
+                  value={manual}
+                  onChange={(e) => setManual(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' && manual.trim()) onPick(manual.trim())
+                  }}
+                />
+                <button
+                  className="empty-action"
+                  disabled={!manual.trim()}
+                  onClick={() => manual.trim() && onPick(manual.trim())}
+                >
+                  열기
+                </button>
+              </div>
+            </div>
+          )}
+          {!loading && !err && dirs.length === 0 && (
+            <p className="muted pad small">
+              하위 폴더가 없습니다. 아래 ‘이 폴더로 사건 열기’를 누르거나 상위로 이동하세요.
+            </p>
+          )}
+          {!loading &&
+            !err &&
+            dirs.map((e) => (
+              <button
+                key={e.path}
+                className="remote-row"
+                onClick={() => load(e.path)}
+                title={e.path}
+              >
+                📁 {e.name}
+              </button>
+            ))}
+        </div>
+        <div className="modal-actions">
+          <button className="empty-action" onClick={() => onPick(cwd)}>
+            {confirmLabel}
+          </button>
+          <button className="header-btn" onClick={onCancel}>
+            취소
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// rclone 동기화 모달 (클라우드 경유) — 맥에서 rclone 실행: 맥 사건폴더 ↔ OneDrive 클라우드.
+// 올리기(맥→클라우드)/내리기(클라우드→맥) 두 버튼. Windows는 자신의 OneDrive 앱으로 받음.
+function SyncModal({
+  profiles,
+  init,
+  onClose
+}: {
+  profiles: SshProfile[]
+  init: { profile: SshProfile; macFolder: string }
+  onClose: () => void
+}): JSX.Element {
+  const [profileId, setProfileId] = useState(init.profile.id)
+  const [macFolder, setMacFolder] = useState(init.macFolder)
+  // OneDrive 클라우드 경로 추정: 맥 경로의 "/OneDrive/" 이후 부분
+  const guessCloud = (p: string): string => {
+    const i = p.toLowerCase().indexOf('/onedrive/')
+    return i >= 0 ? p.slice(i + '/onedrive/'.length) : ''
+  }
+  const [remoteName, setRemoteName] = useState('') // 예: "onedrive:"
+  const [cloudPath, setCloudPath] = useState(guessCloud(init.macFolder))
+  const [info, setInfo] = useState<{ installed: boolean; remotes: string[]; error?: string } | null>(
+    null
+  )
+  const [log, setLog] = useState<string[]>([])
+  const [running, setRunning] = useState(false)
+  const logRef = useRef<HTMLPreElement>(null)
+  const profile = profiles.find((p) => p.id === profileId) ?? init.profile
+
+  // 진행 로그 구독
+  useEffect(() => window.lt.sync.onProgress((line) => setLog((l) => [...l, line])), [])
+  useEffect(() => {
+    const el = logRef.current
+    if (el) el.scrollTop = el.scrollHeight
+  }, [log])
+
+  // 프로필 바뀌면 맥 rclone 정보(설치/리모트) 다시 조회
+  const probe = (): void => {
+    setInfo(null)
+    window.lt.sync.remoteInfo(profile).then((r) => {
+      setInfo(r)
+      if (r.installed && r.remotes.length && !remoteName) {
+        setRemoteName(r.remotes.find((x) => /one/i.test(x)) ?? r.remotes[0])
+      }
+    })
+  }
+  useEffect(probe, [profileId]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  const dest = remoteName + cloudPath
+  const canRun = !running && info?.installed && macFolder.trim() && remoteName && cloudPath.trim()
+  const run = (direction: 'pull' | 'push'): void => {
+    if (!canRun) return
+    setRunning(true)
+    window.lt.sync.run({ profile, direction, macFolder, dest }).then((r) => {
+      setRunning(false)
+      if (!r.ok && r.error) setLog((l) => [...l, '오류: ' + r.error])
+    })
+  }
+
+  return (
+    <div className="modal-overlay" onMouseDown={running ? undefined : onClose}>
+      <div className="modal sync-modal" onMouseDown={(e) => e.stopPropagation()}>
+        <div className="modal-title">⇅ 동기화 (맥미니 rclone · 사건폴더 ↔ OneDrive 클라우드)</div>
+
+        <label className="sync-field">
+          접속 프로필 (맥미니)
+          <select
+            className="setting-select"
+            value={profileId}
+            onChange={(e) => setProfileId(e.target.value)}
+          >
+            {profiles.map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.label} ({p.user}@{p.host})
+              </option>
+            ))}
+          </select>
+        </label>
+
+        {info && !info.installed && (
+          <div className="pad">
+            <p className="muted small">
+              맥미니에서 rclone을 실행할 수 없습니다. (rclone 미설치이거나 SSH 키/agent 인증이
+              아닐 수 있습니다.)
+            </p>
+            {info.error && <pre className="remote-err">{info.error}</pre>}
+            <p className="muted small">
+              맥미니 터미널에서 <code>rclone config</code> 로 OneDrive 리모트를 한 번 만들어 두세요.
+            </p>
+            <button className="empty-action" onClick={probe}>
+              다시 확인
+            </button>
+          </div>
+        )}
+
+        {info?.installed && (
+          <>
+            <label className="sync-field">
+              rclone 리모트 (맥의 OneDrive 설정)
+              <select
+                className="setting-select"
+                value={remoteName}
+                onChange={(e) => setRemoteName(e.target.value)}
+              >
+                {info.remotes.length === 0 && <option value="">(설정된 리모트 없음)</option>}
+                {info.remotes.map((r) => (
+                  <option key={r} value={r}>
+                    {r}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="sync-field">
+              맥 사건 폴더
+              <input
+                className="setting-input"
+                value={macFolder}
+                placeholder="/Users/me/OneDrive/진행중사건/사건폴더"
+                onChange={(e) => setMacFolder(e.target.value)}
+              />
+            </label>
+            <label className="sync-field">
+              클라우드 경로 (리모트 내부)
+              <input
+                className="setting-input"
+                value={cloudPath}
+                placeholder="진행중사건/사건폴더"
+                onChange={(e) => setCloudPath(e.target.value)}
+              />
+            </label>
+            <p className="muted small">
+              대상: <code>{dest || '(리모트:경로 미정)'}</code> · copy --update(최신만,{' '}
+              <b>삭제 전파 안 함</b>)
+            </p>
+            <div className="sync-buttons">
+              <button className="empty-action" disabled={!canRun} onClick={() => run('push')}>
+                ⬆ 올리기 (맥 → 클라우드)
+              </button>
+              <button className="empty-action" disabled={!canRun} onClick={() => run('pull')}>
+                ⬇ 내리기 (클라우드 → 맥)
+              </button>
+            </div>
+            {log.length > 0 && (
+              <pre className="sync-log" ref={logRef}>
+                {log.join('\n')}
+              </pre>
+            )}
+          </>
+        )}
+
+        {!info && <p className="muted pad small">맥미니 rclone 확인 중…</p>}
+
+        <div className="modal-actions">
+          {running && (
+            <button className="header-btn danger" onClick={() => window.lt.sync.cancel()}>
+              중단
+            </button>
+          )}
+          <button className="header-btn" onClick={onClose} disabled={running}>
+            닫기
+          </button>
+        </div>
+      </div>
     </div>
   )
 }
@@ -2331,11 +3172,15 @@ function SettingsView(): JSX.Element {
 function Empty({
   label,
   actionLabel,
-  onAction
+  onAction,
+  secondaryLabel,
+  onSecondary
 }: {
   label: string
   actionLabel: string
   onAction: () => void
+  secondaryLabel?: string
+  onSecondary?: () => void
 }): JSX.Element {
   return (
     <div className="empty">
@@ -2343,6 +3188,11 @@ function Empty({
       <button className="empty-action" onClick={onAction}>
         ＋ {actionLabel}
       </button>
+      {secondaryLabel && onSecondary && (
+        <button className="header-btn empty-secondary" onClick={onSecondary}>
+          {secondaryLabel}
+        </button>
+      )}
     </div>
   )
 }

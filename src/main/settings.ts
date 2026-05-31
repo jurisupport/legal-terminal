@@ -2,8 +2,30 @@ import { app } from 'electron'
 import { join } from 'path'
 import { readFile, writeFile, mkdir } from 'fs/promises'
 
+/** SSH 접속 프로필 — 원격 서버에서 사건 작업(claude 실행 등)을 위한 저장된 연결. */
+export interface SshProfile {
+  /** 안정적인 식별자 */
+  id: string
+  /** 사용자에게 보이는 이름 (예: '사무실 서버') */
+  label: string
+  /** 호스트명 또는 IP */
+  host: string
+  /** 로그인 사용자명 */
+  user: string
+  /** 포트 (기본 22) */
+  port?: number
+  /** 개인키 파일 경로 (미지정 시 ssh-agent·기본 키 사용) */
+  identityFile?: string
+  /** 원격 작성서류 루트 — 사건 폴더 고를 때 시작 위치 */
+  draftsRoot?: string
+  /** 원격 소송기록 루트 (Phase 2 예정) */
+  recordsRoot?: string
+}
+
 /** 앱 전역 설정 (userData/config.json에 영구 저장) */
 export interface Settings {
+  /** 저장된 SSH 접속 프로필 목록 */
+  sshProfiles?: SshProfile[]
   /** 작성서류 루트 — 모든 사건의 작성서류가 하위 폴더로 존재 */
   draftsRoot?: string
   /** 소송기록 루트 — 사건별 전자소송기록 폴더가 하위에 존재 */

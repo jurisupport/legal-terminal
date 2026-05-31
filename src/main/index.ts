@@ -1,4 +1,4 @@
-import { app, BrowserWindow, shell, ipcMain, dialog, screen } from 'electron'
+import { app, BrowserWindow, shell, ipcMain, dialog, screen, Menu } from 'electron'
 import { join, basename, extname, resolve, sep } from 'path'
 import { readdir, readFile, stat, writeFile, copyFile, rm, mkdir, rename, cp } from 'fs/promises'
 import { existsSync } from 'fs'
@@ -12,6 +12,23 @@ import {
   setJsPairing
 } from './caseStore'
 import * as js from './jurisupport'
+import { listRemoteDir } from './ssh'
+import { remoteRcloneInfo, runRemoteSync, cancelSync, type RemoteSyncOpts } from './sync'
+import {
+  isRemote,
+  rfsList,
+  rfsListPdfs,
+  rfsReadBytes,
+  rfsWriteText,
+  rfsWriteBytes,
+  rfsMkdir,
+  rfsCreateFile,
+  rfsMove,
+  rfsStat,
+  rfsDelete,
+  disposeRemote
+} from './remoteFs'
+import type { SshProfile } from './settings'
 import { currentSession, listSessions } from './sessions'
 import { parse as parseHwp } from 'hwp.js'
 import {
@@ -212,6 +229,17 @@ ipcMain.handle('js:getCase', async (_e, id: string) => {
   }
 })
 
+// ── SSH IPC ──
+// 원격 디렉터리 목록 (사건 폴더 선택용). 키/agent 인증일 때만 성공(아니면 ok:false).
+ipcMain.handle('ssh:listDir', (_e, p: { profile: SshProfile; path: string }) =>
+  listRemoteDir(p.profile, p.path)
+)
+
+// ── rclone 동기화 IPC (클라우드 경유: 맥에서 rclone 실행) ──
+ipcMain.handle('sync:remoteInfo', (_e, profile: SshProfile) => remoteRcloneInfo(profile))
+ipcMain.handle('sync:run', (e, opts: RemoteSyncOpts) => runRemoteSync(opts, e.sender))
+ipcMain.on('sync:cancel', () => cancelSync())
+
 // 사건 cwd의 현재 claude 세션 제목(transcript ai-title). since 이후 세션만.
 ipcMain.handle('sessions:current', (_e, p: { cwd: string; since?: number }) =>
   currentSession(p.cwd, p.since ?? 0)
@@ -245,7 +273,8 @@ const MAX_TEXT_BYTES = 2 * 1024 * 1024 // 2MB 초과 텍스트는 잘라서 안�
 
 ipcMain.handle('fs:mkdir', async (_e, p: { dir: string; name: string }) => {
   try {
-    await mkdir(join(p.dir, p.name))
+    if (isRemote(p.dir)) await rfsMkdir(p.dir, p.name)
+    else await mkdir(join(p.dir, p.name))
     return { ok: true }
   } catch (e) {
     return { ok: false, error: String(e) }
@@ -255,6 +284,10 @@ ipcMain.handle('fs:mkdir', async (_e, p: { dir: string; name: string }) => {
 // 새 파일 생성 (이름 충돌 시 " (n)" 붙임), 빈 내용. 경로 반환.
 ipcMain.handle('fs:createFile', async (_e, p: { dir: string; name: string; content?: string }) => {
   try {
+    if (isRemote(p.dir)) {
+      const path = await rfsCreateFile(p.dir, p.name, p.content ?? '')
+      return { ok: true, path }
+    }
     const ext = extname(p.name)
     const base = p.name.slice(0, p.name.length - ext.length)
     let name = p.name
@@ -272,7 +305,19 @@ ipcMain.handle('fs:createFile', async (_e, p: { dir: string; name: string; conte
   }
 })
 
+// 파일/폴더 삭제 (폴더는 재귀). 로컬·원격 공통.
+ipcMain.handle('fs:delete', async (_e, p: string) => {
+  try {
+    if (isRemote(p)) await rfsDelete(p)
+    else await rm(p, { recursive: true, force: true })
+    return { ok: true }
+  } catch (e) {
+    return { ok: false, error: String(e) }
+  }
+})
+
 ipcMain.handle('fs:list', async (_e, dirPath: string) => {
+  if (isRemote(dirPath)) return rfsList(dirPath)
   const entries = await readdir(dirPath, { withFileTypes: true })
   return entries
     .filter((e) => !e.name.startsWith('.'))
@@ -293,6 +338,13 @@ async function walkPdfs(dir: string, out: { name: string; path: string }[]): Pro
   }
 }
 ipcMain.handle('fs:listPdfs', async (_e, dir: string) => {
+  if (isRemote(dir)) {
+    try {
+      return await rfsListPdfs(dir)
+    } catch {
+      return []
+    }
+  }
   const out: { name: string; path: string }[] = []
   try {
     await walkPdfs(dir, out)
@@ -303,7 +355,7 @@ ipcMain.handle('fs:listPdfs', async (_e, dir: string) => {
 })
 
 ipcMain.handle('fs:readBytes', async (_e, filePath: string) => {
-  const buf = await readFile(filePath)
+  const buf = isRemote(filePath) ? await rfsReadBytes(filePath) : await readFile(filePath)
   // 렌더러로 ArrayBuffer 전달 (pdf.js 입력용)
   return buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength)
 })
@@ -315,7 +367,7 @@ ipcMain.handle('fs:readHwpText', async (_e, filePath: string) => {
     return { ok: false, text: '', error: 'HWPX 형식은 아직 지원하지 않습니다 (.hwp만 지원).' }
   }
   try {
-    const buf = await readFile(filePath)
+    const buf = isRemote(filePath) ? await rfsReadBytes(filePath) : await readFile(filePath)
     const doc = parseHwp(buf as unknown as Parameters<typeof parseHwp>[0])
     const lines: string[] = []
     for (const section of doc.sections) {
@@ -336,6 +388,7 @@ ipcMain.handle('fs:readHwpText', async (_e, filePath: string) => {
 // 트리 내부 이동 (탐색기 드래그앤드롭) — 같은 드라이브면 rename, 아니면 복사 후 삭제
 ipcMain.handle('fs:move', async (_e, p: { src: string; destDir: string }) => {
   try {
+    if (isRemote(p.src) || isRemote(p.destDir)) return await rfsMove(p.src, p.destDir)
     const srcRes = resolve(p.src)
     const dest = join(p.destDir, basename(p.src))
     const destRes = resolve(dest)
@@ -365,11 +418,17 @@ ipcMain.handle('fs:move', async (_e, p: { src: string; destDir: string }) => {
 // 외부 파일을 폴더로 복사 (탐색기 드래그앤드롭)
 ipcMain.handle('fs:copyInto', async (_e, p: { destDir: string; srcPaths: string[] }) => {
   const copied: string[] = []
+  const remote = isRemote(p.destDir)
   for (const src of p.srcPaths) {
     try {
-      const dest = join(p.destDir, basename(src))
-      await copyFile(src, dest)
-      copied.push(dest)
+      if (remote) {
+        const buf = await readFile(src) // 로컬 원본을 읽어 원격으로 업로드
+        copied.push(await rfsWriteBytes(p.destDir, basename(src), buf))
+      } else {
+        const dest = join(p.destDir, basename(src))
+        await copyFile(src, dest)
+        copied.push(dest)
+      }
     } catch {
       /* 개별 실패 무시 */
     }
@@ -426,7 +485,8 @@ ipcMain.handle('fs:saveAs', async (_e, p: { content: string; defaultPath?: strin
 
 ipcMain.handle('fs:writeText', async (_e, p: { path: string; content: string }) => {
   try {
-    await writeFile(p.path, p.content, 'utf8')
+    if (isRemote(p.path)) await rfsWriteText(p.path, p.content)
+    else await writeFile(p.path, p.content, 'utf8')
     return { ok: true }
   } catch (e) {
     return { ok: false, error: String(e) }
@@ -435,6 +495,18 @@ ipcMain.handle('fs:writeText', async (_e, p: { path: string; content: string }) 
 
 ipcMain.handle('fs:readText', async (_e, filePath: string) => {
   const ext = extname(filePath).toLowerCase()
+  if (isRemote(filePath)) {
+    const st = await rfsStat(filePath)
+    if (!TEXT_EXT.has(ext)) return { ext, kind: 'binary' as const, text: '', size: st.size }
+    const buf = await rfsReadBytes(filePath)
+    return {
+      ext,
+      kind: 'text' as const,
+      text: buf.subarray(0, MAX_TEXT_BYTES).toString('utf8'),
+      size: st.size,
+      truncated: buf.length > MAX_TEXT_BYTES
+    }
+  }
   const info = await stat(filePath)
   if (!TEXT_EXT.has(ext)) {
     return { ext, kind: 'binary' as const, text: '', size: info.size }
@@ -460,9 +532,15 @@ ipcMain.on('pty:resize', (_e, { id, cols, rows }: { id: string; cols: number; ro
 )
 ipcMain.on('pty:kill', (_e, { id }: { id: string }) => killPty(id))
 
-app.on('before-quit', () => killAllPty())
+app.on('before-quit', () => {
+  killAllPty()
+  disposeRemote()
+})
 
 app.whenReady().then(() => {
+  // 기본 메뉴 제거 — 기본 메뉴가 Ctrl+W를 '창 닫기'에 바인딩해 터미널 Ctrl+W가 창을 닫는 문제 방지.
+  // (메뉴바는 autoHideMenuBar로 이미 숨겨져 있어 UX 변화 없음. Ctrl+W는 렌더러에서 탭 닫기로 처리.)
+  Menu.setApplicationMenu(null)
   createWindow()
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()

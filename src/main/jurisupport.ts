@@ -50,9 +50,24 @@ async function rawPost(
     Accept: 'application/json, text/event-stream'
   }
   if (sid) headers['mcp-session-id'] = sid
-  const res = await fetch(MCP_URL, { method: 'POST', headers, body: JSON.stringify(body) })
-  const text = await res.text()
-  return { status: res.status, sid: res.headers.get('mcp-session-id'), text }
+  // 타임아웃: SSE 응답이 늦거나 스트림이 닫히지 않으면 무한 대기(사건목록 '불러오는 중' 멈춤) → 중단.
+  const ctrl = new AbortController()
+  const timer = setTimeout(() => ctrl.abort(), 20000)
+  try {
+    const res = await fetch(MCP_URL, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(body),
+      signal: ctrl.signal
+    })
+    const text = await res.text()
+    return { status: res.status, sid: res.headers.get('mcp-session-id'), text }
+  } catch (e) {
+    if (ctrl.signal.aborted) throw new Error('JuriSupport 응답 시간 초과 (네트워크 확인 후 ↻ 다시 시도)')
+    throw e
+  } finally {
+    clearTimeout(timer)
+  }
 }
 
 // SSE/JSON 응답에서 JSON-RPC 객체 추출

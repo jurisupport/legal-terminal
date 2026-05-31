@@ -31,6 +31,14 @@ function cleanEnv(): Record<string, string> {
   return env
 }
 
+/** SSH 접속에 필요한 최소 정보 (settings의 SshProfile에서 추려 전달) */
+export interface SshConn {
+  host: string
+  user: string
+  port?: number
+  identityFile?: string
+}
+
 export interface CreatePtyOptions {
   id: string
   cwd?: string
@@ -38,22 +46,77 @@ export interface CreatePtyOptions {
   rows: number
   autoLaunchClaude?: boolean
   resumeSessionId?: string // 주어지면 `claude --resume <id>`로 과거 세션 이어서 실행
+  ssh?: SshConn // 주어지면 로컬 셸 대신 ssh로 원격 접속 (cwd는 원격 경로)
+}
+
+const sshBin = process.platform === 'win32' ? 'ssh.exe' : 'ssh'
+
+// 원격 셸 명령에 안전하게 끼워넣기 위한 single-quote 이스케이프 (POSIX)
+function shq(s: string): string {
+  return `'${s.replace(/'/g, "'\\''")}'`
+}
+
+/**
+ * ssh 인자 + 원격 시작 명령을 만든다.
+ * 비밀번호/키 프롬프트는 터미널(xterm)에 그대로 표시되어 사용자가 응답한다.
+ * 원격 명령은 인증 성공 후에만 실행되므로 stdin 주입과 달리 프롬프트와 충돌하지 않는다.
+ */
+function buildSshArgs(opts: CreatePtyOptions): string[] {
+  const ssh = opts.ssh!
+  const args = ['-tt'] // 원격 PTY 강제 할당 (대화형 claude/셸)
+  if (ssh.port) args.push('-p', String(ssh.port))
+  if (ssh.identityFile) args.push('-i', ssh.identityFile)
+  // 끊김 방지 keepalive, 첫 접속 호스트키 자동 수락
+  args.push('-o', 'ServerAliveInterval=30')
+  args.push('-o', 'StrictHostKeyChecking=accept-new')
+  args.push(`${ssh.user}@${ssh.host}`)
+
+  // 원격 시작 명령 (inner): (cd 사건폴더 →) claude 실행 → 끝나면 로그인 셸 유지.
+  // cd 실패 시에도(&&) claude는 건너뛰되 셸은 유지(;)되어 사용자가 상황을 본다.
+  const launch = opts.resumeSessionId
+    ? `claude --resume ${shq(opts.resumeSessionId)}`
+    : opts.autoLaunchClaude
+      ? 'claude'
+      : ''
+  let inner: string
+  if (opts.cwd && opts.cwd.length > 0) {
+    inner = launch ? `cd ${shq(opts.cwd)} && ${launch}; ` : `cd ${shq(opts.cwd)}; `
+  } else {
+    inner = launch ? `${launch}; ` : ''
+  }
+  inner += 'exec $SHELL -l' // claude 종료 후에도 원격 셸 유지 (로컬 동작과 동일)
+
+  // 대화형 로그인 셸(-ilc)로 감싸 원격 PATH(claude 등)를 로드한 뒤 실행한다.
+  // -i가 있어야 zsh/bash가 .zshrc/.bashrc(claude PATH가 흔히 여기 있음)를 읽는다.
+  // ssh는 이 단일 인자를 원격 셸에 그대로 전달하므로 nested single-quote는 shq로 이중 이스케이프됨.
+  // ($SHELL은 큰따옴표 없이 — Windows ConPTY 커맨드라인 인용을 단순화)
+  args.push(`exec $SHELL -ilc ${shq(inner)}`)
+  return args
 }
 
 export function createPty(opts: CreatePtyOptions, webContents: WebContents): void {
-  const { id, cols, rows, autoLaunchClaude, resumeSessionId } = opts
+  const { id, cols, rows, autoLaunchClaude, resumeSessionId, ssh } = opts
   const cwd = opts.cwd && opts.cwd.length > 0 ? opts.cwd : os.homedir()
 
   // 기존 동일 id 세션 정리 (HMR/재마운트 안전)
   killPty(id)
 
-  const proc = pty.spawn(defaultShell, [], {
-    name: 'xterm-256color',
-    cwd,
-    cols: Math.max(cols, 2),
-    rows: Math.max(rows, 1),
-    env: cleanEnv()
-  })
+  const proc = ssh
+    ? pty.spawn(sshBin, buildSshArgs(opts), {
+        name: 'xterm-256color',
+        // 로컬 cwd는 ssh 실행에만 쓰임(원격 경로는 위 명령의 cd가 처리)
+        cwd: os.homedir(),
+        cols: Math.max(cols, 2),
+        rows: Math.max(rows, 1),
+        env: cleanEnv()
+      })
+    : pty.spawn(defaultShell, [], {
+        name: 'xterm-256color',
+        cwd,
+        cols: Math.max(cols, 2),
+        rows: Math.max(rows, 1),
+        env: cleanEnv()
+      })
   sessions.set(id, { proc })
 
   proc.onData((data) => {
@@ -63,6 +126,9 @@ export function createPty(opts: CreatePtyOptions, webContents: WebContents): voi
     if (!webContents.isDestroyed()) webContents.send('pty:exit', { id, exitCode })
     sessions.delete(id)
   })
+
+  // ssh는 원격 시작 명령(buildSshArgs)으로 claude를 실행하므로 여기서 따로 주입하지 않는다.
+  if (ssh) return
 
   if (resumeSessionId) {
     // 과거 세션 이어서 실행

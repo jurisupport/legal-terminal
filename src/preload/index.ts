@@ -2,6 +2,26 @@ import { contextBridge, ipcRenderer, webUtils } from 'electron'
 
 // 렌더러에 노출되는 좁은 API 표면. 이후 마일스톤에서
 // pty.* / ide.* / fs.* / sidecar.* / caseIndex.* 채널이 여기에 추가된다.
+interface SshConn {
+  host: string
+  user: string
+  port?: number
+  identityFile?: string
+}
+
+interface SshProfile extends SshConn {
+  id: string
+  label: string
+  draftsRoot?: string
+  recordsRoot?: string
+}
+
+interface RemoteEntry {
+  name: string
+  path: string
+  isDir: boolean
+}
+
 interface PtyCreateOpts {
   id: string
   cwd?: string
@@ -9,6 +29,7 @@ interface PtyCreateOpts {
   rows: number
   autoLaunchClaude?: boolean
   resumeSessionId?: string
+  ssh?: SshConn
 }
 
 interface AppSettings {
@@ -19,6 +40,7 @@ interface AppSettings {
   termFontSize?: number
   mdFont?: string
   mdFontSize?: number
+  sshProfiles?: SshProfile[]
 }
 
 const api = {
@@ -73,6 +95,8 @@ const api = {
       ipcRenderer.invoke('fs:copyInto', { destDir, srcPaths }),
     move: (src: string, destDir: string): Promise<{ ok: boolean; path?: string; error?: string }> =>
       ipcRenderer.invoke('fs:move', { src, destDir }),
+    delete: (path: string): Promise<{ ok: boolean; error?: string }> =>
+      ipcRenderer.invoke('fs:delete', path),
     mkdir: (dir: string, name: string): Promise<{ ok: boolean; error?: string }> =>
       ipcRenderer.invoke('fs:mkdir', { dir, name }),
     createFile: (
@@ -122,6 +146,34 @@ const api = {
       ipcRenderer.invoke('js:listCases', params ?? {}),
     getCase: (id: string): Promise<{ ok: boolean; case?: unknown; error?: string }> =>
       ipcRenderer.invoke('js:getCase', id)
+  },
+  ssh: {
+    // 원격 디렉터리 목록 (사건 폴더 선택용). 키/agent 인증 시에만 성공.
+    listDir: (
+      profile: SshProfile,
+      path: string
+    ): Promise<
+      { ok: true; entries: RemoteEntry[]; cwd: string } | { ok: false; error: string }
+    > => ipcRenderer.invoke('ssh:listDir', { profile, path })
+  },
+  sync: {
+    remoteInfo: (
+      profile: SshProfile
+    ): Promise<{ installed: boolean; remotes: string[]; error?: string }> =>
+      ipcRenderer.invoke('sync:remoteInfo', profile),
+    run: (opts: {
+      profile: SshProfile
+      direction: 'pull' | 'push'
+      macFolder: string
+      dest: string
+    }): Promise<{ ok: boolean; code: number | null; error?: string }> =>
+      ipcRenderer.invoke('sync:run', opts),
+    cancel: (): void => ipcRenderer.send('sync:cancel'),
+    onProgress: (cb: (line: string) => void): (() => void) => {
+      const listener = (_e: unknown, line: string): void => cb(line)
+      ipcRenderer.on('sync:progress', listener)
+      return () => ipcRenderer.removeListener('sync:progress', listener)
+    }
   },
   sessions: {
     current: (

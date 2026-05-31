@@ -5,6 +5,7 @@ import { CanvasAddon } from '@xterm/addon-canvas'
 import { WebglAddon } from '@xterm/addon-webgl'
 import '@xterm/xterm/css/xterm.css'
 import { LT_PATH } from '../filetree/FileTree'
+import type { SshConn } from '../env'
 
 // D2Coding(번들, 한글:영문=2:1 고정폭)을 우선 — 한글/영문 폭이 한 폰트로 통일되어 정렬이 맞는다.
 const DEFAULT_FONT = "'D2Coding', 'Cascadia Mono', Consolas, monospace"
@@ -19,8 +20,10 @@ export default function Terminal({
   visible,
   autoClaude = false,
   resumeSessionId,
+  ssh,
   onDropPaths,
   onNewTerminal,
+  onRequestClose,
   onStatus,
   onCycleTab
 }: {
@@ -29,8 +32,10 @@ export default function Terminal({
   visible: boolean
   autoClaude?: boolean
   resumeSessionId?: string
+  ssh?: SshConn
   onDropPaths?: (paths: string[]) => void
   onNewTerminal?: () => void
+  onRequestClose?: () => void
   onStatus?: (status: 'working' | 'done' | 'question') => void
   onCycleTab?: (dir: number) => void
 }): JSX.Element {
@@ -41,6 +46,8 @@ export default function Terminal({
   onDropRef.current = onDropPaths
   const onNewTermRef = useRef(onNewTerminal)
   onNewTermRef.current = onNewTerminal
+  const onCloseRef = useRef(onRequestClose)
+  onCloseRef.current = onRequestClose
   const onStatusRef = useRef(onStatus)
   onStatusRef.current = onStatus
   const onCycleRef = useRef(onCycleTab)
@@ -144,6 +151,12 @@ export default function Terminal({
           onNewTermRef.current?.()
           return false
         }
+        if (k === 'w' && !e.shiftKey && !e.altKey) {
+          // Ctrl+W: 이 터미널 닫기 (작업 중이면 App에서 확인). claude 단어삭제 대신 탭 닫기.
+          e.stopPropagation()
+          onCloseRef.current?.()
+          return false
+        }
         if (k === 'tab') {
           // Ctrl+Tab / Ctrl+Shift+Tab: 터미널 탭 순환
           e.stopPropagation()
@@ -191,7 +204,8 @@ export default function Terminal({
         cols: term.cols,
         rows: term.rows,
         autoLaunchClaude: autoClaude,
-        resumeSessionId
+        resumeSessionId,
+        ssh
       })
 
       // 진행중/완료 감지:

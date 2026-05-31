@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import type { JsCase, JsParty } from '../env'
+import type { JsCase, JsParty, SshProfile } from '../env'
 
 const SIGNUP_URL = 'https://jurisupport.com/signup'
 const CASES_URL = 'https://jurisupport.com/cases'
@@ -48,11 +48,15 @@ const copy = (s: string): void => void navigator.clipboard.writeText(s)
 /** JuriSupport(본체) 사건 대시보드. 좌클릭=작업환경 열기, 우클릭=컨텍스트 메뉴. */
 export default function CasesDashboard({
   onOpenWorkspace,
+  onOpenRemote,
+  sshProfiles = [],
   onBrief,
   onDraft,
   onChanged
 }: {
   onOpenWorkspace: (c: JsCase) => void
+  onOpenRemote?: (c: JsCase, profile: SshProfile) => void
+  sshProfiles?: SshProfile[]
   onBrief: (c: JsCase) => void
   onDraft: (c: JsCase) => void
   onChanged?: () => void
@@ -288,6 +292,12 @@ export default function CasesDashboard({
             [
               ['✳ Claude에 브리핑 요청', () => onBrief(menu.c)],
               ['✍ 준비서면 초안 (/brief-protocol)', () => onDraft(menu.c)],
+              ...(onOpenRemote && sshProfiles.length
+                ? (sshProfiles.map((p) => [
+                    `🔗 ${p.label}에서 열기`,
+                    () => onOpenRemote(menu.c, p)
+                  ]) as [string, () => void][])
+                : []),
               ['—', null],
               ['🌐 JuriSupport에서 보기', () => openExt(caseWebUrl(menu.c.id))],
               ['ℹ 상세 보기', () => toggleDetail(menu.c)],

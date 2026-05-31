@@ -25,6 +25,7 @@ export default function FileTree({
   onOpenFile,
   onDropTo,
   onMove,
+  onDelete,
   pendingCreate = null,
   onCreate,
   onCancelCreate
@@ -34,6 +35,7 @@ export default function FileTree({
   onOpenFile: (path: string, name: string) => void
   onDropTo?: (dir: string, files: FileList) => void
   onMove?: (src: string, destDir: string) => void
+  onDelete?: (path: string, name: string, isDir: boolean) => void
   pendingCreate?: 'file' | 'folder' | null
   onCreate?: (name: string, type: 'file' | 'folder') => void
   onCancelCreate?: () => void
@@ -41,6 +43,23 @@ export default function FileTree({
   const [entries, setEntries] = useState<Entry[] | null>(null)
   const [err, setErr] = useState<string>('')
   const [rootOver, setRootOver] = useState(false)
+  // 우클릭 컨텍스트 메뉴 (삭제 등)
+  const [menu, setMenu] = useState<{ x: number; y: number; entry: Entry } | null>(null)
+  const onContext = (e: React.MouseEvent, entry: Entry): void => {
+    e.preventDefault()
+    e.stopPropagation()
+    setMenu({ x: e.clientX, y: e.clientY, entry })
+  }
+  useEffect(() => {
+    if (!menu) return
+    const close = (): void => setMenu(null)
+    document.addEventListener('click', close)
+    document.addEventListener('scroll', close, true)
+    return () => {
+      document.removeEventListener('click', close)
+      document.removeEventListener('scroll', close, true)
+    }
+  }, [menu])
 
   useEffect(() => {
     let alive = true
@@ -115,8 +134,31 @@ export default function FileTree({
             onOpenFile={onOpenFile}
             onDropTo={onDropTo}
             onMove={onMove}
+            onContext={onContext}
           />
         ))}
+      {menu && (
+        <ul
+          className="ctx-menu"
+          style={{
+            left: Math.min(menu.x, window.innerWidth - 160),
+            top: Math.min(menu.y, window.innerHeight - 80)
+          }}
+          onMouseDown={(e) => e.stopPropagation()}
+        >
+          <li
+            className="ctx-item"
+            onClick={() => {
+              const { path, name, isDir } = menu.entry
+              setMenu(null)
+              if (window.confirm(`'${name}'${isDir ? ' 폴더' : ''}을(를) 삭제할까요?`))
+                onDelete?.(path, name, isDir)
+            }}
+          >
+            🗑 삭제
+          </li>
+        </ul>
+      )}
     </ul>
   )
 }
@@ -127,7 +169,8 @@ function TreeNode({
   refreshNonce,
   onOpenFile,
   onDropTo,
-  onMove
+  onMove,
+  onContext
 }: {
   entry: Entry
   depth: number
@@ -135,6 +178,7 @@ function TreeNode({
   onOpenFile: (path: string, name: string) => void
   onDropTo?: (dir: string, files: FileList) => void
   onMove?: (src: string, destDir: string) => void
+  onContext?: (e: React.MouseEvent, entry: Entry) => void
 }): JSX.Element {
   const [open, setOpen] = useState(false)
   const [children, setChildren] = useState<Entry[] | null>(null)
@@ -182,6 +226,7 @@ function TreeNode({
         className={`tree-row ${over ? 'drop-target' : ''}`}
         style={{ paddingLeft: 8 + depth * 14 }}
         onClick={onClick}
+        onContextMenu={(e) => onContext?.(e, entry)}
         title={entry.name}
         draggable
         onDragStart={(e) => {
@@ -256,6 +301,7 @@ function TreeNode({
               onOpenFile={onOpenFile}
               onDropTo={onDropTo}
               onMove={onMove}
+              onContext={onContext}
             />
           ))}
         </ul>
