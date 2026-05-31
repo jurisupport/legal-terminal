@@ -10,7 +10,7 @@
 
 ![legal-terminal](screenshots/app.png)
 
-> 따로 떠 있던 터미널의 `claude`, 별도 에디터, 전자소송기록 뷰어를 **한 화면에 통합**했습니다. 기존 `jurisupport-plugins` 생태계(songmu-legal 플러그인, korean-law MCP, 법령·판례·사건기록 토킷, PII 보호 훅)는 **교체가 아니라 그대로 살려** 동작합니다.
+> 따로 떠 있던 터미널의 `claude`, 별도 에디터, 전자소송기록 뷰어를 **한 화면에 통합**했습니다. 기존 `jurisupport-plugins` 생태계(songmu-legal 플러그인, korean-law MCP, 법령·판례·사건기록 검색 도구, PII 보호 훅)는 **교체가 아니라 그대로 살려** 동작합니다.
 
 ## 다운로드 (Windows)
 
@@ -19,7 +19,6 @@
 👉 **[legal-terminal 설치 (Setup) 내려받기](https://github.com/jurisupport/legal-terminal/releases/latest/download/legal-terminal-Setup.exe)** — 대부분 이 파일 하나면 됩니다. 받은 뒤 더블클릭해서 설치하세요.
 
 - 설치하기 싫고 바로 실행만: **[포터블 버전](https://github.com/jurisupport/legal-terminal/releases/latest/download/legal-terminal-portable.exe)** (다운로드 후 더블클릭, 설치 불필요)
-- 다른/이전 버전: [전체 릴리스 목록](https://github.com/jurisupport/legal-terminal/releases)
 
 ### 2) 설치할 때 "Windows의 PC 보호" 경고 푸는 법
 
@@ -32,7 +31,7 @@
 
 ### 3) 처음이라면 — `jurisupport-plugins`부터 설치하세요
 
-legal-terminal은 PC에 설치된 **Claude Code**와 **변호사용 플러그인**을 그대로 사용합니다. 아직 이것들이 없다면, **먼저 [`jurisupport-plugins`](https://github.com/jurisupport/jurisupport-plugins)를 설치**하세요. 설치 스크립트가 의존성(Node 등)·**Claude Code**·송무 플러그인·검색 토킷·PII 보호 훅까지 한 번에 구성해 줍니다.
+legal-terminal은 PC에 설치된 **Claude Code**와 **변호사용 플러그인**을 그대로 사용합니다. 아직 이것들이 없다면, **먼저 [`jurisupport-plugins`](https://github.com/jurisupport/jurisupport-plugins)를 설치**하세요. 설치 스크립트가 의존성(Node 등)·**Claude Code**·송무 플러그인·판례·법령·사건기록 검색 도구·PII 보호 훅까지 한 번에 구성해 줍니다.
 
 - Windows: `windows-bootstrap.ps1`
 - macOS/Linux/WSL: `install.sh`
@@ -46,7 +45,7 @@ legal-terminal은 **실제 `claude` CLI를 그대로 실행**하므로, [`jurisu
 1. **설치** — `jurisupport-plugins` 저장소의 설치 스크립트 실행
    - Windows: `windows-bootstrap.ps1` (Python·Node·Chrome 등 의존성 + 플러그인 구성)
    - macOS/Linux/WSL: `install.sh`
-   - 설치되는 것: `~/.claude/settings.json`에 플러그인·**PII 보호 훅**, 검색 토킷 서버, MCP 등록
+   - 설치되는 것: `~/.claude/settings.json`에 플러그인·**PII 보호 훅**, 검색 서버(법령·판례·사건기록), MCP 등록
 2. **구성요소** (설치 후 터미널의 claude에서 바로 사용)
    - `songmu-legal` 플러그인 — `/brief-protocol`(준비서면 표준 절차), `/cold-start-interview`(사무소 플레이북), `case-index`(CSV 사건관리)
    - 검색 스킬 — 법고을 판례검색 · 과거 사건기록(:8767) · 법률서적(:8766) · lbox 가이드
