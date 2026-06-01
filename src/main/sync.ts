@@ -10,6 +10,14 @@ function shq(s: string): string {
   return `'${s.replace(/'/g, "'\\''")}'`
 }
 
+function shellPathArg(path: string): string {
+  const target = path.trim()
+  if (!target || target === '~' || target === '$HOME') return '"$HOME"'
+  if (target.startsWith('~/')) return `"$HOME"/${shq(target.slice(2))}`
+  if (target.startsWith('$HOME/')) return `"$HOME"/${shq(target.slice(6))}`
+  return shq(target)
+}
+
 // BatchMode(키/agent 인증) ssh 인자 — 비대화식 원격 명령 실행용
 function sshBaseArgs(profile: SshProfile): string[] {
   const a: string[] = []
@@ -58,10 +66,12 @@ export function runRemoteSync(
   opts: RemoteSyncOpts,
   wc: WebContents
 ): Promise<{ ok: boolean; code: number | null; error?: string }> {
-  const src = opts.direction === 'pull' ? opts.dest : opts.macFolder
-  const dst = opts.direction === 'pull' ? opts.macFolder : opts.dest
+  const cloudArg = shq(opts.dest)
+  const macArg = shellPathArg(opts.macFolder)
+  const src = opts.direction === 'pull' ? cloudArg : macArg
+  const dst = opts.direction === 'pull' ? macArg : cloudArg
   const rcloneCmd =
-    `rclone copy ${shq(src)} ${shq(dst)} --update --transfers=4 --checkers=8 ` +
+    `rclone copy ${src} ${dst} --update --create-empty-src-dirs --transfers=4 --checkers=8 ` +
     `-v --stats-one-line --stats=1s`
   const args = [...sshBaseArgs(opts.profile), rcloneCmd]
 
@@ -69,8 +79,8 @@ export function runRemoteSync(
     if (!wc.isDestroyed()) wc.send('sync:progress', line)
   }
   send(`$ (맥미니에서) rclone ${opts.direction === 'pull' ? '내리기 ⬇' : '올리기 ⬆'}`)
-  send(`  ${src}`)
-  send(`  → ${dst}`)
+  send(`  ${opts.direction === 'pull' ? opts.dest : opts.macFolder}`)
+  send(`  → ${opts.direction === 'pull' ? opts.macFolder : opts.dest}`)
 
   return new Promise((resolve) => {
     let proc: ReturnType<typeof spawn>

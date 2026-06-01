@@ -2920,6 +2920,28 @@ function remoteCrumbs(path: string): { label: string; path: string }[] {
   ]
 }
 
+function remotePathParts(path: string): string[] {
+  return path
+    .replace(/\\/g, '/')
+    .split('/')
+    .map((p) => p.trim())
+    .filter(Boolean)
+}
+
+function oneDrivePartIndex(path: string): number {
+  return remotePathParts(path).findIndex((part) => part.toLowerCase().startsWith('onedrive'))
+}
+
+function looksLikeOneDrivePath(path: string): boolean {
+  return oneDrivePartIndex(path) >= 0
+}
+
+function cloudPathFromOneDrivePath(path: string): string {
+  const parts = remotePathParts(path)
+  const i = parts.findIndex((part) => part.toLowerCase().startsWith('onedrive'))
+  return i >= 0 ? parts.slice(i + 1).join('/') : ''
+}
+
 const REMOTE_START_POINTS = [
   { label: '홈', path: '~' },
   { label: '루트 /', path: '/' },
@@ -2954,6 +2976,7 @@ function RemoteFolderPicker({
   const [err, setErr] = useState<string>('')
   const [loading, setLoading] = useState(false)
   const [pathInput, setPathInput] = useState(initial)
+  const [syncOpen, setSyncOpen] = useState<{ macFolder: string; reloadPath: string } | null>(null)
 
   const load = (path: string): void => {
     const nextPath = path.trim() || '~'
@@ -2991,108 +3014,142 @@ function RemoteFolderPicker({
   const dirs = entries?.filter((e) => e.isDir) ?? []
   const crumbs = remoteCrumbs(cwd)
   const canUsePathInput = pathInput.trim().length > 0
+  const syncPath = (pathInput.trim() || cwd).trim()
+  const canSyncOneDrive = looksLikeOneDrivePath(syncPath)
+  const closeSync = (): void => {
+    const reloadPath = syncOpen?.reloadPath
+    setSyncOpen(null)
+    if (reloadPath) load(reloadPath)
+  }
 
   return (
-    <div className="modal-overlay" onMouseDown={onCancel}>
-      <div className="modal remote-picker" onMouseDown={(e) => e.stopPropagation()}>
-        <div className="modal-title">
-          🔗 {profile.label} — {title}
-        </div>
-        <p className="muted small remote-hint">
-          기본은 사용자 홈(/Users/사용자명 또는 /home/사용자명)에서 시작합니다. 위치가 다르면 루트(/)에서 다시 찾아보세요.
-        </p>
-        <div className="remote-path">
-          <button className="header-btn" onClick={up} title="상위 폴더">
-            ↑
-          </button>
-          <div className="remote-path-main">
-            <div className="remote-breadcrumbs" aria-label="현재 경로">
-              {crumbs.map((c, i) => (
-                <span key={c.path} className="remote-crumb-wrap">
-                  {i > 0 && <span className="remote-crumb-sep">/</span>}
-                  <button className="remote-crumb" type="button" onClick={() => load(c.path)}>
-                    {c.label}
-                  </button>
-                </span>
-              ))}
-            </div>
-            <code className="remote-cwd">{cwd}</code>
+    <>
+      <div className="modal-overlay" onMouseDown={onCancel}>
+        <div className="modal remote-picker" onMouseDown={(e) => e.stopPropagation()}>
+          <div className="modal-title">
+            🔗 {profile.label} — {title}
           </div>
-          <button className="header-btn" onClick={() => load(cwd)} title="새로고침">
-            ⟳
-          </button>
-        </div>
-        <div className="remote-quick">
-          <span className="muted small">빠른 시작</span>
-          {REMOTE_START_POINTS.map((p) => (
-            <button key={p.path} className="remote-chip" type="button" onClick={() => load(p.path)}>
-              {p.label}
+          <p className="muted small remote-hint">
+            기본은 사용자 홈(/Users/사용자명 또는 /home/사용자명)에서 시작합니다. 위치가 다르면 루트(/)에서 다시 찾아보세요.
+          </p>
+          <div className="remote-path">
+            <button className="header-btn" onClick={up} title="상위 폴더">
+              ↑
             </button>
-          ))}
-        </div>
-        <form
-          className="remote-jump"
-          onSubmit={(e) => {
-            e.preventDefault()
-            if (canUsePathInput) load(pathInput)
-          }}
-        >
-          <input
-            className="setting-input"
-            placeholder="원격 경로 입력: /Users/me/OneDrive/진행중사건"
-            value={pathInput}
-            onChange={(e) => setPathInput(e.target.value)}
-          />
-          <button className="header-btn" type="submit" disabled={!canUsePathInput}>
-            이동
-          </button>
-          <button
-            className="header-btn"
-            type="button"
-            disabled={!canUsePathInput}
-            onClick={() => canUsePathInput && onPick(pathInput.trim())}
-          >
-            입력 경로 선택
-          </button>
-        </form>
-        <div className="remote-list">
-          {loading && <p className="muted pad small">불러오는 중…</p>}
-          {!loading && err && (
-            <div className="pad">
-              <p className="muted small">
-                목록을 가져오지 못했습니다. 다른 시작 위치를 눌러보거나 경로를 직접 입력하세요.
-              </p>
-              <pre className="remote-err">{err}</pre>
+            <div className="remote-path-main">
+              <div className="remote-breadcrumbs" aria-label="현재 경로">
+                {crumbs.map((c, i) => (
+                  <span key={c.path} className="remote-crumb-wrap">
+                    {i > 0 && <span className="remote-crumb-sep">/</span>}
+                    <button className="remote-crumb" type="button" onClick={() => load(c.path)}>
+                      {c.label}
+                    </button>
+                  </span>
+                ))}
+              </div>
+              <code className="remote-cwd">{cwd}</code>
             </div>
-          )}
-          {!loading && !err && dirs.length === 0 && (
-            <p className="muted pad small">
-              하위 폴더가 없습니다. 아래 ‘{confirmLabel}’를 누르거나 상위로 이동하세요.
-            </p>
-          )}
-          {!loading &&
-            !err &&
-            dirs.map((e) => (
-              <button
-                key={e.path}
-                className="remote-row"
-                onClick={() => load(e.path)}
-                title={e.path}
-              >
-                📁 {e.name}
+            <button className="header-btn" onClick={() => load(cwd)} title="새로고침">
+              ⟳
+            </button>
+            <button
+              className="header-btn"
+              type="button"
+              disabled={!canSyncOneDrive}
+              title={
+                canSyncOneDrive
+                  ? '현재 OneDrive 위치를 rclone으로 클라우드에서 최신화'
+                  : 'OneDrive 또는 CloudStorage/OneDrive 폴더로 이동한 뒤 사용하세요'
+              }
+              onClick={() =>
+                setSyncOpen({
+                  macFolder: syncPath,
+                  reloadPath: syncPath
+                })
+              }
+            >
+              OneDrive 최신화
+            </button>
+          </div>
+          <div className="remote-quick">
+            <span className="muted small">빠른 시작</span>
+            {REMOTE_START_POINTS.map((p) => (
+              <button key={p.path} className="remote-chip" type="button" onClick={() => load(p.path)}>
+                {p.label}
               </button>
             ))}
-        </div>
-        <div className="modal-actions">
-          <button className="empty-action" onClick={() => onPick(cwd)}>
-            {confirmLabel}
-          </button>
-          <button className="header-btn" onClick={onCancel}>
-            취소
-          </button>
+          </div>
+          <form
+            className="remote-jump"
+            onSubmit={(e) => {
+              e.preventDefault()
+              if (canUsePathInput) load(pathInput)
+            }}
+          >
+            <input
+              className="setting-input"
+              placeholder="원격 경로 입력: /Users/me/OneDrive/진행중사건"
+              value={pathInput}
+              onChange={(e) => setPathInput(e.target.value)}
+            />
+            <button className="header-btn" type="submit" disabled={!canUsePathInput}>
+              이동
+            </button>
+            <button
+              className="header-btn"
+              type="button"
+              disabled={!canUsePathInput}
+              onClick={() => canUsePathInput && onPick(pathInput.trim())}
+            >
+              입력 경로 선택
+            </button>
+          </form>
+          <div className="remote-list">
+            {loading && <p className="muted pad small">불러오는 중…</p>}
+            {!loading && err && (
+              <div className="pad">
+                <p className="muted small">
+                  목록을 가져오지 못했습니다. 다른 시작 위치를 눌러보거나 경로를 직접 입력하세요.
+                </p>
+                <pre className="remote-err">{err}</pre>
+              </div>
+            )}
+            {!loading && !err && dirs.length === 0 && (
+              <p className="muted pad small">
+                하위 폴더가 없습니다. 아래 ‘{confirmLabel}’를 누르거나 상위로 이동하세요.
+              </p>
+            )}
+            {!loading &&
+              !err &&
+              dirs.map((e) => (
+                <button
+                  key={e.path}
+                  className="remote-row"
+                  onClick={() => load(e.path)}
+                  title={e.path}
+                >
+                  📁 {e.name}
+                </button>
+              ))}
+          </div>
+          <div className="modal-actions">
+            <button className="empty-action" onClick={() => onPick(cwd)}>
+              {confirmLabel}
+            </button>
+            <button className="header-btn" onClick={onCancel}>
+              취소
+            </button>
+          </div>
         </div>
       </div>
-    </div>
+      {syncOpen && (
+        <SyncModal
+          profiles={[profile]}
+          init={{ profile, macFolder: syncOpen.macFolder }}
+          onClose={closeSync}
+        />
+      )}
+    </>
   )
 }
 
@@ -3109,13 +3166,8 @@ function SyncModal({
 }): JSX.Element {
   const [profileId, setProfileId] = useState(init.profile.id)
   const [macFolder, setMacFolder] = useState(init.macFolder)
-  // OneDrive 클라우드 경로 추정: 맥 경로의 "/OneDrive/" 이후 부분
-  const guessCloud = (p: string): string => {
-    const i = p.toLowerCase().indexOf('/onedrive/')
-    return i >= 0 ? p.slice(i + '/onedrive/'.length) : ''
-  }
   const [remoteName, setRemoteName] = useState('') // 예: "onedrive:"
-  const [cloudPath, setCloudPath] = useState(guessCloud(init.macFolder))
+  const [cloudPath, setCloudPath] = useState(cloudPathFromOneDrivePath(init.macFolder))
   const [info, setInfo] = useState<{ installed: boolean; remotes: string[]; error?: string } | null>(
     null
   )
@@ -3143,8 +3195,9 @@ function SyncModal({
   }
   useEffect(probe, [profileId]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  const dest = remoteName + cloudPath
-  const canRun = !running && info?.installed && macFolder.trim() && remoteName && cloudPath.trim()
+  const normalizedCloudPath = cloudPath.trim().replace(/^\/+/, '')
+  const dest = remoteName ? remoteName + normalizedCloudPath : ''
+  const canRun = Boolean(!running && info?.installed && macFolder.trim() && remoteName)
   const run = (direction: 'pull' | 'push'): void => {
     if (!canRun) return
     setRunning(true)
@@ -3212,7 +3265,7 @@ function SyncModal({
               <input
                 className="setting-input"
                 value={macFolder}
-                placeholder="/Users/me/OneDrive/진행중사건/사건폴더"
+                placeholder="/Users/me/Library/CloudStorage/OneDrive/진행중사건/사건폴더"
                 onChange={(e) => setMacFolder(e.target.value)}
               />
             </label>
@@ -3221,12 +3274,12 @@ function SyncModal({
               <input
                 className="setting-input"
                 value={cloudPath}
-                placeholder="진행중사건/사건폴더"
+                placeholder="진행중사건/사건폴더 (비우면 OneDrive 루트)"
                 onChange={(e) => setCloudPath(e.target.value)}
               />
             </label>
             <p className="muted small">
-              대상: <code>{dest || '(리모트:경로 미정)'}</code> · copy --update(최신만,{' '}
+              대상: <code>{dest || '(리모트:경로 미정)'}</code> · copy --update(빈 폴더 포함,{' '}
               <b>삭제 전파 안 함</b>)
             </p>
             <div className="sync-buttons">
