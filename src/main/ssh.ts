@@ -7,6 +7,14 @@ function shq(s: string): string {
   return `'${s.replace(/'/g, "'\\''")}'`
 }
 
+function cdTarget(path: string): string {
+  const target = path.trim()
+  if (!target || target === '~' || target === '$HOME') return '"$HOME"'
+  if (target.startsWith('~/')) return `"$HOME"/${shq(target.slice(2))}`
+  if (target.startsWith('$HOME/')) return `"$HOME"/${shq(target.slice(6))}`
+  return shq(target)
+}
+
 // 원격 경로 join (원격은 POSIX 경로)
 function joinRemote(dir: string, name: string): string {
   return `${dir.replace(/\/+$/, '')}/${name}`
@@ -36,7 +44,7 @@ export function listRemoteDir(
   // 디렉터리만 슬래시(-p), 숨김 제외 위해 -A 대신 일반 ls, 한 줄 하나(-1)
   // 경로 미지정/빈값이면 홈(~)을 사용
   const target = remotePath && remotePath.trim() ? remotePath : '~'
-  args.push(`cd ${shq(target)} && pwd && ls -1p`)
+  args.push(`cd ${cdTarget(target)} && pwd && ls -1p`)
 
   return new Promise((resolve) => {
     execFile(sshBin, args, { timeout: 15000, windowsHide: true }, (err, stdout, stderr) => {

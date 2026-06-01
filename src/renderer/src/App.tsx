@@ -2881,6 +2881,52 @@ function ConnMenu({
   )
 }
 
+function parentRemotePath(path: string): string {
+  const trimmed = path.trim()
+  if (!trimmed || trimmed === '~') return '~'
+  if (trimmed.startsWith('~/')) {
+    const parent = trimmed.replace(/\/+$/, '').replace(/\/[^/]*$/, '')
+    return parent === '~' || !parent ? '~' : parent
+  }
+  return trimmed.replace(/\/+$/, '').replace(/\/[^/]*$/, '') || '/'
+}
+
+function remoteCrumbs(path: string): { label: string; path: string }[] {
+  const trimmed = path.trim()
+  if (!trimmed || trimmed === '~') return [{ label: '~', path: '~' }]
+  if (trimmed.startsWith('~/')) {
+    const parts = trimmed.slice(2).split('/').filter(Boolean)
+    let acc = '~'
+    return [
+      { label: '~', path: '~' },
+      ...parts.map((part) => {
+        acc += '/' + part
+        return { label: part, path: acc }
+      })
+    ]
+  }
+  if (!trimmed.startsWith('/')) return [{ label: trimmed, path: trimmed }]
+  const parts = trimmed.split('/').filter(Boolean)
+  let acc = ''
+  return [
+    { label: '루트', path: '/' },
+    ...parts.map((part) => {
+      acc += '/' + part
+      return { label: part, path: acc }
+    })
+  ]
+}
+
+const REMOTE_START_POINTS = [
+  { label: '홈', path: '~' },
+  { label: '루트 /', path: '/' },
+  { label: '/Users', path: '/Users' },
+  { label: '/home', path: '/home' },
+  { label: '/Volumes', path: '/Volumes' },
+  { label: 'CloudStorage', path: '~/Library/CloudStorage' },
+  { label: 'Documents', path: '~/Documents' }
+]
+
 // 원격(SSH) 사건 폴더 탐색·선택. ssh.listDir(키/agent 인증)로 목록을 받고,
 // 실패 시(비밀번호 인증 등) 원격 경로를 직접 입력하는 폴백을 제공한다.
 function RemoteFolderPicker({
@@ -2903,21 +2949,31 @@ function RemoteFolderPicker({
   const [entries, setEntries] = useState<RemoteEntry[] | null>(null)
   const [err, setErr] = useState<string>('')
   const [loading, setLoading] = useState(false)
-  const [manual, setManual] = useState('')
+  const [pathInput, setPathInput] = useState(initial)
 
   const load = (path: string): void => {
+    const nextPath = path.trim() || '~'
+    setPathInput(nextPath)
     setLoading(true)
     setErr('')
-    window.lt.ssh.listDir(profile, path).then((r) => {
-      setLoading(false)
-      if (r.ok) {
-        setCwd(r.cwd)
-        setEntries(r.entries)
-      } else {
-        setErr(r.error)
+    window.lt.ssh
+      .listDir(profile, nextPath)
+      .then((r) => {
+        setLoading(false)
+        if (r.ok) {
+          setCwd(r.cwd)
+          setPathInput(r.cwd)
+          setEntries(r.entries)
+        } else {
+          setErr(r.error)
+          setEntries(null)
+        }
+      })
+      .catch((e: unknown) => {
+        setLoading(false)
+        setErr(e instanceof Error ? e.message : String(e))
         setEntries(null)
-      }
-    })
+      })
   }
 
   useEffect(() => {
@@ -2926,10 +2982,11 @@ function RemoteFolderPicker({
   }, [])
 
   const up = (): void => {
-    const parent = cwd.replace(/\/+$/, '').replace(/\/[^/]*$/, '') || '/'
-    load(parent)
+    load(parentRemotePath(cwd))
   }
   const dirs = entries?.filter((e) => e.isDir) ?? []
+  const crumbs = remoteCrumbs(cwd)
+  const canUsePathInput = pathInput.trim().length > 0
 
   return (
     <div className="modal-overlay" onMouseDown={onCancel}>
@@ -2937,47 +2994,76 @@ function RemoteFolderPicker({
         <div className="modal-title">
           🔗 {profile.label} — {title}
         </div>
+        <p className="muted small remote-hint">
+          루트를 모르면 홈이나 루트에서 시작해 폴더를 하나씩 열어보세요.
+        </p>
         <div className="remote-path">
           <button className="header-btn" onClick={up} title="상위 폴더">
             ↑
           </button>
-          <code className="remote-cwd">{cwd}</code>
+          <div className="remote-path-main">
+            <div className="remote-breadcrumbs" aria-label="현재 경로">
+              {crumbs.map((c, i) => (
+                <span key={c.path} className="remote-crumb-wrap">
+                  {i > 0 && <span className="remote-crumb-sep">/</span>}
+                  <button className="remote-crumb" type="button" onClick={() => load(c.path)}>
+                    {c.label}
+                  </button>
+                </span>
+              ))}
+            </div>
+            <code className="remote-cwd">{cwd}</code>
+          </div>
           <button className="header-btn" onClick={() => load(cwd)} title="새로고침">
             ⟳
           </button>
         </div>
+        <div className="remote-quick">
+          <span className="muted small">빠른 시작</span>
+          {REMOTE_START_POINTS.map((p) => (
+            <button key={p.path} className="remote-chip" type="button" onClick={() => load(p.path)}>
+              {p.label}
+            </button>
+          ))}
+        </div>
+        <form
+          className="remote-jump"
+          onSubmit={(e) => {
+            e.preventDefault()
+            if (canUsePathInput) load(pathInput)
+          }}
+        >
+          <input
+            className="setting-input"
+            placeholder="원격 경로 입력: /Users/me/OneDrive/진행중사건"
+            value={pathInput}
+            onChange={(e) => setPathInput(e.target.value)}
+          />
+          <button className="header-btn" type="submit" disabled={!canUsePathInput}>
+            이동
+          </button>
+          <button
+            className="header-btn"
+            type="button"
+            disabled={!canUsePathInput}
+            onClick={() => canUsePathInput && onPick(pathInput.trim())}
+          >
+            입력 경로 선택
+          </button>
+        </form>
         <div className="remote-list">
           {loading && <p className="muted pad small">불러오는 중…</p>}
           {!loading && err && (
             <div className="pad">
               <p className="muted small">
-                목록을 가져오지 못했습니다 (키/ssh-agent 인증이 아닐 수 있습니다).
+                목록을 가져오지 못했습니다. 다른 시작 위치를 눌러보거나 경로를 직접 입력하세요.
               </p>
               <pre className="remote-err">{err}</pre>
-              <p className="muted small">원격 사건 폴더 경로를 직접 입력하세요:</p>
-              <div className="remote-manual">
-                <input
-                  className="setting-input"
-                  placeholder="예: /home/me/cases/2025가합12345"
-                  value={manual}
-                  onChange={(e) => setManual(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter' && manual.trim()) onPick(manual.trim())
-                  }}
-                />
-                <button
-                  className="empty-action"
-                  disabled={!manual.trim()}
-                  onClick={() => manual.trim() && onPick(manual.trim())}
-                >
-                  열기
-                </button>
-              </div>
             </div>
           )}
           {!loading && !err && dirs.length === 0 && (
             <p className="muted pad small">
-              하위 폴더가 없습니다. 아래 ‘이 폴더로 사건 열기’를 누르거나 상위로 이동하세요.
+              하위 폴더가 없습니다. 아래 ‘{confirmLabel}’를 누르거나 상위로 이동하세요.
             </p>
           )}
           {!loading &&

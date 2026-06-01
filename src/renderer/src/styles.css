@@ -1763,16 +1763,58 @@ body {
 
 /* 원격 폴더 선택 */
 .remote-picker {
-  width: 560px;
+  width: min(720px, 92vw);
+}
+.remote-hint {
+  margin: 0 0 10px;
 }
 .remote-path {
   display: flex;
-  align-items: center;
+  align-items: stretch;
   gap: 8px;
   margin-bottom: 10px;
 }
-.remote-cwd {
+.remote-path-main {
   flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.remote-breadcrumbs {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 3px;
+  min-width: 0;
+}
+.remote-crumb-wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  min-width: 0;
+}
+.remote-crumb-sep {
+  color: var(--fg-muted);
+  font-size: 11px;
+}
+.remote-crumb {
+  max-width: 150px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg-alt);
+  color: var(--fg);
+  padding: 3px 7px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.remote-crumb:hover {
+  background: var(--bg-activity);
+}
+.remote-cwd {
   font-family: var(--font-mono);
   font-size: 12px;
   background: var(--bg);
@@ -1781,6 +1823,30 @@ body {
   padding: 6px 10px;
   word-break: break-all;
   color: var(--fg);
+}
+.remote-quick,
+.remote-jump {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.remote-chip {
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--fg);
+  padding: 5px 8px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.remote-chip:hover {
+  background: var(--bg-alt);
+}
+.remote-jump .setting-input {
+  flex: 1 1 280px;
+  min-width: 180px;
 }
 .remote-list {
   flex: 1;
