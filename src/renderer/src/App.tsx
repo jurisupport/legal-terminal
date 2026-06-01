@@ -1777,58 +1777,68 @@ function DocsPanel({
         if (e.dataTransfer.files.length) onDropFiles(e.dataTransfer.files)
       }}
     >
-      <div className="sidebar-header">
-        <span className="sidebar-title">{title}</span>
-        {mode === 'explorer' && (
-          <span className="header-actions">
-            <select
-              className="sort-select"
-              value={sortMode}
-              title="정렬"
-              aria-label="탐색기 정렬"
-              disabled={!draftsFolder}
-              onChange={(e) => setSortMode(e.target.value as SortMode)}
-            >
-              {SORT_OPTIONS.map((opt) => (
-                <option key={opt.value} value={opt.value}>
-                  {opt.label}
-                </option>
-              ))}
-            </select>
-            <button className="tool-btn" title="새 작업환경 열기" onClick={onOpenWorkspace}>
-              <IconWorkspace size={15} />
-              <span className="sr-only">새 작업환경 열기</span>
-            </button>
-            <button className="tool-btn" title="새 파일" disabled={!draftsFolder} onClick={onNewFile}>
-              <IconNewFile size={15} />
-              <span className="sr-only">새 파일</span>
-            </button>
-            <button
-              className="tool-btn"
-              title="새 폴더"
-              disabled={!draftsFolder}
-              onClick={onNewFolder}
-            >
-              <IconNewFolder size={15} />
-              <span className="sr-only">새 폴더</span>
-            </button>
-            {onSync && (
-              <button
-                className="tool-btn"
-                title="rclone 동기화 (로컬 ↔ 맥미니)"
+      <div className={`sidebar-header ${mode === 'explorer' ? 'explorer-header' : ''}`}>
+        {mode === 'explorer' ? (
+          <>
+            <div className="sidebar-header-main">
+              <span className="sidebar-title">{title}</span>
+              <span className="header-actions explorer-actions">
+                <button className="tool-btn" title="새 작업환경 열기" onClick={onOpenWorkspace}>
+                  <IconWorkspace size={15} />
+                  <span className="sr-only">새 작업환경 열기</span>
+                </button>
+                <button className="tool-btn" title="새 파일" disabled={!draftsFolder} onClick={onNewFile}>
+                  <IconNewFile size={15} />
+                  <span className="sr-only">새 파일</span>
+                </button>
+                <button
+                  className="tool-btn"
+                  title="새 폴더"
+                  disabled={!draftsFolder}
+                  onClick={onNewFolder}
+                >
+                  <IconNewFolder size={15} />
+                  <span className="sr-only">새 폴더</span>
+                </button>
+                {onSync && (
+                  <button
+                    className="tool-btn"
+                    title="rclone 동기화 (로컬 ↔ 맥미니)"
+                    disabled={!draftsFolder}
+                    onClick={onSync}
+                  >
+                    <IconSync size={15} />
+                    <span className="sr-only">동기화</span>
+                  </button>
+                )}
+              </span>
+            </div>
+            <div className="explorer-sort-row">
+              <select
+                className="sort-select explorer-sort-select"
+                value={sortMode}
+                title="정렬"
+                aria-label="탐색기 정렬"
                 disabled={!draftsFolder}
-                onClick={onSync}
+                onChange={(e) => setSortMode(e.target.value as SortMode)}
               >
-                <IconSync size={15} />
-                <span className="sr-only">동기화</span>
+                {SORT_OPTIONS.map((opt) => (
+                  <option key={opt.value} value={opt.value}>
+                    {opt.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+          </>
+        ) : (
+          <>
+            <span className="sidebar-title">{title}</span>
+            {mode === 'viewer' && recordsFolder && (
+              <button className="header-btn" title="소송기록 폴더 변경" onClick={onPickRecords}>
+                변경
               </button>
             )}
-          </span>
-        )}
-        {mode === 'viewer' && recordsFolder && (
-          <button className="header-btn" title="소송기록 폴더 변경" onClick={onPickRecords}>
-            변경
-          </button>
+          </>
         )}
       </div>
       <div className="sidebar-body">

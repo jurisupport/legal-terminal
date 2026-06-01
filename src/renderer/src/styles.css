@@ -168,6 +168,18 @@ body {
   justify-content: space-between;
   gap: 8px;
 }
+.explorer-header {
+  align-items: stretch;
+  flex-direction: column;
+  gap: 7px;
+}
+.sidebar-header-main {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+}
 .sidebar-title {
   min-width: 0;
   overflow: hidden;
@@ -179,6 +191,17 @@ body {
   align-items: center;
   gap: 5px;
   min-width: 0;
+}
+.explorer-actions {
+  flex: 0 0 auto;
+}
+.explorer-sort-row {
+  display: flex;
+  width: 100%;
+}
+.explorer-sort-select {
+  width: 100%;
+  max-width: none;
 }
 .header-btn {
   background: transparent;
