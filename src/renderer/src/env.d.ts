@@ -18,6 +18,7 @@ export interface RemoteEntry {
   name: string
   path: string
   isDir: boolean
+  mtimeMs?: number
 }
 
 export interface PtyCreateOpts {
@@ -104,7 +105,7 @@ export interface LtApi {
     ) => Promise<{ ok: boolean; path?: string; error?: string }>
   }
   fs: {
-    list: (dirPath: string) => Promise<{ name: string; path: string; isDir: boolean }[]>
+    list: (dirPath: string) => Promise<{ name: string; path: string; isDir: boolean; mtimeMs?: number }[]>
     readBytes: (filePath: string) => Promise<ArrayBuffer>
     readHwpText: (filePath: string) => Promise<{ ok: boolean; text: string; error?: string }>
     writeText: (path: string, content: string) => Promise<{ ok: boolean; error?: string }>

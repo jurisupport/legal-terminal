@@ -319,12 +319,17 @@ ipcMain.handle('fs:delete', async (_e, p: string) => {
 ipcMain.handle('fs:list', async (_e, dirPath: string) => {
   if (isRemote(dirPath)) return rfsList(dirPath)
   const entries = await readdir(dirPath, { withFileTypes: true })
-  return entries
-    .filter((e) => !e.name.startsWith('.'))
-    .map((e) => ({ name: e.name, path: join(dirPath, e.name), isDir: e.isDirectory() }))
-    .sort((a, b) =>
-      a.isDir === b.isDir ? a.name.localeCompare(b.name, 'ko') : a.isDir ? -1 : 1
-    )
+  const visible = entries.filter((e) => !e.name.startsWith('.'))
+  const out = await Promise.all(
+    visible.map(async (e) => {
+      const path = join(dirPath, e.name)
+      const st = await stat(path)
+      return { name: e.name, path, isDir: e.isDirectory(), mtimeMs: st.mtimeMs }
+    })
+  )
+  return out.sort((a, b) =>
+    a.isDir === b.isDir ? a.name.localeCompare(b.name, 'ko') : a.isDir ? -1 : 1
+  )
 })
 
 // 폴더(하위 포함)의 모든 PDF 수집 — 전자소송기록 폴더 분류용

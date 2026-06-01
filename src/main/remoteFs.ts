@@ -140,13 +140,14 @@ interface Entry {
   name: string
   path: string
   isDir: boolean
+  mtimeMs?: number
 }
 
 // 디렉터리 목록. 심볼릭 링크는 stat으로 디렉터리 여부 확인.
 export async function rfsList(uri: string): Promise<Entry[]> {
   const { profileId, path } = parseRemote(uri)
   const sftp = await getSftp(profileId)
-  const list = await new Promise<{ filename: string; attrs: { mode: number } }[]>(
+  const list = await new Promise<{ filename: string; attrs: { mode: number; mtime?: number } }[]>(
     (resolve, reject) => sftp.readdir(path, (err, l) => (err ? reject(err) : resolve(l as never)))
   )
   const out: Entry[] = []
@@ -157,7 +158,12 @@ export async function rfsList(uri: string): Promise<Entry[]> {
     if ((e.attrs.mode & S_IFMT) === S_IFLNK) {
       isDir = await statIsDir(sftp, remotePath)
     }
-    out.push({ name: e.filename, path: makeRemote(profileId, remotePath), isDir })
+    out.push({
+      name: e.filename,
+      path: makeRemote(profileId, remotePath),
+      isDir,
+      mtimeMs: e.attrs.mtime ? e.attrs.mtime * 1000 : undefined
+    })
   }
   out.sort((a, b) =>
     a.isDir === b.isDir ? a.name.localeCompare(b.name, 'ko') : a.isDir ? -1 : 1

@@ -233,44 +233,54 @@ export default function Terminal({
       })
 
       // 진행중/완료 감지:
-      // claude는 작업 중 "esc to interrupt" 스피너를 계속 그린다 → 그게 보이면 working,
-      // 출력이 멈추면(스피너 사라짐) done. 완료(working→done) 전이에서만 onStatus('done').
+      // claude는 작업 중 "esc to interrupt" 스피너를 계속 그린다 → 그게 보이면 working.
+      // 원격 SSH에서는 화면 갱신이 뭉쳐 도착할 수 있으므로 충분히 조용해진 뒤에만 done으로 본다.
       let idleTimer: ReturnType<typeof setTimeout> | null = null
       let working = false
       let recent = '' // 최근 출력(ANSI 제거 전) — 질문/확인 프롬프트 감지용
+      let lastBusyAt = 0
+      const idleMs = ssh ? 6000 : 2500
       const BUSY_RE = /to interrupt/i
       // claude 권한/확인 프롬프트 패턴
-      const QUESTION_RE = /(do you want to|❯\s*1\.|\b1\.\s*yes\b|\(y\/n\)|\by\/n\b)/i
+      const QUESTION_RE =
+        /(do you want to|would you like to|continue\?|❯\s*1\.|\b1\.\s*yes\b|\(y\/n\)|\by\/n\b)/i
       const stripAnsi = (s: string): string => s.replace(/\[[0-9;?]*[a-zA-Z]/g, '')
+      const scheduleIdle = (delay = idleMs): void => {
+        if (idleTimer) clearTimeout(idleTimer)
+        idleTimer = setTimeout(goIdle, delay)
+      }
       const goIdle = (): void => {
         if (!working) return
-        working = false
         const isQuestion = QUESTION_RE.test(stripAnsi(recent))
+        if (!isQuestion && Date.now() - lastBusyAt < idleMs) {
+          scheduleIdle(idleMs - (Date.now() - lastBusyAt))
+          return
+        }
+        working = false
         onStatusRef.current?.(isQuestion ? 'question' : 'done')
       }
       const offData = window.lt.pty.onData((p) => {
         if (p.id !== id) return
         term.write(p.data)
-        const busy = BUSY_RE.test(p.data)
+        const busy = BUSY_RE.test(stripAnsi(p.data))
         if (busy && !working) {
           working = true
           recent = ''
           onStatusRef.current?.('working')
         }
         if (busy || working) {
+          if (busy) lastBusyAt = Date.now()
           recent = (recent + p.data).slice(-4000)
-          if (idleTimer) clearTimeout(idleTimer)
-          idleTimer = setTimeout(goIdle, 1200)
+          scheduleIdle(QUESTION_RE.test(stripAnsi(recent)) ? 500 : idleMs)
         }
       })
       const offExit = window.lt.pty.onExit((p) => {
         if (p.id === id) term.write(`\r\n\x1b[90m[프로세스 종료: ${p.exitCode}]\x1b[0m\r\n`)
       })
       const onInput = term.onData((data) => window.lt.pty.write(id, data))
-      // claude가 벨(BEL)을 보내면 즉시 완료 판정(질문 여부 포함)
+      // Claude의 BEL은 완료뿐 아니라 권한/확인 프롬프트에서도 울릴 수 있으므로 즉시 완료로 보지 않는다.
       const onBellDisp = term.onBell(() => {
-        if (working) goIdle()
-        else onStatusRef.current?.('done')
+        if (working) scheduleIdle(QUESTION_RE.test(stripAnsi(recent)) ? 500 : idleMs)
       })
 
       const doResize = (): void => {

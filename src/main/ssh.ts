@@ -24,6 +24,7 @@ export interface RemoteEntry {
   name: string
   path: string
   isDir: boolean
+  mtimeMs?: number
 }
 
 /**
@@ -44,9 +45,17 @@ export function listRemoteDir(
   // 숨김 제외, 한 줄 하나. test -d를 써서 루트의 symlink 디렉터리도 탐색 가능하게 보인다.
   // 경로 미지정/빈값이면 홈(~)을 사용
   const target = remotePath && remotePath.trim() ? remotePath : '~'
-  args.push(
-    `cd ${cdTarget(target)} && pwd && find . ! -name . -prune -exec test -d {} \\; -print | sed 's#^\\./##; s#/$##; s#$#/#'`
-  )
+  const listDirs = `
+for p do
+  [ -d "$p" ] || continue
+  name=\${p#./}
+  [ -n "$name" ] || continue
+  case "$name" in .*) continue ;; esac
+  m=$(stat -f %m "$p" 2>/dev/null || stat -c %Y "$p" 2>/dev/null || echo 0)
+  printf '%s\t%s\n' "$m" "$name"
+done
+`.trim()
+  args.push(`cd ${cdTarget(target)} && pwd && find . ! -name . -prune -exec sh -c ${shq(listDirs)} sh {} +`)
 
   return new Promise((resolve) => {
     execFile(sshBin, args, { timeout: 15000, windowsHide: true }, (err, stdout, stderr) => {
@@ -61,10 +70,16 @@ export function listRemoteDir(
       for (const raw of lines) {
         const line = raw.replace(/\r$/, '')
         if (!line) continue
-        const isDir = line.endsWith('/')
-        const name = isDir ? line.slice(0, -1) : line
+        const tab = line.indexOf('\t')
+        const mtimeSec = tab >= 0 ? Number(line.slice(0, tab)) : 0
+        const name = tab >= 0 ? line.slice(tab + 1) : line
         if (!name || name.startsWith('.')) continue
-        entries.push({ name, path: joinRemote(cwd, name), isDir })
+        entries.push({
+          name,
+          path: joinRemote(cwd, name),
+          isDir: true,
+          mtimeMs: Number.isFinite(mtimeSec) ? mtimeSec * 1000 : undefined
+        })
       }
       entries.sort((a, b) =>
         a.isDir === b.isDir ? a.name.localeCompare(b.name, 'ko') : a.isDir ? -1 : 1

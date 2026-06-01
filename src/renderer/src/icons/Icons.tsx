@@ -61,3 +61,46 @@ export function IconSettings({ size = 22 }: IconProps): JSX.Element {
     </svg>
   )
 }
+
+export function IconNewFile({ size = 16 }: IconProps): JSX.Element {
+  return (
+    <svg {...base(size)}>
+      <path d="M7 3h7l4 4v14H7z" />
+      <path d="M14 3v5h5" />
+      <path d="M12 11v6" />
+      <path d="M9 14h6" />
+    </svg>
+  )
+}
+
+export function IconNewFolder({ size = 16 }: IconProps): JSX.Element {
+  return (
+    <svg {...base(size)}>
+      <path d="M3 7a2 2 0 0 1 2-2h3.5l2 2H19a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
+      <path d="M12 10v6" />
+      <path d="M9 13h6" />
+    </svg>
+  )
+}
+
+export function IconSync({ size = 16 }: IconProps): JSX.Element {
+  return (
+    <svg {...base(size)}>
+      <path d="M20 7h-5a5 5 0 0 0-8.4-2.6L5 6" />
+      <path d="M4 17h5a5 5 0 0 0 8.4 2.6L19 18" />
+      <path d="M17 4l3 3-3 3" />
+      <path d="M7 20l-3-3 3-3" />
+    </svg>
+  )
+}
+
+export function IconWorkspace({ size = 16 }: IconProps): JSX.Element {
+  return (
+    <svg {...base(size)}>
+      <path d="M4 5h6l2 2h8v11a2 2 0 0 1-2 2H4z" />
+      <path d="M4 10h16" />
+      <path d="M16 13v4" />
+      <path d="M14 15h4" />
+    </svg>
+  )
+}

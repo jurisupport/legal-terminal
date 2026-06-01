@@ -1,13 +1,30 @@
 import { useEffect, useRef, useState } from 'react'
 
-interface Entry {
+export interface Entry {
   name: string
   path: string
   isDir: boolean
+  mtimeMs?: number
 }
+
+export type SortMode = 'name-asc' | 'name-desc' | 'mtime-desc' | 'mtime-asc'
 
 // 트리 내부 드래그 식별용 MIME (외부 OS 파일 드롭과 구분)
 export const LT_PATH = 'application/x-lt-path'
+
+const koCollator = new Intl.Collator('ko', { numeric: true, sensitivity: 'base' })
+
+export function sortEntries<T extends Entry>(entries: T[], mode: SortMode): T[] {
+  return [...entries].sort((a, b) => {
+    if (a.isDir !== b.isDir) return a.isDir ? -1 : 1
+    if (mode === 'name-asc') return koCollator.compare(a.name, b.name)
+    if (mode === 'name-desc') return koCollator.compare(b.name, a.name)
+    const am = a.mtimeMs ?? 0
+    const bm = b.mtimeMs ?? 0
+    const byTime = mode === 'mtime-desc' ? bm - am : am - bm
+    return byTime || koCollator.compare(a.name, b.name)
+  })
+}
 
 function fileIcon(name: string): string {
   const n = name.toLowerCase()
@@ -27,6 +44,7 @@ export default function FileTree({
   onMove,
   onDelete,
   pendingCreate = null,
+  sortMode = 'name-asc',
   onCreate,
   onCancelCreate
 }: {
@@ -37,6 +55,7 @@ export default function FileTree({
   onMove?: (src: string, destDir: string) => void
   onDelete?: (path: string, name: string, isDir: boolean) => void
   pendingCreate?: 'file' | 'folder' | null
+  sortMode?: SortMode
   onCreate?: (name: string, type: 'file' | 'folder') => void
   onCancelCreate?: () => void
 }): JSX.Element {
@@ -125,12 +144,13 @@ export default function FileTree({
       )}
       {!err &&
         entries &&
-        entries.map((e) => (
+        sortEntries(entries, sortMode).map((e) => (
           <TreeNode
             key={e.path}
             entry={e}
             depth={0}
             refreshNonce={refreshNonce}
+            sortMode={sortMode}
             onOpenFile={onOpenFile}
             onDropTo={onDropTo}
             onMove={onMove}
@@ -167,6 +187,7 @@ function TreeNode({
   entry,
   depth,
   refreshNonce,
+  sortMode,
   onOpenFile,
   onDropTo,
   onMove,
@@ -175,6 +196,7 @@ function TreeNode({
   entry: Entry
   depth: number
   refreshNonce: number
+  sortMode: SortMode
   onOpenFile: (path: string, name: string) => void
   onDropTo?: (dir: string, files: FileList) => void
   onMove?: (src: string, destDir: string) => void
@@ -292,12 +314,13 @@ function TreeNode({
       </div>
       {entry.isDir && open && children && (
         <ul className="tree">
-          {children.map((c) => (
+          {sortEntries(children, sortMode).map((c) => (
             <TreeNode
               key={c.path}
               entry={c}
               depth={depth + 1}
               refreshNonce={refreshNonce}
+              sortMode={sortMode}
               onOpenFile={onOpenFile}
               onDropTo={onDropTo}
               onMove={onMove}

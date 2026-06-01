@@ -168,9 +168,17 @@ body {
   justify-content: space-between;
   gap: 8px;
 }
+.sidebar-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .header-actions {
   display: flex;
-  gap: 4px;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
 }
 .header-btn {
   background: transparent;
@@ -184,6 +192,61 @@ body {
 .header-btn:hover {
   color: var(--fg);
   border-color: var(--fg-muted);
+}
+.header-btn:disabled,
+.tool-btn:disabled,
+.sort-select:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+.tool-btn {
+  width: 26px;
+  height: 26px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--fg-muted);
+  cursor: pointer;
+  padding: 0;
+}
+.tool-btn:hover:not(:disabled) {
+  color: var(--fg);
+  border-color: var(--fg-muted);
+  background: rgba(255, 255, 255, 0.04);
+}
+.sort-select {
+  height: 26px;
+  max-width: 78px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg);
+  color: var(--fg-muted);
+  font-size: 11px;
+  padding: 0 4px;
+  outline: none;
+}
+.sort-select:focus {
+  border-color: var(--accent);
+  color: var(--fg);
+}
+.remote-sort {
+  max-width: 92px;
+  flex: 0 0 auto;
+}
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
 }
 .sidebar-body {
   flex: 1;
@@ -1170,6 +1233,9 @@ body {
   font-size: 14px;
   padding: 0 12px;
   flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
 }
 .tab-add:hover {
   color: var(--fg);

@@ -20,6 +20,7 @@ interface RemoteEntry {
   name: string
   path: string
   isDir: boolean
+  mtimeMs?: number
 }
 
 interface PtyCreateOpts {
@@ -76,7 +77,7 @@ const api = {
   fs: {
     list: (
       dirPath: string
-    ): Promise<{ name: string; path: string; isDir: boolean }[]> =>
+    ): Promise<{ name: string; path: string; isDir: boolean; mtimeMs?: number }[]> =>
       ipcRenderer.invoke('fs:list', dirPath),
     readBytes: (filePath: string): Promise<ArrayBuffer> =>
       ipcRenderer.invoke('fs:readBytes', filePath),

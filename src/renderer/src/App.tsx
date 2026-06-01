@@ -1,10 +1,19 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState, type ReactNode } from 'react'
 import Terminal from './terminal/Terminal'
-import FileTree, { LT_PATH } from './filetree/FileTree'
+import FileTree, { LT_PATH, sortEntries, type SortMode } from './filetree/FileTree'
 import PdfViewer from './viewer/PdfViewer'
 import RecordViewer from './viewer/RecordViewer'
 import { parseRecordFiles, type ParsedRecord, type OutlineItem } from './viewer/recordOutline'
-import { IconExplorer, IconCases, IconViewer, IconSettings } from './icons/Icons'
+import {
+  IconExplorer,
+  IconCases,
+  IconViewer,
+  IconSettings,
+  IconNewFile,
+  IconNewFolder,
+  IconSync,
+  IconWorkspace
+} from './icons/Icons'
 import MarkdownEditor from './editor/MarkdownEditor'
 import CasesDashboard from './dashboard/CasesDashboard'
 import UpcomingHearings from './dashboard/UpcomingHearings'
@@ -21,6 +30,13 @@ const ACTIVITY: ActivityItem[] = [
   { id: 'explorer', label: '탐색기', Icon: IconExplorer },
   { id: 'cases', label: '사건', Icon: IconCases },
   { id: 'viewer', label: '기록뷰어', Icon: IconViewer }
+]
+
+const SORT_OPTIONS: { value: SortMode; label: string; title: string }[] = [
+  { value: 'name-asc', label: '가나다↑', title: '가나다순' },
+  { value: 'name-desc', label: '가나다↓', title: '가나다 역순' },
+  { value: 'mtime-desc', label: '수정↓', title: '최근 수정순' },
+  { value: 'mtime-asc', label: '수정↑', title: '오래된 수정순' }
 ]
 
 const normalizePasteForPty = (text: string): string =>
@@ -1170,6 +1186,7 @@ export default function App(): JSX.Element {
         onNewFolder={newFolder}
         onNewFile={newFile}
         onSync={sshProfiles.length > 0 ? openSync : undefined}
+        onOpenWorkspace={() => void openConnOrLocal()}
         onOpenCase={openCaseWorkspace}
         jsNonce={jsNonce}
         pendingCreate={pendingCreate}
@@ -1244,7 +1261,11 @@ export default function App(): JSX.Element {
               setSessionListOpen((v) => !v)
             }
           }}
-          extra={{ label: '📁', title: '사건 폴더 열기', onClick: () => void openConnOrLocal() }}
+          extra={{
+            icon: <IconWorkspace size={15} />,
+            title: '새 작업환경 열기',
+            onClick: () => void openConnOrLocal()
+          }}
         />
         {sessionListOpen && (
           <SessionList
@@ -1581,6 +1602,7 @@ function DocsPanel({
   onNewFolder,
   onNewFile,
   onSync,
+  onOpenWorkspace,
   onOpenCase,
   jsNonce,
   pendingCreate,
@@ -1604,6 +1626,7 @@ function DocsPanel({
   onNewFolder: () => void
   onNewFile: () => void
   onSync?: () => void
+  onOpenWorkspace: () => void
   onOpenCase: (c: JsCase) => void
   jsNonce: number
   pendingCreate: 'file' | 'folder' | null
@@ -1612,6 +1635,7 @@ function DocsPanel({
 }): JSX.Element {
   const title = { explorer: '탐색기', cases: '다가오는 기일', viewer: '문서' }[mode]
   const [dragOver, setDragOver] = useState(false)
+  const [sortMode, setSortMode] = useState<SortMode>('name-asc')
   const canDrop = mode === 'explorer' && !!draftsFolder
   return (
     <div
@@ -1631,18 +1655,49 @@ function DocsPanel({
       }}
     >
       <div className="sidebar-header">
-        <span>{title}</span>
-        {mode === 'explorer' && draftsFolder && (
+        <span className="sidebar-title">{title}</span>
+        {mode === 'explorer' && (
           <span className="header-actions">
-            <button className="header-btn" title="새 파일" onClick={onNewFile}>
-              ＋파일
+            <select
+              className="sort-select"
+              value={sortMode}
+              title="정렬"
+              aria-label="탐색기 정렬"
+              disabled={!draftsFolder}
+              onChange={(e) => setSortMode(e.target.value as SortMode)}
+            >
+              {SORT_OPTIONS.map((opt) => (
+                <option key={opt.value} value={opt.value}>
+                  {opt.label}
+                </option>
+              ))}
+            </select>
+            <button className="tool-btn" title="새 작업환경 열기" onClick={onOpenWorkspace}>
+              <IconWorkspace size={15} />
+              <span className="sr-only">새 작업환경 열기</span>
             </button>
-            <button className="header-btn" title="새 폴더" onClick={onNewFolder}>
-              ＋폴더
+            <button className="tool-btn" title="새 파일" disabled={!draftsFolder} onClick={onNewFile}>
+              <IconNewFile size={15} />
+              <span className="sr-only">새 파일</span>
+            </button>
+            <button
+              className="tool-btn"
+              title="새 폴더"
+              disabled={!draftsFolder}
+              onClick={onNewFolder}
+            >
+              <IconNewFolder size={15} />
+              <span className="sr-only">새 폴더</span>
             </button>
             {onSync && (
-              <button className="header-btn" title="rclone 동기화 (로컬 ↔ 맥미니)" onClick={onSync}>
-                ⇅동기화
+              <button
+                className="tool-btn"
+                title="rclone 동기화 (로컬 ↔ 맥미니)"
+                disabled={!draftsFolder}
+                onClick={onSync}
+              >
+                <IconSync size={15} />
+                <span className="sr-only">동기화</span>
               </button>
             )}
           </span>
@@ -1664,6 +1719,7 @@ function DocsPanel({
               onMove={onMove}
               onDelete={onDelete}
               pendingCreate={pendingCreate}
+              sortMode={sortMode}
               onCreate={onCreateEntry}
               onCancelCreate={onCancelCreate}
             />
@@ -1824,8 +1880,8 @@ interface TabBarProps {
   onClose: (id: string) => void
   onAdd: () => void
   addTitle: string
-  extra?: { label: string; title: string; onClick: () => void }
-  extraLeft?: { label: string; title: string; active?: boolean; onClick: () => void }
+  extra?: { label?: string; icon?: ReactNode; title: string; onClick: () => void }
+  extraLeft?: { label?: string; icon?: ReactNode; title: string; active?: boolean; onClick: () => void }
   // 탭 재정렬(같은 창) + 창 간 이동/찢기. 둘 다 주어질 때만 탭이 draggable.
   onReorder?: (fromId: string, toId: string) => void
   onTearOut?: (id: string) => void
@@ -1875,7 +1931,7 @@ function TabBar({
             extraLeft.onClick()
           }}
         >
-          {extraLeft.label}
+          {extraLeft.icon ?? extraLeft.label}
         </button>
       )}
       {overflow && (
@@ -2003,7 +2059,7 @@ function TabBar({
       )}
       {extra && (
         <button className="tab-add" title={extra.title} onClick={extra.onClick}>
-          {extra.label}
+          {extra.icon ?? extra.label}
         </button>
       )}
       <button className="tab-add" title={addTitle} onClick={onAdd}>
@@ -2977,6 +3033,7 @@ function RemoteFolderPicker({
   const [loading, setLoading] = useState(false)
   const [pathInput, setPathInput] = useState(initial)
   const [syncOpen, setSyncOpen] = useState<{ macFolder: string; reloadPath: string } | null>(null)
+  const [sortMode, setSortMode] = useState<SortMode>('name-asc')
 
   const load = (path: string): void => {
     const nextPath = path.trim() || '~'
@@ -3011,7 +3068,7 @@ function RemoteFolderPicker({
   const up = (): void => {
     load(parentRemotePath(cwd))
   }
-  const dirs = entries?.filter((e) => e.isDir) ?? []
+  const dirs = sortEntries(entries?.filter((e) => e.isDir) ?? [], sortMode)
   const crumbs = remoteCrumbs(cwd)
   const canUsePathInput = pathInput.trim().length > 0
   const syncPath = (pathInput.trim() || cwd).trim()
@@ -3052,6 +3109,19 @@ function RemoteFolderPicker({
             <button className="header-btn" onClick={() => load(cwd)} title="새로고침">
               ⟳
             </button>
+            <select
+              className="sort-select remote-sort"
+              value={sortMode}
+              title="정렬"
+              aria-label="원격 폴더 정렬"
+              onChange={(e) => setSortMode(e.target.value as SortMode)}
+            >
+              {SORT_OPTIONS.map((opt) => (
+                <option key={opt.value} value={opt.value}>
+                  {opt.label}
+                </option>
+              ))}
+            </select>
             <button
               className="header-btn"
               type="button"
