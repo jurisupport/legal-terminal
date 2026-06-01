@@ -236,6 +236,7 @@ export default function App(): JSX.Element {
 
   // 탐색기 인라인 생성 (VS Code식: 트리에 입력칸이 떠서 이름 입력)
   const [pendingCreate, setPendingCreate] = useState<'file' | 'folder' | null>(null)
+  const closeActiveTermRef = useRef<() => void>(() => {})
 
   useEffect(() => {
     window.lt?.app
@@ -303,6 +304,12 @@ export default function App(): JSX.Element {
       const k = e.key.toLowerCase()
       const inTerm = (document.activeElement as HTMLElement | null)?.closest?.('.term-col')
       if (k === 'w' && !e.shiftKey) {
+        if (platform === 'darwin' && activeTerm) {
+          e.preventDefault()
+          e.stopPropagation()
+          closeActiveTermRef.current()
+          return
+        }
         if (inTerm) return // 터미널 포커스 시 claude로 (단어 삭제)
         e.preventDefault()
         if (activeDoc) closeDoc(activeDoc)
@@ -1036,6 +1043,9 @@ export default function App(): JSX.Element {
       if (!window.confirm('claude가 아직 작업 중입니다. 이 터미널을 닫을까요?')) return
     }
     closeTerm(id)
+  }
+  closeActiveTermRef.current = (): void => {
+    if (activeTerm) closeTermWithConfirm(activeTerm)
   }
 
   const caseRef = (c: JsCase): string => `${c.caseNumber ?? ''} ${c.caseName ?? ''}`.trim() || c.id
