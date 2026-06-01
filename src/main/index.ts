@@ -500,6 +500,19 @@ ipcMain.handle('fs:writeText', async (_e, p: { path: string; content: string }) 
   }
 })
 
+ipcMain.handle('fs:stat', async (_e, filePath: string) => {
+  try {
+    if (isRemote(filePath)) {
+      const st = await rfsStat(filePath)
+      return { ok: true, ...st }
+    }
+    const st = await stat(filePath)
+    return { ok: true, size: st.size, isDir: st.isDirectory(), mtimeMs: st.mtimeMs }
+  } catch (e) {
+    return { ok: false, error: String(e) }
+  }
+})
+
 ipcMain.handle('fs:readText', async (_e, filePath: string) => {
   const ext = extname(filePath).toLowerCase()
   if (isRemote(filePath)) {

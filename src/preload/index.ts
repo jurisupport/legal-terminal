@@ -117,7 +117,13 @@ const api = {
       text: string
       size: number
       truncated?: boolean
-    }> => ipcRenderer.invoke('fs:readText', filePath)
+    }> => ipcRenderer.invoke('fs:readText', filePath),
+    stat: (
+      filePath: string
+    ): Promise<
+      | { ok: true; size: number; isDir: boolean; mtimeMs?: number }
+      | { ok: false; error: string }
+    > => ipcRenderer.invoke('fs:stat', filePath)
   },
   case: {
     getPairing: (drafts: string): Promise<string | undefined> =>

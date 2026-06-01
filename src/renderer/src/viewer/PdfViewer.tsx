@@ -8,6 +8,7 @@ pdfjs.GlobalWorkerOptions.workerSrc = workerUrl
 
 type ZoomMode = 'fit_page' | 'fit_width' | 'custom'
 const CROP_OPTIONS = [0.05, 0.1, 0.15, 0.2, 0.25]
+const isRemotePath = (p: string): boolean => p.startsWith('ssh://')
 
 function resolveDefault(pdfZoom?: string): { mode: ZoomMode; scale: number } {
   if (pdfZoom === 'fit_width') return { mode: 'fit_width', scale: 1 }
@@ -62,6 +63,7 @@ export default function PdfViewer({
   const [rotation, setRotation] = useState(0)
   const [effPct, setEffPct] = useState(100)
   const [wrapTick, setWrapTick] = useState(0)
+  const [reloadNonce, setReloadNonce] = useState(0)
   const [err, setErr] = useState('')
   const [loading, setLoading] = useState(true)
 
@@ -92,6 +94,29 @@ export default function PdfViewer({
       setCustomScale(d.scale)
     })
   }, [])
+
+  useEffect(() => {
+    if (!isRemotePath(path)) return
+    let alive = true
+    let lastSig = ''
+    const tick = (): void => {
+      window.lt.fs
+        .stat(path)
+        .then((s) => {
+          if (!alive || !s.ok) return
+          const sig = `${s.size}:${s.mtimeMs ?? 0}`
+          if (lastSig && sig !== lastSig) setReloadNonce((n) => n + 1)
+          lastSig = sig
+        })
+        .catch(() => {})
+    }
+    tick()
+    const timer = setInterval(tick, 2500)
+    return () => {
+      alive = false
+      clearInterval(timer)
+    }
+  }, [path])
 
   // 문서 로드
   useEffect(() => {
@@ -134,7 +159,7 @@ export default function PdfViewer({
       docRef.current?.destroy()
       docRef.current = null
     }
-  }, [path]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [path, reloadNonce]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // 현재 페이지 렌더 (배율/회전/여백자르기 반영)
   useEffect(() => {

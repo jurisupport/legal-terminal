@@ -77,6 +77,37 @@ interface TermTab {
 // 원격 파일 패널이 쓰는 ssh:// URI 빌더 (main의 remoteFs와 동일 스킴)
 const remoteUri = (profileId: string, p: string): string =>
   'ssh://' + profileId + (p.startsWith('/') ? p : '/' + p)
+
+const isRemotePath = (p?: string): p is string => !!p && p.startsWith('ssh://')
+
+function useRemoteFileVersion(path?: string, intervalMs = 2500): number {
+  const [version, setVersion] = useState(0)
+  const sigRef = useRef('')
+
+  useEffect(() => {
+    if (!isRemotePath(path)) return
+    let alive = true
+    const tick = (): void => {
+      window.lt.fs
+        .stat(path)
+        .then((s) => {
+          if (!alive || !s.ok) return
+          const sig = `${s.size}:${s.mtimeMs ?? 0}`
+          if (sigRef.current && sig !== sigRef.current) setVersion((v) => v + 1)
+          sigRef.current = sig
+        })
+        .catch(() => {})
+    }
+    tick()
+    const timer = setInterval(tick, intervalMs)
+    return () => {
+      alive = false
+      clearInterval(timer)
+    }
+  }, [path, intervalMs])
+
+  return version
+}
 interface CaseMeta {
   jsId?: string
   court?: string
@@ -721,6 +752,12 @@ export default function App(): JSX.Element {
   const activeSuggestedRecords = activeTermTab?.suggestedRecords
   const isViewer = mode === 'viewer'
 
+  useEffect(() => {
+    if (!isRemotePath(activeDraftsFolder) && !isRemotePath(activeRecordsFolder)) return
+    const timer = setInterval(() => setTreeRefresh((x) => x + 1), 5000)
+    return () => clearInterval(timer)
+  }, [activeDraftsFolder, activeRecordsFolder])
+
   // 외부 파일을 특정 폴더로 복사 (드래그앤드롭)
   const copyFilesTo = (dir: string, files: FileList): void => {
     const paths = Array.from(files)
@@ -813,7 +850,7 @@ export default function App(): JSX.Element {
     return () => {
       alive = false
     }
-  }, [isViewer, activeRecordsFolder])
+  }, [isViewer, activeRecordsFolder, treeRefresh])
 
   // 문서(파일) 순서: 본안 → 서증 → 첨부
   const recordOrder: OutlineItem[] = panelRecord
@@ -2285,6 +2322,7 @@ function TextDoc({ text, note }: { text: string; note?: string }): JSX.Element {
 
 /** 텍스트 파일 미리보기 (md/txt/csv/json…). MD 옵시디언식 라이브 프리뷰는 추후 CodeMirror로. */
 function FileView({ path }: { path: string }): JSX.Element {
+  const remoteVersion = useRemoteFileVersion(path)
   const [state, setState] = useState<{
     loading: boolean
     text: string
@@ -2312,7 +2350,7 @@ function FileView({ path }: { path: string }): JSX.Element {
     return () => {
       alive = false
     }
-  }, [path])
+  }, [path, remoteVersion])
 
   if (state.loading) return <div className="welcome"><p className="muted">불러오는 중…</p></div>
   if (state.err) return <div className="welcome"><p className="muted">열기 실패: {state.err}</p></div>
@@ -2327,6 +2365,7 @@ function FileView({ path }: { path: string }): JSX.Element {
 
 /** HWP(.hwp) — 텍스트만 추출해 표시 */
 function HwpView({ path }: { path: string }): JSX.Element {
+  const remoteVersion = useRemoteFileVersion(path)
   const [state, setState] = useState<{ loading: boolean; text: string; err: string }>({
     loading: true,
     text: '',
@@ -2345,7 +2384,7 @@ function HwpView({ path }: { path: string }): JSX.Element {
     return () => {
       alive = false
     }
-  }, [path])
+  }, [path, remoteVersion])
   if (state.loading) return <div className="welcome"><p className="muted">HWP 텍스트 추출 중…</p></div>
   if (state.err) return <div className="welcome"><p className="muted">{state.err}</p></div>
   return <TextDoc text={state.text} />
@@ -2396,6 +2435,7 @@ function detectDelim(firstLine: string): string {
 
 /** CSV — 표(기본) / 색상 텍스트(열별 색상) */
 function CsvView({ path }: { path: string }): JSX.Element {
+  const remoteVersion = useRemoteFileVersion(path)
   const [state, setState] = useState<{ loading: boolean; rows: string[][]; err: string }>({
     loading: true,
     rows: [],
@@ -2418,7 +2458,7 @@ function CsvView({ path }: { path: string }): JSX.Element {
     return () => {
       alive = false
     }
-  }, [path])
+  }, [path, remoteVersion])
 
   if (state.loading) return <div className="welcome"><p className="muted">불러오는 중…</p></div>
   if (state.err) return <div className="welcome"><p className="muted">열기 실패: {state.err}</p></div>
@@ -2486,6 +2526,7 @@ function ImageViewer({
   path: string
   onNavigate?: (dir: 1 | -1) => void
 }): JSX.Element {
+  const remoteVersion = useRemoteFileVersion(path)
   const [url, setUrl] = useState('')
   const [err, setErr] = useState('')
   const [mode, setMode] = useState<'fit_page' | 'fit_width' | 'custom'>('fit_page')
@@ -2509,7 +2550,7 @@ function ImageViewer({
       alive = false
       if (made) URL.revokeObjectURL(made)
     }
-  }, [path])
+  }, [path, remoteVersion])
 
   const zoomBy = (f: number): void => {
     setMode('custom')

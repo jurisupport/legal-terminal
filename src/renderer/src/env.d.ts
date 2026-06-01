@@ -131,6 +131,12 @@ export interface LtApi {
       size: number
       truncated?: boolean
     }>
+    stat: (
+      filePath: string
+    ) => Promise<
+      | { ok: true; size: number; isDir: boolean; mtimeMs?: number }
+      | { ok: false; error: string }
+    >
   }
   case: {
     getPairing: (drafts: string) => Promise<string | undefined>

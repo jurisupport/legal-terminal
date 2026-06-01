@@ -208,12 +208,20 @@ export async function rfsWriteBytes(
   return makeRemote(profileId, full)
 }
 
-export async function rfsStat(uri: string): Promise<{ size: number; isDir: boolean }> {
+export async function rfsStat(
+  uri: string
+): Promise<{ size: number; isDir: boolean; mtimeMs?: number }> {
   const { profileId, path } = parseRemote(uri)
   const sftp = await getSftp(profileId)
   return await new Promise((resolve, reject) =>
     sftp.stat(path, (err, st) =>
-      err ? reject(err) : resolve({ size: st.size, isDir: st.isDirectory() })
+      err
+        ? reject(err)
+        : resolve({
+            size: st.size,
+            isDir: st.isDirectory(),
+            mtimeMs: st.mtime ? st.mtime * 1000 : undefined
+          })
     )
   )
 }

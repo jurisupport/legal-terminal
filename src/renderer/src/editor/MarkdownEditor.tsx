@@ -48,9 +48,18 @@ export default function MarkdownEditor({
   const previewComp = useRef(new Compartment())
   const pathRef = useRef<string | undefined>(path)
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const savedRef = useRef(!!path)
+  const localDirtyRef = useRef(false)
+  const applyingRemoteRef = useRef(false)
+  const remoteSigRef = useRef('')
   const [preview, setPreview] = useState(true)
   const [err, setErr] = useState('')
   const [saved, setSaved] = useState(!!path)
+
+  const setSavedState = (value: boolean): void => {
+    savedRef.current = value
+    setSaved(value)
+  }
 
   const saveNow = (): void => {
     const v = viewRef.current
@@ -61,13 +70,21 @@ export default function MarkdownEditor({
     }
     const content = v.state.doc.toString()
     if (pathRef.current) {
-      window.lt.fs.writeText(pathRef.current, content).then((r) => r.ok && setSaved(true))
+      window.lt.fs.writeText(pathRef.current, content).then((r) => {
+        if (!r.ok || !pathRef.current) return
+        localDirtyRef.current = false
+        setSavedState(true)
+        window.lt.fs.stat(pathRef.current).then((s) => {
+          if (s.ok) remoteSigRef.current = `${s.size}:${s.mtimeMs ?? 0}`
+        })
+      })
     } else {
       window.lt.fs.saveAs(content, defaultDir).then((r) => {
         if (r.ok && r.path) {
           pathRef.current = r.path
           onPath?.(r.path)
-          setSaved(true)
+          localDirtyRef.current = false
+          setSavedState(true)
           onDirtyRef.current?.(false) // 이제 경로가 있으니 닫아도 안전
         }
       })
@@ -107,7 +124,13 @@ export default function MarkdownEditor({
             previewComp.current.of(preview ? livePreview : []),
             EditorView.updateListener.of((u) => {
               if (u.docChanged) {
-                setSaved(false)
+                if (applyingRemoteRef.current) {
+                  localDirtyRef.current = false
+                  setSavedState(true)
+                  return
+                }
+                localDirtyRef.current = true
+                setSavedState(false)
                 scheduleSave()
                 // 경로 없는(스크래치) 문서에 내용이 있으면 닫을 때 사라짐 → dirty
                 onDirtyRef.current?.(!pathRef.current && u.state.doc.length > 0)
@@ -115,6 +138,8 @@ export default function MarkdownEditor({
             })
           ]
         })
+        localDirtyRef.current = false
+        setSavedState(!!pathRef.current)
         viewRef.current = new EditorView({ state, parent: hostRef.current })
         viewRef.current.focus()
       })
@@ -124,6 +149,60 @@ export default function MarkdownEditor({
       if (pathRef.current) saveNow()
       viewRef.current?.destroy()
       viewRef.current = null
+    }
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    if (!pathRef.current?.startsWith('ssh://')) return
+    let alive = true
+    const tick = (): void => {
+      const currentPath = pathRef.current
+      if (!currentPath) return
+      window.lt.fs
+        .stat(currentPath)
+        .then((s) => {
+          if (!alive || !s.ok) return
+          const sig = `${s.size}:${s.mtimeMs ?? 0}`
+          if (!remoteSigRef.current) {
+            remoteSigRef.current = sig
+            return
+          }
+          if (sig === remoteSigRef.current) return
+          window.lt.fs
+            .readText(currentPath)
+            .then((r) => {
+              if (!alive || r.kind !== 'text' || r.truncated) return
+              const v = viewRef.current
+              remoteSigRef.current = sig
+              if (!v) return
+              const next = r.text
+              const current = v.state.doc.toString()
+              if (next === current) {
+                localDirtyRef.current = false
+                setSavedState(true)
+                return
+              }
+              if (localDirtyRef.current || !savedRef.current) return
+              applyingRemoteRef.current = true
+              try {
+                v.dispatch({
+                  changes: { from: 0, to: v.state.doc.length, insert: next }
+                })
+              } finally {
+                applyingRemoteRef.current = false
+              }
+              localDirtyRef.current = false
+              setSavedState(true)
+            })
+            .catch(() => {})
+        })
+        .catch(() => {})
+    }
+    tick()
+    const timer = setInterval(tick, 2500)
+    return () => {
+      alive = false
+      clearInterval(timer)
     }
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
