@@ -21,10 +21,11 @@
 
 > 따로 떠 있던 터미널의 `claude`, 별도 에디터, 전자소송기록 뷰어를 **한 화면에 통합**했습니다. 기존 `jurisupport-plugins` 생태계(songmu-legal 플러그인, korean-law MCP, 법령·판례·사건기록 검색 도구, PII 보호 훅)는 **교체가 아니라 그대로 살려** 동작합니다.
 
-## 이번 업데이트 (v0.1.8) — 원격 동기화·터미널 안정화
+## 이번 업데이트 (v0.1.9) — Windows 설치 복구·원격 안정화
 
 사무실 서버에 둔 사건을, 노트북에서 로컬과 똑같이 다룰 수 있습니다.
 
+- **Windows 설치 복구** — 기존 버전 제거기가 깨졌거나 실행되지 않아도 새 설치본이 복구 설치처럼 계속 진행되도록 보강했습니다.
 - **rclone 한글 경로 안정화** — macOS OneDrive의 조합형 한글 경로를 rclone 클라우드 경로에 맞게 정규화해 `directory not found` 오류를 줄였습니다.
 - **원격 터미널 즉시 열기** — 소송기록 폴더 자동 매칭이 늦거나 실패해도 SSH 터미널은 먼저 열리도록 순서를 바꿨습니다.
 - **탐색기 동기화 버튼 표시 개선** — 정렬 옵션을 다음 줄로 내려 좁은 탐색기 상단에서도 동기화 버튼이 가려지지 않습니다.
@@ -47,6 +48,7 @@
 👉 **[legal-terminal 설치 (Setup) 내려받기](https://github.com/jurisupport/legal-terminal/releases/latest/download/legal-terminal-Setup.exe)** — 대부분 이 파일 하나면 됩니다. 받은 뒤 더블클릭해서 설치하세요.
 
 - 설치하기 싫고 바로 실행만: **[포터블 버전](https://github.com/jurisupport/legal-terminal/releases/latest/download/legal-terminal-portable.exe)** (다운로드 후 더블클릭, 설치 불필요)
+- 기존 버전 때문에 설치/제거가 막히면: 최신 설치본을 다시 실행하세요. v0.1.9부터 기존 제거기가 실패해도 복구 설치로 진행됩니다.
 
 ### 2) 설치할 때 "Windows의 PC 보호" 경고 푸는 법
 
