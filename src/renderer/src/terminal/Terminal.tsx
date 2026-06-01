@@ -26,6 +26,7 @@ export default function Terminal({
   autoClaude = false,
   resumeSessionId,
   ssh,
+  focusNonce = 0,
   onDropPaths,
   onNewTerminal,
   onRequestClose,
@@ -38,6 +39,7 @@ export default function Terminal({
   autoClaude?: boolean
   resumeSessionId?: string
   ssh?: SshConn
+  focusNonce?: number
   onDropPaths?: (paths: string[]) => void
   onNewTerminal?: () => void
   onRequestClose?: () => void
@@ -335,6 +337,14 @@ export default function Terminal({
     })
     return () => cancelAnimationFrame(raf)
   }, [visible, id])
+
+  useEffect(() => {
+    if (!visible || focusNonce === 0) return
+    const raf = requestAnimationFrame(() => {
+      termRef.current?.focus()
+    })
+    return () => cancelAnimationFrame(raf)
+  }, [focusNonce, visible])
 
   return <div className="xterm-host" ref={hostRef} />
 }

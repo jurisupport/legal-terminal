@@ -183,6 +183,7 @@ export default function App(): JSX.Element {
 
   const [termTabs, setTermTabs] = useState<TermTab[]>([])
   const [activeTerm, setActiveTerm] = useState<string>('')
+  const [termFocusNonce, setTermFocusNonce] = useState<Record<string, number>>({})
   const [draftsRoot, setDraftsRoot] = useState<string | undefined>()
   const [recordsRoot, setRecordsRoot] = useState<string | undefined>()
   // SSH 접속 프로필 + 접속 선택/원격 폴더 선택 모달 상태
@@ -869,6 +870,8 @@ export default function App(): JSX.Element {
 
   // 임의 터미널에 bracketed paste로 텍스트 주입 (줄바꿈이 바로 제출되지 않게).
   const pasteToTerm = (termId: string, payload: string): void => {
+    setActiveTerm(termId)
+    setTermFocusNonce((n) => ({ ...n, [termId]: (n[termId] ?? 0) + 1 }))
     window.lt.pty.write(termId, `\x1b[200~${normalizePasteForPty(payload)}\x1b[201~`)
   }
 
@@ -1360,6 +1363,7 @@ export default function App(): JSX.Element {
                 resumeSessionId={t.resumeSessionId}
                 ssh={t.ssh}
                 visible={t.id === activeTerm}
+                focusNonce={termFocusNonce[t.id] ?? 0}
                 onDropPaths={(paths) => dropFilesToTerm(t.id, paths)}
                 onNewTerminal={addTermSame}
                 onRequestClose={() => closeTermWithConfirm(t.id)}
