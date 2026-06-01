@@ -2921,12 +2921,13 @@ function remoteCrumbs(path: string): { label: string; path: string }[] {
 }
 
 const REMOTE_START_POINTS = [
-  { label: '홈', path: '~' },
   { label: '루트 /', path: '/' },
+  { label: '홈', path: '~' },
   { label: '/Users', path: '/Users' },
   { label: '/home', path: '/home' },
   { label: '/Volumes', path: '/Volumes' },
   { label: 'CloudStorage', path: '~/Library/CloudStorage' },
+  { label: 'OneDrive', path: '~/Library/CloudStorage/OneDrive' },
   { label: 'Documents', path: '~/Documents' }
 ]
 
@@ -2947,7 +2948,7 @@ function RemoteFolderPicker({
   onPick: (remotePath: string) => void
   onCancel: () => void
 }): JSX.Element {
-  const initial = (startPath ?? profile.draftsRoot)?.trim() || '~'
+  const initial = (startPath ?? profile.draftsRoot)?.trim() || '/'
   const [cwd, setCwd] = useState<string>(initial)
   const [entries, setEntries] = useState<RemoteEntry[] | null>(null)
   const [err, setErr] = useState<string>('')
@@ -2998,7 +2999,7 @@ function RemoteFolderPicker({
           🔗 {profile.label} — {title}
         </div>
         <p className="muted small remote-hint">
-          루트를 모르면 홈이나 루트에서 시작해 폴더를 하나씩 열어보세요.
+          루트를 모르면 루트(/)에서 시작해 작성서류나 사건기록 폴더까지 하나씩 열어보세요.
         </p>
         <div className="remote-path">
           <button className="header-btn" onClick={up} title="상위 폴더">

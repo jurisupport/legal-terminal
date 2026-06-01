@@ -41,10 +41,12 @@ export function listRemoteDir(
   args.push('-o', 'BatchMode=yes', '-o', 'ConnectTimeout=12')
   args.push('-o', 'StrictHostKeyChecking=accept-new')
   args.push(`${profile.user}@${profile.host}`)
-  // 디렉터리만 슬래시(-p), 숨김 제외 위해 -A 대신 일반 ls, 한 줄 하나(-1)
+  // 숨김 제외, 한 줄 하나. test -d를 써서 루트의 symlink 디렉터리도 탐색 가능하게 보인다.
   // 경로 미지정/빈값이면 홈(~)을 사용
   const target = remotePath && remotePath.trim() ? remotePath : '~'
-  args.push(`cd ${cdTarget(target)} && pwd && ls -1p`)
+  args.push(
+    `cd ${cdTarget(target)} && pwd && find . ! -name . -prune -exec test -d {} \\; -print | sed 's#^\\./##; s#/$##; s#$#/#'`
+  )
 
   return new Promise((resolve) => {
     execFile(sshBin, args, { timeout: 15000, windowsHide: true }, (err, stdout, stderr) => {
