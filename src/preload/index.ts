@@ -179,13 +179,15 @@ const api = {
   sessions: {
     current: (
       cwd: string,
-      since?: number
+      since?: number,
+      ssh?: SshConn
     ): Promise<{ sessionId: string; title?: string } | null> =>
-      ipcRenderer.invoke('sessions:current', { cwd, since }),
+      ipcRenderer.invoke('sessions:current', { cwd, since, ssh }),
     list: (
-      cwd: string
+      cwd: string,
+      ssh?: SshConn
     ): Promise<{ sessionId: string; title?: string; mtime: number }[]> =>
-      ipcRenderer.invoke('sessions:list', cwd)
+      ipcRenderer.invoke('sessions:list', { cwd, ssh })
   },
   claude: {
     ask: (payload: string): Promise<void> => ipcRenderer.invoke('claude:ask', payload),

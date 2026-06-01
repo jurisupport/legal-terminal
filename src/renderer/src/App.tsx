@@ -346,9 +346,9 @@ export default function App(): JSX.Element {
     let alive = true
     const tick = (): void => {
       termTabs.forEach((t) => {
-        if (t.renamed || t.ssh) return // 원격 transcript는 로컬에 없어 자동명명 불가
+        if (t.renamed || t.ssh) return // 원격 transcript 조회는 세션 목록을 열 때만 수행
         // 이 터미널이 시작된 이후의 세션만 매칭 (과거 세션 제목 방지)
-        window.lt.sessions.current(t.cwd, (t.createdAt ?? 0) - 3000).then((r) => {
+        window.lt.sessions.current(t.cwd, (t.createdAt ?? 0) - 3000, t.ssh).then((r) => {
           if (!alive || !r?.title) return
           setTermTabs((tabs) =>
             tabs.map((x) =>
@@ -523,18 +523,26 @@ export default function App(): JSX.Element {
     createCase(entry.drafts, entry.name, entry.records)
 
   // 과거 claude 세션 이어서 열기 (claude --resume). 지정한 cwd/사건 컨텍스트에서.
-  const openPastSession = (sessionId: string, cwd: string, title?: string): void => {
+  const openPastSession = (sessionId: string, cwd: string, title?: string, source?: TermTab): void => {
     const base = currentCase && currentCase.drafts === cwd ? currentCase : undefined
     const meta = base?.meta
     const tab: TermTab = {
       id: newId(),
       title: title ? title : base?.name ?? cwd.split(/[\\/]/).pop() ?? '세션',
       cwd,
-      recordsFolder: base?.records,
+      recordsFolder: base?.records ?? source?.recordsFolder,
       autoClaude: true,
       createdAt: Date.now(),
       resumeSessionId: sessionId,
       renamed: !!title, // 과거 세션 제목을 그대로 쓰면 자동 갱신 안 함
+      jsId: source?.jsId,
+      court: source?.court,
+      caseNumber: source?.caseNumber,
+      caseName: source?.caseName,
+      client: source?.client,
+      ssh: source?.ssh,
+      sshLabel: source?.sshLabel,
+      profileId: source?.profileId,
       ...meta
     }
     setTermTabs((t) => [...t, tab])
@@ -1278,8 +1286,8 @@ export default function App(): JSX.Element {
               selectTerm(id)
               setSessionListOpen(false)
             }}
-            onResume={(sid, cwd, title) => {
-              openPastSession(sid, cwd, title)
+            onResume={(sid, cwd, title, source) => {
+              openPastSession(sid, cwd, title, source)
               setSessionListOpen(false)
             }}
             onClose={() => setSessionListOpen(false)}
@@ -2086,7 +2094,7 @@ function SessionList({
   onFilter: (f: string) => void
   caseCwd?: string
   onSelect: (id: string) => void
-  onResume: (sessionId: string, cwd: string, title?: string) => void
+  onResume: (sessionId: string, cwd: string, title?: string, source?: TermTab) => void
   onClose: () => void
 }): JSX.Element {
   const [past, setPast] = useState<{ sessionId: string; title?: string; mtime: number }[] | null>(
@@ -2119,10 +2127,17 @@ function SessionList({
   )
 
   // 과거 세션을 읽을 cwd: 필터된 사건의 열린 세션 cwd → 없으면 현재 사건 cwd
+  const activeSession = sessions.find((s) => s.id === activeId)
+  const filterSource =
+    filter !== 'all' && filter !== '__folder__'
+      ? sessions.find((s) => s.jsId === filter)
+      : filter === '__folder__'
+        ? (shown.find((s) => s.id === activeId) ?? shown[0])
+        : activeSession
   const filterCwd =
     filter !== 'all' && filter !== '__folder__'
-      ? (sessions.find((s) => s.jsId === filter)?.cwd ?? caseCwd)
-      : caseCwd
+      ? (filterSource?.cwd ?? caseCwd)
+      : (filterSource?.cwd ?? caseCwd)
 
   useEffect(() => {
     if (!filterCwd) {
@@ -2131,11 +2146,11 @@ function SessionList({
     }
     let alive = true
     setPast(null)
-    window.lt.sessions.list(filterCwd).then((r) => alive && setPast(r))
+    window.lt.sessions.list(filterCwd, filterSource?.ssh).then((r) => alive && setPast(r))
     return () => {
       alive = false
     }
-  }, [filterCwd])
+  }, [filterCwd, filterSource?.ssh?.host, filterSource?.ssh?.user, filterSource?.ssh?.port, filterSource?.ssh?.identityFile])
 
   const fmt = (ms: number): string => {
     const d = new Date(ms)
@@ -2190,7 +2205,7 @@ function SessionList({
             <li
               key={p.sessionId}
               className="sl-row past"
-              onClick={() => onResume(p.sessionId, filterCwd, p.title)}
+              onClick={() => onResume(p.sessionId, filterCwd, p.title, filterSource)}
               title={`${p.sessionId}\nclaude --resume 로 이어서 열기`}
             >
               <span className="sl-name">↻ {p.title || '(제목 없음)'}</span>

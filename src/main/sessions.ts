@@ -1,15 +1,38 @@
 import { homedir } from 'os'
 import { join } from 'path'
 import { readdir, stat, open } from 'fs/promises'
+import { execFile } from 'child_process'
+import type { SshProfile } from './settings'
 
 // claude Code 세션 transcript: ~/.claude/projects/<인코딩폴더>/<sessionId>.jsonl
 // 폴더 인코딩이 비영숫자→'-'(한글 충돌)이라, 폴더명 계산 대신 transcript 내부 cwd로 매칭한다.
 const projectsDir = join(homedir(), '.claude', 'projects')
+const sshBin = process.platform === 'win32' ? 'ssh.exe' : 'ssh'
+type SshConn = Pick<SshProfile, 'host' | 'user' | 'port' | 'identityFile'>
 
 interface TranscriptRef {
   file: string
   sessionId: string
   mtime: number
+}
+
+interface TranscriptHead {
+  sessionId: string
+  mtime: number
+  head: string
+}
+
+function shq(s: string): string {
+  return `'${s.replace(/'/g, "'\\''")}'`
+}
+
+function sshBaseArgs(ssh: SshConn): string[] {
+  const a: string[] = []
+  if (ssh.port) a.push('-p', String(ssh.port))
+  if (ssh.identityFile) a.push('-i', ssh.identityFile)
+  a.push('-o', 'BatchMode=yes', '-o', 'ConnectTimeout=12', '-o', 'StrictHostKeyChecking=accept-new')
+  a.push(`${ssh.user}@${ssh.host}`)
+  return a
 }
 
 async function listTranscripts(): Promise<TranscriptRef[]> {
@@ -54,6 +77,52 @@ async function readHead(file: string, bytes = 65536): Promise<string> {
   }
 }
 
+async function listRemoteTranscriptHeads(ssh: SshConn, bytes = 65536): Promise<TranscriptHead[]> {
+  const script = `
+root="$HOME/.claude/projects"
+[ -d "$root" ] || exit 0
+find "$root" -type f -name '*.jsonl' -print 2>/dev/null | while IFS= read -r f; do
+  m=$(stat -f %m "$f" 2>/dev/null || stat -c %Y "$f" 2>/dev/null || echo 0)
+  id=\${f##*/}
+  id=\${id%.jsonl}
+  printf '%s\\t%s\\t%s\\n' "$m" "$id" "$f"
+done | sort -rn | head -200 | while IFS="$(printf '\\t')" read -r m id f; do
+  b64=$(head -c ${bytes} "$f" | base64 | tr -d '\\n\\r')
+  printf '%s\\t%s\\t%s\\n' "$m" "$id" "$b64"
+done
+`.trim()
+  return new Promise((resolve) => {
+    execFile(
+      sshBin,
+      [...sshBaseArgs(ssh), script],
+      { timeout: 25000, windowsHide: true, maxBuffer: 64 * 1024 * 1024 },
+      (err, stdout) => {
+        if (err) {
+          resolve([])
+          return
+        }
+        const out: TranscriptHead[] = []
+        for (const raw of stdout.split(/\r?\n/)) {
+          if (!raw.trim()) continue
+          const [mtimeRaw, sessionId, b64] = raw.split('\t')
+          if (!sessionId || !b64) continue
+          const mtime = Number(mtimeRaw) * 1000
+          try {
+            out.push({
+              sessionId,
+              mtime: Number.isFinite(mtime) ? mtime : 0,
+              head: Buffer.from(b64, 'base64').toString('utf8')
+            })
+          } catch {
+            /* skip malformed line */
+          }
+        }
+        resolve(out.sort((a, b) => b.mtime - a.mtime))
+      }
+    )
+  })
+}
+
 function parseHead(content: string): { cwd?: string; title?: string } {
   let cwd: string | undefined
   let aiTitle: string | undefined
@@ -86,8 +155,21 @@ function parseHead(content: string): { cwd?: string; title?: string } {
 // 주어진 cwd의 모든 과거 claude 세션 목록 (최신순). 제목·시각 포함.
 export async function listSessions(
   cwd: string,
-  limit = 40
+  limit = 40,
+  ssh?: SshConn
 ): Promise<{ sessionId: string; title?: string; mtime: number }[]> {
+  if (ssh) {
+    const ts = await listRemoteTranscriptHeads(ssh)
+    const out: { sessionId: string; title?: string; mtime: number }[] = []
+    for (const t of ts) {
+      if (out.length >= limit) break
+      const p = parseHead(t.head)
+      if (p.cwd && p.cwd === cwd) {
+        out.push({ sessionId: t.sessionId, title: p.title, mtime: t.mtime })
+      }
+    }
+    return out
+  }
   const ts = await listTranscripts()
   const out: { sessionId: string; title?: string; mtime: number }[] = []
   for (const t of ts) {
@@ -110,8 +192,20 @@ export async function listSessions(
 // (터미널을 연 뒤 시작된 세션 = 현재 세션. 과거 세션 제목이 잡히는 것을 방지).
 export async function currentSession(
   cwd: string,
-  since = 0
+  since = 0,
+  ssh?: SshConn
 ): Promise<{ sessionId: string; title?: string } | null> {
+  if (ssh) {
+    const ts = await listRemoteTranscriptHeads(ssh)
+    for (const t of ts) {
+      if (since && t.mtime < since) continue
+      const p = parseHead(t.head)
+      if (p.cwd && p.cwd === cwd) {
+        return { sessionId: t.sessionId, title: p.title }
+      }
+    }
+    return null
+  }
   const ts = await listTranscripts()
   for (const t of ts) {
     if (since && t.mtime < since) continue // 과거 세션 제외

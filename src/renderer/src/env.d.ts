@@ -168,9 +168,10 @@ export interface LtApi {
   sessions: {
     current: (
       cwd: string,
-      since?: number
+      since?: number,
+      ssh?: SshConn
     ) => Promise<{ sessionId: string; title?: string } | null>
-    list: (cwd: string) => Promise<{ sessionId: string; title?: string; mtime: number }[]>
+    list: (cwd: string, ssh?: SshConn) => Promise<{ sessionId: string; title?: string; mtime: number }[]>
   }
   claude: {
     ask: (payload: string) => Promise<void>

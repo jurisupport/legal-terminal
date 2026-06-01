@@ -241,10 +241,12 @@ ipcMain.handle('sync:run', (e, opts: RemoteSyncOpts) => runRemoteSync(opts, e.se
 ipcMain.on('sync:cancel', () => cancelSync())
 
 // 사건 cwd의 현재 claude 세션 제목(transcript ai-title). since 이후 세션만.
-ipcMain.handle('sessions:current', (_e, p: { cwd: string; since?: number }) =>
-  currentSession(p.cwd, p.since ?? 0)
+ipcMain.handle('sessions:current', (_e, p: { cwd: string; since?: number; ssh?: SshProfile }) =>
+  currentSession(p.cwd, p.since ?? 0, p.ssh)
 )
-ipcMain.handle('sessions:list', (_e, cwd: string) => listSessions(cwd))
+ipcMain.handle('sessions:list', (_e, p: { cwd: string; ssh?: SshProfile }) =>
+  listSessions(p.cwd, 40, p.ssh)
+)
 
 // ── 설정 IPC ──
 ipcMain.handle('settings:get', () => getSettings())
