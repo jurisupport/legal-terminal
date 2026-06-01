@@ -23,6 +23,9 @@ const ACTIVITY: ActivityItem[] = [
   { id: 'viewer', label: '기록뷰어', Icon: IconViewer }
 ]
 
+const normalizePasteForPty = (text: string): string =>
+  text.replace(/\r\n/g, '\n').replace(/\r/g, '\n').replace(/\n/g, '\r')
+
 interface DocTab {
   id: string
   title: string
@@ -805,7 +808,7 @@ export default function App(): JSX.Element {
 
   // 임의 터미널에 bracketed paste로 텍스트 주입 (줄바꿈이 바로 제출되지 않게).
   const pasteToTerm = (termId: string, payload: string): void => {
-    window.lt.pty.write(termId, `\x1b[200~${payload}\x1b[201~`)
+    window.lt.pty.write(termId, `\x1b[200~${normalizePasteForPty(payload)}\x1b[201~`)
   }
 
   // Claude 질문 전송: 이 창에 터미널이 있으면 직접, 없으면(문서 전용 창) 메인 창 터미널로 IPC 전달.

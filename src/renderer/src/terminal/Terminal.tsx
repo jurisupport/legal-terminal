@@ -10,6 +10,11 @@ import type { SshConn } from '../env'
 // D2Coding(번들, 한글:영문=2:1 고정폭)을 우선 — 한글/영문 폭이 한 폰트로 통일되어 정렬이 맞는다.
 const DEFAULT_FONT = "'D2Coding', 'Cascadia Mono', Consolas, monospace"
 
+// PTY 입력에서 Enter는 LF(\n)가 아니라 CR(\r)이다. LF만 보내면 다음 줄이 같은
+// 커서 열에서 시작해 멀티라인 paste가 들여쓰기처럼 보일 수 있다.
+const normalizePasteForPty = (text: string): string =>
+  text.replace(/\r\n/g, '\n').replace(/\r/g, '\n').replace(/\n/g, '\r')
+
 /**
  * 하나의 사건 터미널. main의 node-pty(플랫폼 기본 셸)를 띄우고 자동으로 `claude`를 실행한다.
  * 폰트/글자크기는 설정(termFont, termFontSize)에서 읽는다(새 터미널에 적용).
@@ -141,9 +146,13 @@ export default function Terminal({
       if (visible) term.focus()
 
       // 붙여넣기: 셸/claude가 줄바꿈을 즉시 실행하지 않도록 bracketed paste로 감싼다.
+      const pasteText = (txt: string): void => {
+        const normalized = normalizePasteForPty(txt)
+        if (normalized) window.lt.pty.write(id, `\x1b[200~${normalized}\x1b[201~`)
+      }
       const pasteFromClipboard = (): void => {
         navigator.clipboard.readText().then((txt) => {
-          if (txt) window.lt.pty.write(id, `\x1b[200~${txt}\x1b[201~`)
+          pasteText(txt)
         })
       }
       // 복사/붙여넣기 키 처리. true=xterm/pty로 전달, false=가로채서 기본동작 차단.
@@ -204,6 +213,14 @@ export default function Terminal({
         }
       }
       mount.addEventListener('contextmenu', onCtx)
+      const onPaste = (ev: ClipboardEvent): void => {
+        const txt = ev.clipboardData?.getData('text/plain')
+        if (!txt) return
+        ev.preventDefault()
+        ev.stopPropagation()
+        pasteText(txt)
+      }
+      mount.addEventListener('paste', onPaste, true)
 
       window.lt.pty.create({
         id,
@@ -276,6 +293,7 @@ export default function Terminal({
         onBellDisp.dispose()
         if (idleTimer) clearTimeout(idleTimer)
         mount.removeEventListener('contextmenu', onCtx)
+        mount.removeEventListener('paste', onPaste, true)
         ro.disconnect()
         window.lt.pty.kill(id)
         term.dispose()
