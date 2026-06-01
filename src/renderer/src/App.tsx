@@ -79,6 +79,13 @@ const remoteUri = (profileId: string, p: string): string =>
   'ssh://' + profileId + (p.startsWith('/') ? p : '/' + p)
 
 const isRemotePath = (p?: string): p is string => !!p && p.startsWith('ssh://')
+const parseRemoteUri = (uri: string): { profileId: string; path: string } | null => {
+  if (!isRemotePath(uri)) return null
+  const rest = uri.slice('ssh://'.length)
+  const slash = rest.indexOf('/')
+  if (slash < 0) return { profileId: rest, path: '/' }
+  return { profileId: rest.slice(0, slash), path: rest.slice(slash) }
+}
 
 function useRemoteFileVersion(path?: string, intervalMs = 2500): number {
   const [version, setVersion] = useState(0)
@@ -114,6 +121,16 @@ interface CaseMeta {
   caseNumber?: string
   caseName?: string
   client?: string
+}
+interface CurrentCase {
+  drafts: string
+  records?: string
+  name: string
+  meta?: CaseMeta
+  ssh?: SshConn
+  sshLabel?: string
+  profileId?: string
+  remotePath?: string
 }
 // 법원명 약칭 (탭 제목 길이 절약)
 function abbrevCourt(court: string): string {
@@ -438,6 +455,9 @@ export default function App(): JSX.Element {
     window.lt.case.addHistory({ drafts, records, name }).then(setRecent)
   }
 
+  const historyDraftsForTerm = (t: TermTab): string =>
+    t.ssh && t.profileId ? remoteUri(t.profileId, t.cwd) : t.cwd
+
   const addTerm = async (): Promise<void> => {
     const picked = await window.lt.dialog.pickFolder({
       title: '사건(작성서류) 폴더 선택',
@@ -459,6 +479,13 @@ export default function App(): JSX.Element {
     records?: string
   ): void => {
     const title = name || remotePath.replace(/\/+$/, '').split('/').pop() || profile.label
+    const draftsUri = remoteUri(profile.id, remotePath)
+    const ssh = {
+      host: profile.host,
+      user: profile.user,
+      port: profile.port,
+      identityFile: profile.identityFile
+    }
     const tab: TermTab = {
       id: newId(),
       title,
@@ -466,15 +493,26 @@ export default function App(): JSX.Element {
       recordsFolder: records,
       autoClaude: true,
       createdAt: Date.now(),
-      ssh: { host: profile.host, user: profile.user, port: profile.port, identityFile: profile.identityFile },
+      ssh,
       sshLabel: profile.label,
       profileId: profile.id,
       ...meta
     }
     setTermTabs((t) => [...t, tab])
     setActiveTerm(tab.id)
+    setCurrentCase({
+      drafts: draftsUri,
+      records,
+      name: title,
+      meta,
+      ssh,
+      sshLabel: profile.label,
+      profileId: profile.id,
+      remotePath
+    })
+    window.lt.case.addHistory({ drafts: draftsUri, records, name: title }).then(setRecent)
     // 소송기록이 정해졌으면 페어링 기억(다음에 자동 적용) — 로컬과 동일
-    if (records) window.lt.case.setPairing(remoteUri(profile.id, remotePath), records)
+    if (records) window.lt.case.setPairing(draftsUri, records)
   }
 
   // ssh:// URI에서 원격 plain 경로만 추출 (createRemoteCase의 cwd용)
@@ -551,8 +589,26 @@ export default function App(): JSX.Element {
   }
 
   // 최근 사건은 사용자가 명시적으로 고른 것이므로 연결된 소송기록을 바로 적용
-  const openRecent = (entry: { drafts: string; records?: string; name: string }): void =>
-    createCase(entry.drafts, entry.name, entry.records)
+  const openRecent = async (entry: {
+    drafts: string
+    records?: string
+    name: string
+  }): Promise<void> => {
+    const remote = parseRemoteUri(entry.drafts)
+    if (!remote) {
+      createCase(entry.drafts, entry.name, entry.records)
+      return
+    }
+    const s = await window.lt.settings.get()
+    const profiles = s.sshProfiles ?? []
+    setSshProfiles(profiles)
+    const profile = profiles.find((p) => p.id === remote.profileId)
+    if (!profile) {
+      window.alert('이 최근 사건에 연결된 SSH 프로필을 찾을 수 없습니다. 설정에서 SSH 프로필을 확인하세요.')
+      return
+    }
+    createRemoteCase(profile, remote.path, entry.name, undefined, entry.records)
+  }
 
   // 과거 claude 세션 이어서 열기 (claude --resume). 지정한 cwd/사건 컨텍스트에서.
   const openPastSession = (sessionId: string, cwd: string, title?: string, source?: TermTab): void => {
@@ -586,7 +642,27 @@ export default function App(): JSX.Element {
     const cur = termTabs.find((t) => t.id === activeTerm)
     if (!cur) {
       if (currentCase) {
-        createCase(currentCase.drafts, currentCase.name, currentCase.records, undefined, currentCase.meta)
+        if (currentCase.ssh && currentCase.profileId && currentCase.remotePath) {
+          const saved = sshProfiles.find((p) => p.id === currentCase.profileId)
+          const profile: SshProfile =
+            saved ?? {
+              id: currentCase.profileId,
+              label: currentCase.sshLabel ?? currentCase.profileId,
+              host: currentCase.ssh.host,
+              user: currentCase.ssh.user,
+              port: currentCase.ssh.port,
+              identityFile: currentCase.ssh.identityFile
+            }
+          createRemoteCase(
+            profile,
+            currentCase.remotePath,
+            currentCase.name,
+            currentCase.meta,
+            currentCase.records
+          )
+        } else {
+          createCase(currentCase.drafts, currentCase.name, currentCase.records, undefined, currentCase.meta)
+        }
       } else {
         void addTerm()
       }
@@ -622,8 +698,9 @@ export default function App(): JSX.Element {
         t.id === activeTerm ? { ...t, recordsFolder: rec, suggestedRecords: undefined } : t
       )
     )
-    window.lt.case.setPairing(cur.cwd, rec)
-    window.lt.case.addHistory({ drafts: cur.cwd, records: rec, name: cur.title }).then(setRecent)
+    const drafts = historyDraftsForTerm(cur)
+    window.lt.case.setPairing(drafts, rec)
+    window.lt.case.addHistory({ drafts, records: rec, name: cur.title }).then(setRecent)
   }
 
   const closeTerm = (id: string): void =>
@@ -726,12 +803,7 @@ export default function App(): JSX.Element {
   }
 
   // 마지막으로 연 사건 컨텍스트 — 터미널을 모두 닫아도 유지(탐색기·뷰어·새 터미널 기준)
-  const [currentCase, setCurrentCase] = useState<{
-    drafts: string
-    records?: string
-    name: string
-    meta?: CaseMeta
-  } | null>(null)
+  const [currentCase, setCurrentCase] = useState<CurrentCase | null>(null)
 
   // 사건 지정 해제 — 마지막 사건 컨텍스트를 비워 '+'·'이 사건에서 열기'가 더는 그 사건을 열지 않게.
   // (탐색기·뷰어 패널도 활성 터미널이 없으면 비워진다)
@@ -1460,7 +1532,9 @@ export default function App(): JSX.Element {
             setCurrentCase((c) => (c ? { ...c, records: uri } : c))
             // 페어링 기억 → 다음에 이 사건을 열면 자동 적용
             if (cur?.ssh && cur.profileId) {
-              window.lt.case.setPairing(remoteUri(cur.profileId, cur.cwd), uri)
+              const drafts = remoteUri(cur.profileId, cur.cwd)
+              window.lt.case.setPairing(drafts, uri)
+              window.lt.case.addHistory({ drafts, records: uri, name: cur.title }).then(setRecent)
             }
             setRecordsPick(null)
           }}
@@ -2263,7 +2337,7 @@ function Welcome({
   onOpen
 }: {
   recent: { drafts: string; records?: string; name: string; ts: number }[]
-  onOpen: (e: { drafts: string; records?: string; name: string }) => void
+  onOpen: (e: { drafts: string; records?: string; name: string }) => void | Promise<void>
 }): JSX.Element {
   return (
     <div className="welcome">
@@ -2275,8 +2349,9 @@ function Welcome({
           <h2 className="recent-title">최근 사건</h2>
           <ul className="recent-list">
             {recent.map((r) => (
-              <li key={r.drafts} className="recent-item" onClick={() => onOpen(r)} title={r.drafts}>
+              <li key={r.drafts} className="recent-item" onClick={() => void onOpen(r)} title={r.drafts}>
                 <span className="recent-name">⚖️ {r.name}</span>
+                {isRemotePath(r.drafts) && <span className="recent-tag">원격</span>}
                 {r.records && <span className="recent-tag">기록 연결됨</span>}
               </li>
             ))}
