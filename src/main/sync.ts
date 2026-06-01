@@ -18,7 +18,7 @@ function shellPathArg(path: string): string {
   return shq(target)
 }
 
-function remoteRclonePrefix(): string {
+function remoteRcloneBootstrap(): string {
   return [
     'PATH="/opt/homebrew/bin:/usr/local/bin:/opt/local/bin:$PATH"',
     'rclone_bin=$(command -v rclone 2>/dev/null || true)',
@@ -30,9 +30,12 @@ function remoteRclonePrefix(): string {
     'if [ -z "$rclone_bin" ]; then',
     '  echo "rclone not found. Install it on the remote Mac: brew install rclone" >&2',
     '  exit 127',
-    'fi',
-    '"$rclone_bin"'
+    'fi'
   ].join('\n')
+}
+
+function remoteRclonePrefix(): string {
+  return `${remoteRcloneBootstrap()}\n"$rclone_bin"`
 }
 
 // BatchMode(키/agent 인증) ssh 인자 — 비대화식 원격 명령 실행용
@@ -84,21 +87,33 @@ export function runRemoteSync(
   opts: RemoteSyncOpts,
   wc: WebContents
 ): Promise<{ ok: boolean; code: number | null; error?: string }> {
-  const cloudArg = shq(opts.dest)
+  const cloudDest = opts.dest.normalize('NFC')
+  const cloudArg = shq(cloudDest)
   const macArg = shellPathArg(opts.macFolder)
   const src = opts.direction === 'pull' ? cloudArg : macArg
   const dst = opts.direction === 'pull' ? macArg : cloudArg
+  const checkSource =
+    opts.direction === 'pull'
+      ? [
+          'if ! "$rclone_bin" lsf ' + cloudArg + ' --max-depth 1 >/dev/null 2>&1; then',
+          `  echo "클라우드 경로를 찾을 수 없습니다: ${cloudDest}" >&2`,
+          '  echo "클라우드 경로 입력을 확인하거나, 먼저 올리기(맥 → 클라우드)로 폴더를 만드세요." >&2',
+          '  exit 66',
+          'fi'
+        ].join('\n')
+      : ''
   const rcloneCmd =
-    `${remoteRclonePrefix()} copy ${src} ${dst} --update --create-empty-src-dirs --transfers=4 --checkers=8 ` +
-    `-v --stats-one-line --stats=1s`
+    `${remoteRcloneBootstrap()}\n${checkSource}\n` +
+    `"$rclone_bin" copy ${src} ${dst} --update --create-empty-src-dirs --transfers=4 --checkers=8 ` +
+    `--retries=1 --low-level-retries=1 -v --stats-one-line --stats=1s`
   const args = [...sshBaseArgs(opts.profile), rcloneCmd]
 
   const send = (line: string): void => {
     if (!wc.isDestroyed()) wc.send('sync:progress', line)
   }
   send(`$ (맥미니에서) rclone ${opts.direction === 'pull' ? '내리기 ⬇' : '올리기 ⬆'}`)
-  send(`  ${opts.direction === 'pull' ? opts.dest : opts.macFolder}`)
-  send(`  → ${opts.direction === 'pull' ? opts.macFolder : opts.dest}`)
+  send(`  ${opts.direction === 'pull' ? cloudDest : opts.macFolder}`)
+  send(`  → ${opts.direction === 'pull' ? opts.macFolder : cloudDest}`)
 
   return new Promise((resolve) => {
     let proc: ReturnType<typeof spawn>

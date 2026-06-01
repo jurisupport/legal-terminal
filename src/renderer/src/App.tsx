@@ -3172,7 +3172,7 @@ function looksLikeOneDrivePath(path: string): boolean {
 function cloudPathFromOneDrivePath(path: string): string {
   const parts = remotePathParts(path)
   const i = parts.findIndex((part) => part.toLowerCase().startsWith('onedrive'))
-  return i >= 0 ? parts.slice(i + 1).join('/') : ''
+  return i >= 0 ? parts.slice(i + 1).join('/').normalize('NFC') : ''
 }
 
 const REMOTE_START_POINTS = [
@@ -3442,7 +3442,7 @@ function SyncModal({
   }
   useEffect(probe, [profileId]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  const normalizedCloudPath = cloudPath.trim().replace(/^\/+/, '')
+  const normalizedCloudPath = cloudPath.trim().replace(/^\/+/, '').normalize('NFC')
   const dest = remoteName ? remoteName + normalizedCloudPath : ''
   const canRun = Boolean(!running && info?.installed && macFolder.trim() && remoteName)
   const run = (direction: 'pull' | 'push'): void => {
