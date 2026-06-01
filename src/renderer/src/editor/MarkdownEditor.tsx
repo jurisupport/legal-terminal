@@ -10,6 +10,12 @@ import { mdToPrintHtml } from './mdExport'
 
 const DEFAULT_MD_FONT = "'D2Coding', 'Cascadia Mono', Consolas, monospace"
 
+export interface MarkdownDocumentPayload {
+  title: string
+  path?: string
+  markdown: string
+}
+
 function makeTheme(family: string, size: number): ReturnType<typeof EditorView.theme> {
   return EditorView.theme(
     {
@@ -32,12 +38,14 @@ export default function MarkdownEditor({
   defaultDir,
   onPath,
   onAsk,
+  onSendToJuriSupport,
   onDirty
 }: {
   path?: string
   defaultDir?: string
   onPath?: (path: string) => void
   onAsk?: () => void
+  onSendToJuriSupport?: (doc: MarkdownDocumentPayload) => void
   // 닫으면 데이터가 사라질 위험(저장 안 된 새 문서에 내용 있음)을 알린다
   onDirty?: (dirty: boolean) => void
 }): JSX.Element {
@@ -249,6 +257,27 @@ export default function MarkdownEditor({
             <span className="tb-divider" />
             <button className="tb-btn" title="이 문서에 대해 Claude에 물어보기" onClick={onAsk}>
               ✳ Claude
+            </button>
+          </>
+        )}
+        {onSendToJuriSupport && (
+          <>
+            <span className="tb-divider" />
+            <button
+              className="tb-btn"
+              title="JuriSupport 소송문서 작성 요청"
+              onClick={() => {
+                const v = viewRef.current
+                if (!v) return
+                const title = pathRef.current?.split(/[\\/]/).pop() ?? '무제.md'
+                onSendToJuriSupport({
+                  title,
+                  path: pathRef.current,
+                  markdown: v.state.doc.toString()
+                })
+              }}
+            >
+              JS 문서
             </button>
           </>
         )}

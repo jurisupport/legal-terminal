@@ -14,7 +14,7 @@ import {
   IconSync,
   IconWorkspace
 } from './icons/Icons'
-import MarkdownEditor from './editor/MarkdownEditor'
+import MarkdownEditor, { type MarkdownDocumentPayload } from './editor/MarkdownEditor'
 import CasesDashboard from './dashboard/CasesDashboard'
 import UpcomingHearings from './dashboard/UpcomingHearings'
 import type { JsCase, SshConn, SshProfile, RemoteEntry, TabPayload } from './env'
@@ -133,6 +133,78 @@ interface CurrentCase {
   sshLabel?: string
   profileId?: string
   remotePath?: string
+}
+
+interface JuriSupportLegalPromptContext {
+  caseId?: string
+  court?: string
+  caseNumber?: string
+  caseName?: string
+  client?: string
+}
+
+function buildJuriSupportLegalDocumentPrompt(
+  doc: MarkdownDocumentPayload,
+  context: JuriSupportLegalPromptContext
+): string {
+  const title = doc.title.replace(/\.[^.]+$/, '') || '문서'
+  const caseLines = [
+    context.caseId && `- caseId: ${context.caseId}`,
+    context.court && `- 법원: ${context.court}`,
+    context.caseNumber && `- 사건번호: ${context.caseNumber}`,
+    context.caseName && `- 사건명: ${context.caseName}`,
+    context.client && `- 의뢰인/당사자: ${context.client}`
+  ].filter(Boolean)
+  const caseBlock = caseLines.length
+    ? caseLines.join('\n')
+    : '- 현재 앱에서 연결된 JuriSupport 사건 ID를 확인하지 못했습니다. 먼저 list_cases 등으로 대상 사건을 확인하세요.'
+
+  return `아래 Markdown 원본을 JuriSupport 소송문서(legal_document)로 정리해 주세요.
+
+목표:
+- Markdown은 사람이 읽고 편집하기 위한 원본입니다. 사용자에게 별도 변환용 문법을 요구하지 마세요.
+- 원본 의미를 보존하되, JuriSupport MCP/API 규칙에 맞는 legal_document content, evidenceList, attachments로 분리하세요.
+- 대상이 명확하면 create_legal_document 또는 update_legal_document/autosave_legal_document MCP 도구를 호출하세요.
+- 기존 문서 ID가 필요하지만 원본/대화에서 특정되지 않으면 임의로 고르지 말고 먼저 짧게 확인하세요.
+
+사건 컨텍스트:
+${caseBlock}
+
+문서 원본:
+- 파일명: ${doc.title}
+${doc.path ? `- 경로: ${doc.path}` : '- 경로: 미저장 문서'}
+- 기본 제목 후보: ${title}
+
+JuriSupport legal_document 작성 규칙:
+- documentType은 원본에서 판단하세요. 가능한 값: complaint, accusation, brief, answer, appeal, supremeAppeal, correction, cause, modifiedCause, applicationReason, other.
+- content에는 순수 본문만 넣으세요.
+- content에 문서 제목, 사건번호, 법원, 당사자 표시, 대리인 표시, 입증방법/증거방법 목록, 첨부서류 목록, 날짜, 서명란, 법원 귀중을 중복으로 넣지 마세요.
+- 원본의 번호 붙은 제목은 JuriSupport 에디터 개요 규칙에 맞게 h1/h2/h3 구조로 정리하고, 자동 번호와 중복될 수 있는 번호 텍스트는 제거하세요.
+- 소송서류 본문은 공손한 서면체로 유지하세요.
+
+서증 처리:
+- 본문 안의 "갑 제1호증", "을 제2호증의1" 같은 raw 호증 문구는 content에 그대로 두지 말고 data-evidence-exhibit span으로 변환하세요.
+- 새 서증 span 예: <span data-evidence-exhibit="true" data-side="갑" data-description="매매계약서" contenteditable="false"></span>
+- 재인용 서증 span 예: <span data-evidence-exhibit="true" data-side="갑" data-is-reference="true" data-reference-main-number="1" data-description="매매계약서" contenteditable="false"></span>
+- 새 서증의 evidenceList 항목은 mainNumber를 null로 두고, 본문 등장 순서와 evidenceList 순서를 맞추세요.
+- 재인용은 isReference=true, referenceMainNumber를 사용하세요.
+- 원본의 입증방법/증거방법 목록과 본문 인용이 불일치하면 MCP 도구를 호출하지 말고 불일치 항목을 질문하세요.
+
+첨부서류 처리:
+- 본문 안의 첨부서류 인용은 data-attachment-exhibit span으로 변환하세요.
+- 새 첨부 span 예: <span data-attachment-exhibit="true" data-name="위임장" data-description="위임장" data-sub-description="2026. 4. 17.자" data-quantity="1통" contenteditable="false"></span>
+- 재인용 첨부 span 예: <span data-attachment-exhibit="true" data-name="위임장" data-description="위임장" data-quantity="1통" data-is-reference="true" data-reference-attachment-number="1" contenteditable="false"></span>
+- 새 첨부의 attachments 항목은 attachmentNumber를 null 또는 생략하고, 재인용 첨부는 includeInAttachmentList=false로 중복 목록 생성을 피하세요.
+- 원본의 첨부서류 목록은 attachments로 분리하고 content에 목록을 중복 출력하지 마세요.
+
+진행 방식:
+- 애매한 서증/첨부/문서유형/대상 문서 ID가 있으면 먼저 확인 질문만 하세요.
+- 애매하지 않으면 변환 요약을 한 번 보여준 뒤 MCP 도구를 호출하세요.
+
+<markdown-source>
+${doc.markdown}
+</markdown-source>
+`
 }
 // 법원명 약칭 (탭 제목 길이 절약)
 function abbrevCourt(court: string): string {
@@ -1137,6 +1209,17 @@ export default function App(): JSX.Element {
     sendClaude(payload)
   }
 
+  const sendMarkdownToJuriSupport = (doc: MarkdownDocumentPayload): void => {
+    const prompt = buildJuriSupportLegalDocumentPrompt(doc, {
+      caseId: activeTermTab?.jsId ?? currentCase?.meta?.jsId,
+      court: activeTermTab?.court ?? currentCase?.meta?.court,
+      caseNumber: activeTermTab?.caseNumber ?? currentCase?.meta?.caseNumber,
+      caseName: activeTermTab?.caseName ?? currentCase?.meta?.caseName,
+      client: activeTermTab?.client ?? currentCase?.meta?.client
+    })
+    sendClaude(prompt)
+  }
+
   // ── 사건 대시보드 동작 ──
   // 토큰 변경 등으로 좌측 '다가오는 기일' 패널을 새로고침하기 위한 nonce
   const [jsNonce, setJsNonce] = useState(0)
@@ -1342,6 +1425,7 @@ export default function App(): JSX.Element {
           defaultDir={draftsRoot}
           onPath={(p) => setDocPath(activeDocTab.id, p)}
           onAsk={() => askClaude('')}
+          onSendToJuriSupport={sendMarkdownToJuriSupport}
           onDirty={(d) =>
             setDirtyDocs((s) => {
               const has = s.has(activeDocTab.id)
