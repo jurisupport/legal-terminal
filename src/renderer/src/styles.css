@@ -1446,10 +1446,6 @@ body {
 .xterm-host .xterm {
   height: 100%;
 }
-/* IME 한글 조합 오버레이가 커서보다 한 칸 뒤에 뜨는 현상 보정 (한 셀 왼쪽으로) */
-.xterm-host .xterm .composition-view {
-  transform: translateX(-1ch);
-}
 
 /* ── PDF 뷰어 ── */
 .pdf-viewer {
