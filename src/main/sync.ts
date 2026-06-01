@@ -18,6 +18,23 @@ function shellPathArg(path: string): string {
   return shq(target)
 }
 
+function remoteRclonePrefix(): string {
+  return [
+    'PATH="/opt/homebrew/bin:/usr/local/bin:/opt/local/bin:$PATH"',
+    'rclone_bin=$(command -v rclone 2>/dev/null || true)',
+    'if [ -z "$rclone_bin" ]; then',
+    '  for p in /opt/homebrew/bin/rclone /usr/local/bin/rclone /opt/local/bin/rclone; do',
+    '    [ -x "$p" ] && rclone_bin="$p" && break',
+    '  done',
+    'fi',
+    'if [ -z "$rclone_bin" ]; then',
+    '  echo "rclone not found. Install it on the remote Mac: brew install rclone" >&2',
+    '  exit 127',
+    'fi',
+    '"$rclone_bin"'
+  ].join('\n')
+}
+
 // BatchMode(키/agent 인증) ssh 인자 — 비대화식 원격 명령 실행용
 function sshBaseArgs(profile: SshProfile): string[] {
   const a: string[] = []
@@ -29,13 +46,14 @@ function sshBaseArgs(profile: SshProfile): string[] {
 }
 
 // 맥의 rclone 설치 여부 + 설정된 리모트 목록(rclone listremotes). 키/agent 인증 시에만 성공.
+// SSH 비대화식 명령은 Homebrew PATH를 못 읽는 경우가 있어 흔한 설치 경로를 명시적으로 찾는다.
 export function remoteRcloneInfo(
   profile: SshProfile
 ): Promise<{ installed: boolean; remotes: string[]; error?: string }> {
   return new Promise((resolve) => {
     execFile(
       sshBin,
-      [...sshBaseArgs(profile), 'rclone listremotes'],
+      [...sshBaseArgs(profile), `${remoteRclonePrefix()} listremotes`],
       { timeout: 15000, windowsHide: true },
       (err, stdout, stderr) => {
         if (err) {
@@ -71,7 +89,7 @@ export function runRemoteSync(
   const src = opts.direction === 'pull' ? cloudArg : macArg
   const dst = opts.direction === 'pull' ? macArg : cloudArg
   const rcloneCmd =
-    `rclone copy ${src} ${dst} --update --create-empty-src-dirs --transfers=4 --checkers=8 ` +
+    `${remoteRclonePrefix()} copy ${src} ${dst} --update --create-empty-src-dirs --transfers=4 --checkers=8 ` +
     `-v --stats-one-line --stats=1s`
   const args = [...sshBaseArgs(opts.profile), rcloneCmd]
 
