@@ -62,6 +62,8 @@ export default function FileTree({
   const [entries, setEntries] = useState<Entry[] | null>(null)
   const [err, setErr] = useState<string>('')
   const [rootOver, setRootOver] = useState(false)
+  const lastRoot = useRef<string | null>(null)
+  const entriesRef = useRef<Entry[] | null>(null)
   // 우클릭 컨텍스트 메뉴 (삭제 등)
   const [menu, setMenu] = useState<{ x: number; y: number; entry: Entry } | null>(null)
   const onContext = (e: React.MouseEvent, entry: Entry): void => {
@@ -82,12 +84,25 @@ export default function FileTree({
 
   useEffect(() => {
     let alive = true
-    setEntries(null)
-    setErr('')
+    const rootChanged = lastRoot.current !== root
+    lastRoot.current = root
+    const hasEntries = entriesRef.current !== null
+    if (rootChanged) setEntries(null)
+    if (rootChanged) entriesRef.current = null
+    if (rootChanged || !hasEntries) setErr('')
     window.lt.fs
       .list(root)
-      .then((e) => alive && setEntries(e))
-      .catch((e) => alive && setErr(String(e)))
+      .then((e) => {
+        if (!alive) return
+        entriesRef.current = e
+        setErr('')
+        setEntries(e)
+      })
+      .catch((e) => {
+        if (!alive) return
+        if (rootChanged || entriesRef.current === null) setErr(String(e))
+        else console.warn('[filetree] refresh failed', e)
+      })
     return () => {
       alive = false
     }
