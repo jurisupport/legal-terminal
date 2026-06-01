@@ -30,6 +30,11 @@ export interface ParsedRecord {
 const DATE_RE = /\d{4}\.\d{2}\.\d{2}/
 const DATE_LENIENT = /(\d{4})\.\s*(\d{1,2})\.\s*(\d{1,2})/ // 2024.03.01 / 2024. 3. 1
 const CASE_RE = /\d{4}[가-힣]{1,5}\d{1,6}/ // 2025느합1050, 2024가단5369527
+const EVID_RE = /(?:^|[\s_\-–—(（])([갑을])\s*제?\s*(\d+(?:-\d+)?)\s*호?증?(?=$|[\s_\-–—()（）.])/
+
+function nfc(v: string): string {
+  return v.normalize('NFC')
+}
 
 function dateNum(s: string): number {
   const m = s.match(DATE_LENIENT)
@@ -42,7 +47,6 @@ function byDate(a: OutlineItem, b: OutlineItem): number {
   return da - db || a.sortKey - b.sortKey
 }
 const COURT_RE = /([가-힣]+법원)/
-const EVID_RE = /([갑을])\s*제?\s*(\d+(?:-\d+)?)\s*호?증?/
 
 interface FlatNode {
   title: string
@@ -120,6 +124,16 @@ function evidenceName(title: string, prefix: string): string | undefined {
       if (name.length >= 2 && !name.endsWith(')')) return name
     }
   }
+  const fallback = new RegExp(`${type}\\s*제?\\s*${num}\\s*호?증?\\s*[_\\s\\-–—]+(.+)`)
+  const fm = title.match(fallback)
+  if (fm) {
+    const name = fm[1]
+      .replace(/\.[^.]+$/, '')
+      .replace(/^[\s_\-–—]+/, '')
+      .replace(/\s*\([^)]*\)\s*$/, '')
+      .trim()
+    if (name.length >= 2) return name
+  }
   // 두 번째 괄호가 문서명인 경우
   if (brackets.length >= 2) {
     const second = brackets[1].trim()
@@ -129,13 +143,15 @@ function evidenceName(title: string, prefix: string): string | undefined {
 }
 
 function classify(title: string): OutlineItem {
+  title = nfc(title)
   const tokens = title.split('_')
   const dateM = title.match(DATE_RE)
   const date = dateM ? dateM[0] : ''
   const dateIdx = dateM ? tokens.findIndex((t) => DATE_RE.test(t)) : -1
   const docType = dateIdx >= 0 && tokens[dateIdx + 1] ? tokens[dateIdx + 1] : tokens[2] ?? '문서'
 
-  const isEvidence = tokens.some((t) => t === '서증' || t === '서증서류') || /_서증_/.test(title)
+  const em = title.match(EVID_RE)
+  const isEvidence = tokens.some((t) => t === '서증' || t === '서증서류') || /_서증_/.test(title) || !!em
   const isAttachment = !isEvidence && tokens.some((t) => t.includes('첨부'))
 
   const brackets = topBrackets(title)
@@ -148,7 +164,6 @@ function classify(title: string): OutlineItem {
 
   if (isEvidence) {
     category = 'evidence'
-    const em = title.match(EVID_RE)
     if (em) {
       evidencePrefix = `${em[1]}${em[2]}`
       const major = em[1] === '갑' ? 0 : 1
@@ -183,7 +198,7 @@ function classify(title: string): OutlineItem {
 }
 
 function normalize(v: string): string {
-  return v.replace(/[\s_\-()]+/g, '')
+  return nfc(v).replace(/[\s_\-()]+/g, '')
 }
 
 /**
@@ -199,7 +214,7 @@ export function parseRecordFiles(files: { name: string; path: string }[]): Parse
 
   const pdfs = files.filter((f) => f.name.toLowerCase().endsWith('.pdf'))
   pdfs.forEach((f, i) => {
-    const nameNoExt = f.name.replace(/\.[^.]+$/, '')
+    const nameNoExt = nfc(f.name.replace(/\.[^.]+$/, ''))
     if (!court) court = nameNoExt.match(COURT_RE)?.[1]
     if (!caseNo) caseNo = nameNoExt.match(CASE_RE)?.[0]
     const item = classify(nameNoExt)
@@ -229,9 +244,10 @@ export async function parseRecordOutline(doc: PDFDocumentProxy): Promise<ParsedR
   const attachments: OutlineItem[] = []
 
   flat.forEach((n, i) => {
-    if (!court) court = n.title.match(COURT_RE)?.[1]
-    if (!caseNo) caseNo = n.title.match(CASE_RE)?.[0]
-    const item = classify(n.title)
+    const title = nfc(n.title)
+    if (!court) court = title.match(COURT_RE)?.[1]
+    if (!caseNo) caseNo = title.match(CASE_RE)?.[0]
+    const item = classify(title)
     item.page = n.page
     if (item.sortKey === 0) item.sortKey = i
     if (item.category === 'evidence') evidences.push(item)
