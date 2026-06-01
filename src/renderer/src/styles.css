@@ -66,26 +66,24 @@ body {
   user-select: none;
 }
 
-/* ── 전체 셸 그리드 (모드별 레이아웃, 터미널은 항상 마지막 열로 고정) ── */
+/* ── 전체 셸 그리드 (좌우 도킹 영역 + 본문) ── */
 .shell {
   display: grid;
   grid-template-rows: 1fr 22px;
   height: 100vh;
 }
-/* 기록뷰어 모드 비율이 기준. 터미널 너비 = (화면 − 48 − 220 − 280)/2 로 고정하여
-   두 모드에서 동일. 탐색기 모드에는 서증(280)이 없으므로 그 폭을 본문이 흡수한다. */
-/* 기본(탐색기/사건/claude): 문서 | 본문 | 터미널 */
+/* 기본: 액티비티 | 좌측 도킹 | 본문 | 우측 도킹 */
 .shell.mode-default {
-  grid-template-columns: 48px 220px 1fr calc((100% - 48px - 220px - 280px) / 2);
+  grid-template-columns: 48px var(--left-dock-width, 220px) 1fr var(--right-dock-width, calc((100vw - 48px - 220px - 280px) / 2));
   grid-template-areas:
-    'activity docs body terminal'
+    'activity leftdock body rightdock'
     'status   status status status';
 }
-/* 뷰어: 문서 | 본문 | 서증·참고자료 | 터미널 */
+/* 뷰어: 액티비티 | 좌측 도킹 | 본문 | 서증·참고자료 | 우측 도킹 */
 .shell.mode-viewer {
-  grid-template-columns: 48px 220px 1fr 280px calc((100% - 48px - 220px - 280px) / 2);
+  grid-template-columns: 48px var(--left-dock-width, 220px) 1fr 280px var(--right-dock-width, calc((100vw - 48px - 220px - 280px) / 2));
   grid-template-areas:
-    'activity docs body evid terminal'
+    'activity leftdock body evid rightdock'
     'status   status status status status';
 }
 
@@ -98,6 +96,79 @@ body {
 .shell-doconly .body-col {
   flex: 1;
   min-height: 0;
+}
+.shell-terminalonly {
+  height: 100vh;
+  display: grid;
+  grid-template-rows: 1fr 22px;
+  grid-template-areas:
+    'terminal'
+    'status';
+}
+.shell-terminalonly .term-col {
+  min-height: 0;
+}
+
+/* ── 좌우 도킹 컬럼 ── */
+.dock-col {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  overflow: hidden;
+  background: var(--bg-alt);
+}
+.dock-left {
+  grid-area: leftdock;
+  border-right: 1px solid var(--border);
+}
+.dock-right {
+  grid-area: rightdock;
+  border-left: 1px solid var(--border);
+}
+.dock-switcher {
+  height: 29px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: stretch;
+  background: var(--tab-inactive);
+  border-bottom: 1px solid var(--border);
+}
+.dock-switch {
+  flex: 1 1 0;
+  min-width: 0;
+  border: none;
+  border-top: 2px solid transparent;
+  border-right: 1px solid var(--border);
+  background: transparent;
+  color: var(--fg-muted);
+  font-size: 12px;
+  cursor: pointer;
+}
+.dock-switch:last-child {
+  border-right: none;
+}
+.dock-switch:hover {
+  color: var(--fg);
+}
+.dock-switch.active {
+  background: var(--tab-active);
+  border-top-color: var(--statusbar);
+  color: var(--fg);
+}
+.dock-content {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+.dock-content > .sidebar,
+.dock-content > .term-col {
+  flex: 1;
+  min-height: 0;
+  grid-area: auto;
+  border-left: none;
+  border-right: none;
 }
 
 /* ── 액티비티바 ── */
@@ -728,10 +799,18 @@ body {
   padding: 16px;
   background: #2a2a2a;
 }
+.image-wrap.pannable {
+  justify-content: flex-start;
+  cursor: grab;
+}
+.image-wrap.pannable.grabbing {
+  cursor: grabbing;
+}
 .image-wrap img {
   display: block;
   background: #fff;
   box-shadow: 0 2px 12px rgba(0, 0, 0, 0.5);
+  user-select: none;
 }
 .image-wrap.center {
   align-items: center;
@@ -1586,8 +1665,69 @@ body {
   cursor: grab;
   outline: none;
 }
+.pdf-canvas-wrap.pannable {
+  cursor: grab;
+}
+.pdf-canvas-wrap.pannable .textLayer {
+  user-select: none;
+}
 .pdf-canvas-wrap.grabbing {
   cursor: grabbing;
+}
+.pdf-password {
+  width: min(360px, 100%);
+  align-self: center;
+  margin-top: 72px;
+  padding: 18px;
+  background: var(--bg-alt);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  cursor: default;
+}
+.pdf-password-title {
+  color: var(--fg);
+  font-size: 15px;
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+.pdf-password-sub {
+  color: var(--fg-muted);
+  font-size: 12px;
+  line-height: 1.45;
+  margin-bottom: 12px;
+}
+.pdf-password-row {
+  display: flex;
+  gap: 8px;
+}
+.pdf-password-input {
+  flex: 1;
+  min-width: 0;
+  height: 30px;
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0 9px;
+  font-size: 13px;
+  outline: none;
+}
+.pdf-password-input:focus {
+  border-color: var(--accent);
+}
+.pdf-password-submit {
+  height: 30px;
+  padding: 0 14px;
+  background: var(--accent);
+  color: var(--accent-fg);
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 13px;
+}
+.pdf-password-submit:disabled {
+  opacity: 0.45;
+  cursor: default;
 }
 .pdf-page {
   position: relative;

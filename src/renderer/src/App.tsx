@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode } from 'react'
+import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react'
 import Terminal from './terminal/Terminal'
 import FileTree, { LT_PATH, sortEntries, type SortMode } from './filetree/FileTree'
 import PdfViewer from './viewer/PdfViewer'
@@ -17,9 +17,11 @@ import {
 import MarkdownEditor from './editor/MarkdownEditor'
 import CasesDashboard from './dashboard/CasesDashboard'
 import UpcomingHearings from './dashboard/UpcomingHearings'
-import type { JsCase, SshConn, SshProfile, RemoteEntry } from './env'
+import type { JsCase, SshConn, SshProfile, RemoteEntry, TabPayload } from './env'
 
 type Mode = 'explorer' | 'cases' | 'viewer'
+type DockSide = 'left' | 'right'
+type DockPanel = 'docs' | 'terminal'
 
 interface ActivityItem {
   id: Mode
@@ -187,20 +189,29 @@ const newId = (): string =>
   typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : `id-${Date.now()}-${++docSeq}`
 
 export default function App(): JSX.Element {
+  const docOnly = window.location.hash.includes('docOnly')
+  const termOnly = window.location.hash.includes('termOnly')
   const [mode, setMode] = useState<Mode>('explorer')
   const [info, setInfo] = useState<string>('')
   const [platform, setPlatform] = useState<string>('')
 
-  const [docTabs, setDocTabs] = useState<DocTab[]>([
-    { id: 'doc-welcome', title: '시작하기.md', kind: 'welcome' }
-  ])
-  const [activeDoc, setActiveDoc] = useState<string>('doc-welcome')
+  const [docTabs, setDocTabs] = useState<DocTab[]>(() =>
+    docOnly ? [] : [{ id: 'doc-welcome', title: '시작하기.md', kind: 'welcome' }]
+  )
+  const [activeDoc, setActiveDoc] = useState<string>(() => (docOnly ? '' : 'doc-welcome'))
   // 닫으면 내용이 사라지는 문서(저장 안 된 새 문서) id 집합 — 닫기 전 확인용
   const [dirtyDocs, setDirtyDocs] = useState<Set<string>>(new Set())
 
   const [termTabs, setTermTabs] = useState<TermTab[]>([])
   const [activeTerm, setActiveTerm] = useState<string>('')
   const [termFocusNonce, setTermFocusNonce] = useState<Record<string, number>>({})
+  const termTabsRef = useRef<TermTab[]>([])
+  const [docsDock, setDocsDock] = useState<DockSide>('left')
+  const [terminalDock, setTerminalDock] = useState<DockSide>('right')
+  const [dockActive, setDockActive] = useState<Record<DockSide, DockPanel>>({
+    left: 'docs',
+    right: 'terminal'
+  })
   const [draftsRoot, setDraftsRoot] = useState<string | undefined>()
   const [recordsRoot, setRecordsRoot] = useState<string | undefined>()
   // SSH 접속 프로필 + 접속 선택/원격 폴더 선택 모달 상태
@@ -253,6 +264,42 @@ export default function App(): JSX.Element {
     })
     window.lt?.case.history().then(setRecent)
   }, [])
+
+  termTabsRef.current = termTabs
+  useEffect(() => {
+    const killWindowTerms = (): void => {
+      for (const t of termTabsRef.current) window.lt.pty.kill(t.id)
+    }
+    window.addEventListener('beforeunload', killWindowTerms)
+    return () => window.removeEventListener('beforeunload', killWindowTerms)
+  }, [])
+
+  const showDockPanel = (panel: DockPanel): void => {
+    const side = panel === 'docs' ? docsDock : terminalDock
+    setDockActive((active) => ({ ...active, [side]: panel }))
+  }
+  const moveDocsDock = (side: DockSide): void => {
+    setDocsDock(side)
+    setDockActive((active) => ({ ...active, [side]: 'docs' }))
+  }
+  const moveTerminalDock = (side: DockSide): void => {
+    setTerminalDock(side)
+    setDockActive((active) => ({ ...active, [side]: 'terminal' }))
+  }
+  const dockPanels = (side: DockSide): DockPanel[] =>
+    (['docs', 'terminal'] as DockPanel[]).filter((panel) =>
+      panel === 'docs' ? docsDock === side : terminalDock === side
+    )
+  const dockWidth = (side: DockSide): string => {
+    const panels = dockPanels(side)
+    if (panels.length === 0) return '0px'
+    if (panels.includes('terminal')) return 'calc((100vw - 48px - 220px - 280px) / 2)'
+    return '220px'
+  }
+  const shellStyle = {
+    '--left-dock-width': dockWidth('left'),
+    '--right-dock-width': dockWidth('right')
+  } as CSSProperties & Record<'--left-dock-width' | '--right-dock-width', string>
 
   // ── 본문(문서) 탭 ──
   // 활성 사건 폴더가 있으면 거기에 실제 파일을 만들어 연다(VS Code식). 없으면 메모리 스크래치.
@@ -386,11 +433,43 @@ export default function App(): JSX.Element {
     }
   }
 
-  // 다른 창에서 찢겨/이동돼 온 탭 수신 → 파일 열기 (최신 openFile 클로저를 ref로 사용)
+  const currentCaseFromTerm = (t: TermTab): CurrentCase => {
+    const drafts = t.ssh && t.profileId ? remoteUri(t.profileId, t.cwd) : t.cwd
+    return {
+      drafts,
+      records: t.recordsFolder,
+      name: t.title,
+      meta: {
+        jsId: t.jsId,
+        court: t.court,
+        caseNumber: t.caseNumber,
+        caseName: t.caseName,
+        client: t.client
+      },
+      ssh: t.ssh,
+      sshLabel: t.sshLabel,
+      profileId: t.profileId,
+      remotePath: t.ssh ? t.cwd : undefined
+    }
+  }
+
+  // 다른 창에서 찢겨/이동돼 온 탭 수신 → 문서 또는 터미널 열기.
   const openFileRef = useRef(openFile)
   openFileRef.current = openFile
+  const receiveTabRef = useRef<(p: TabPayload) => void>(() => {})
+  receiveTabRef.current = (p) => {
+    if (p.kind === 'terminal') {
+      const tab = p.tab as TermTab
+      setTermTabs((tabs) => (tabs.some((t) => t.id === tab.id) ? tabs : [...tabs, tab]))
+      setActiveTerm(tab.id)
+      setCurrentCase(currentCaseFromTerm(tab))
+      showDockPanel('terminal')
+      return
+    }
+    openFileRef.current(p.path, p.title)
+  }
   useEffect(() => {
-    const off = window.lt.tabs.onReceive((p) => openFileRef.current(p.path, p.title))
+    const off = window.lt.tabs.onReceive((p) => receiveTabRef.current(p))
     window.lt.tabs.ready() // 큐잉된 페이로드 flush 요청
     return off
   }, [])
@@ -437,6 +516,17 @@ export default function App(): JSX.Element {
       return a
     })
   }
+  const reorderTerms = (fromId: string, toId: string): void => {
+    setTermTabs((ts) => {
+      const a = [...ts]
+      const fi = a.findIndex((x) => x.id === fromId)
+      const ti = a.findIndex((x) => x.id === toId)
+      if (fi < 0 || ti < 0 || fi === ti) return ts
+      const [m] = a.splice(fi, 1)
+      a.splice(ti, 0, m)
+      return a
+    })
+  }
 
   // ── 사건 터미널 탭 (작성서류 폴더 = cwd로 claude 실행) ──
   const createCase = (
@@ -458,6 +548,7 @@ export default function App(): JSX.Element {
     }
     setTermTabs((t) => [...t, tab])
     setActiveTerm(tab.id)
+    showDockPanel('terminal')
     setCurrentCase({ drafts, records, name, meta: caseMeta })
     window.lt.case.addHistory({ drafts, records, name }).then(setRecent)
   }
@@ -507,6 +598,7 @@ export default function App(): JSX.Element {
     }
     setTermTabs((t) => [...t, tab])
     setActiveTerm(tab.id)
+    showDockPanel('terminal')
     setCurrentCase({
       drafts: draftsUri,
       records,
@@ -674,6 +766,7 @@ export default function App(): JSX.Element {
     }
     setTermTabs((t) => [...t, tab])
     setActiveTerm(tab.id)
+    showDockPanel('terminal')
   }
 
   // + / Ctrl+T : 같은 사건에서 새 터미널(claude 실행). 활성 터미널이 없으면 마지막 사건에서, 그것도 없으면 폴더 선택.
@@ -725,6 +818,7 @@ export default function App(): JSX.Element {
     }
     setTermTabs((t) => [...t, tab])
     setActiveTerm(tab.id)
+    showDockPanel('terminal')
   }
 
   // 추천 소송기록 폴더 적용 ('열기' 클릭 시)
@@ -742,12 +836,31 @@ export default function App(): JSX.Element {
     window.lt.case.addHistory({ drafts, records: rec, name: cur.title }).then(setRecent)
   }
 
-  const closeTerm = (id: string): void =>
+  const removeTermTab = (id: string): void => {
     setTermTabs((tabs) => closeTab(tabs, id, activeTerm, setActiveTerm))
+    setTermAttention((s) => {
+      if (!s.has(id)) return s
+      const n = new Set(s)
+      n.delete(id)
+      return n
+    })
+    setTermStatus((m) => {
+      if (!m.has(id)) return m
+      const n = new Map(m)
+      n.delete(id)
+      return n
+    })
+  }
+  const closeTerm = (id: string): void => {
+    window.lt.pty.kill(id)
+    removeTermTab(id)
+  }
+  const detachTerm = (id: string): void => removeTermTab(id)
 
   // 터미널 선택 → 활성화 + 완료(주목) 표시 해제
   const selectTerm = (id: string): void => {
     setActiveTerm(id)
+    showDockPanel('terminal')
     setTermAttention((s) => {
       if (!s.has(id)) return s
       const n = new Set(s)
@@ -1120,6 +1233,7 @@ export default function App(): JSX.Element {
       createCase(drafts, name, records, undefined, meta)
     }
     setMode('explorer')
+    showDockPanel('docs')
   }
 
   // 우클릭: 사건을 원격(SSH 프로필)에서 열기 — 원격 draftsRoot에서 폴더명 매칭, 실패 시 수동 선택.
@@ -1155,6 +1269,7 @@ export default function App(): JSX.Element {
       // 소송기록 매칭은 터미널을 먼저 띄운 뒤 붙인다. SFTP/키 문제로 터미널 생성이 막히면 안 된다.
       resolveRemoteRecordsLater(opened.id, profile, remotePath, opened.title, c)
       setMode('explorer')
+      showDockPanel('docs')
     } else {
       // 작성서류 매칭 실패 → 폴더 선택기로 직접 지정 (소송기록은 picker onPick에서 resolve)
       setRemoteCasePick({ profile, name, meta })
@@ -1183,9 +1298,6 @@ export default function App(): JSX.Element {
       pasteToTerm(termId, `다음 파일들에 대해:\n${paths.map((p) => `- ${p}`).join('\n')}\n\n`)
     }
   }
-
-  // 찢어낸 '문서 전용 창' 여부 (main이 새 창 URL에 #docOnly 해시를 붙임)
-  const docOnly = window.location.hash.includes('docOnly')
 
   // 탭 드래그 중 여부 — 창 전체에서 '이동' 커서를 보이게 해 '금지' 표시를 막는다.
   const [tabDragging, setTabDragging] = useState(false)
@@ -1280,7 +1392,13 @@ export default function App(): JSX.Element {
 
   const docTabBar = (
     <TabBar
-      tabs={docTabs.map((t) => ({ id: t.id, title: t.title, tooltip: t.path, path: t.path }))}
+      tabs={docTabs.map((t) => ({
+        id: t.id,
+        title: t.title,
+        tooltip: t.path,
+        path: t.path,
+        dragPayload: t.path ? ({ kind: 'doc', path: t.path, title: t.title } as TabPayload) : undefined
+      }))}
       activeId={activeDoc}
       onSelect={setActiveDoc}
       onClose={closeDoc}
@@ -1291,6 +1409,168 @@ export default function App(): JSX.Element {
       onDragActive={setTabDragging}
     />
   )
+
+  const docsPanel = (
+    <DocsPanel
+      key="docs"
+      mode={mode}
+      dockSide={docsDock}
+      draftsFolder={activeDraftsFolder}
+      recordsFolder={activeRecordsFolder}
+      suggestedRecords={activeSuggestedRecords}
+      record={panelRecord}
+      refreshNonce={treeRefresh}
+      onOpenFile={openFile}
+      onDropTo={copyFilesTo}
+      onMove={moveEntry}
+      onDelete={deleteEntry}
+      onPickRecords={pickRecords}
+      onApplySuggested={applySuggested}
+      onOpenItem={onOpenItem}
+      onDropFiles={onDropFiles}
+      onNewFolder={newFolder}
+      onNewFile={newFile}
+      onSync={sshProfiles.length > 0 ? openSync : undefined}
+      onOpenWorkspace={() => void openConnOrLocal()}
+      onMoveDock={(side) => moveDocsDock(side)}
+      onOpenCase={openCaseWorkspace}
+      jsNonce={jsNonce}
+      pendingCreate={pendingCreate}
+      onCreateEntry={onCreateEntry}
+      onCancelCreate={() => setPendingCreate(null)}
+    />
+  )
+
+  const terminalPanel = (
+    <div className="term-col" key="terminal">
+      <TabBar
+        tabs={termTabs.map((t) => ({
+          id: t.id,
+          title: t.renamed
+            ? t.title
+            : t.sessionTitle
+              ? `${t.title} · ${t.sessionTitle}`
+              : t.title,
+          attention: termAttention.has(t.id) && termStatus.get(t.id) !== 'question',
+          working: termStatus.get(t.id) === 'working',
+          question: termStatus.get(t.id) === 'question' && termAttention.has(t.id),
+          dragPayload: { kind: 'terminal', tab: { ...t } } as TabPayload,
+          tooltip: [
+            t.ssh && `🔗 ${t.sshLabel ?? '원격'} (${t.ssh.user}@${t.ssh.host})`,
+            t.court && `${t.court}`,
+            t.caseNumber,
+            t.caseName,
+            t.client && `의뢰인 ${t.client}`,
+            t.cwd
+          ]
+            .filter(Boolean)
+            .join('\n')
+        }))}
+        activeId={activeTerm}
+        onSelect={selectTerm}
+        onClose={closeTerm}
+        onAdd={addTermSame}
+        addTitle="새 터미널"
+        onReorder={reorderTerms}
+        onTearOut={detachTerm}
+        onDragActive={setTabDragging}
+        onRename={(id, title) =>
+          setTermTabs((tabs) =>
+            tabs.map((t) => (t.id === id ? { ...t, title, renamed: true } : t))
+          )
+        }
+        extraLeft={[
+          {
+            label: '☰',
+            title: '세션 목록',
+            active: sessionListOpen,
+            onClick: () => {
+              const cur = termTabs.find((t) => t.id === activeTerm)
+              setSessionFilter(cur?.jsId ?? 'all')
+              setSessionListOpen((v) => !v)
+            }
+          },
+          ...(termOnly
+            ? []
+            : [
+                {
+                  label: terminalDock === 'right' ? '⇤' : '⇥',
+                  title: terminalDock === 'right' ? '터미널 왼쪽으로 이동' : '터미널 오른쪽으로 이동',
+                  onClick: () => moveTerminalDock(terminalDock === 'right' ? 'left' : 'right')
+                }
+              ])
+        ]}
+        extra={{
+          icon: <IconWorkspace size={15} />,
+          title: '새 작업환경 열기',
+          onClick: () => void openConnOrLocal()
+        }}
+      />
+      {sessionListOpen && (
+        <SessionList
+          sessions={termTabs}
+          activeId={activeTerm}
+          filter={sessionFilter}
+          onFilter={setSessionFilter}
+          caseCwd={currentCase?.drafts}
+          onSelect={(id) => {
+            selectTerm(id)
+            setSessionListOpen(false)
+          }}
+          onResume={(sid, cwd, title, source) => {
+            openPastSession(sid, cwd, title, source)
+            setSessionListOpen(false)
+          }}
+          onClose={() => setSessionListOpen(false)}
+        />
+      )}
+      <div className="term-stack">
+        {termTabs.length === 0 &&
+          (currentCase ? (
+            <Empty
+              label={`「${currentCase.name}」 — 터미널이 모두 닫혔습니다`}
+              actionLabel="이 사건에서 터미널 열기"
+              onAction={addTermSame}
+              secondaryLabel="✕ 사건 지정 해제"
+              onSecondary={clearCase}
+            />
+          ) : (
+            <Empty
+              label="사건 폴더를 열어 시작하세요 (작성문서 또는 사건기록 폴더)"
+              actionLabel="사건 폴더 열기"
+              onAction={() => void openConnOrLocal()}
+            />
+          ))}
+        {termTabs.map((t) => (
+          <div
+            key={t.id}
+            className="term-pane"
+            style={{ display: t.id === activeTerm ? 'block' : 'none' }}
+          >
+            <Terminal
+              id={t.id}
+              cwd={t.cwd}
+              autoClaude={t.autoClaude ?? false}
+              resumeSessionId={t.resumeSessionId}
+              ssh={t.ssh}
+              visible={t.id === activeTerm}
+              focusNonce={termFocusNonce[t.id] ?? 0}
+              onDropPaths={(paths) => dropFilesToTerm(t.id, paths)}
+              onNewTerminal={addTermSame}
+              onRequestClose={() => closeTermWithConfirm(t.id)}
+              onStatus={(s) => onTermStatus(t.id, s)}
+              onCycleTab={cycleTerm}
+            />
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+
+  const dockChildren: Record<DockPanel, ReactNode> = {
+    docs: docsPanel,
+    terminal: terminalPanel
+  }
 
   // 탭을 창 밖으로 찢어낸 '문서 전용 창': 터미널·탐색기·액티비티바 없이 문서만.
   if (docOnly) {
@@ -1306,8 +1586,24 @@ export default function App(): JSX.Element {
     )
   }
 
+  if (termOnly) {
+    return (
+      <div className="shell-terminalonly" {...shellDragProps}>
+        {terminalPanel}
+        <div className="statusbar">
+          <span className="status-left">legal-terminal · 터미널</span>
+          <span className="status-right">{info}</span>
+        </div>
+      </div>
+    )
+  }
+
   return (
-    <div className={`shell ${isViewer ? 'mode-viewer' : 'mode-default'}`} {...shellDragProps}>
+    <div
+      className={`shell ${isViewer ? 'mode-viewer' : 'mode-default'}`}
+      style={shellStyle}
+      {...shellDragProps}
+    >
       {/* ── 액티비티바 (모드 전환) ── */}
       <div className="activitybar" key="activity">
         <div className="activitybar-top">
@@ -1316,7 +1612,10 @@ export default function App(): JSX.Element {
               key={item.id}
               className={`activity-item ${mode === item.id ? 'active' : ''}`}
               title={item.label}
-              onClick={() => setMode(item.id)}
+              onClick={() => {
+                setMode(item.id)
+                showDockPanel('docs')
+              }}
             >
               <item.Icon />
             </button>
@@ -1329,32 +1628,12 @@ export default function App(): JSX.Element {
         </div>
       </div>
 
-      {/* ── 문서(좌측 목록) — 모드별 내용 ── */}
-      <DocsPanel
-        key="docs"
-        mode={mode}
-        draftsFolder={activeDraftsFolder}
-        recordsFolder={activeRecordsFolder}
-        suggestedRecords={activeSuggestedRecords}
-        record={panelRecord}
-        refreshNonce={treeRefresh}
-        onOpenFile={openFile}
-        onDropTo={copyFilesTo}
-        onMove={moveEntry}
-        onDelete={deleteEntry}
-        onPickRecords={pickRecords}
-        onApplySuggested={applySuggested}
-        onOpenItem={onOpenItem}
-        onDropFiles={onDropFiles}
-        onNewFolder={newFolder}
-        onNewFile={newFile}
-        onSync={sshProfiles.length > 0 ? openSync : undefined}
-        onOpenWorkspace={() => void openConnOrLocal()}
-        onOpenCase={openCaseWorkspace}
-        jsNonce={jsNonce}
-        pendingCreate={pendingCreate}
-        onCreateEntry={onCreateEntry}
-        onCancelCreate={() => setPendingCreate(null)}
+      <DockColumn
+        side="left"
+        panels={dockPanels('left')}
+        active={dockActive.left}
+        onSelect={(panel) => setDockActive((active) => ({ ...active, left: panel }))}
+        childrenByPanel={dockChildren}
       />
 
       {/* ── 본문(가운데) — 사건 모드는 대시보드, 그 외엔 문서 탭 ── */}
@@ -1379,116 +1658,13 @@ export default function App(): JSX.Element {
       {/* ── 서증·첨부서류 (뷰어 모드에서만) ── */}
       {isViewer && <EvidencePanel key="evid" record={panelRecord} onOpenItem={onOpenItem} />}
 
-      {/* ── 터미널 (항상 동일 위치·세션 유지) ── */}
-      <div className="term-col" key="terminal">
-        <TabBar
-          tabs={termTabs.map((t) => ({
-            id: t.id,
-            title: t.renamed
-              ? t.title
-              : t.sessionTitle
-                ? `${t.title} · ${t.sessionTitle}`
-                : t.title,
-            attention: termAttention.has(t.id) && termStatus.get(t.id) !== 'question',
-            working: termStatus.get(t.id) === 'working',
-            question: termStatus.get(t.id) === 'question' && termAttention.has(t.id),
-            tooltip: [
-              t.ssh && `🔗 ${t.sshLabel ?? '원격'} (${t.ssh.user}@${t.ssh.host})`,
-              t.court && `${t.court}`,
-              t.caseNumber,
-              t.caseName,
-              t.client && `의뢰인 ${t.client}`,
-              t.cwd
-            ]
-              .filter(Boolean)
-              .join('\n')
-          }))}
-          activeId={activeTerm}
-          onSelect={selectTerm}
-          onClose={closeTerm}
-          onAdd={addTermSame}
-          addTitle="새 터미널"
-          onRename={(id, title) =>
-            setTermTabs((tabs) =>
-              tabs.map((t) => (t.id === id ? { ...t, title, renamed: true } : t))
-            )
-          }
-          extraLeft={{
-            label: '☰',
-            title: '세션 목록',
-            active: sessionListOpen,
-            onClick: () => {
-              // 열 때 현재 세션의 사건으로 기본 필터
-              const cur = termTabs.find((t) => t.id === activeTerm)
-              setSessionFilter(cur?.jsId ?? 'all')
-              setSessionListOpen((v) => !v)
-            }
-          }}
-          extra={{
-            icon: <IconWorkspace size={15} />,
-            title: '새 작업환경 열기',
-            onClick: () => void openConnOrLocal()
-          }}
-        />
-        {sessionListOpen && (
-          <SessionList
-            sessions={termTabs}
-            activeId={activeTerm}
-            filter={sessionFilter}
-            onFilter={setSessionFilter}
-            caseCwd={currentCase?.drafts}
-            onSelect={(id) => {
-              selectTerm(id)
-              setSessionListOpen(false)
-            }}
-            onResume={(sid, cwd, title, source) => {
-              openPastSession(sid, cwd, title, source)
-              setSessionListOpen(false)
-            }}
-            onClose={() => setSessionListOpen(false)}
-          />
-        )}
-        <div className="term-stack">
-          {termTabs.length === 0 &&
-            (currentCase ? (
-              <Empty
-                label={`「${currentCase.name}」 — 터미널이 모두 닫혔습니다`}
-                actionLabel="이 사건에서 터미널 열기"
-                onAction={addTermSame}
-                secondaryLabel="✕ 사건 지정 해제"
-                onSecondary={clearCase}
-              />
-            ) : (
-              <Empty
-                label="사건 폴더를 열어 시작하세요 (작성문서 또는 사건기록 폴더)"
-                actionLabel="사건 폴더 열기"
-                onAction={() => void openConnOrLocal()}
-              />
-            ))}
-          {termTabs.map((t) => (
-            <div
-              key={t.id}
-              className="term-pane"
-              style={{ display: t.id === activeTerm ? 'block' : 'none' }}
-            >
-              <Terminal
-                id={t.id}
-                cwd={t.cwd}
-                autoClaude={t.autoClaude ?? false}
-                resumeSessionId={t.resumeSessionId}
-                ssh={t.ssh}
-                visible={t.id === activeTerm}
-                focusNonce={termFocusNonce[t.id] ?? 0}
-                onDropPaths={(paths) => dropFilesToTerm(t.id, paths)}
-                onNewTerminal={addTermSame}
-                onRequestClose={() => closeTermWithConfirm(t.id)}
-                onStatus={(s) => onTermStatus(t.id, s)}
-                onCycleTab={cycleTerm}
-              />
-            </div>
-          ))}
-        </div>
-      </div>
+      <DockColumn
+        side="right"
+        panels={dockPanels('right')}
+        active={dockActive.right}
+        onSelect={(panel) => setDockActive((active) => ({ ...active, right: panel }))}
+        childrenByPanel={dockChildren}
+      />
 
       <div className="statusbar" key="status">
         <span className="status-left">legal-terminal · {modeLabel(mode)}</span>
@@ -1544,6 +1720,7 @@ export default function App(): JSX.Element {
             const opened = createRemoteCase(profile, remotePath, name, meta)
             resolveRemoteRecordsLater(opened.id, profile, remotePath, opened.title)
             setMode('explorer')
+            showDockPanel('docs')
           }}
         />
       )}
@@ -1743,14 +1920,51 @@ function closeTab<T extends { id: string }>(
 ): T[] {
   const idx = tabs.findIndex((t) => t.id === id)
   const next = tabs.filter((t) => t.id !== id)
-  if (id === activeId && next.length > 0) setActive(next[Math.min(idx, next.length - 1)].id)
+  if (id === activeId) setActive(next.length > 0 ? next[Math.min(idx, next.length - 1)].id : '')
   return next
+}
+
+function DockColumn({
+  side,
+  panels,
+  active,
+  onSelect,
+  childrenByPanel
+}: {
+  side: DockSide
+  panels: DockPanel[]
+  active: DockPanel
+  onSelect: (panel: DockPanel) => void
+  childrenByPanel: Record<DockPanel, ReactNode>
+}): JSX.Element | null {
+  if (panels.length === 0) return null
+  const current = panels.includes(active) ? active : panels[0]
+  return (
+    <div className={`dock-col dock-${side}`}>
+      {panels.length > 1 && (
+        <div className="dock-switcher">
+          {panels.map((panel) => (
+            <button
+              key={panel}
+              className={`dock-switch ${panel === current ? 'active' : ''}`}
+              title={panel === 'docs' ? '문서 패널' : '터미널'}
+              onClick={() => onSelect(panel)}
+            >
+              {panel === 'docs' ? '문서' : '터미널'}
+            </button>
+          ))}
+        </div>
+      )}
+      <div className="dock-content">{childrenByPanel[current]}</div>
+    </div>
+  )
 }
 
 // ── 좌측 문서 패널 (모드별) ──
 // 탐색기 모드 = 작성서류 폴더 트리. 뷰어 모드 = 열린 PDF의 본안 문서 목차(없으면 소송기록 폴더 트리).
 function DocsPanel({
   mode,
+  dockSide,
   draftsFolder,
   recordsFolder,
   suggestedRecords,
@@ -1768,6 +1982,7 @@ function DocsPanel({
   onNewFile,
   onSync,
   onOpenWorkspace,
+  onMoveDock,
   onOpenCase,
   jsNonce,
   pendingCreate,
@@ -1775,6 +1990,7 @@ function DocsPanel({
   onCancelCreate
 }: {
   mode: Mode
+  dockSide: DockSide
   draftsFolder?: string
   recordsFolder?: string
   suggestedRecords?: string
@@ -1792,6 +2008,7 @@ function DocsPanel({
   onNewFile: () => void
   onSync?: () => void
   onOpenWorkspace: () => void
+  onMoveDock: (side: DockSide) => void
   onOpenCase: (c: JsCase) => void
   jsNonce: number
   pendingCreate: 'file' | 'folder' | null
@@ -1805,7 +2022,6 @@ function DocsPanel({
   return (
     <div
       className={`sidebar ${dragOver ? 'drag-over' : ''}`}
-      style={{ gridArea: 'docs' }}
       onDragOver={(e) => {
         if (!canDrop) return
         e.preventDefault()
@@ -1828,6 +2044,16 @@ function DocsPanel({
                 <button className="tool-btn" title="새 작업환경 열기" onClick={onOpenWorkspace}>
                   <IconWorkspace size={15} />
                   <span className="sr-only">새 작업환경 열기</span>
+                </button>
+                <button
+                  className="tool-btn"
+                  title={dockSide === 'left' ? '작성서류 오른쪽으로 이동' : '작성서류 왼쪽으로 이동'}
+                  onClick={() => onMoveDock(dockSide === 'left' ? 'right' : 'left')}
+                >
+                  {dockSide === 'left' ? '⇥' : '⇤'}
+                  <span className="sr-only">
+                    {dockSide === 'left' ? '작성서류 오른쪽으로 이동' : '작성서류 왼쪽으로 이동'}
+                  </span>
                 </button>
                 <button className="tool-btn" title="새 파일" disabled={!draftsFolder} onClick={onNewFile}>
                   <IconNewFile size={15} />
@@ -1875,11 +2101,23 @@ function DocsPanel({
         ) : (
           <>
             <span className="sidebar-title">{title}</span>
-            {mode === 'viewer' && recordsFolder && (
-              <button className="header-btn" title="소송기록 폴더 변경" onClick={onPickRecords}>
-                변경
+            <span className="header-actions">
+              <button
+                className="tool-btn"
+                title={dockSide === 'left' ? '문서 패널 오른쪽으로 이동' : '문서 패널 왼쪽으로 이동'}
+                onClick={() => onMoveDock(dockSide === 'left' ? 'right' : 'left')}
+              >
+                {dockSide === 'left' ? '⇥' : '⇤'}
+                <span className="sr-only">
+                  {dockSide === 'left' ? '문서 패널 오른쪽으로 이동' : '문서 패널 왼쪽으로 이동'}
+                </span>
               </button>
-            )}
+              {mode === 'viewer' && recordsFolder && (
+                <button className="header-btn" title="소송기록 폴더 변경" onClick={onPickRecords}>
+                  변경
+                </button>
+              )}
+            </span>
           </>
         )}
       </div>
@@ -2046,6 +2284,7 @@ interface TabBarProps {
     title: string
     tooltip?: string
     path?: string
+    dragPayload?: TabPayload
     attention?: boolean
     working?: boolean
     question?: boolean
@@ -2055,8 +2294,12 @@ interface TabBarProps {
   onClose: (id: string) => void
   onAdd: () => void
   addTitle: string
-  extra?: { label?: string; icon?: ReactNode; title: string; onClick: () => void }
-  extraLeft?: { label?: string; icon?: ReactNode; title: string; active?: boolean; onClick: () => void }
+  extra?:
+    | { label?: string; icon?: ReactNode; title: string; onClick: () => void }
+    | { label?: string; icon?: ReactNode; title: string; onClick: () => void }[]
+  extraLeft?:
+    | { label?: string; icon?: ReactNode; title: string; active?: boolean; onClick: () => void }
+    | { label?: string; icon?: ReactNode; title: string; active?: boolean; onClick: () => void }[]
   // 탭 재정렬(같은 창) + 창 간 이동/찢기. 둘 다 주어질 때만 탭이 draggable.
   onReorder?: (fromId: string, toId: string) => void
   onTearOut?: (id: string) => void
@@ -2082,6 +2325,8 @@ function TabBar({
   const [editing, setEditing] = useState<{ id: string; value: string } | null>(null)
   const dragId = useRef<string | null>(null)
   const draggable = !!onTearOut
+  const extraLeftItems = extraLeft ? (Array.isArray(extraLeft) ? extraLeft : [extraLeft]) : []
+  const extraItems = extra ? (Array.isArray(extra) ? extra : [extra]) : []
 
   useEffect(() => {
     const el = scrollRef.current
@@ -2097,18 +2342,19 @@ function TabBar({
 
   return (
     <div className="tabs">
-      {extraLeft && (
+      {extraLeftItems.map((item, i) => (
         <button
-          className={`tab-add ${extraLeft.active ? 'on' : ''}`}
-          title={extraLeft.title}
+          key={i}
+          className={`tab-add ${item.active ? 'on' : ''}`}
+          title={item.title}
           onClick={(e) => {
             e.stopPropagation()
-            extraLeft.onClick()
+            item.onClick()
           }}
         >
-          {extraLeft.icon ?? extraLeft.label}
+          {item.icon ?? item.label}
         </button>
-      )}
+      ))}
       {overflow && (
         <button className="tab-scroll" title="왼쪽" onClick={() => scrollBy(-180)}>
           ‹
@@ -2136,8 +2382,7 @@ function TabBar({
                     dragId.current = t.id
                     e.dataTransfer.effectAllowed = 'move'
                     onDragActive?.(true)
-                    // 파일 기반 탭만 창 간 이동/찢기 가능 (경로 없으면 재정렬만)
-                    if (t.path) window.lt.tabs.beginDrag({ path: t.path, title: t.title })
+                    if (t.dragPayload) void window.lt.tabs.beginDrag(t.dragPayload)
                   }
                 : undefined
             }
@@ -2152,7 +2397,10 @@ function TabBar({
               draggable
                 ? (e) => {
                     e.preventDefault()
-                    if (dragId.current && dragId.current !== t.id) onReorder?.(dragId.current, t.id)
+                    if (dragId.current && dragId.current !== t.id) {
+                      onReorder?.(dragId.current, t.id)
+                      void window.lt.tabs.endDrag()
+                    }
                     dragId.current = null
                   }
                 : undefined
@@ -2163,7 +2411,7 @@ function TabBar({
                     const id = dragId.current
                     dragId.current = null
                     onDragActive?.(false)
-                    if (!id || !t.path) return
+                    if (!id || !t.dragPayload) return
                     const r = await window.lt.tabs.endDrag()
                     if (r?.action === 'moved') onTearOut?.(id)
                   }
@@ -2232,11 +2480,11 @@ function TabBar({
           ›
         </button>
       )}
-      {extra && (
-        <button className="tab-add" title={extra.title} onClick={extra.onClick}>
-          {extra.icon ?? extra.label}
+      {extraItems.map((item, i) => (
+        <button key={i} className="tab-add" title={item.title} onClick={item.onClick}>
+          {item.icon ?? item.label}
         </button>
-      )}
+      ))}
       <button className="tab-add" title={addTitle} onClick={onAdd}>
         ＋
       </button>
@@ -2710,6 +2958,44 @@ function ImageViewer({
     }
   }
 
+  useEffect(() => {
+    const wrap = wrapRef.current
+    if (!wrap || mode !== 'custom') return
+    let dragging = false
+    let sx = 0
+    let sy = 0
+    let sl = 0
+    let st = 0
+    const down = (e: MouseEvent): void => {
+      if (e.button !== 0) return
+      dragging = true
+      sx = e.clientX
+      sy = e.clientY
+      sl = wrap.scrollLeft
+      st = wrap.scrollTop
+      wrap.classList.add('grabbing')
+      e.preventDefault()
+    }
+    const move = (e: MouseEvent): void => {
+      if (!dragging) return
+      wrap.scrollLeft = sl - (e.clientX - sx)
+      wrap.scrollTop = st - (e.clientY - sy)
+    }
+    const up = (): void => {
+      dragging = false
+      wrap.classList.remove('grabbing')
+    }
+    wrap.addEventListener('mousedown', down)
+    window.addEventListener('mousemove', move)
+    window.addEventListener('mouseup', up)
+    return () => {
+      wrap.removeEventListener('mousedown', down)
+      window.removeEventListener('mousemove', move)
+      window.removeEventListener('mouseup', up)
+      wrap.classList.remove('grabbing')
+    }
+  }, [mode])
+
   const imgStyle: React.CSSProperties =
     mode === 'fit_page'
       ? { maxWidth: '100%', maxHeight: '100%' }
@@ -2745,8 +3031,12 @@ function ImageViewer({
           ＋
         </button>
       </div>
-      <div className={`image-wrap ${mode === 'fit_page' ? 'center' : ''}`} ref={wrapRef} onWheel={onWheel}>
-        {url && <img src={url} style={imgStyle} alt="" />}
+      <div
+        className={`image-wrap ${mode === 'fit_page' ? 'center' : ''} ${mode === 'custom' ? 'pannable' : ''}`}
+        ref={wrapRef}
+        onWheel={onWheel}
+      >
+        {url && <img src={url} style={imgStyle} draggable={false} alt="" />}
       </div>
     </div>
   )

@@ -31,6 +31,31 @@ export interface PtyCreateOpts {
   ssh?: SshConn
 }
 
+export interface TerminalTabPayload {
+  id: string
+  title: string
+  cwd: string
+  recordsFolder?: string
+  suggestedRecords?: string
+  autoClaude?: boolean
+  jsId?: string
+  court?: string
+  caseNumber?: string
+  caseName?: string
+  client?: string
+  sessionTitle?: string
+  renamed?: boolean
+  createdAt?: number
+  resumeSessionId?: string
+  ssh?: SshConn
+  sshLabel?: string
+  profileId?: string
+}
+
+export type TabPayload =
+  | { kind: 'doc'; path: string; title: string }
+  | { kind: 'terminal'; tab: TerminalTabPayload }
+
 export interface AppSettings {
   draftsRoot?: string
   recordsRoot?: string
@@ -184,15 +209,16 @@ export interface LtApi {
     onIncoming: (cb: (payload: string) => void) => () => void
   }
   tabs: {
-    beginDrag: (payload: { path: string; title: string }) => Promise<void>
+    beginDrag: (payload: TabPayload) => Promise<void>
     endDrag: () => Promise<{ action: 'moved' | 'none' }>
     ready: () => Promise<void>
-    onReceive: (cb: (p: { path: string; title: string }) => void) => () => void
+    onReceive: (cb: (p: TabPayload) => void) => () => void
   }
   pty: {
     create: (opts: PtyCreateOpts) => Promise<void>
     write: (id: string, data: string) => void
     resize: (id: string, cols: number, rows: number) => void
+    detach: (id: string) => void
     kill: (id: string) => void
     onData: (cb: (p: { id: string; data: string }) => void) => () => void
     onExit: (cb: (p: { id: string; exitCode: number }) => void) => () => void

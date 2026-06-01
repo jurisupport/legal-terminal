@@ -33,6 +33,31 @@ interface PtyCreateOpts {
   ssh?: SshConn
 }
 
+interface TerminalTabPayload {
+  id: string
+  title: string
+  cwd: string
+  recordsFolder?: string
+  suggestedRecords?: string
+  autoClaude?: boolean
+  jsId?: string
+  court?: string
+  caseNumber?: string
+  caseName?: string
+  client?: string
+  sessionTitle?: string
+  renamed?: boolean
+  createdAt?: number
+  resumeSessionId?: string
+  ssh?: SshConn
+  sshLabel?: string
+  profileId?: string
+}
+
+type TabPayload =
+  | { kind: 'doc'; path: string; title: string }
+  | { kind: 'terminal'; tab: TerminalTabPayload }
+
 interface AppSettings {
   draftsRoot?: string
   recordsRoot?: string
@@ -204,12 +229,12 @@ const api = {
     }
   },
   tabs: {
-    beginDrag: (payload: { path: string; title: string }): Promise<void> =>
+    beginDrag: (payload: TabPayload): Promise<void> =>
       ipcRenderer.invoke('tabs:beginDrag', payload),
     endDrag: (): Promise<{ action: 'moved' | 'none' }> => ipcRenderer.invoke('tabs:endDrag'),
     ready: (): Promise<void> => ipcRenderer.invoke('tabs:ready'),
-    onReceive: (cb: (p: { path: string; title: string }) => void): (() => void) => {
-      const listener = (_e: unknown, p: { path: string; title: string }): void => cb(p)
+    onReceive: (cb: (p: TabPayload) => void): (() => void) => {
+      const listener = (_e: unknown, p: TabPayload): void => cb(p)
       ipcRenderer.on('tabs:receive', listener)
       return () => ipcRenderer.removeListener('tabs:receive', listener)
     }
@@ -219,6 +244,7 @@ const api = {
     write: (id: string, data: string): void => ipcRenderer.send('pty:write', { id, data }),
     resize: (id: string, cols: number, rows: number): void =>
       ipcRenderer.send('pty:resize', { id, cols, rows }),
+    detach: (id: string): void => ipcRenderer.send('pty:detach', { id }),
     kill: (id: string): void => ipcRenderer.send('pty:kill', { id }),
     onData: (cb: (p: { id: string; data: string }) => void): (() => void) => {
       const listener = (_e: unknown, p: { id: string; data: string }): void => cb(p)

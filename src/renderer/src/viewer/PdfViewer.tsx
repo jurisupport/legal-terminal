@@ -9,6 +9,15 @@ pdfjs.GlobalWorkerOptions.workerSrc = workerUrl
 type ZoomMode = 'fit_page' | 'fit_width' | 'custom'
 const CROP_OPTIONS = [0.05, 0.1, 0.15, 0.2, 0.25]
 const isRemotePath = (p: string): boolean => p.startsWith('ssh://')
+const isLocalCloudPath = (p: string): boolean =>
+  p.includes('/OneDrive/') || p.includes('/Library/CloudStorage/OneDrive')
+type PasswordPrompt = { reason: 'need' | 'incorrect' }
+
+function cleanPdfError(e: unknown): string {
+  return (e instanceof Error ? e.message : String(e))
+    .replace(/^Error invoking remote method '[^']+':\s*/u, '')
+    .replace(/^Error:\s*/u, '')
+}
 
 function resolveDefault(pdfZoom?: string): { mode: ZoomMode; scale: number } {
   if (pdfZoom === 'fit_width') return { mode: 'fit_width', scale: 1 }
@@ -55,17 +64,23 @@ export default function PdfViewer({
   const pageRef = useRef(1)
   const nextDocRef = useRef<(() => void) | undefined>(onNextDoc)
   const prevDocRef = useRef<(() => void) | undefined>(onPrevDoc)
+  const passwordCallbackRef = useRef<((password: string) => void) | null>(null)
 
   const [numPages, setNumPages] = useState(0)
   const [page, setPage] = useState(1)
   const [mode, setMode] = useState<ZoomMode>('fit_page')
   const [customScale, setCustomScale] = useState(1.0)
   const [rotation, setRotation] = useState(0)
+  const [panMode, setPanMode] = useState(true)
   const [effPct, setEffPct] = useState(100)
   const [wrapTick, setWrapTick] = useState(0)
   const [reloadNonce, setReloadNonce] = useState(0)
   const [err, setErr] = useState('')
   const [loading, setLoading] = useState(true)
+  const [loadingSeconds, setLoadingSeconds] = useState(0)
+  const [passwordPrompt, setPasswordPrompt] = useState<PasswordPrompt | null>(null)
+  const [passwordValue, setPasswordValue] = useState('')
+  const [passwordBusy, setPasswordBusy] = useState(false)
 
   numPagesRef.current = numPages
   pageRef.current = page
@@ -126,15 +141,37 @@ export default function PdfViewer({
     setNumPages(0)
     setPage(1)
     setRotation(0)
+    setPasswordPrompt(null)
+    setPasswordValue('')
+    setPasswordBusy(false)
+    passwordCallbackRef.current = null
+    let loadingTask: ReturnType<typeof pdfjs.getDocument> | null = null
     window.lt.fs
       .readBytes(path)
       .then(async (ab) => {
-        const doc = await pdfjs.getDocument({ data: new Uint8Array(ab) }).promise
+        loadingTask = pdfjs.getDocument({ data: new Uint8Array(ab) })
+        loadingTask.onPassword = (updatePassword: (password: string) => void, reason: number) => {
+          if (cancelled) return
+          passwordCallbackRef.current = (password: string): void => {
+            setPasswordBusy(true)
+            updatePassword(password)
+          }
+          setPasswordPrompt({
+            reason:
+              reason === pdfjs.PasswordResponses.INCORRECT_PASSWORD ? 'incorrect' : 'need'
+          })
+          setPasswordBusy(false)
+          setLoading(false)
+        }
+        const doc = await loadingTask.promise
         if (cancelled) {
           doc.destroy()
           return
         }
         docRef.current = doc
+        passwordCallbackRef.current = null
+        setPasswordPrompt(null)
+        setPasswordBusy(false)
         setNumPages(doc.numPages)
         setLoading(false)
         // 새 문서 로드 직후 뷰어에 포커스 → 다음 문서로 넘어가도 화살표 키가 바로 동작
@@ -149,17 +186,32 @@ export default function PdfViewer({
       })
       .catch((e) => {
         if (!cancelled) {
-          setErr(String(e))
+          setErr(cleanPdfError(e))
           setLoading(false)
+          setPasswordPrompt(null)
+          setPasswordBusy(false)
+          passwordCallbackRef.current = null
         }
       })
     return () => {
       cancelled = true
+      void loadingTask?.destroy()
       taskRef.current?.cancel()
       docRef.current?.destroy()
       docRef.current = null
+      passwordCallbackRef.current = null
     }
   }, [path, reloadNonce]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    if (!loading || (!isRemotePath(path) && !isLocalCloudPath(path))) {
+      setLoadingSeconds(0)
+      return
+    }
+    setLoadingSeconds(0)
+    const timer = setInterval(() => setLoadingSeconds((s) => s + 1), 1000)
+    return () => clearInterval(timer)
+  }, [loading, path])
 
   // 현재 페이지 렌더 (배율/회전/여백자르기 반영)
   useEffect(() => {
@@ -285,14 +337,15 @@ export default function PdfViewer({
     let st = 0
     const down = (e: MouseEvent): void => {
       if (e.button !== 0) return
-      // 텍스트 레이어 위에서는 드래그=텍스트 선택 (팬 비활성)
-      if ((e.target as HTMLElement)?.closest?.('.textLayer')) return
+      // 손 도구가 꺼져 있으면 텍스트 레이어 위 드래그는 텍스트 선택으로 둔다.
+      if (!panMode && (e.target as HTMLElement)?.closest?.('.textLayer')) return
       dragging = true
       sx = e.clientX
       sy = e.clientY
       sl = wrap.scrollLeft
       st = wrap.scrollTop
       wrap.classList.add('grabbing')
+      if (panMode) e.preventDefault()
     }
     const move = (e: MouseEvent): void => {
       if (!dragging) return
@@ -368,6 +421,13 @@ export default function PdfViewer({
     }
   }
 
+  const submitPassword = (e: React.FormEvent): void => {
+    e.preventDefault()
+    const password = passwordValue
+    if (!password || !passwordCallbackRef.current) return
+    passwordCallbackRef.current(password)
+  }
+
   if (err)
     return (
       <div className="welcome">
@@ -415,6 +475,14 @@ export default function PdfViewer({
         </button>
         <button className="tb-btn" onClick={() => zoomBy(1.1)} title="확대">
           ＋
+        </button>
+
+        <button
+          className={`tb-btn ${panMode ? 'on' : ''}`}
+          title={panMode ? '손 도구 켜짐' : '손 도구'}
+          onClick={() => setPanMode((v) => !v)}
+        >
+          손
         </button>
 
         <span className="tb-divider" />
@@ -468,14 +536,56 @@ export default function PdfViewer({
         )}
       </div>
       <div
-        className="pdf-canvas-wrap"
+        className={`pdf-canvas-wrap ${panMode ? 'pannable' : ''}`}
         ref={wrapRef}
         tabIndex={0}
         onKeyDown={onKeyDown}
         onMouseDown={() => wrapRef.current?.focus()}
       >
-        {loading ? (
-          <p className="muted pad">PDF 불러오는 중…</p>
+        {passwordPrompt ? (
+          <form className="pdf-password" onSubmit={submitPassword}>
+            <div className="pdf-password-title">암호가 필요한 PDF입니다</div>
+            <div className="pdf-password-sub">
+              {passwordPrompt.reason === 'incorrect'
+                ? '암호가 맞지 않습니다. 다시 입력하세요.'
+                : '문서를 열려면 PDF 암호를 입력하세요.'}
+            </div>
+            <div className="pdf-password-row">
+              <input
+                className="pdf-password-input"
+                type="password"
+                autoFocus
+                value={passwordValue}
+                disabled={passwordBusy}
+                onChange={(e) => setPasswordValue(e.target.value)}
+                placeholder="PDF 암호"
+              />
+              <button
+                className="pdf-password-submit"
+                type="submit"
+                disabled={!passwordValue || passwordBusy}
+              >
+                열기
+              </button>
+            </div>
+          </form>
+        ) : loading ? (
+          <div className="pdf-loading">
+            <p className="muted pad">
+              {(isRemotePath(path) || isLocalCloudPath(path)) && loadingSeconds >= 5
+                ? isRemotePath(path)
+                  ? '원격 PDF를 내려받는 중…'
+                  : 'OneDrive PDF를 내려받는 중…'
+                : 'PDF 불러오는 중…'}
+            </p>
+            {(isRemotePath(path) || isLocalCloudPath(path)) && loadingSeconds >= 10 && (
+              <p className="muted pad small">
+                {isRemotePath(path)
+                  ? 'OneDrive 클라우드 전용 파일이면 원격 Mac에서 다운로드가 끝날 때까지 조금 걸릴 수 있습니다.'
+                  : '맥 OneDrive 클라우드 전용 파일이면 다운로드가 끝난 뒤 열립니다.'}
+              </p>
+            )}
+          </div>
         ) : (
           <div className="pdf-page">
             <canvas ref={canvasRef} />

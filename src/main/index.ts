@@ -1,4 +1,5 @@
 import { app, BrowserWindow, shell, ipcMain, dialog, screen, Menu } from 'electron'
+import { spawn } from 'child_process'
 import { join, basename, extname, resolve, sep } from 'path'
 import { readdir, readFile, stat, writeFile, copyFile, rm, mkdir, rename, cp } from 'fs/promises'
 import { existsSync } from 'fs'
@@ -35,6 +36,7 @@ import {
   createPty,
   writePty,
   resizePty,
+  detachPty,
   killPty,
   killAllPty,
   type CreatePtyOptions
@@ -42,11 +44,13 @@ import {
 
 let mainWindow: BrowserWindow | null = null
 
-function createWindow(setMain = true, opts?: { docOnly?: boolean }): BrowserWindow {
+function createWindow(setMain = true, opts?: { docOnly?: boolean; termOnly?: boolean }): BrowserWindow {
   const docOnly = !!opts?.docOnly
-  // 문서 전용(찢어낸) 창은 최대화하지 않고 적당한 크기로, 커서 근처에 띄운다.
+  const termOnly = !!opts?.termOnly
+  const detached = docOnly || termOnly
+  // 찢어낸 창은 최대화하지 않고 적당한 크기로, 커서 근처에 띄운다.
   let pos: { x?: number; y?: number } = {}
-  if (docOnly) {
+  if (detached) {
     try {
       const p = screen.getCursorScreenPoint()
       pos = { x: Math.max(0, p.x - 300), y: Math.max(0, p.y - 30) }
@@ -55,11 +59,11 @@ function createWindow(setMain = true, opts?: { docOnly?: boolean }): BrowserWind
     }
   }
   const win = new BrowserWindow({
-    // 기준 설계 해상도 1920×1080(전체 창은 최대화), 문서 전용 창은 1000×820
-    width: docOnly ? 1000 : 1920,
-    height: docOnly ? 820 : 1080,
-    minWidth: docOnly ? 560 : 1280,
-    minHeight: docOnly ? 400 : 800,
+    // 기준 설계 해상도 1920×1080(전체 창은 최대화), 찢어낸 창은 1000×820
+    width: detached ? 1000 : 1920,
+    height: detached ? 820 : 1080,
+    minWidth: detached ? 560 : 1280,
+    minHeight: detached ? 400 : 800,
     ...pos,
     show: false,
     backgroundColor: '#1e1e1e',
@@ -76,7 +80,7 @@ function createWindow(setMain = true, opts?: { docOnly?: boolean }): BrowserWind
   if (setMain) mainWindow = win
 
   win.on('ready-to-show', () => {
-    if (!docOnly) win.maximize()
+    if (!detached) win.maximize()
     win.show()
   })
 
@@ -86,8 +90,8 @@ function createWindow(setMain = true, opts?: { docOnly?: boolean }): BrowserWind
   })
 
   // electron-vite: dev 서버 URL 또는 빌드된 index.html 로드
-  // 문서 전용 창은 #docOnly 해시로 렌더러에 알림 (터미널·탐색기 없이 문서만)
-  const hash = opts?.docOnly ? 'docOnly' : ''
+  // 전용 창은 해시로 렌더러에 알림 (문서만 / 터미널만)
+  const hash = docOnly ? 'docOnly' : termOnly ? 'termOnly' : ''
   if (process.env['ELECTRON_RENDERER_URL']) {
     win.loadURL(process.env['ELECTRON_RENDERER_URL'] + (hash ? `#${hash}` : ''))
   } else {
@@ -111,8 +115,10 @@ ipcMain.handle('claude:ask', (_e, payload: string) => {
 
 // ── 탭 드래그(창 간 이동/찢기) 조율 ──
 interface TabPayload {
-  path: string
-  title: string
+  kind?: 'doc' | 'terminal'
+  path?: string
+  title?: string
+  tab?: unknown
 }
 let pendingTabDrag: { payload: TabPayload; sourceId: number } | null = null
 // 새 창은 렌더러가 준비되기 전이라 페이로드를 큐잉했다가 'tabs:ready' 때 전달.
@@ -131,13 +137,18 @@ ipcMain.handle('tabs:ready', (e) => {
   }
 })
 
-// 화면좌표 pt가 해당 창의 '문서 탭바'(.body-col > .tabs) 위인지 렌더러에 물어 판정.
+// 화면좌표 pt가 해당 창의 지정 탭바 위인지 렌더러에 물어 판정.
 // (window.screenX/Y + getBoundingClientRect = 스크린 좌표, zoom=1에서 DIP와 일치)
-async function isOverDocTabBar(win: BrowserWindow, pt: { x: number; y: number }): Promise<boolean> {
+async function isOverTabBar(
+  win: BrowserWindow,
+  pt: { x: number; y: number },
+  selector: string
+): Promise<boolean> {
+  const safeSelector = JSON.stringify(selector)
   try {
     return await win.webContents.executeJavaScript(
       `(() => {
-        const el = document.querySelector('.body-col > .tabs');
+        const el = document.querySelector(${safeSelector});
         if (!el) return false;
         const r = el.getBoundingClientRect();
         const x = window.screenX + r.left, y = window.screenY + r.top;
@@ -155,9 +166,11 @@ ipcMain.handle('tabs:endDrag', async () => {
   if (!drag) return { action: 'none' }
   const pt = screen.getCursorScreenPoint()
   const wins = BrowserWindow.getAllWindows().filter((w) => !w.isDestroyed())
-  // 1) 어떤 창의 문서 탭바 위에서 놓였는가?
+  const kind = drag.payload.kind ?? 'doc'
+  const targetSelector = kind === 'terminal' ? '.term-col > .tabs' : '.body-col > .tabs'
+  // 1) 어떤 창의 같은 종류 탭바 위에서 놓였는가?
   for (const w of wins) {
-    if (await isOverDocTabBar(w, pt)) {
+    if (await isOverTabBar(w, pt, targetSelector)) {
       // 같은 창 탭바 = 재정렬(렌더러 onDrop이 처리), 찢기 아님
       if (w.id === drag.sourceId) return { action: 'none' }
       // 다른 창 탭바 = 그 창으로 이동(merge)
@@ -166,8 +179,8 @@ ipcMain.handle('tabs:endDrag', async () => {
       return { action: 'moved' }
     }
   }
-  // 2) 탭바 밖(본문/창 밖 등)에서 놓임 → 새 문서 전용 창으로 찢기
-  const win = createWindow(false, { docOnly: true })
+  // 2) 탭바 밖(본문/창 밖 등)에서 놓임 → 새 전용 창으로 찢기
+  const win = createWindow(false, kind === 'terminal' ? { termOnly: true } : { docOnly: true })
   pendingReceive.set(win.id, [drag.payload])
   return { action: 'moved' }
 })
@@ -272,6 +285,161 @@ const TEXT_EXT = new Set([
   '.js', '.ts', '.tsx', '.css', '.py', '.sh', '.ini', '.toml'
 ])
 const MAX_TEXT_BYTES = 2 * 1024 * 1024 // 2MB 초과 텍스트는 잘라서 안내
+const LOCAL_CLOUD_READ_TIMEOUT_MS = 45_000
+const LOCAL_CLOUD_HYDRATE_TIMEOUT_MS = 180_000
+const localPrefetching = new Set<string>()
+const localPrefetchedAt = new Map<string, number>()
+
+function isLikelyLocalOneDrivePath(filePath: string): boolean {
+  if (process.platform !== 'darwin') return false
+  const p = filePath.replace(/\\/g, '/')
+  return p.includes('/OneDrive/') || p.includes('/Library/CloudStorage/OneDrive')
+}
+
+function oneDriveCliPath(): string | undefined {
+  const appPath = '/Applications/OneDrive.app/Contents/MacOS/OneDrive'
+  return existsSync(appPath) ? appPath : undefined
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+function readViaCat(filePath: string, timeoutMs: number, collect = true): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = []
+    const errs: Buffer[] = []
+    const proc = spawn('/bin/cat', [filePath], {
+      stdio: ['ignore', collect ? 'pipe' : 'ignore', 'pipe'],
+      windowsHide: true
+    })
+    let settled = false
+    const finish = (err?: Error, buf?: Buffer): void => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      if (err) reject(err)
+      else resolve(buf ?? Buffer.alloc(0))
+    }
+    const timer = setTimeout(() => {
+      proc.kill()
+      finish(new Error('OneDrive 파일 다운로드 대기 시간이 초과되었습니다.'))
+    }, timeoutMs)
+    proc.stdout?.on('data', (chunk: Buffer) => {
+      if (collect) chunks.push(chunk)
+    })
+    proc.stderr?.on('data', (chunk: Buffer) => errs.push(chunk))
+    proc.on('error', (err) => finish(err))
+    proc.on('close', (code) => {
+      if (code === 0) {
+        finish(undefined, collect ? Buffer.concat(chunks) : Buffer.alloc(0))
+        return
+      }
+      const msg = Buffer.concat(errs).toString('utf8').trim()
+      finish(new Error(msg || `/bin/cat 종료 코드 ${code}`))
+    })
+  })
+}
+
+async function runQuiet(command: string, args: string[], timeoutMs: number): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    const proc = spawn(command, args, { stdio: 'ignore', windowsHide: true })
+    let settled = false
+    const finish = (err?: Error): void => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      if (err) reject(err)
+      else resolve()
+    }
+    const timer = setTimeout(() => {
+      proc.kill()
+      finish(new Error(`${command} timed out`))
+    }, timeoutMs)
+    proc.on('error', finish)
+    proc.on('close', () => finish())
+  })
+}
+
+async function hydrateLocalCloudFile(filePath: string, timeoutMs = LOCAL_CLOUD_HYDRATE_TIMEOUT_MS): Promise<void> {
+  try {
+    await readViaCat(filePath, 5_000, false)
+    return
+  } catch {
+    /* 파일 내용이 아직 로컬에 없으면 아래에서 다운로드를 트리거한다. */
+  }
+
+  const oneDrive = oneDriveCliPath()
+  if (oneDrive) {
+    void runQuiet('open', ['-ga', 'OneDrive'], 10_000).catch(() => {})
+    void runQuiet(oneDrive, ['/pin', filePath], 15_000).catch(() => {})
+  }
+  void runQuiet('fileproviderctl', ['materialize', filePath], 10_000).catch(() => {})
+  void runQuiet('brctl', ['download', filePath], 10_000).catch(() => {})
+
+  const deadline = Date.now() + timeoutMs
+  let lastErr: unknown
+  while (Date.now() < deadline) {
+    try {
+      await readViaCat(filePath, 5_000, false)
+      return
+    } catch (e) {
+      lastErr = e
+      await delay(1500)
+    }
+  }
+  const msg = lastErr instanceof Error ? lastErr.message : String(lastErr ?? '알 수 없는 오류')
+  throw new Error(
+    `OneDrive 파일 자동 다운로드가 시간 내 완료되지 않았습니다: ${filePath}\n맥 OneDrive 로그인/네트워크 상태를 확인한 뒤 다시 여세요. (${msg})`
+  )
+}
+
+async function readLocalBytes(filePath: string): Promise<Buffer> {
+  if (!isLikelyLocalOneDrivePath(filePath)) return await readFile(filePath)
+  try {
+    const buf = await readViaCat(filePath, LOCAL_CLOUD_READ_TIMEOUT_MS)
+    localPrefetchedAt.set(filePath, Date.now())
+    return buf
+  } catch (firstErr) {
+    const first = firstErr instanceof Error ? firstErr.message : String(firstErr)
+    if (/No such file|not a directory|Permission denied|Is a directory/i.test(first)) {
+      throw firstErr
+    }
+    await hydrateLocalCloudFile(filePath)
+    try {
+      const buf = await readViaCat(filePath, LOCAL_CLOUD_READ_TIMEOUT_MS)
+      localPrefetchedAt.set(filePath, Date.now())
+      return buf
+    } catch (retryErr) {
+      const retry = retryErr instanceof Error ? retryErr.message : String(retryErr)
+      throw new Error(`OneDrive 파일 읽기 실패: ${retry}\n초기 읽기 오류: ${first}`)
+    }
+  }
+}
+
+function prefetchLocalCloudFiles(paths: string[]): void {
+  const now = Date.now()
+  const targets = paths
+    .filter((p) => {
+      const prefetchedAt = localPrefetchedAt.get(p) ?? 0
+      return isLikelyLocalOneDrivePath(p) && !localPrefetching.has(p) && now - prefetchedAt > 10 * 60_000
+    })
+    .slice(0, 80)
+  if (targets.length === 0) return
+  for (const path of targets) localPrefetching.add(path)
+  void (async () => {
+    for (const path of targets) {
+      try {
+        await hydrateLocalCloudFile(path, 120_000)
+        localPrefetchedAt.set(path, Date.now())
+      } catch {
+        /* 선다운로드 실패는 실제 열기 시 명확히 다시 보고한다. */
+      } finally {
+        localPrefetching.delete(path)
+      }
+    }
+  })()
+}
 
 ipcMain.handle('fs:mkdir', async (_e, p: { dir: string; name: string }) => {
   try {
@@ -329,6 +497,7 @@ ipcMain.handle('fs:list', async (_e, dirPath: string) => {
       return { name: e.name, path, isDir: e.isDirectory(), mtimeMs: st.mtimeMs }
     })
   )
+  prefetchLocalCloudFiles(out.filter((e) => !e.isDir).map((e) => e.path))
   return out.sort((a, b) =>
     a.isDir === b.isDir ? a.name.localeCompare(b.name, 'ko') : a.isDir ? -1 : 1
   )
@@ -355,6 +524,7 @@ ipcMain.handle('fs:listPdfs', async (_e, dir: string) => {
   const out: { name: string; path: string }[] = []
   try {
     await walkPdfs(dir, out)
+    prefetchLocalCloudFiles(out.map((p) => p.path))
   } catch {
     /* 폴더 없음/권한 무시 */
   }
@@ -362,9 +532,14 @@ ipcMain.handle('fs:listPdfs', async (_e, dir: string) => {
 })
 
 ipcMain.handle('fs:readBytes', async (_e, filePath: string) => {
-  const buf = isRemote(filePath) ? await rfsReadBytes(filePath) : await readFile(filePath)
-  // 렌더러로 ArrayBuffer 전달 (pdf.js 입력용)
-  return buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength)
+  try {
+    const buf = isRemote(filePath) ? await rfsReadBytes(filePath) : await readLocalBytes(filePath)
+    // 렌더러로 ArrayBuffer 전달 (pdf.js 입력용)
+    return buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength)
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e)
+    throw new Error(`${isRemote(filePath) ? '원격 파일 읽기 실패' : '파일 읽기 실패'}: ${msg}`)
+  }
 })
 
 // HWP(.hwp, HWP5) 텍스트만 추출 — 이미지/표 등 서식은 무시하고 본문 텍스트만
@@ -374,7 +549,7 @@ ipcMain.handle('fs:readHwpText', async (_e, filePath: string) => {
     return { ok: false, text: '', error: 'HWPX 형식은 아직 지원하지 않습니다 (.hwp만 지원).' }
   }
   try {
-    const buf = isRemote(filePath) ? await rfsReadBytes(filePath) : await readFile(filePath)
+    const buf = isRemote(filePath) ? await rfsReadBytes(filePath) : await readLocalBytes(filePath)
     const doc = parseHwp(buf as unknown as Parameters<typeof parseHwp>[0])
     const lines: string[] = []
     for (const section of doc.sections) {
@@ -531,7 +706,7 @@ ipcMain.handle('fs:readText', async (_e, filePath: string) => {
   if (!TEXT_EXT.has(ext)) {
     return { ext, kind: 'binary' as const, text: '', size: info.size }
   }
-  const buf = await readFile(filePath)
+  const buf = await readLocalBytes(filePath)
   const truncated = buf.length > MAX_TEXT_BYTES
   return {
     ext,
@@ -550,6 +725,7 @@ ipcMain.on('pty:write', (_e, { id, data }: { id: string; data: string }) => writ
 ipcMain.on('pty:resize', (_e, { id, cols, rows }: { id: string; cols: number; rows: number }) =>
   resizePty(id, cols, rows)
 )
+ipcMain.on('pty:detach', (e, { id }: { id: string }) => detachPty(id, e.sender))
 ipcMain.on('pty:kill', (_e, { id }: { id: string }) => killPty(id))
 
 app.on('before-quit', () => {

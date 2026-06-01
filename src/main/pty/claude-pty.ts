@@ -5,9 +5,12 @@ import os from 'os'
 
 interface Session {
   proc: pty.IPty
+  viewers: Map<number, WebContents>
+  buffer: string
 }
 
 const sessions = new Map<string, Session>()
+const MAX_REPLAY_CHARS = 200_000
 
 const defaultShell =
   process.platform === 'win32'
@@ -101,8 +104,12 @@ export function createPty(opts: CreatePtyOptions, webContents: WebContents): voi
   const { id, cols, rows, autoLaunchClaude, resumeSessionId, ssh } = opts
   const cwd = opts.cwd && opts.cwd.length > 0 ? opts.cwd : os.homedir()
 
-  // 기존 동일 id 세션 정리 (HMR/재마운트 안전)
-  killPty(id)
+  const existing = sessions.get(id)
+  if (existing) {
+    attachPty(id, webContents)
+    resizePty(id, cols, rows)
+    return
+  }
 
   let proc: pty.IPty
   try {
@@ -129,13 +136,28 @@ export function createPty(opts: CreatePtyOptions, webContents: WebContents): voi
     }
     return
   }
-  sessions.set(id, { proc })
+  const session: Session = { proc, viewers: new Map(), buffer: '' }
+  sessions.set(id, session)
+  attachPty(id, webContents)
 
   proc.onData((data) => {
-    if (!webContents.isDestroyed()) webContents.send('pty:data', { id, data })
+    session.buffer = (session.buffer + data).slice(-MAX_REPLAY_CHARS)
+    for (const [viewerId, viewer] of session.viewers) {
+      if (viewer.isDestroyed()) {
+        session.viewers.delete(viewerId)
+        continue
+      }
+      viewer.send('pty:data', { id, data })
+    }
   })
   proc.onExit(({ exitCode }) => {
-    if (!webContents.isDestroyed()) webContents.send('pty:exit', { id, exitCode })
+    for (const [viewerId, viewer] of session.viewers) {
+      if (viewer.isDestroyed()) {
+        session.viewers.delete(viewerId)
+        continue
+      }
+      viewer.send('pty:exit', { id, exitCode })
+    }
     sessions.delete(id)
   })
 
@@ -149,6 +171,19 @@ export function createPty(opts: CreatePtyOptions, webContents: WebContents): voi
     // 셸이 뜨면 곧바로 Claude Code CLI 실행 (VS Code 확장과 동일한 경험)
     proc.write('claude\r')
   }
+}
+
+export function attachPty(id: string, webContents: WebContents): boolean {
+  const session = sessions.get(id)
+  if (!session || webContents.isDestroyed()) return false
+  session.viewers.set(webContents.id, webContents)
+  webContents.once('destroyed', () => detachPty(id, webContents))
+  if (session.buffer) webContents.send('pty:data', { id, data: session.buffer })
+  return true
+}
+
+export function detachPty(id: string, webContents: WebContents): void {
+  sessions.get(id)?.viewers.delete(webContents.id)
 }
 
 export function writePty(id: string, data: string): void {

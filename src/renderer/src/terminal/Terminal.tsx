@@ -224,16 +224,6 @@ export default function Terminal({
       }
       mount.addEventListener('paste', onPaste, true)
 
-      window.lt.pty.create({
-        id,
-        cwd,
-        cols: term.cols,
-        rows: term.rows,
-        autoLaunchClaude: autoClaude,
-        resumeSessionId,
-        ssh
-      })
-
       // 진행중/완료 감지:
       // claude는 작업 중 "esc to interrupt" 스피너를 계속 그린다 → 그게 보이면 working.
       // 원격 SSH에서는 화면 갱신이 뭉쳐 도착할 수 있으므로 충분히 조용해진 뒤에만 done으로 본다.
@@ -285,6 +275,16 @@ export default function Terminal({
         if (working) scheduleIdle(QUESTION_RE.test(stripAnsi(recent)) ? 500 : idleMs)
       })
 
+      window.lt.pty.create({
+        id,
+        cwd,
+        cols: term.cols,
+        rows: term.rows,
+        autoLaunchClaude: autoClaude,
+        resumeSessionId,
+        ssh
+      })
+
       const doResize = (): void => {
         // 숨겨진(display:none) 동안엔 크기가 0으로 측정돼 pty가 좁게 줄어든다 → 건너뛴다.
         if (!mount.offsetWidth || !mount.offsetHeight) return
@@ -307,7 +307,7 @@ export default function Terminal({
         mount.removeEventListener('contextmenu', onCtx)
         mount.removeEventListener('paste', onPaste, true)
         ro.disconnect()
-        window.lt.pty.kill(id)
+        window.lt.pty.detach(id)
         term.dispose()
         termRef.current = null
         fitRef.current = null

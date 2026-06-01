@@ -1,4 +1,6 @@
 import { Client, type SFTPWrapper, utils } from 'ssh2'
+import { spawn } from 'child_process'
+import { createHash } from 'crypto'
 import { readFile } from 'fs/promises'
 import { existsSync } from 'fs'
 import { homedir } from 'os'
@@ -30,6 +32,63 @@ const pool = new Map<string, Promise<{ client: Client; sftp: SFTPWrapper }>>()
 
 const winAgent = '\\\\.\\pipe\\openssh-ssh-agent'
 const DEFAULT_KEYS = ['id_ed25519', 'id_ecdsa', 'id_rsa']
+const sshBin = process.platform === 'win32' ? 'ssh.exe' : 'ssh'
+const SSH_READ_TIMEOUT_MS = 120_000
+const SSH_QUICK_READ_TIMEOUT_MS = 8_000
+const RCLONE_READ_TIMEOUT_MS = 5 * 60_000
+const REMOTE_CLOUD_HYDRATE_TIMEOUT_MS = 10 * 60_000
+const REMOTE_MATERIALIZE_TMP_ROOT = '/tmp/legal-terminal-rclone-materialize'
+const remotePrefetching = new Set<string>()
+const remotePrefetchedAt = new Map<string, number>()
+
+function shq(s: string): string {
+  return `'${s.replace(/'/g, "'\\''")}'`
+}
+
+function isLikelyOneDrivePath(path: string): boolean {
+  return path.includes('/OneDrive/') || path.includes('/Library/CloudStorage/OneDrive')
+}
+
+function oneDriveCloudPath(path: string): string | undefined {
+  const marker = '/OneDrive/'
+  const idx = path.indexOf(marker)
+  if (idx >= 0) return 'onedrive:' + path.slice(idx + marker.length).normalize('NFC')
+  const cloudStorage = path.match(/\/Library\/CloudStorage\/OneDrive[^/]*\/(.+)$/)
+  return cloudStorage ? 'onedrive:' + cloudStorage[1].normalize('NFC') : undefined
+}
+
+function remoteRcloneBootstrap(): string {
+  return [
+    'PATH="/opt/homebrew/bin:/usr/local/bin:/opt/local/bin:$PATH"',
+    'rclone_bin=$(command -v rclone 2>/dev/null || true)',
+    'if [ -z "$rclone_bin" ]; then',
+    '  for p in /opt/homebrew/bin/rclone /usr/local/bin/rclone /opt/local/bin/rclone; do',
+    '    [ -x "$p" ] && rclone_bin="$p" && break',
+    '  done',
+    'fi',
+    'if [ -z "$rclone_bin" ]; then',
+    '  echo "rclone not found on remote Mac" >&2',
+    '  exit 127',
+    'fi'
+  ].join('\n')
+}
+
+function remoteMaterializeTmpPath(profileId: string, cloudPath: string): string {
+  const rel = cloudPath.replace(/^[^:]+:/, '')
+  const hash = createHash('sha256')
+    .update(profileId + '\0' + cloudPath)
+    .digest('hex')
+    .slice(0, 24)
+  const base = posix.basename(rel) || 'file'
+  return posix.join(REMOTE_MATERIALIZE_TMP_ROOT, profileId, `${hash}-${base}`)
+}
+
+async function getProfile(profileId: string): Promise<SshProfile> {
+  const settings = await getSettings()
+  const profile = (settings.sshProfiles ?? []).find((p) => p.id === profileId)
+  if (!profile) throw new Error('SSH 프로필을 찾을 수 없습니다: ' + profileId)
+  return profile
+}
 
 // 프로필 + 기본 키/agent로 ssh2 접속 설정을 만든다.
 // 비밀번호 인증은 지원하지 않음(파일 패널은 키/agent 필요) — 실패 시 명확한 에러를 던진다.
@@ -71,9 +130,7 @@ async function buildConfig(p: SshProfile): Promise<Record<string, unknown>> {
 
 function connect(profileId: string): Promise<{ client: Client; sftp: SFTPWrapper }> {
   return (async () => {
-    const settings = await getSettings()
-    const profile = (settings.sshProfiles ?? []).find((p) => p.id === profileId)
-    if (!profile) throw new Error('SSH 프로필을 찾을 수 없습니다: ' + profileId)
+    const profile = await getProfile(profileId)
     const cfg = await buildConfig(profile)
 
     return await new Promise<{ client: Client; sftp: SFTPWrapper }>((resolve, reject) => {
@@ -143,17 +200,50 @@ interface Entry {
   mtimeMs?: number
 }
 
+function sameFsName(a: string, b: string): boolean {
+  return a === b || a.normalize('NFC') === b.normalize('NFC') || a.normalize('NFD') === b.normalize('NFD')
+}
+
+function sftpLstat(sftp: SFTPWrapper, path: string): Promise<unknown> {
+  return new Promise((resolve, reject) =>
+    sftp.lstat(path, (err, st) => (err ? reject(err) : resolve(st)))
+  )
+}
+
+async function resolveRemotePath(sftp: SFTPWrapper, requestedPath: string): Promise<string> {
+  try {
+    await sftpLstat(sftp, requestedPath)
+    return requestedPath
+  } catch {
+    /* Try component-wise Unicode normalization fallback below. */
+  }
+  const absolute = requestedPath.startsWith('/')
+  const parts = requestedPath.split('/').filter(Boolean)
+  let current = absolute ? '/' : '.'
+  for (const part of parts) {
+    const list = await new Promise<{ filename: string }[]>((resolve, reject) =>
+      sftp.readdir(current, (err, l) => (err ? reject(err) : resolve(l as never)))
+    )
+    const hit = list.find((e) => sameFsName(e.filename, part))
+    if (!hit) throw new Error('원격 경로를 찾을 수 없습니다: ' + requestedPath)
+    current = current === '/' ? '/' + hit.filename : posix.join(current, hit.filename)
+  }
+  return current
+}
+
 // 디렉터리 목록. 심볼릭 링크는 stat으로 디렉터리 여부 확인.
 export async function rfsList(uri: string): Promise<Entry[]> {
   const { profileId, path } = parseRemote(uri)
   const sftp = await getSftp(profileId)
+  const actualPath = await resolveRemotePath(sftp, path)
   const list = await new Promise<{ filename: string; attrs: { mode: number; mtime?: number } }[]>(
-    (resolve, reject) => sftp.readdir(path, (err, l) => (err ? reject(err) : resolve(l as never)))
+    (resolve, reject) =>
+      sftp.readdir(actualPath, (err, l) => (err ? reject(err) : resolve(l as never)))
   )
   const out: Entry[] = []
   for (const e of list) {
     if (e.filename.startsWith('.')) continue
-    const remotePath = posix.join(path, e.filename)
+    const remotePath = posix.join(actualPath, e.filename)
     let isDir = (e.attrs.mode & S_IFMT) === S_IFDIR
     if ((e.attrs.mode & S_IFMT) === S_IFLNK) {
       isDir = await statIsDir(sftp, remotePath)
@@ -168,6 +258,7 @@ export async function rfsList(uri: string): Promise<Entry[]> {
   out.sort((a, b) =>
     a.isDir === b.isDir ? a.name.localeCompare(b.name, 'ko') : a.isDir ? -1 : 1
   )
+  prefetchRemoteOneDriveFiles(profileId, out.filter((e) => !e.isDir).map((e) => e.path))
   return out
 }
 
@@ -180,9 +271,383 @@ function statIsDir(sftp: SFTPWrapper, path: string): Promise<boolean> {
 export async function rfsReadBytes(uri: string): Promise<Buffer> {
   const { profileId, path } = parseRemote(uri)
   const sftp = await getSftp(profileId)
-  return await new Promise<Buffer>((resolve, reject) =>
-    sftp.readFile(path, (err, buf) => (err ? reject(err) : resolve(buf as Buffer)))
-  )
+  const actualPath = await resolveRemotePath(sftp, path)
+  if (isLikelyOneDrivePath(actualPath)) {
+    const cloudPath = oneDriveCloudPath(actualPath)
+    try {
+      return await readBytesViaSsh(profileId, actualPath, SSH_QUICK_READ_TIMEOUT_MS)
+    } catch (sshErr) {
+      if (cloudPath) {
+        try {
+          await materializeRemoteOneDriveFile(profileId, cloudPath, actualPath)
+          return await readBytesViaSsh(profileId, actualPath, SSH_READ_TIMEOUT_MS)
+        } catch (materializeErr) {
+          try {
+            return await readBytesViaRclone(profileId, cloudPath)
+          } catch (rcloneErr) {
+            if (!isCloudTimeout(sshErr)) throw new Error(readFailureMessage(sshErr, rcloneErr))
+            await hydrateRemoteFile(profileId, actualPath)
+            try {
+              return await readBytesViaSsh(profileId, actualPath)
+            } catch (retryErr) {
+              throw new Error(
+                [
+                  readFailureMessage(sshErr, retryErr),
+                  `rclone 직접 읽기 실패(${rcloneErr instanceof Error ? rcloneErr.message : String(rcloneErr)})`,
+                  `원격 파일 물리화 실패(${materializeErr instanceof Error ? materializeErr.message : String(materializeErr)})`
+                ].join('\n')
+              )
+            }
+          }
+        }
+      }
+      if (!isCloudTimeout(sshErr)) throw sshErr
+      await hydrateRemoteFile(profileId, actualPath)
+      return await readBytesViaSsh(profileId, actualPath)
+    }
+  }
+  try {
+    return await new Promise<Buffer>((resolve, reject) => {
+      const chunks: Buffer[] = []
+      const stream = sftp.createReadStream(actualPath)
+      let settled = false
+      let timer: ReturnType<typeof setTimeout> | undefined
+      const fail = (err: Error): void => {
+        if (settled) return
+        settled = true
+        if (timer) clearTimeout(timer)
+        stream.destroy()
+        reject(err)
+      }
+      const arm = (): void => {
+        if (timer) clearTimeout(timer)
+        timer = setTimeout(() => fail(new Error('SFTP read timed out')), 15_000)
+      }
+      arm()
+      stream.on('data', (chunk: Buffer | string) => {
+        chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk))
+        arm()
+      })
+      stream.on('error', (err: unknown) => fail(err instanceof Error ? err : new Error(String(err))))
+      stream.on('end', () => {
+        if (settled) return
+        settled = true
+        if (timer) clearTimeout(timer)
+        resolve(Buffer.concat(chunks))
+      })
+    })
+  } catch (e) {
+    const sftpErr = e
+    try {
+      return await readBytesViaSsh(profileId, actualPath)
+    } catch (sshErr) {
+      if (isCloudTimeout(sshErr)) {
+        await hydrateRemoteFile(profileId, actualPath)
+        try {
+          return await readBytesViaSsh(profileId, actualPath)
+        } catch (retryErr) {
+          throw new Error(cloudFileMessage(actualPath, sftpErr, retryErr))
+        }
+      }
+      throw new Error(readFailureMessage(sftpErr, sshErr))
+    }
+  }
+}
+
+function isCloudTimeout(e: unknown): boolean {
+  return /Operation timed out|timed out/i.test(e instanceof Error ? e.message : String(e))
+}
+
+function readFailureMessage(sftpErr: unknown, sshErr: unknown): string {
+  const sftpMsg = sftpErr instanceof Error ? sftpErr.message : String(sftpErr)
+  const sshMsg = sshErr instanceof Error ? sshErr.message : String(sshErr)
+  return `SFTP 읽기 실패(${sftpMsg}); SSH fallback 실패: ${sshMsg}`
+}
+
+function cloudFileMessage(path: string, sftpErr: unknown, retryErr: unknown): string {
+  return [
+    readFailureMessage(sftpErr, retryErr),
+    `원격 파일 자동 다운로드가 시간 내 완료되지 않았습니다: ${path}`,
+    '원격 Mac의 OneDrive 로그인/네트워크 상태를 확인한 뒤 다시 여세요.'
+  ].join('\n')
+}
+
+async function readBytesViaSsh(
+  profileId: string,
+  path: string,
+  timeoutMs = SSH_READ_TIMEOUT_MS
+): Promise<Buffer> {
+  const profile = await getProfile(profileId)
+  const args = sshArgs(profile)
+  args.push(`cat -- ${shq(path)}`)
+
+  return await new Promise<Buffer>((resolve, reject) => {
+    const chunks: Buffer[] = []
+    const errs: Buffer[] = []
+    const proc = spawn(sshBin, args, { windowsHide: true })
+    const timer = setTimeout(() => {
+      proc.kill()
+      reject(new Error('Operation timed out'))
+    }, timeoutMs)
+    proc.stdout.on('data', (chunk: Buffer) => chunks.push(chunk))
+    proc.stderr.on('data', (chunk: Buffer) => errs.push(chunk))
+    proc.on('error', (err) => {
+      clearTimeout(timer)
+      reject(new Error(`SSH fallback 실행 실패: ${err.message}`))
+    })
+    proc.on('close', (code) => {
+      clearTimeout(timer)
+      if (code === 0) {
+        resolve(Buffer.concat(chunks))
+        return
+      }
+      const fallbackErr = Buffer.concat(errs).toString('utf8').trim()
+      reject(new Error(fallbackErr || `ssh 종료 코드 ${code}`))
+    })
+  })
+}
+
+async function readBytesViaRclone(profileId: string, cloudPath: string): Promise<Buffer> {
+  const profile = await getProfile(profileId)
+  const script = `${remoteRcloneBootstrap()}\n"$rclone_bin" cat ${shq(cloudPath)} --retries=1 --low-level-retries=1`
+
+  return await new Promise<Buffer>((resolve, reject) => {
+    const chunks: Buffer[] = []
+    const errs: Buffer[] = []
+    const proc = spawn(sshBin, [...sshArgs(profile), script], { windowsHide: true })
+    const timer = setTimeout(() => {
+      proc.kill()
+      reject(new Error('rclone read timed out'))
+    }, RCLONE_READ_TIMEOUT_MS)
+    proc.stdout.on('data', (chunk: Buffer) => chunks.push(chunk))
+    proc.stderr.on('data', (chunk: Buffer) => errs.push(chunk))
+    proc.on('error', (err) => {
+      clearTimeout(timer)
+      reject(new Error(`rclone 실행 실패: ${err.message}`))
+    })
+    proc.on('close', (code) => {
+      clearTimeout(timer)
+      if (code === 0) {
+        resolve(Buffer.concat(chunks))
+        return
+      }
+      const msg = Buffer.concat(errs).toString('utf8').trim()
+      reject(new Error(msg || `rclone 종료 코드 ${code}`))
+    })
+  })
+}
+
+async function materializeRemoteOneDriveFile(
+  profileId: string,
+  cloudPath: string,
+  targetPath: string
+): Promise<void> {
+  const profile = await getProfile(profileId)
+  const tmpPath = `${remoteMaterializeTmpPath(profileId, cloudPath)}.part.$$`
+  const script = [
+    remoteRcloneBootstrap(),
+    `cloud=${shq(cloudPath)}`,
+    `target=${shq(targetPath)}`,
+    `tmp=${shq(tmpPath)}`,
+    'if ! ls -lO "$target" 2>/dev/null | grep -q "dataless"; then exit 0; fi',
+    'mode=$(stat -f "%Lp" "$target" 2>/dev/null || echo 600)',
+    'gid=$(stat -f "%g" "$target" 2>/dev/null || true)',
+    'mkdir -p "$(dirname "$tmp")"',
+    'rm -f "$tmp"',
+    '"$rclone_bin" copyto "$cloud" "$tmp" --ignore-times --retries=1 --low-level-retries=1',
+    'chmod "$mode" "$tmp" >/dev/null 2>&1 || true',
+    'if [ -n "$gid" ]; then chgrp "$gid" "$tmp" >/dev/null 2>&1 || true; fi',
+    'mv -f "$tmp" "$target"'
+  ].join('\n')
+
+  await new Promise<void>((resolve, reject) => {
+    const errs: Buffer[] = []
+    const proc = spawn(sshBin, [...sshArgs(profile), script], { windowsHide: true })
+    const timer = setTimeout(() => {
+      proc.kill()
+      reject(new Error('rclone materialize timed out'))
+    }, RCLONE_READ_TIMEOUT_MS)
+    proc.stderr.on('data', (chunk: Buffer) => errs.push(chunk))
+    proc.on('error', (err) => {
+      clearTimeout(timer)
+      reject(new Error(`rclone materialize 실행 실패: ${err.message}`))
+    })
+    proc.on('close', (code) => {
+      clearTimeout(timer)
+      if (code === 0) resolve()
+      else reject(new Error(Buffer.concat(errs).toString('utf8').trim() || `rclone 종료 코드 ${code}`))
+    })
+  })
+}
+
+function prefetchRemoteOneDriveFiles(profileId: string, uris: string[]): void {
+  const now = Date.now()
+  const pairs = uris
+    .map((uri) => {
+      const { path } = parseRemote(uri)
+      const cloudPath = oneDriveCloudPath(path)
+      if (!cloudPath) return null
+      const key = `${profileId}\0${cloudPath}`
+      const doneAt = remotePrefetchedAt.get(key) ?? 0
+      if (remotePrefetching.has(key) || now - doneAt < 10 * 60_000) return null
+      return { key, cloudPath, targetPath: path }
+    })
+    .filter((p): p is { key: string; cloudPath: string; targetPath: string } => !!p)
+  if (pairs.length === 0) return
+
+  for (const p of pairs) remotePrefetching.add(p.key)
+  void (async () => {
+    const profile = await getProfile(profileId)
+    const lines = pairs
+      .map((p) => `${Buffer.from(p.cloudPath).toString('base64')}\t${Buffer.from(p.targetPath).toString('base64')}`)
+      .join('\n')
+    const tmpRoot = posix.join(REMOTE_MATERIALIZE_TMP_ROOT, profileId)
+    const script = [
+      remoteRcloneBootstrap(),
+      `tmp_root=${shq(tmpRoot)}`,
+      'while IFS="$(printf \'\\t\')" read -r cloud64 target64; do',
+      '  [ -z "$cloud64" ] && continue',
+      '  cloud=$(printf "%s" "$cloud64" | base64 --decode)',
+      '  target=$(printf "%s" "$target64" | base64 --decode)',
+      '  ls -lO "$target" 2>/dev/null | grep -q "dataless" || continue',
+      '  mode=$(stat -f "%Lp" "$target" 2>/dev/null || echo 600)',
+      '  gid=$(stat -f "%g" "$target" 2>/dev/null || true)',
+      '  mkdir -p "$tmp_root"',
+      '  name=$(basename "$target")',
+      '  tmp="$tmp_root/$name.part.$$"',
+      '  rm -f "$tmp"',
+      '  if "$rclone_bin" copyto "$cloud" "$tmp" --ignore-times --retries=1 --low-level-retries=1; then',
+      '    chmod "$mode" "$tmp" >/dev/null 2>&1 || true',
+      '    if [ -n "$gid" ]; then chgrp "$gid" "$tmp" >/dev/null 2>&1 || true; fi',
+      '    if ls -lO "$target" 2>/dev/null | grep -q "dataless"; then',
+      '      mv -f "$tmp" "$target"',
+      '    else',
+      '      rm -f "$tmp"',
+      '    fi',
+      '  else',
+      '    rm -f "$tmp"',
+      '  fi',
+      `done <<'LT_PREFETCH_FILES'\n${lines}\nLT_PREFETCH_FILES`
+    ].join('\n')
+    await new Promise<void>((resolve) => {
+      const proc = spawn(sshBin, [...sshArgs(profile), script], { windowsHide: true })
+      proc.on('error', () => resolve())
+      proc.on('close', () => resolve())
+    })
+    const finishedAt = Date.now()
+    for (const p of pairs) {
+      remotePrefetching.delete(p.key)
+      remotePrefetchedAt.set(p.key, finishedAt)
+    }
+  })().catch(() => {
+    for (const p of pairs) remotePrefetching.delete(p.key)
+  })
+}
+function sshArgs(profile: SshProfile): string[] {
+  const args: string[] = []
+  if (profile.port) args.push('-p', String(profile.port))
+  if (profile.identityFile) args.push('-i', profile.identityFile)
+  args.push('-o', 'BatchMode=yes')
+  args.push('-o', 'ConnectTimeout=20')
+  args.push('-o', 'ServerAliveInterval=30')
+  args.push('-o', 'StrictHostKeyChecking=accept-new')
+  args.push(`${profile.user}@${profile.host}`)
+  return args
+}
+
+async function hydrateRemoteFile(profileId: string, path: string): Promise<void> {
+  const profile = await getProfile(profileId)
+  const script = `
+p=${shq(path)}
+err="/tmp/legal-terminal-download-$$.err"
+cleanup() { rm -f "$err"; }
+trap cleanup EXIT
+
+try_read() {
+  rm -f "$err"
+  python3 - "$p" > /dev/null 2>"$err" <<'PY' &
+import sys
+p = sys.argv[1]
+with open(p, 'rb') as f:
+    f.read(4096)
+PY
+  rpid=$!
+  i=0
+  while [ "$i" -lt 8 ]; do
+    if ! kill -0 "$rpid" >/dev/null 2>&1; then
+      wait "$rpid"
+      return $?
+    fi
+    sleep 1
+    i=$((i + 1))
+  done
+  kill "$rpid" >/dev/null 2>&1 || true
+  wait "$rpid" >/dev/null 2>&1 || true
+  echo "OneDrive placeholder read timed out" > "$err"
+  return 124
+}
+
+is_dataless() {
+  ls -lO "$p" 2>/dev/null | grep -q "dataless"
+}
+
+start_downloader() {
+  if [ -n "\${dlpid:-}" ] && kill -0 "$dlpid" >/dev/null 2>&1; then
+    return 0
+  fi
+  rm -f "$err"
+  /bin/cat "$p" >/dev/null 2>"$err" &
+  dlpid=$!
+}
+
+if ! is_dataless && try_read; then exit 0; fi
+
+onedrive="/Applications/OneDrive.app/Contents/MacOS/OneDrive"
+if [ -x "$onedrive" ]; then
+  open -ga OneDrive >/dev/null 2>&1 || true
+  "$onedrive" /pin "$p" >/dev/null 2>&1 || true
+fi
+
+start_downloader
+deadline=$(( $(date +%s) + 590 ))
+while [ "$(date +%s)" -lt "$deadline" ]; do
+  if ! is_dataless; then
+    if [ -n "\${dlpid:-}" ]; then wait "$dlpid" >/dev/null 2>&1 || true; fi
+    exit 0
+  fi
+  if [ -n "\${dlpid:-}" ] && ! kill -0 "$dlpid" >/dev/null 2>&1; then
+    wait "$dlpid" >/dev/null 2>&1
+    if ! is_dataless && try_read; then exit 0; fi
+    if [ -x "$onedrive" ]; then "$onedrive" /pin "$p" >/dev/null 2>&1 || true; fi
+    start_downloader
+  fi
+  sleep 2
+done
+
+if [ -n "\${dlpid:-}" ]; then kill "$dlpid" >/dev/null 2>&1 || true; fi
+cat "$err" >&2 2>/dev/null || true
+if [ -x "$onedrive" ]; then "$onedrive" /getpin "$p" >&2 || true; fi
+ls -lO@ "$p" >&2 2>/dev/null || true
+exit 1
+`.trim()
+  await new Promise<void>((resolve, reject) => {
+    const errs: Buffer[] = []
+    const proc = spawn(sshBin, [...sshArgs(profile), script], { windowsHide: true })
+    const timer = setTimeout(() => {
+      proc.kill()
+      reject(new Error('원격 OneDrive 다운로드 대기 시간이 초과되었습니다.'))
+    }, REMOTE_CLOUD_HYDRATE_TIMEOUT_MS)
+    proc.stderr.on('data', (chunk: Buffer) => errs.push(chunk))
+    proc.on('error', (err) => {
+      clearTimeout(timer)
+      reject(err)
+    })
+    proc.on('close', (code) => {
+      clearTimeout(timer)
+      if (code === 0) resolve()
+      else reject(new Error(Buffer.concat(errs).toString('utf8').trim() || `ssh 종료 코드 ${code}`))
+    })
+  })
 }
 
 export async function rfsWriteText(uri: string, content: string): Promise<void> {
@@ -213,8 +678,9 @@ export async function rfsStat(
 ): Promise<{ size: number; isDir: boolean; mtimeMs?: number }> {
   const { profileId, path } = parseRemote(uri)
   const sftp = await getSftp(profileId)
+  const actualPath = await resolveRemotePath(sftp, path)
   return await new Promise((resolve, reject) =>
-    sftp.stat(path, (err, st) =>
+    sftp.stat(actualPath, (err, st) =>
       err
         ? reject(err)
         : resolve({
@@ -318,8 +784,10 @@ async function removeRec(sftp: SFTPWrapper, path: string): Promise<void> {
 export async function rfsListPdfs(uri: string): Promise<{ name: string; path: string }[]> {
   const { profileId, path } = parseRemote(uri)
   const sftp = await getSftp(profileId)
+  const actualPath = await resolveRemotePath(sftp, path)
   const out: { name: string; path: string }[] = []
-  await walk(sftp, profileId, path, out, 0)
+  await walk(sftp, profileId, actualPath, out, 0)
+  prefetchRemoteOneDriveFiles(profileId, out.map((p) => p.path))
   return out
 }
 
