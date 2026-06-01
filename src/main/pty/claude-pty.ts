@@ -104,22 +104,31 @@ export function createPty(opts: CreatePtyOptions, webContents: WebContents): voi
   // 기존 동일 id 세션 정리 (HMR/재마운트 안전)
   killPty(id)
 
-  const proc = ssh
-    ? pty.spawn(sshBin, buildSshArgs(opts), {
-        name: 'xterm-256color',
-        // 로컬 cwd는 ssh 실행에만 쓰임(원격 경로는 위 명령의 cd가 처리)
-        cwd: os.homedir(),
-        cols: Math.max(cols, 2),
-        rows: Math.max(rows, 1),
-        env: cleanEnv()
-      })
-    : pty.spawn(defaultShell, defaultShellArgs, {
-        name: 'xterm-256color',
-        cwd,
-        cols: Math.max(cols, 2),
-        rows: Math.max(rows, 1),
-        env: cleanEnv()
-      })
+  let proc: pty.IPty
+  try {
+    proc = ssh
+      ? pty.spawn(sshBin, buildSshArgs(opts), {
+          name: 'xterm-256color',
+          // 로컬 cwd는 ssh 실행에만 쓰임(원격 경로는 위 명령의 cd가 처리)
+          cwd: os.homedir(),
+          cols: Math.max(cols, 2),
+          rows: Math.max(rows, 1),
+          env: cleanEnv()
+        })
+      : pty.spawn(defaultShell, defaultShellArgs, {
+          name: 'xterm-256color',
+          cwd,
+          cols: Math.max(cols, 2),
+          rows: Math.max(rows, 1),
+          env: cleanEnv()
+        })
+  } catch (e) {
+    if (!webContents.isDestroyed()) {
+      webContents.send('pty:data', { id, data: `\r\n\x1b[31m[터미널 시작 실패: ${String(e)}]\x1b[0m\r\n` })
+      webContents.send('pty:exit', { id, exitCode: 1 })
+    }
+    return
+  }
   sessions.set(id, { proc })
 
   proc.onData((data) => {

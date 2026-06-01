@@ -477,7 +477,7 @@ export default function App(): JSX.Element {
     name?: string,
     meta?: CaseMeta,
     records?: string
-  ): void => {
+  ): { id: string; title: string } => {
     const title = name || remotePath.replace(/\/+$/, '').split('/').pop() || profile.label
     const draftsUri = remoteUri(profile.id, remotePath)
     const ssh = {
@@ -513,6 +513,38 @@ export default function App(): JSX.Element {
     window.lt.case.addHistory({ drafts: draftsUri, records, name: title }).then(setRecent)
     // 소송기록이 정해졌으면 페어링 기억(다음에 자동 적용) — 로컬과 동일
     if (records) window.lt.case.setPairing(draftsUri, records)
+    return { id: tab.id, title }
+  }
+
+  const attachRemoteRecords = (
+    tabId: string,
+    profile: SshProfile,
+    remotePath: string,
+    title: string,
+    records?: string
+  ): void => {
+    if (!records) return
+    setTermTabs((tabs) =>
+      tabs.map((t) => (t.id === tabId ? { ...t, recordsFolder: records } : t))
+    )
+    setCurrentCase((c) =>
+      c?.profileId === profile.id && c.remotePath === remotePath ? { ...c, records } : c
+    )
+    const drafts = remoteUri(profile.id, remotePath)
+    window.lt.case.setPairing(drafts, records)
+    window.lt.case.addHistory({ drafts, records, name: title }).then(setRecent)
+  }
+
+  const resolveRemoteRecordsLater = (
+    tabId: string,
+    profile: SshProfile,
+    remotePath: string,
+    title: string,
+    c?: JsCase
+  ): void => {
+    void resolveRemoteRecords(profile, remotePath, c)
+      .then((records) => attachRemoteRecords(tabId, profile, remotePath, title, records))
+      .catch(() => {})
   }
 
   // ssh:// URI에서 원격 plain 경로만 추출 (createRemoteCase의 cwd용)
@@ -1108,9 +1140,10 @@ export default function App(): JSX.Element {
       matchedUri = await matchCaseFolder(remoteUri(profile.id, profile.draftsRoot), c)
     }
     if (matchedUri) {
-      // 소송기록: 페어링 기억 → 사건번호 매칭 (로컬과 동일 우선순위)
-      const recordsUri = await resolveRemoteRecords(profile, remotePlain(matchedUri, profile.id), c)
-      createRemoteCase(profile, remotePlain(matchedUri, profile.id), name, meta, recordsUri)
+      const remotePath = remotePlain(matchedUri, profile.id)
+      const opened = createRemoteCase(profile, remotePath, name, meta)
+      // 소송기록 매칭은 터미널을 먼저 띄운 뒤 붙인다. SFTP/키 문제로 터미널 생성이 막히면 안 된다.
+      resolveRemoteRecordsLater(opened.id, profile, remotePath, opened.title, c)
       setMode('explorer')
     } else {
       // 작성서류 매칭 실패 → 폴더 선택기로 직접 지정 (소송기록은 picker onPick에서 resolve)
@@ -1483,9 +1516,8 @@ export default function App(): JSX.Element {
           onPick={async (remotePath) => {
             const prof = remotePick
             setRemotePick(null)
-            // 소송기록: 페어링 기억 → 폴더명 매칭 (로컬과 동일)
-            const records = await resolveRemoteRecords(prof, remotePath)
-            createRemoteCase(prof, remotePath, undefined, undefined, records)
+            const opened = createRemoteCase(prof, remotePath)
+            resolveRemoteRecordsLater(opened.id, prof, remotePath, opened.title)
           }}
         />
       )}
@@ -1499,8 +1531,8 @@ export default function App(): JSX.Element {
           onPick={async (remotePath) => {
             const { profile, name, meta } = remoteCasePick
             setRemoteCasePick(null)
-            const records = await resolveRemoteRecords(profile, remotePath)
-            createRemoteCase(profile, remotePath, name, meta, records)
+            const opened = createRemoteCase(profile, remotePath, name, meta)
+            resolveRemoteRecordsLater(opened.id, profile, remotePath, opened.title)
             setMode('explorer')
           }}
         />
