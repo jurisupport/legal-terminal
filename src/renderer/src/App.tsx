@@ -504,6 +504,11 @@ export default function App(): JSX.Element {
     profile: SshProfile
     macFolder: string
   } | null>(null)
+  const [workspacePick, setWorkspacePick] = useState<{
+    loading: boolean
+    entries: WorkspaceEntry[]
+    error?: string
+  } | null>(null)
 
   // 활성 PDF의 목차 분류 결과 + 페이지 점프 신호
   const [pdfRecord, setPdfRecord] = useState<{ path: string; parsed: ParsedRecord } | null>(null)
@@ -1501,34 +1506,7 @@ export default function App(): JSX.Element {
     )
   }
 
-  const chooseWorkspaceEntry = (entries: WorkspaceEntry[]): WorkspaceEntry | null => {
-    if (entries.length === 0) return null
-    if (entries.length === 1) return entries[0]
-    const selected = window.prompt(
-      `불러올 작업환경 번호를 입력하세요.\n\n${entries.map(describeWorkspaceEntry).join('\n')}`,
-      '1'
-    )
-    if (selected === null) return null
-    const index = Number.parseInt(selected.trim(), 10) - 1
-    if (!Number.isInteger(index) || !entries[index]) {
-      window.alert('작업환경 번호가 올바르지 않습니다.')
-      return null
-    }
-    return entries[index]
-  }
-
-  const loadSavedWorkspace = async (): Promise<WorkspaceLoadResult> => {
-    const list = await window.lt.workspace.list()
-    if (!list.ok) return { ok: false, error: list.error ?? '작업환경 목록을 불러오지 못했습니다.' }
-    const entries = list.entries ?? []
-    if (entries.length === 0) return window.lt.workspace.load()
-    const entry = chooseWorkspaceEntry(entries)
-    if (!entry) return { ok: true, canceled: true, snapshot: null }
-    return window.lt.workspace.load(entry.id)
-  }
-
-  const restoreWorkspace = async (importFile = false): Promise<void> => {
-    const result = importFile ? await window.lt.workspace.importFile() : await loadSavedWorkspace()
+  const applyWorkspaceLoadResult = (result: WorkspaceLoadResult): void => {
     if (result.canceled) return
     if (!result.ok) {
       window.alert('작업환경 복원 실패: ' + (result.error ?? '알 수 없는 오류'))
@@ -1544,6 +1522,34 @@ export default function App(): JSX.Element {
         result.snapshot.terminals?.length ?? 0
       }개`
     )
+  }
+
+  const openSavedWorkspacePicker = async (): Promise<void> => {
+    setWorkspacePick({ loading: true, entries: [] })
+    const list = await window.lt.workspace.list()
+    if (!list.ok) {
+      setWorkspacePick({
+        loading: false,
+        entries: [],
+        error: list.error ?? '작업환경 목록을 불러오지 못했습니다.'
+      })
+      return
+    }
+    setWorkspacePick({ loading: false, entries: list.entries ?? [] })
+  }
+
+  const loadSavedWorkspaceEntry = async (entry: WorkspaceEntry): Promise<void> => {
+    const result = await window.lt.workspace.load(entry.id)
+    if (result.ok && result.snapshot) setWorkspacePick(null)
+    applyWorkspaceLoadResult(result)
+  }
+
+  const restoreWorkspace = async (importFile = false): Promise<void> => {
+    if (!importFile) {
+      await openSavedWorkspacePicker()
+      return
+    }
+    applyWorkspaceLoadResult(await window.lt.workspace.importFile())
   }
 
   useEffect(() => {
@@ -2451,7 +2457,7 @@ export default function App(): JSX.Element {
           </button>
           <button
             className="activity-item"
-            title="작업환경 복원 (Shift: 파일에서 가져오기)"
+            title="저장된 작업환경 가져오기 (Shift: JSON 파일에서 가져오기)"
             onClick={(e) => void restoreWorkspace(e.shiftKey)}
           >
             <IconSync />
@@ -2483,6 +2489,17 @@ export default function App(): JSX.Element {
 
       <SelectionAsk onAsk={askClaude} />
       <SelectionMenu onAsk={askClaude} />
+
+      {workspacePick && (
+        <WorkspacePicker
+          loading={workspacePick.loading}
+          entries={workspacePick.entries}
+          error={workspacePick.error}
+          onLoad={(entry) => void loadSavedWorkspaceEntry(entry)}
+          onRefresh={() => void openSavedWorkspacePicker()}
+          onClose={() => setWorkspacePick(null)}
+        />
+      )}
 
       {/* 접속 선택 (로컬 / 저장된 SSH 프로필) */}
       {connMenu && (
@@ -4453,6 +4470,64 @@ function SshProfilesEditor(): JSX.Element {
           }}
         />
       )}
+    </div>
+  )
+}
+
+function WorkspacePicker({
+  loading,
+  entries,
+  error,
+  onLoad,
+  onRefresh,
+  onClose
+}: {
+  loading: boolean
+  entries: WorkspaceEntry[]
+  error?: string
+  onLoad: (entry: WorkspaceEntry) => void
+  onRefresh: () => void
+  onClose: () => void
+}): JSX.Element {
+  return (
+    <div className="modal-overlay" onMouseDown={onClose}>
+      <div className="modal workspace-picker" onMouseDown={(e) => e.stopPropagation()}>
+        <div className="modal-title">저장된 작업환경 가져오기</div>
+        <div className="workspace-list">
+          {loading && <p className="muted pad small">불러오는 중…</p>}
+          {!loading && error && <p className="muted pad small">불러오기 실패: {error}</p>}
+          {!loading && !error && entries.length === 0 && (
+            <p className="muted pad small">저장된 작업환경이 없습니다.</p>
+          )}
+          {!loading &&
+            !error &&
+            entries.map((entry, index) => (
+              <button
+                key={entry.id}
+                className="workspace-row"
+                type="button"
+                title={describeWorkspaceEntry(entry, index)}
+                onClick={() => onLoad(entry)}
+              >
+                <span className="workspace-row-main">
+                  <span className="workspace-row-title">{entry.label}</span>
+                  <span className="muted small">{formatWorkspaceSavedAt(entry.savedAt)}</span>
+                </span>
+                <span className="workspace-row-meta">
+                  문서 {entry.docs} · 터미널 {entry.terminals}
+                </span>
+              </button>
+            ))}
+        </div>
+        <div className="modal-actions">
+          <button className="header-btn" type="button" onClick={onRefresh}>
+            새로고침
+          </button>
+          <button className="header-btn" type="button" onClick={onClose}>
+            닫기
+          </button>
+        </div>
+      </div>
     </div>
   )
 }

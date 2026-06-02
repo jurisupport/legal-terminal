@@ -2231,6 +2231,53 @@ body {
   min-width: 0;
 }
 
+.workspace-picker {
+  width: min(560px, 92vw);
+}
+.workspace-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 80px;
+  max-height: min(52vh, 420px);
+  overflow: auto;
+}
+.workspace-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  min-height: 58px;
+  text-align: left;
+  background: var(--bg-alt);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 10px 12px;
+  cursor: pointer;
+  color: var(--fg);
+}
+.workspace-row:hover {
+  background: #2f2f30;
+}
+.workspace-row-main {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.workspace-row-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+}
+.workspace-row-meta {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
 /* 원격 폴더 선택 */
 .remote-picker {
   width: min(720px, 92vw);

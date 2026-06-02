@@ -1,7 +1,7 @@
 import { app } from 'electron'
 import { createHash } from 'crypto'
 import { basename, dirname, isAbsolute, join } from 'path'
-import { mkdir, readFile, writeFile } from 'fs/promises'
+import { mkdir, readFile, readdir, writeFile } from 'fs/promises'
 
 export interface WorkspaceSnapshot {
   version: number
@@ -138,7 +138,12 @@ function entryFromSnapshot(
   path: string,
   fallback?: Pick<WorkspaceEntry, 'id' | 'label'>
 ): WorkspaceEntry {
-  const identity = fallback ?? workspaceIdentity(snapshot)
+  const metadataId = asString(snapshot.workspaceId)
+  const metadataLabel = asString(snapshot.workspaceLabel)
+  const identity =
+    fallback ??
+    (metadataId && metadataLabel ? { id: metadataId, label: metadataLabel } : undefined) ??
+    workspaceIdentity(snapshot)
   return {
     id: identity.id,
     label: identity.label,
@@ -188,6 +193,25 @@ async function saveEntry(entry: WorkspaceEntry): Promise<void> {
   const entries = await readWorkspaceIndex()
   const next = [entry, ...entries.filter((existing) => existing.id !== entry.id)]
   await writeWorkspaceIndex(next)
+}
+
+async function listStoredWorkspaceEntries(): Promise<WorkspaceEntry[]> {
+  try {
+    const names = await readdir(workspaceStoreDir())
+    const entries = await Promise.all(
+      names
+        .filter((name) => name.endsWith('.json') && name !== 'workspace-index.json')
+        .map(async (name) => {
+          const result = await loadWorkspaceSnapshot(join(workspaceStoreDir(), name))
+          return result.ok && result.snapshot && result.entry ? result.entry : null
+        })
+    )
+    return entries.filter((entry): entry is WorkspaceEntry => !!entry)
+  } catch (e) {
+    const code = (e as NodeJS.ErrnoException).code
+    if (code === 'ENOENT') return []
+    throw e
+  }
 }
 
 export async function saveWorkspaceSnapshot(
@@ -250,8 +274,12 @@ export async function loadWorkspaceSnapshot(
 
 export async function listWorkspaceSnapshots(): Promise<WorkspaceListResult> {
   try {
-    const entries = await readWorkspaceIndex()
-    const byId = new Map(entries.map((entry) => [entry.id, entry]))
+    const entries = [...(await readWorkspaceIndex()), ...(await listStoredWorkspaceEntries())]
+    const byId = new Map<string, WorkspaceEntry>()
+    for (const entry of entries) {
+      const previous = byId.get(entry.id)
+      if (!previous || entry.savedAt > previous.savedAt) byId.set(entry.id, entry)
+    }
 
     const legacy = await loadWorkspaceSnapshot(LEGACY_WORKSPACE_ID)
     if (legacy.ok && legacy.snapshot && legacy.entry && !byId.has(legacy.entry.id)) {
