@@ -1525,6 +1525,10 @@ body {
 .xterm-host .xterm {
   height: 100%;
 }
+.xterm-host .xterm.lt-win-ime-fix .composition-view.active,
+.xterm-host .xterm.lt-win-ime-fix.lt-ime-composing .xterm-helper-textarea {
+  transform: translateX(calc(-1 * var(--lt-ime-cell-width, 0px)));
+}
 
 /* ── PDF 뷰어 ── */
 .pdf-viewer {

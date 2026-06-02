@@ -15,6 +15,68 @@ const DEFAULT_FONT = "'D2Coding', 'Cascadia Mono', Consolas, monospace"
 const normalizePasteForPty = (text: string): string =>
   text.replace(/\r\n/g, '\n').replace(/\r/g, '\n').replace(/\n/g, '\r')
 
+const WIN_IME_FIX_CLASS = 'lt-win-ime-fix'
+const WIN_IME_COMPOSING_CLASS = 'lt-ime-composing'
+
+const measureCellWidth = (term: XTerm): number | null => {
+  const screen = term.element?.querySelector<HTMLElement>('.xterm-screen')
+  const width = screen?.getBoundingClientRect().width ?? 0
+  if (!width || !term.cols) return null
+  return width / term.cols
+}
+
+const installWindowsImeCorrection = (term: XTerm, platform: string): (() => void) => {
+  if (platform !== 'win32' || !term.element || !term.textarea) return () => {}
+
+  const element = term.element
+  const textarea = term.textarea
+  let active = true
+  element.classList.add(WIN_IME_FIX_CLASS)
+
+  const syncCorrection = (): void => {
+    if (!active || !element.classList.contains(WIN_IME_COMPOSING_CLASS)) return
+    const cellWidth = measureCellWidth(term)
+    const cursorX = term.buffer.active.cursorX
+    const offset = cellWidth && cursorX > 0 ? cellWidth : 0
+    element.style.setProperty('--lt-ime-cell-width', `${offset}px`)
+  }
+
+  const scheduleCorrection = (): void => {
+    syncCorrection()
+    requestAnimationFrame(syncCorrection)
+    window.setTimeout(syncCorrection, 0)
+  }
+
+  const onCompositionStart = (): void => {
+    element.classList.add(WIN_IME_COMPOSING_CLASS)
+    scheduleCorrection()
+  }
+  const onCompositionUpdate = (): void => scheduleCorrection()
+  const onCompositionEnd = (): void => {
+    element.classList.remove(WIN_IME_COMPOSING_CLASS)
+    element.style.setProperty('--lt-ime-cell-width', '0px')
+  }
+
+  textarea.addEventListener('compositionstart', onCompositionStart)
+  textarea.addEventListener('compositionupdate', onCompositionUpdate)
+  textarea.addEventListener('compositionend', onCompositionEnd)
+  textarea.addEventListener('blur', onCompositionEnd)
+  const renderSync = term.onRender(syncCorrection)
+  const resizeSync = term.onResize(syncCorrection)
+
+  return () => {
+    active = false
+    textarea.removeEventListener('compositionstart', onCompositionStart)
+    textarea.removeEventListener('compositionupdate', onCompositionUpdate)
+    textarea.removeEventListener('compositionend', onCompositionEnd)
+    textarea.removeEventListener('blur', onCompositionEnd)
+    renderSync.dispose()
+    resizeSync.dispose()
+    element.classList.remove(WIN_IME_FIX_CLASS, WIN_IME_COMPOSING_CLASS)
+    element.style.removeProperty('--lt-ime-cell-width')
+  }
+}
+
 /**
  * 하나의 사건 터미널. main의 node-pty(플랫폼 기본 셸)를 띄우고 자동으로 `claude`를 실행한다.
  * 폰트/글자크기는 설정(termFont, termFontSize)에서 읽는다(새 터미널에 적용).
@@ -144,6 +206,7 @@ export default function Terminal({
       fit.fit()
       termRef.current = term
       fitRef.current = fit
+      const cleanupWindowsImeCorrection = installWindowsImeCorrection(term, appInfo.platform)
       // 새 터미널 생성 직후 활성 탭이면 바로 포커스 (커서가 그 터미널 안에 들어가게)
       if (visible) term.focus()
 
@@ -307,6 +370,7 @@ export default function Terminal({
         mount.removeEventListener('contextmenu', onCtx)
         mount.removeEventListener('paste', onPaste, true)
         ro.disconnect()
+        cleanupWindowsImeCorrection()
         window.lt.pty.detach(id)
         term.dispose()
         termRef.current = null
