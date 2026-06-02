@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react'
+import { useEffect, useRef, useState, type ReactNode } from 'react'
 import Terminal from './terminal/Terminal'
 import FileTree, { LT_PATH, sortEntries, type SortMode } from './filetree/FileTree'
 import PdfViewer from './viewer/PdfViewer'
@@ -23,7 +23,6 @@ import type { AppSettings, JsCase, SshConn, SshProfile, RemoteEntry, TabPayload 
 
 type Mode = 'explorer' | 'cases' | 'viewer'
 type DockSide = 'left' | 'right'
-type DockPanel = 'docs' | 'terminal'
 
 interface ActivityItem {
   id: Mode
@@ -142,6 +141,7 @@ interface DocTab {
   title: string
   kind: 'welcome' | 'markdown' | 'mdview' | 'file' | 'pdf' | 'image' | 'hwp' | 'csv' | 'settings'
   path?: string
+  side?: DockSide
 }
 /**
  * 터미널 1개 = 사건 1개.
@@ -167,6 +167,23 @@ interface TermTab {
   ssh?: SshConn // 주어지면 원격(SSH) 사건 — cwd는 원격 경로, claude도 원격에서 실행
   sshLabel?: string // 접속 프로필 이름 (탭 툴팁/표시용)
   profileId?: string // 원격 파일 패널 라우팅용 (ssh://<profileId>/<경로>)
+  side?: DockSide
+}
+
+type WorkTabKind = 'doc' | 'terminal'
+type WorkTabKey = `${WorkTabKind}:${string}`
+
+const docSide = (tab?: DocTab): DockSide => tab?.side ?? 'left'
+const termSide = (tab?: TermTab): DockSide => tab?.side ?? 'right'
+const otherSide = (side: DockSide): DockSide => (side === 'left' ? 'right' : 'left')
+const docKey = (id: string): WorkTabKey => `doc:${id}`
+const termKeyOf = (id: string): WorkTabKey => `terminal:${id}`
+const parseWorkKey = (key: string): { kind: WorkTabKind; id: string } | null => {
+  const split = key.indexOf(':')
+  if (split < 0) return null
+  const kind = key.slice(0, split)
+  if (kind !== 'doc' && kind !== 'terminal') return null
+  return { kind, id: key.slice(split + 1) }
 }
 
 // 원격 파일 패널이 쓰는 ssh:// URI 빌더 (main의 remoteFs와 동일 스킴)
@@ -368,7 +385,7 @@ export default function App(): JSX.Element {
   const [platform, setPlatform] = useState<string>('')
 
   const [docTabs, setDocTabs] = useState<DocTab[]>(() =>
-    docOnly ? [] : [{ id: 'doc-welcome', title: '시작하기.md', kind: 'welcome' }]
+    docOnly ? [] : [{ id: 'doc-welcome', title: '시작하기.md', kind: 'welcome', side: 'left' }]
   )
   const [activeDoc, setActiveDoc] = useState<string>(() => (docOnly ? '' : 'doc-welcome'))
   // 닫으면 내용이 사라지는 문서(저장 안 된 새 문서) id 집합 — 닫기 전 확인용
@@ -378,11 +395,9 @@ export default function App(): JSX.Element {
   const [activeTerm, setActiveTerm] = useState<string>('')
   const [termFocusNonce, setTermFocusNonce] = useState<Record<string, number>>({})
   const termTabsRef = useRef<TermTab[]>([])
-  const [docsDock, setDocsDock] = useState<DockSide>('left')
-  const [terminalDock, setTerminalDock] = useState<DockSide>('right')
-  const [dockActive, setDockActive] = useState<Record<DockSide, DockPanel>>({
-    left: 'docs',
-    right: 'terminal'
+  const [activeWork, setActiveWork] = useState<Record<DockSide, string>>({
+    left: docOnly ? '' : docKey('doc-welcome'),
+    right: ''
   })
   const [draftsRoot, setDraftsRoot] = useState<string | undefined>()
   const [recordsRoot, setRecordsRoot] = useState<string | undefined>()
@@ -463,36 +478,39 @@ export default function App(): JSX.Element {
     return () => window.removeEventListener('beforeunload', killWindowTerms)
   }, [])
 
-  const showDockPanel = (panel: DockPanel): void => {
-    const side = panel === 'docs' ? docsDock : terminalDock
-    setDockActive((active) => ({ ...active, [side]: panel }))
+  const setWorkActive = (side: DockSide, key: WorkTabKey): void => {
+    setActiveWork((active) => ({ ...active, [side]: key }))
   }
-  const moveDocsDock = (side: DockSide): void => {
-    setDocsDock(side)
-    setDockActive((active) => ({ ...active, [side]: 'docs' }))
+  const activateDocTab = (id: string): void => {
+    const tab = docTabs.find((t) => t.id === id)
+    setActiveDoc(id)
+    setWorkActive(docSide(tab), docKey(id))
   }
-  const moveTerminalDock = (side: DockSide): void => {
-    setTerminalDock(side)
-    setDockActive((active) => ({ ...active, [side]: 'terminal' }))
+  const activateTermTab = (id: string): void => {
+    const tab = termTabs.find((t) => t.id === id)
+    setActiveTerm(id)
+    setWorkActive(termSide(tab), termKeyOf(id))
   }
-  const dockPanels = (side: DockSide): DockPanel[] =>
-    (['docs', 'terminal'] as DockPanel[]).filter((panel) =>
-      panel === 'docs' ? docsDock === side : terminalDock === side
-    )
-  const dockWidth = (side: DockSide): string => {
-    const panels = dockPanels(side)
-    if (panels.length === 0) return '0px'
-    if (panels.includes('terminal')) return 'calc((100vw - 48px - 220px - 280px) / 2)'
-    return '220px'
+  const moveDocToSide = (id: string, side: DockSide): void => {
+    setDocTabs((tabs) => tabs.map((t) => (t.id === id ? { ...t, side } : t)))
+    setActiveDoc(id)
+    setWorkActive(side, docKey(id))
   }
-  const shellStyle = {
-    '--left-dock-width': dockWidth('left'),
-    '--right-dock-width': dockWidth('right')
-  } as CSSProperties & Record<'--left-dock-width' | '--right-dock-width', string>
+  const moveTermToSide = (id: string, side: DockSide): void => {
+    setTermTabs((tabs) => tabs.map((t) => (t.id === id ? { ...t, side } : t)))
+    setActiveTerm(id)
+    setWorkActive(side, termKeyOf(id))
+  }
+  const moveWorkTabToSide = (key: string, side: DockSide): void => {
+    const parsed = parseWorkKey(key)
+    if (!parsed) return
+    if (parsed.kind === 'doc') moveDocToSide(parsed.id, side)
+    else moveTermToSide(parsed.id, side)
+  }
 
   // ── 본문(문서) 탭 ──
   // 활성 사건 폴더가 있으면 거기에 실제 파일을 만들어 연다(VS Code식). 없으면 메모리 스크래치.
-  const addDoc = (): void => {
+  const addDoc = (side: DockSide = 'left'): void => {
     const t = termTabs.find((t) => t.id === activeTerm)
     // 원격 사건이면 ssh:// URI로 만들어 원격에 생성 (plain cwd면 로컬에 잘못 생성됨)
     const dir = t ? (t.ssh && t.profileId ? remoteUri(t.profileId, t.cwd) : t.cwd) : undefined
@@ -500,15 +518,16 @@ export default function App(): JSX.Element {
       window.lt.fs.createFile(dir, '새 문서.md').then((r) => {
         if (r.ok && r.path) {
           setTreeRefresh((x) => x + 1)
-          openFile(r.path, r.path.split(/[\\/]/).pop() ?? '새 문서.md')
+          openFile(r.path, r.path.split(/[\\/]/).pop() ?? '새 문서.md', side)
         }
       })
       return
     }
     const n = ++docSeq
-    const tab: DocTab = { id: `doc-${n}`, title: `새 문서 ${n}.md`, kind: 'mdview' }
+    const tab: DocTab = { id: `doc-${n}`, title: `새 문서 ${n}.md`, kind: 'mdview', side }
     setDocTabs((t) => [...t, tab])
     setActiveDoc(tab.id)
+    setWorkActive(side, docKey(tab.id))
   }
   const setDocPath = (id: string, path: string): void =>
     setDocTabs((tabs) =>
@@ -578,18 +597,19 @@ export default function App(): JSX.Element {
   const openSettings = (): void => {
     const existing = docTabs.find((t) => t.kind === 'settings')
     if (existing) {
-      setActiveDoc(existing.id)
+      activateDocTab(existing.id)
       return
     }
-    const tab: DocTab = { id: 'settings', title: '설정', kind: 'settings' }
+    const tab: DocTab = { id: 'settings', title: '설정', kind: 'settings', side: 'left' }
     setDocTabs((t) => [...t, tab])
     setActiveDoc(tab.id)
+    setWorkActive('left', docKey(tab.id))
   }
 
-  const openFile = (path: string, name: string): void => {
+  const openFile = (path: string, name: string, side: DockSide = 'left'): void => {
     const existing = docTabs.find((t) => t.path === path)
     if (existing) {
-      setActiveDoc(existing.id)
+      activateDocTab(existing.id)
       return
     }
     const lower = path.toLowerCase()
@@ -599,9 +619,10 @@ export default function App(): JSX.Element {
     else if (/\.(hwp|hwpx)$/.test(lower)) kind = 'hwp'
     else if (/\.(md|markdown)$/.test(lower)) kind = 'mdview'
     else if (lower.endsWith('.csv')) kind = 'csv'
-    const tab: DocTab = { id: `file-${++docSeq}`, title: name, kind, path }
+    const tab: DocTab = { id: `file-${++docSeq}`, title: name, kind, path, side }
     setDocTabs((t) => [...t, tab])
     setActiveDoc(tab.id)
+    setWorkActive(side, docKey(tab.id))
   }
 
   // 이미지 뷰어: 같은 폴더의 정렬순 이전/다음 이미지로 현재 탭에서 이동
@@ -652,14 +673,14 @@ export default function App(): JSX.Element {
   const receiveTabRef = useRef<(p: TabPayload) => void>(() => {})
   receiveTabRef.current = (p) => {
     if (p.kind === 'terminal') {
-      const tab = p.tab as TermTab
+      const tab = { ...(p.tab as TermTab), side: (p.tab as TermTab).side ?? 'right' }
       setTermTabs((tabs) => (tabs.some((t) => t.id === tab.id) ? tabs : [...tabs, tab]))
       setActiveTerm(tab.id)
       setCurrentCase(currentCaseFromTerm(tab))
-      showDockPanel('terminal')
+      setWorkActive(termSide(tab), termKeyOf(tab.id))
       return
     }
-    openFileRef.current(p.path, p.title)
+    openFileRef.current(p.path, p.title, p.side ?? 'left')
   }
   useEffect(() => {
     const off = window.lt.tabs.onReceive((p) => receiveTabRef.current(p))
@@ -727,7 +748,8 @@ export default function App(): JSX.Element {
     name: string,
     records?: string,
     suggested?: string,
-    caseMeta?: CaseMeta
+    caseMeta?: CaseMeta,
+    side: DockSide = 'right'
   ): void => {
     const tab: TermTab = {
       id: newId(),
@@ -737,11 +759,12 @@ export default function App(): JSX.Element {
       suggestedRecords: suggested,
       autoClaude: true, // 사건 열기 → claude 자동 실행
       createdAt: Date.now(),
+      side,
       ...caseMeta
     }
     setTermTabs((t) => [...t, tab])
     setActiveTerm(tab.id)
-    showDockPanel('terminal')
+    setWorkActive(side, termKeyOf(tab.id))
     setCurrentCase({ drafts, records, name, meta: caseMeta })
     window.lt.case.addHistory({ drafts, records, name }).then(setRecent)
   }
@@ -749,7 +772,7 @@ export default function App(): JSX.Element {
   const historyDraftsForTerm = (t: TermTab): string =>
     t.ssh && t.profileId ? remoteUri(t.profileId, t.cwd) : t.cwd
 
-  const addTerm = async (): Promise<void> => {
+  const addTerm = async (side: DockSide = 'right'): Promise<void> => {
     const picked = await window.lt.dialog.pickFolder({
       title: '사건(작성서류) 폴더 선택',
       defaultPath: draftsRoot
@@ -757,7 +780,7 @@ export default function App(): JSX.Element {
     if (!picked) return
     // 이전에 페어링한 소송기록 폴더가 있으면 '추천'만 (자동 적용하지 않고 물어봄)
     const paired = await window.lt.case.getPairing(picked.path)
-    createCase(picked.path, picked.name, undefined, paired ?? undefined)
+    createCase(picked.path, picked.name, undefined, paired ?? undefined, undefined, side)
   }
 
   // 원격(SSH) 사건 터미널 — cwd는 원격 경로, claude도 원격에서 실행.
@@ -767,7 +790,8 @@ export default function App(): JSX.Element {
     remotePath: string,
     name?: string,
     meta?: CaseMeta,
-    records?: string
+    records?: string,
+    side: DockSide = 'right'
   ): { id: string; title: string } => {
     const title = name || remotePath.replace(/\/+$/, '').split('/').pop() || profile.label
     const draftsUri = remoteUri(profile.id, remotePath)
@@ -787,11 +811,12 @@ export default function App(): JSX.Element {
       ssh,
       sshLabel: profile.label,
       profileId: profile.id,
+      side,
       ...meta
     }
     setTermTabs((t) => [...t, tab])
     setActiveTerm(tab.id)
-    showDockPanel('terminal')
+    setWorkActive(side, termKeyOf(tab.id))
     setCurrentCase({
       drafts: draftsUri,
       records,
@@ -935,7 +960,13 @@ export default function App(): JSX.Element {
   }
 
   // 과거 claude 세션 이어서 열기 (claude --resume). 지정한 cwd/사건 컨텍스트에서.
-  const openPastSession = (sessionId: string, cwd: string, title?: string, source?: TermTab): void => {
+  const openPastSession = (
+    sessionId: string,
+    cwd: string,
+    title?: string,
+    source?: TermTab,
+    side: DockSide = termSide(source)
+  ): void => {
     const base = currentCase && currentCase.drafts === cwd ? currentCase : undefined
     const meta = base?.meta
     const tab: TermTab = {
@@ -955,16 +986,18 @@ export default function App(): JSX.Element {
       ssh: source?.ssh,
       sshLabel: source?.sshLabel,
       profileId: source?.profileId,
+      side,
       ...meta
     }
     setTermTabs((t) => [...t, tab])
     setActiveTerm(tab.id)
-    showDockPanel('terminal')
+    setWorkActive(side, termKeyOf(tab.id))
   }
 
   // + / Ctrl+T : 같은 사건에서 새 터미널(claude 실행). 활성 터미널이 없으면 마지막 사건에서, 그것도 없으면 폴더 선택.
-  const addTermSame = (): void => {
+  const addTermSame = (preferredSide?: DockSide): void => {
     const cur = termTabs.find((t) => t.id === activeTerm)
+    const side = preferredSide ?? termSide(cur)
     if (!cur) {
       if (currentCase) {
         if (currentCase.ssh && currentCase.profileId && currentCase.remotePath) {
@@ -983,13 +1016,14 @@ export default function App(): JSX.Element {
             currentCase.remotePath,
             currentCase.name,
             currentCase.meta,
-            currentCase.records
+            currentCase.records,
+            side
           )
         } else {
-          createCase(currentCase.drafts, currentCase.name, currentCase.records, undefined, currentCase.meta)
+          createCase(currentCase.drafts, currentCase.name, currentCase.records, undefined, currentCase.meta, side)
         }
       } else {
-        void addTerm()
+        void addTerm(side)
       }
       return
     }
@@ -1007,11 +1041,12 @@ export default function App(): JSX.Element {
       client: cur.client,
       ssh: cur.ssh, // 원격 사건이면 같은 접속으로 새 터미널
       sshLabel: cur.sshLabel,
-      profileId: cur.profileId
+      profileId: cur.profileId,
+      side
     }
     setTermTabs((t) => [...t, tab])
     setActiveTerm(tab.id)
-    showDockPanel('terminal')
+    setWorkActive(side, termKeyOf(tab.id))
   }
 
   // 추천 소송기록 폴더 적용 ('열기' 클릭 시)
@@ -1052,8 +1087,7 @@ export default function App(): JSX.Element {
 
   // 터미널 선택 → 활성화 + 완료(주목) 표시 해제
   const selectTerm = (id: string): void => {
-    setActiveTerm(id)
-    showDockPanel('terminal')
+    activateTermTab(id)
     setTermAttention((s) => {
       if (!s.has(id)) return s
       const n = new Set(s)
@@ -1096,16 +1130,22 @@ export default function App(): JSX.Element {
 
   // Ctrl+Tab: 같은 종류 탭 순환 (터미널끼리 / 문서끼리)
   const cycleTerm = (dir: number): void => {
-    if (termTabs.length < 2) return
-    const i = termTabs.findIndex((t) => t.id === activeTerm)
-    const ni = (((i < 0 ? 0 : i) + dir) % termTabs.length + termTabs.length) % termTabs.length
-    selectTerm(termTabs[ni].id)
+    const cur = termTabs.find((t) => t.id === activeTerm)
+    const side = termSide(cur)
+    const scoped = termTabs.filter((t) => termSide(t) === side)
+    if (scoped.length < 2) return
+    const i = scoped.findIndex((t) => t.id === activeTerm)
+    const ni = (((i < 0 ? 0 : i) + dir) % scoped.length + scoped.length) % scoped.length
+    selectTerm(scoped[ni].id)
   }
   const cycleDoc = (dir: number): void => {
-    if (docTabs.length < 2) return
-    const i = docTabs.findIndex((t) => t.id === activeDoc)
-    const ni = (((i < 0 ? 0 : i) + dir) % docTabs.length + docTabs.length) % docTabs.length
-    setActiveDoc(docTabs[ni].id)
+    const cur = docTabs.find((t) => t.id === activeDoc)
+    const side = docSide(cur)
+    const scoped = docTabs.filter((t) => docSide(t) === side)
+    if (scoped.length < 2) return
+    const i = scoped.findIndex((t) => t.id === activeDoc)
+    const ni = (((i < 0 ? 0 : i) + dir) % scoped.length + scoped.length) % scoped.length
+    activateDocTab(scoped[ni].id)
   }
 
   // 활성 사건(또는 마지막 사건)에 소송기록 폴더를 지정/탐색 → 뷰어 연결 + 페어링 기억.
@@ -1268,8 +1308,9 @@ export default function App(): JSX.Element {
     // 파일: 이름 없으면 무제 스크래치(저장 시 이름 물어봄)
     if (!n) {
       const id = `doc-${++docSeq}`
-      setDocTabs((t) => [...t, { id, title: '무제.md', kind: 'mdview' }])
+      setDocTabs((t) => [...t, { id, title: '무제.md', kind: 'mdview', side: 'left' }])
       setActiveDoc(id)
+      setWorkActive('left', docKey(id))
       return
     }
     const fn = /\.[^.]+$/.test(n) ? n : n + '.md'
@@ -1323,7 +1364,9 @@ export default function App(): JSX.Element {
 
   // 임의 터미널에 bracketed paste로 텍스트 주입 (줄바꿈이 바로 제출되지 않게).
   const pasteToTerm = (termId: string, payload: string): void => {
+    const tab = termTabs.find((t) => t.id === termId)
     setActiveTerm(termId)
+    setWorkActive(termSide(tab), termKeyOf(termId))
     setTermFocusNonce((n) => ({ ...n, [termId]: (n[termId] ?? 0) + 1 }))
     window.lt.pty.write(termId, `\x1b[200~${normalizePasteForPty(payload)}\x1b[201~`)
   }
@@ -1461,7 +1504,7 @@ export default function App(): JSX.Element {
     setCurrentCase({ drafts, records, name, meta })
     const existing = termTabs.find((t) => t.cwd === drafts || (t.jsId && t.jsId === c.id))
     if (existing) {
-      setActiveTerm(existing.id)
+      activateTermTab(existing.id)
       setTermTabs((tabs) =>
         tabs.map((t) =>
           t.id === existing.id
@@ -1473,7 +1516,6 @@ export default function App(): JSX.Element {
       createCase(drafts, name, records, undefined, meta)
     }
     setMode('explorer')
-    showDockPanel('docs')
   }
 
   // 우클릭: 사건을 원격(SSH 프로필)에서 열기 — 원격 draftsRoot에서 폴더명 매칭, 실패 시 수동 선택.
@@ -1509,7 +1551,6 @@ export default function App(): JSX.Element {
       // 소송기록 매칭은 터미널을 먼저 띄운 뒤 붙인다. SFTP/키 문제로 터미널 생성이 막히면 안 된다.
       resolveRemoteRecordsLater(opened.id, profile, remotePath, opened.title, c)
       setMode('explorer')
-      showDockPanel('docs')
     } else {
       // 작성서류 매칭 실패 → 폴더 선택기로 직접 지정 (소송기록은 picker onPick에서 resolve)
       setRemoteCasePick({ profile, name, meta })
@@ -1530,7 +1571,9 @@ export default function App(): JSX.Element {
   // 탐색기/외부에서 터미널로 드래그드롭한 파일들을 그 터미널 프롬프트에 주입.
   const dropFilesToTerm = (termId: string, paths: string[]): void => {
     if (!paths.length) return
+    const tab = termTabs.find((t) => t.id === termId)
     setActiveTerm(termId)
+    setWorkActive(termSide(tab), termKeyOf(termId))
     if (paths.length === 1) {
       const p = paths[0]
       askAboutFile(termId, p, p.split(/[\\/]/).pop() ?? p)
@@ -1553,71 +1596,63 @@ export default function App(): JSX.Element {
     }
   }
 
-  // 본문(문서) 렌더 — 전체 셸과 '문서 전용 창' 양쪽에서 재사용
-  const docContent = (
+  // 본문(문서) 렌더 — 좌/우 작업 영역과 '문서 전용 창'에서 재사용
+  const renderDocContent = (tab?: DocTab): ReactNode => (
     <>
-      {!activeDocTab && <Empty label="열린 문서가 없습니다" actionLabel="새 문서" onAction={addDoc} />}
-      {activeDocTab?.kind === 'welcome' && <Welcome recent={recent} onOpen={openRecent} />}
-      {activeDocTab?.kind === 'markdown' && <DocPlaceholder title={activeDocTab.title} />}
-      {activeDocTab?.kind === 'file' && (
-        <FileView key={activeDocTab.path} path={activeDocTab.path as string} />
-      )}
-      {activeDocTab?.kind === 'image' && (
+      {!tab && <Empty label="열린 문서가 없습니다" actionLabel="새 문서" onAction={() => addDoc('left')} />}
+      {tab?.kind === 'welcome' && <Welcome recent={recent} onOpen={openRecent} />}
+      {tab?.kind === 'markdown' && <DocPlaceholder title={tab.title} />}
+      {tab?.kind === 'file' && <FileView key={tab.path} path={tab.path as string} />}
+      {tab?.kind === 'image' && (
         <ImageViewer
-          key={activeDocTab.path}
-          path={activeDocTab.path as string}
-          onNavigate={(dir) => navigateImage(activeDocTab.path as string, dir)}
+          key={tab.path}
+          path={tab.path as string}
+          onNavigate={(dir) => navigateImage(tab.path as string, dir)}
         />
       )}
-      {activeDocTab?.kind === 'hwp' && (
-        <HwpView key={activeDocTab.path} path={activeDocTab.path as string} />
-      )}
-      {activeDocTab?.kind === 'csv' && (
-        <CsvView key={activeDocTab.path} path={activeDocTab.path as string} />
-      )}
-      {activeDocTab?.kind === 'mdview' && (
+      {tab?.kind === 'hwp' && <HwpView key={tab.path} path={tab.path as string} />}
+      {tab?.kind === 'csv' && <CsvView key={tab.path} path={tab.path as string} />}
+      {tab?.kind === 'mdview' && (
         <MarkdownEditor
-          key={activeDocTab.id}
-          path={activeDocTab.path}
+          key={tab.id}
+          path={tab.path}
           defaultDir={draftsRoot}
-          onPath={(p) => setDocPath(activeDocTab.id, p)}
+          onPath={(p) => setDocPath(tab.id, p)}
           onAsk={() => askClaude('')}
           onSendToJuriSupport={sendMarkdownToJuriSupport}
           onDirty={(d) =>
             setDirtyDocs((s) => {
-              const has = s.has(activeDocTab.id)
+              const has = s.has(tab.id)
               if (d === has) return s
               const n = new Set(s)
-              if (d) n.add(activeDocTab.id)
-              else n.delete(activeDocTab.id)
+              if (d) n.add(tab.id)
+              else n.delete(tab.id)
               return n
             })
           }
         />
       )}
-      {activeDocTab?.kind === 'pdf' &&
-        (recordItems.some((i) => i.path === activeDocTab.path) ? (
+      {tab?.kind === 'pdf' &&
+        (recordItems.some((i) => i.path === tab.path) ? (
           <RecordViewer
-            key={activeDocTab.id}
+            key={tab.id}
             items={recordItems}
-            startPath={activeDocTab.path as string}
+            startPath={tab.path as string}
             cropOn={cropOn}
             cropRatio={cropRatio}
             onCropOn={setCropOn}
             onCropRatio={setCropRatio}
             onCurrent={(it) =>
               setDocTabs((tabs) =>
-                tabs.map((t) =>
-                  t.id === activeDocTab.id ? { ...t, path: it.path, title: it.label } : t
-                )
+                tabs.map((t) => (t.id === tab.id ? { ...t, path: it.path, title: it.label } : t))
               )
             }
             onAskDoc={() => askClaude('')}
           />
         ) : (
           <PdfViewer
-            key={activeDocTab.path}
-            path={activeDocTab.path as string}
+            key={tab.path}
+            path={tab.path as string}
             onOutline={onOutline}
             jumpTo={pdfJump}
             cropOn={cropOn}
@@ -1627,7 +1662,7 @@ export default function App(): JSX.Element {
             onAskDoc={() => askClaude('')}
           />
         ))}
-      {activeDocTab?.kind === 'settings' && <SettingsView />}
+      {tab?.kind === 'settings' && <SettingsView />}
     </>
   )
 
@@ -1638,12 +1673,14 @@ export default function App(): JSX.Element {
         title: t.title,
         tooltip: t.path,
         path: t.path,
-        dragPayload: t.path ? ({ kind: 'doc', path: t.path, title: t.title } as TabPayload) : undefined
+        dragPayload: t.path
+          ? ({ kind: 'doc', path: t.path, title: t.title, side: docSide(t) } as TabPayload)
+          : undefined
       }))}
       activeId={activeDoc}
-      onSelect={setActiveDoc}
+      onSelect={activateDocTab}
       onClose={closeDoc}
-      onAdd={addDoc}
+      onAdd={() => addDoc('left')}
       addTitle="새 문서"
       onReorder={reorderDocs}
       onTearOut={closeDoc}
@@ -1655,7 +1692,6 @@ export default function App(): JSX.Element {
     <DocsPanel
       key="docs"
       mode={mode}
-      dockSide={docsDock}
       draftsFolder={activeDraftsFolder}
       recordsFolder={activeRecordsFolder}
       suggestedRecords={activeSuggestedRecords}
@@ -1673,7 +1709,6 @@ export default function App(): JSX.Element {
       onNewFile={newFile}
       onSync={sshProfiles.length > 0 ? openSync : undefined}
       onOpenWorkspace={() => void openConnOrLocal()}
-      onMoveDock={(side) => moveDocsDock(side)}
       onOpenCase={openCaseWorkspace}
       jsNonce={jsNonce}
       pendingCreate={pendingCreate}
@@ -1695,6 +1730,7 @@ export default function App(): JSX.Element {
           attention: termAttention.has(t.id) && termStatus.get(t.id) !== 'question',
           working: termStatus.get(t.id) === 'working',
           question: termStatus.get(t.id) === 'question' && termAttention.has(t.id),
+          renamable: true,
           dragPayload: { kind: 'terminal', tab: { ...t } } as TabPayload,
           tooltip: [
             t.ssh && `🔗 ${t.sshLabel ?? '원격'} (${t.ssh.user}@${t.ssh.host})`,
@@ -1710,7 +1746,7 @@ export default function App(): JSX.Element {
         activeId={activeTerm}
         onSelect={selectTerm}
         onClose={closeTerm}
-        onAdd={addTermSame}
+        onAdd={() => addTermSame()}
         addTitle="새 터미널"
         onReorder={reorderTerms}
         onTearOut={detachTerm}
@@ -1730,16 +1766,7 @@ export default function App(): JSX.Element {
               setSessionFilter(cur?.jsId ?? 'all')
               setSessionListOpen((v) => !v)
             }
-          },
-          ...(termOnly
-            ? []
-            : [
-                {
-                  label: terminalDock === 'right' ? '⇤' : '⇥',
-                  title: terminalDock === 'right' ? '터미널 왼쪽으로 이동' : '터미널 오른쪽으로 이동',
-                  onClick: () => moveTerminalDock(terminalDock === 'right' ? 'left' : 'right')
-                }
-              ])
+          }
         ]}
         extra={{
           icon: <IconWorkspace size={15} />,
@@ -1799,7 +1826,7 @@ export default function App(): JSX.Element {
               visible={t.id === activeTerm}
               focusNonce={termFocusNonce[t.id] ?? 0}
               onDropPaths={(paths) => dropFilesToTerm(t.id, paths)}
-              onNewTerminal={addTermSame}
+              onNewTerminal={() => addTermSame(termSide(t))}
               onRequestClose={() => closeTermWithConfirm(t.id)}
               onStatus={(s) => onTermStatus(t.id, s)}
               onCycleTab={cycleTerm}
@@ -1810,9 +1837,226 @@ export default function App(): JSX.Element {
     </div>
   )
 
-  const dockChildren: Record<DockPanel, ReactNode> = {
-    docs: docsPanel,
-    terminal: terminalPanel
+  const renderWorkPane = (side: DockSide): ReactNode => {
+    if (side === 'left' && mode === 'cases') {
+      return (
+        <div className="work-pane work-left" key="cases">
+          <CasesDashboard
+            onOpenWorkspace={openCaseWorkspace}
+            onOpenRemote={openCaseRemote}
+            sshProfiles={sshProfiles}
+            defaultOpenProfileId={defaultCaseOpenProfileId}
+            onBrief={briefCaseToClaude}
+            onDraft={draftCaseWithClaude}
+            onChanged={() => setJsNonce((n) => n + 1)}
+          />
+        </div>
+      )
+    }
+
+    const docs = docTabs.filter((t) => docSide(t) === side)
+    const terms = termTabs.filter((t) => termSide(t) === side)
+    const workTabs = [
+      ...docs.map((t) => ({
+        id: docKey(t.id),
+        title: t.title,
+        tooltip: t.path,
+        path: t.path,
+        dragPayload: t.path
+          ? ({ kind: 'doc', path: t.path, title: t.title, side } as TabPayload)
+          : undefined
+      })),
+      ...terms.map((t) => ({
+        id: termKeyOf(t.id),
+        title: t.renamed
+          ? t.title
+          : t.sessionTitle
+            ? `${t.title} · ${t.sessionTitle}`
+            : t.title,
+        attention: termAttention.has(t.id) && termStatus.get(t.id) !== 'question',
+        working: termStatus.get(t.id) === 'working',
+        question: termStatus.get(t.id) === 'question' && termAttention.has(t.id),
+        renamable: true,
+        dragPayload: { kind: 'terminal', tab: { ...t, side } } as TabPayload,
+        tooltip: [
+          t.ssh && `🔗 ${t.sshLabel ?? '원격'} (${t.ssh.user}@${t.ssh.host})`,
+          t.court && `${t.court}`,
+          t.caseNumber,
+          t.caseName,
+          t.client && `의뢰인 ${t.client}`,
+          t.cwd
+        ]
+          .filter(Boolean)
+          .join('\n')
+      }))
+    ]
+    const activeKey = workTabs.some((t) => t.id === activeWork[side])
+      ? activeWork[side]
+      : (workTabs[0]?.id ?? '')
+    const activeParsed = parseWorkKey(activeKey)
+    const activeDocForPane =
+      activeParsed?.kind === 'doc' ? docs.find((t) => t.id === activeParsed.id) : undefined
+    const visibleTermId = activeParsed?.kind === 'terminal' ? activeParsed.id : ''
+    const hasTerms = terms.length > 0
+    const sessionListSide = termSide(activeTermTab)
+
+    return (
+      <div className={`work-pane work-${side}`} key={side}>
+        <TabBar
+          tabs={workTabs}
+          activeId={activeKey}
+          onSelect={(key) => {
+            const parsed = parseWorkKey(key)
+            if (!parsed) return
+            if (parsed.kind === 'doc') activateDocTab(parsed.id)
+            else selectTerm(parsed.id)
+          }}
+          onClose={(key) => {
+            const parsed = parseWorkKey(key)
+            if (!parsed) return
+            if (parsed.kind === 'doc') closeDoc(parsed.id)
+            else closeTerm(parsed.id)
+          }}
+          onAdd={() => addDoc(side)}
+          addTitle="새 문서"
+          onReorder={(from, to) => {
+            const f = parseWorkKey(from)
+            const t = parseWorkKey(to)
+            if (!f || !t || f.kind !== t.kind) return
+            if (f.kind === 'doc') reorderDocs(f.id, t.id)
+            else reorderTerms(f.id, t.id)
+          }}
+          onTearOut={(key) => {
+            const parsed = parseWorkKey(key)
+            if (!parsed) return
+            if (parsed.kind === 'doc') closeDoc(parsed.id)
+            else detachTerm(parsed.id)
+          }}
+          onDragActive={setTabDragging}
+          onRename={(key, title) => {
+            const parsed = parseWorkKey(key)
+            if (parsed?.kind !== 'terminal') return
+            setTermTabs((tabs) =>
+              tabs.map((t) => (t.id === parsed.id ? { ...t, title, renamed: true } : t))
+            )
+          }}
+          extraLeft={[
+            ...(activeKey
+              ? [
+                  {
+                    label: side === 'left' ? '⇥' : '⇤',
+                    title: side === 'left' ? '활성 탭 오른쪽으로 이동' : '활성 탭 왼쪽으로 이동',
+                    onClick: () => moveWorkTabToSide(activeKey, otherSide(side))
+                  }
+                ]
+              : []),
+            ...(hasTerms
+              ? [
+                  {
+                    label: '☰',
+                    title: '세션 목록',
+                    active: sessionListOpen && side === sessionListSide,
+                    onClick: () => {
+                      const cur =
+                        terms.find((t) => t.id === activeTerm) ??
+                        terms[0]
+                      if (cur) {
+                        setActiveTerm(cur.id)
+                        setWorkActive(side, termKeyOf(cur.id))
+                        setSessionFilter(cur.jsId ?? 'all')
+                      } else {
+                        setSessionFilter('all')
+                      }
+                      setSessionListOpen((v) => !(v && side === sessionListSide))
+                    }
+                  }
+                ]
+              : [])
+          ]}
+          extra={[
+            {
+              label: '＋T',
+              title: '새 터미널',
+              onClick: () => addTermSame(side)
+            },
+            {
+              icon: <IconWorkspace size={15} />,
+              title: '새 작업환경 열기',
+              onClick: () => void openConnOrLocal()
+            }
+          ]}
+        />
+        {sessionListOpen && side === sessionListSide && (
+          <SessionList
+            sessions={termTabs}
+            activeId={activeTerm}
+            filter={sessionFilter}
+            onFilter={setSessionFilter}
+            caseCwd={currentCase?.drafts}
+            onSelect={(id) => {
+              selectTerm(id)
+              setSessionListOpen(false)
+            }}
+            onResume={(sid, cwd, title, source) => {
+              openPastSession(sid, cwd, title, source, side)
+              setSessionListOpen(false)
+            }}
+            onClose={() => setSessionListOpen(false)}
+          />
+        )}
+        <div className="work-content">
+          {workTabs.length === 0 &&
+            (side === 'right' ? (
+              currentCase ? (
+                <Empty
+                  label={`「${currentCase.name}」 — 오른쪽에 열린 탭이 없습니다`}
+                  actionLabel="이 사건에서 터미널 열기"
+                  onAction={() => addTermSame(side)}
+                  secondaryLabel="새 문서"
+                  onSecondary={() => addDoc(side)}
+                />
+              ) : (
+                <Empty
+                  label="오른쪽에 열린 탭이 없습니다"
+                  actionLabel="터미널 열기"
+                  onAction={() => addTermSame(side)}
+                  secondaryLabel="새 문서"
+                  onSecondary={() => addDoc(side)}
+                />
+              )
+            ) : (
+              <Empty label="왼쪽에 열린 탭이 없습니다" actionLabel="새 문서" onAction={() => addDoc(side)} />
+            ))}
+          {activeDocForPane && (
+            <div className="doc-content" onMouseDown={() => activateDocTab(activeDocForPane.id)}>
+              {renderDocContent(activeDocForPane)}
+            </div>
+          )}
+          {terms.map((t) => (
+            <div
+              key={t.id}
+              className="term-pane"
+              style={{ display: t.id === visibleTermId ? 'block' : 'none' }}
+            >
+              <Terminal
+                id={t.id}
+                cwd={t.cwd}
+                autoClaude={t.autoClaude ?? false}
+                resumeSessionId={t.resumeSessionId}
+                ssh={t.ssh}
+                visible={t.id === visibleTermId}
+                focusNonce={termFocusNonce[t.id] ?? 0}
+                onDropPaths={(paths) => dropFilesToTerm(t.id, paths)}
+                onNewTerminal={() => addTermSame(side)}
+                onRequestClose={() => closeTermWithConfirm(t.id)}
+                onStatus={(s) => onTermStatus(t.id, s)}
+                onCycleTab={cycleTerm}
+              />
+            </div>
+          ))}
+        </div>
+      </div>
+    )
   }
 
   // 탭을 창 밖으로 찢어낸 '문서 전용 창': 터미널·탐색기·액티비티바 없이 문서만.
@@ -1821,7 +2065,7 @@ export default function App(): JSX.Element {
       <div className="shell-doconly" {...shellDragProps}>
         <div className="body-col">
           {docTabBar}
-          <div className="doc-content">{docContent}</div>
+          <div className="doc-content">{renderDocContent(activeDocTab)}</div>
         </div>
         <SelectionAsk onAsk={askClaude} />
         <SelectionMenu onAsk={askClaude} />
@@ -1844,7 +2088,6 @@ export default function App(): JSX.Element {
   return (
     <div
       className={`shell ${isViewer ? 'mode-viewer' : 'mode-default'}`}
-      style={shellStyle}
       {...shellDragProps}
     >
       {/* ── 액티비티바 (모드 전환) ── */}
@@ -1855,10 +2098,7 @@ export default function App(): JSX.Element {
               key={item.id}
               className={`activity-item ${mode === item.id ? 'active' : ''}`}
               title={item.label}
-              onClick={() => {
-                setMode(item.id)
-                showDockPanel('docs')
-              }}
+              onClick={() => setMode(item.id)}
             >
               <item.Icon />
             </button>
@@ -1874,44 +2114,16 @@ export default function App(): JSX.Element {
         </div>
       </div>
 
-      <DockColumn
-        side="left"
-        panels={dockPanels('left')}
-        active={dockActive.left}
-        onSelect={(panel) => setDockActive((active) => ({ ...active, left: panel }))}
-        childrenByPanel={dockChildren}
-      />
-
-      {/* ── 본문(가운데) — 사건 모드는 대시보드, 그 외엔 문서 탭 ── */}
-      <div className="body-col" key="body">
-        {mode === 'cases' ? (
-          <CasesDashboard
-            onOpenWorkspace={openCaseWorkspace}
-            onOpenRemote={openCaseRemote}
-            sshProfiles={sshProfiles}
-            defaultOpenProfileId={defaultCaseOpenProfileId}
-            onBrief={briefCaseToClaude}
-            onDraft={draftCaseWithClaude}
-            onChanged={() => setJsNonce((n) => n + 1)}
-          />
-        ) : (
-          <>
-            {docTabBar}
-            <div className="doc-content">{docContent}</div>
-          </>
-        )}
+      <div className="side-col" key="side">
+        {docsPanel}
       </div>
+
+      {renderWorkPane('left')}
 
       {/* ── 서증·첨부서류 (뷰어 모드에서만) ── */}
       {isViewer && <EvidencePanel key="evid" record={panelRecord} onOpenItem={onOpenItem} />}
 
-      <DockColumn
-        side="right"
-        panels={dockPanels('right')}
-        active={dockActive.right}
-        onSelect={(panel) => setDockActive((active) => ({ ...active, right: panel }))}
-        childrenByPanel={dockChildren}
-      />
+      {renderWorkPane('right')}
 
       <div className="statusbar" key="status">
         <span className="status-left">legal-terminal · {modeLabel(mode)}</span>
@@ -1967,7 +2179,6 @@ export default function App(): JSX.Element {
             const opened = createRemoteCase(profile, remotePath, name, meta)
             resolveRemoteRecordsLater(opened.id, profile, remotePath, opened.title)
             setMode('explorer')
-            showDockPanel('docs')
           }}
         />
       )}
@@ -2054,7 +2265,7 @@ function SelectionMenu({ onAsk }: { onAsk: (text: string) => void }): JSX.Elemen
       const text = sel?.toString().trim() ?? ''
       const node = sel?.anchorNode
       const el = node instanceof Element ? node : node?.parentElement
-      if (!text || !el?.closest?.('.body-col')) return // 선택 없으면 기본 메뉴
+      if (!text || !el?.closest?.('.work-pane, .body-col')) return // 선택 없으면 기본 메뉴
       e.preventDefault()
       setMenu({ x: e.clientX, y: e.clientY, text })
     }
@@ -2117,7 +2328,7 @@ function SelectionAsk({ onAsk }: { onAsk: (text: string) => void }): JSX.Element
       }
       const node = sel.anchorNode
       const el = node instanceof Element ? node : node?.parentElement
-      if (!el?.closest?.('.body-col')) {
+      if (!el?.closest?.('.work-pane, .body-col')) {
         setBox(null)
         return
       }
@@ -2174,47 +2385,10 @@ function closeTab<T extends { id: string }>(
   return next
 }
 
-function DockColumn({
-  side,
-  panels,
-  active,
-  onSelect,
-  childrenByPanel
-}: {
-  side: DockSide
-  panels: DockPanel[]
-  active: DockPanel
-  onSelect: (panel: DockPanel) => void
-  childrenByPanel: Record<DockPanel, ReactNode>
-}): JSX.Element | null {
-  if (panels.length === 0) return null
-  const current = panels.includes(active) ? active : panels[0]
-  return (
-    <div className={`dock-col dock-${side}`}>
-      {panels.length > 1 && (
-        <div className="dock-switcher">
-          {panels.map((panel) => (
-            <button
-              key={panel}
-              className={`dock-switch ${panel === current ? 'active' : ''}`}
-              title={panel === 'docs' ? '문서 패널' : '터미널'}
-              onClick={() => onSelect(panel)}
-            >
-              {panel === 'docs' ? '문서' : '터미널'}
-            </button>
-          ))}
-        </div>
-      )}
-      <div className="dock-content">{childrenByPanel[current]}</div>
-    </div>
-  )
-}
-
 // ── 좌측 문서 패널 (모드별) ──
 // 탐색기 모드 = 작성서류 폴더 트리. 뷰어 모드 = 열린 PDF의 본안 문서 목차(없으면 소송기록 폴더 트리).
 function DocsPanel({
   mode,
-  dockSide,
   draftsFolder,
   recordsFolder,
   suggestedRecords,
@@ -2232,7 +2406,6 @@ function DocsPanel({
   onNewFile,
   onSync,
   onOpenWorkspace,
-  onMoveDock,
   onOpenCase,
   jsNonce,
   pendingCreate,
@@ -2240,7 +2413,6 @@ function DocsPanel({
   onCancelCreate
 }: {
   mode: Mode
-  dockSide: DockSide
   draftsFolder?: string
   recordsFolder?: string
   suggestedRecords?: string
@@ -2258,7 +2430,6 @@ function DocsPanel({
   onNewFile: () => void
   onSync?: () => void
   onOpenWorkspace: () => void
-  onMoveDock: (side: DockSide) => void
   onOpenCase: (c: JsCase) => void
   jsNonce: number
   pendingCreate: 'file' | 'folder' | null
@@ -2313,16 +2484,6 @@ function DocsPanel({
                 <button className="tool-btn" title="새 작업환경 열기" onClick={onOpenWorkspace}>
                   <IconWorkspace size={15} />
                   <span className="sr-only">새 작업환경 열기</span>
-                </button>
-                <button
-                  className="tool-btn"
-                  title={dockSide === 'left' ? '작성서류 오른쪽으로 이동' : '작성서류 왼쪽으로 이동'}
-                  onClick={() => onMoveDock(dockSide === 'left' ? 'right' : 'left')}
-                >
-                  {dockSide === 'left' ? '⇥' : '⇤'}
-                  <span className="sr-only">
-                    {dockSide === 'left' ? '작성서류 오른쪽으로 이동' : '작성서류 왼쪽으로 이동'}
-                  </span>
                 </button>
                 <button className="tool-btn" title="새 파일" disabled={!draftsFolder} onClick={onNewFile}>
                   <IconNewFile size={15} />
@@ -2391,16 +2552,6 @@ function DocsPanel({
           <>
             <span className="sidebar-title">{title}</span>
             <span className="header-actions">
-              <button
-                className="tool-btn"
-                title={dockSide === 'left' ? '문서 패널 오른쪽으로 이동' : '문서 패널 왼쪽으로 이동'}
-                onClick={() => onMoveDock(dockSide === 'left' ? 'right' : 'left')}
-              >
-                {dockSide === 'left' ? '⇥' : '⇤'}
-                <span className="sr-only">
-                  {dockSide === 'left' ? '문서 패널 오른쪽으로 이동' : '문서 패널 왼쪽으로 이동'}
-                </span>
-              </button>
               {mode === 'viewer' && recordsFolder && (
                 <button className="header-btn" title="소송기록 폴더 변경" onClick={onPickRecords}>
                   변경
@@ -2578,11 +2729,12 @@ interface TabBarProps {
     attention?: boolean
     working?: boolean
     question?: boolean
+    renamable?: boolean
   }[]
   activeId: string
   onSelect: (id: string) => void
   onClose: (id: string) => void
-  onAdd: () => void
+  onAdd?: () => void
   addTitle: string
   extra?:
     | { label?: string; icon?: ReactNode; title: string; onClick: () => void }
@@ -2708,7 +2860,7 @@ function TabBar({
                 : undefined
             }
             onDoubleClick={
-              onRename
+              onRename && t.renamable
                 ? (e) => {
                     e.stopPropagation()
                     setEditing({ id: t.id, value: t.title })
@@ -2775,9 +2927,11 @@ function TabBar({
           {item.icon ?? item.label}
         </button>
       ))}
-      <button className="tab-add" title={addTitle} onClick={onAdd}>
-        ＋
-      </button>
+      {onAdd && (
+        <button className="tab-add" title={addTitle} onClick={onAdd}>
+          ＋
+        </button>
+      )}
     </div>
   )
 }

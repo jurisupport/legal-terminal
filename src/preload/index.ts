@@ -52,10 +52,11 @@ interface TerminalTabPayload {
   ssh?: SshConn
   sshLabel?: string
   profileId?: string
+  side?: 'left' | 'right'
 }
 
 type TabPayload =
-  | { kind: 'doc'; path: string; title: string }
+  | { kind: 'doc'; path: string; title: string; side?: 'left' | 'right' }
   | { kind: 'terminal'; tab: TerminalTabPayload }
 
 interface AppSettings {

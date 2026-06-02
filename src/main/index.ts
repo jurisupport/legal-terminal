@@ -119,6 +119,7 @@ interface TabPayload {
   kind?: 'doc' | 'terminal'
   path?: string
   title?: string
+  side?: 'left' | 'right'
   tab?: unknown
 }
 let pendingTabDrag: { payload: TabPayload; sourceId: number } | null = null
@@ -168,7 +169,7 @@ ipcMain.handle('tabs:endDrag', async () => {
   const pt = screen.getCursorScreenPoint()
   const wins = BrowserWindow.getAllWindows().filter((w) => !w.isDestroyed())
   const kind = drag.payload.kind ?? 'doc'
-  const targetSelector = kind === 'terminal' ? '.term-col > .tabs' : '.body-col > .tabs'
+  const targetSelector = '.work-pane > .tabs, .term-col > .tabs, .body-col > .tabs'
   // 1) 어떤 창의 같은 종류 탭바 위에서 놓였는가?
   for (const w of wins) {
     if (await isOverTabBar(w, pt, targetSelector)) {
