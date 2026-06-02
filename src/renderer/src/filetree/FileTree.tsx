@@ -46,6 +46,17 @@ function relativePath(root: string, path: string): string {
   return path.slice(root.length).replace(/^[\\/]+/, '')
 }
 
+function isRemotePath(path: string): boolean {
+  return path.startsWith('ssh://')
+}
+
+function parentPath(path: string, fallback: string): string {
+  const slash = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'))
+  if (slash <= 0) return fallback
+  if (isRemotePath(path) && slash <= 'ssh://'.length) return fallback
+  return path.slice(0, slash)
+}
+
 /** 활성 사건 폴더(root)의 파일트리. 폴더는 펼칠 때 지연 로딩. */
 export default function FileTree({
   root,
@@ -54,6 +65,8 @@ export default function FileTree({
   onDropTo,
   onMove,
   onDelete,
+  onPasteTo,
+  onDownload,
   pendingCreate = null,
   sortMode = 'name-asc',
   onCreate,
@@ -66,6 +79,8 @@ export default function FileTree({
   onDropTo?: (dir: string, files: FileList) => void
   onMove?: (src: string, destDir: string) => void
   onDelete?: (path: string, name: string, isDir: boolean) => void
+  onPasteTo?: (dir: string) => void
+  onDownload?: (path: string, name: string, isDir: boolean) => void
   pendingCreate?: 'file' | 'folder' | null
   sortMode?: SortMode
   onCreate?: (name: string, type: 'file' | 'folder') => void
@@ -80,12 +95,27 @@ export default function FileTree({
   const lastRoot = useRef<string | null>(null)
   const entriesRef = useRef<Entry[] | null>(null)
   const query = filter.trim()
-  // 우클릭 컨텍스트 메뉴 (삭제 등)
-  const [menu, setMenu] = useState<{ x: number; y: number; entry: Entry } | null>(null)
+  // 우클릭 컨텍스트 메뉴 (붙여넣기/다운로드/삭제 등)
+  const [menu, setMenu] = useState<{
+    x: number
+    y: number
+    entry?: Entry
+    pasteDir: string
+  } | null>(null)
   const onContext = (e: React.MouseEvent, entry: Entry): void => {
     e.preventDefault()
     e.stopPropagation()
-    setMenu({ x: e.clientX, y: e.clientY, entry })
+    setMenu({
+      x: e.clientX,
+      y: e.clientY,
+      entry,
+      pasteDir: entry.isDir ? entry.path : parentPath(entry.path, root)
+    })
+  }
+  const onRootContext = (e: React.MouseEvent): void => {
+    e.preventDefault()
+    e.stopPropagation()
+    setMenu({ x: e.clientX, y: e.clientY, pasteDir: root })
   }
   useEffect(() => {
     if (!menu) return
@@ -178,6 +208,7 @@ export default function FileTree({
   return (
     <ul
       className={`tree ${rootOver ? 'drop-target-root' : ''}`}
+      onContextMenu={onRootContext}
       onDragOver={(e) => {
         // 내부 경로 또는 외부 파일일 때만 드롭 허용
         if (!e.dataTransfer.types.includes(LT_PATH) && !e.dataTransfer.types.includes('Files')) return
@@ -208,6 +239,7 @@ export default function FileTree({
                   title={e.path}
                   draggable
                   onClick={() => onOpenFile(e.path, e.name)}
+                  onContextMenu={(ev) => onContext(ev, e)}
                   onDragStart={(ev) => {
                     ev.stopPropagation()
                     ev.dataTransfer.setData(LT_PATH, e.path)
@@ -268,22 +300,52 @@ export default function FileTree({
         <ul
           className="ctx-menu"
           style={{
-            left: Math.min(menu.x, window.innerWidth - 160),
-            top: Math.min(menu.y, window.innerHeight - 80)
+            left: Math.min(menu.x, window.innerWidth - 180),
+            top: Math.min(menu.y, window.innerHeight - 120)
           }}
           onMouseDown={(e) => e.stopPropagation()}
         >
-          <li
-            className="ctx-item"
-            onClick={() => {
-              const { path, name, isDir } = menu.entry
-              setMenu(null)
-              if (window.confirm(`'${name}'${isDir ? ' 폴더' : ''}을(를) 삭제할까요?`))
-                onDelete?.(path, name, isDir)
-            }}
-          >
-            🗑 삭제
-          </li>
+          {onPasteTo && (
+            <li
+              className="ctx-item"
+              onClick={() => {
+                const dir = menu.pasteDir
+                setMenu(null)
+                onPasteTo(dir)
+              }}
+            >
+              붙여넣기
+            </li>
+          )}
+          {onDownload &&
+            ((menu.entry && isRemotePath(menu.entry.path)) || (!menu.entry && isRemotePath(root))) && (
+            <li
+              className="ctx-item"
+              onClick={() => {
+                const entry = menu.entry
+                const path = entry?.path ?? root
+                const name = entry?.name ?? '현재 폴더'
+                const isDir = entry?.isDir ?? true
+                setMenu(null)
+                onDownload(path, name, isDir)
+              }}
+            >
+              다운로드
+            </li>
+          )}
+          {menu.entry && onDelete && (
+            <li
+              className="ctx-item"
+              onClick={() => {
+                const { path, name, isDir } = menu.entry as Entry
+                setMenu(null)
+                if (window.confirm(`'${name}'${isDir ? ' 폴더' : ''}을(를) 삭제할까요?`))
+                  onDelete(path, name, isDir)
+              }}
+            >
+              삭제
+            </li>
+          )}
         </ul>
       )}
     </ul>

@@ -1,8 +1,9 @@
-import { app, BrowserWindow, shell, ipcMain, dialog, screen, Menu } from 'electron'
+import { app, BrowserWindow, shell, ipcMain, dialog, screen, Menu, clipboard } from 'electron'
 import { spawn } from 'child_process'
-import { join, basename, extname, resolve, sep } from 'path'
+import { join, basename, dirname, extname, resolve, sep, posix } from 'path'
 import { readdir, readFile, stat, writeFile, copyFile, rm, mkdir, rename, cp } from 'fs/promises'
 import { existsSync } from 'fs'
+import { fileURLToPath } from 'url'
 import { getSettings, setSettings, type Settings } from './settings'
 import {
   getPairing,
@@ -17,6 +18,8 @@ import { listRemoteDir } from './ssh'
 import { remoteRcloneInfo, runRemoteSync, cancelSync, type RemoteSyncOpts } from './sync'
 import {
   isRemote,
+  parseRemote,
+  makeRemote,
   rfsList,
   rfsListPdfs,
   rfsReadBytes,
@@ -486,6 +489,249 @@ function prefetchLocalCloudFiles(paths: string[]): void {
   })()
 }
 
+function readBplistInt(buf: Buffer, offset: number, size: number): number {
+  let value = 0
+  for (let i = 0; i < size; i++) value = value * 256 + buf[offset + i]
+  return value
+}
+
+function parseBplistStrings(buf: Buffer): string[] {
+  if (buf.length < 40 || buf.subarray(0, 8).toString('ascii') !== 'bplist00') return []
+  const trailer = buf.subarray(buf.length - 32)
+  const offsetSize = trailer[6]
+  const refSize = trailer[7]
+  const objectCount = Number(trailer.readBigUInt64BE(8))
+  const topObject = Number(trailer.readBigUInt64BE(16))
+  const offsetTableOffset = Number(trailer.readBigUInt64BE(24))
+  if (!offsetSize || !refSize || objectCount <= 0 || objectCount > 100_000) return []
+  const offsets: number[] = []
+  for (let i = 0; i < objectCount; i++) {
+    offsets.push(readBplistInt(buf, offsetTableOffset + i * offsetSize, offsetSize))
+  }
+
+  const readLength = (offset: number, low: number): { length: number; offset: number } => {
+    if (low < 0xf) return { length: low, offset }
+    const marker = buf[offset]
+    const intSize = 1 << (marker & 0x0f)
+    return { length: readBplistInt(buf, offset + 1, intSize), offset: offset + 1 + intSize }
+  }
+
+  const readObject = (index: number, seen = new Set<number>()): unknown => {
+    if (index < 0 || index >= offsets.length || seen.has(index)) return null
+    seen.add(index)
+    let offset = offsets[index]
+    const marker = buf[offset++]
+    const high = marker >> 4
+    const low = marker & 0x0f
+    if (high === 0x5) {
+      const lengthInfo = readLength(offset, low)
+      return buf.subarray(lengthInfo.offset, lengthInfo.offset + lengthInfo.length).toString('utf8')
+    }
+    if (high === 0x6) {
+      const lengthInfo = readLength(offset, low)
+      return Buffer.from(buf.subarray(lengthInfo.offset, lengthInfo.offset + lengthInfo.length * 2))
+        .swap16()
+        .toString('utf16le')
+    }
+    if (high === 0xa) {
+      const lengthInfo = readLength(offset, low)
+      const out: unknown[] = []
+      for (let i = 0; i < lengthInfo.length; i++) {
+        const ref = readBplistInt(buf, lengthInfo.offset + i * refSize, refSize)
+        out.push(readObject(ref, new Set(seen)))
+      }
+      return out
+    }
+    if (high === 0xd) {
+      const lengthInfo = readLength(offset, low)
+      const keysStart = lengthInfo.offset
+      const valuesStart = keysStart + lengthInfo.length * refSize
+      const out: Record<string, unknown> = {}
+      for (let i = 0; i < lengthInfo.length; i++) {
+        const keyRef = readBplistInt(buf, keysStart + i * refSize, refSize)
+        const valueRef = readBplistInt(buf, valuesStart + i * refSize, refSize)
+        const key = readObject(keyRef, new Set(seen))
+        if (typeof key === 'string') out[key] = readObject(valueRef, new Set(seen))
+      }
+      return out
+    }
+    return null
+  }
+
+  const strings: string[] = []
+  const collect = (value: unknown): void => {
+    if (typeof value === 'string') strings.push(value)
+    else if (Array.isArray(value)) value.forEach(collect)
+    else if (value && typeof value === 'object') Object.values(value).forEach(collect)
+  }
+  collect(readObject(topObject))
+  return strings
+}
+
+function decodeClipboardBuffer(buf: Buffer): string[] {
+  const bplistStrings = parseBplistStrings(buf)
+  const texts = [
+    buf.toString('utf8'),
+    buf.includes(0) ? buf.toString('utf16le') : ''
+  ].filter(Boolean)
+  return [...bplistStrings, ...texts]
+}
+
+function filePathFromClipboardToken(token: string): string | null {
+  let value = token.trim()
+  if (!value || value === 'copy' || value === 'cut') return null
+  value = value.replace(/[;,]+$/, '').trim()
+  value = value.replace(/^['"]|['"]$/g, '')
+  if (!value) return null
+  try {
+    if (/^file:/i.test(value)) return fileURLToPath(value)
+  } catch {
+    return null
+  }
+  if (/^\/.+/.test(value) || /^[A-Za-z]:[\\/]/.test(value) || /^\\\\[^\\]+\\[^\\]+/.test(value)) {
+    return value
+  }
+  return null
+}
+
+function extractClipboardPathsFromText(text: string): string[] {
+  const paths: string[] = []
+  const push = (value: string | null): void => {
+    if (value && existsSync(value)) paths.push(value)
+  }
+  const normalized = text.replace(/\r\n?/g, '\n').replace(/\0/g, '\n')
+  for (const line of normalized.split('\n')) push(filePathFromClipboardToken(line))
+
+  const embedded =
+    normalized.match(
+      /file:\/\/[^\s<>"']+|\/(?:Users|Volumes|private|var|tmp|opt|Applications|Library)\/[^\n\r\t<>"']+|[A-Za-z]:\\[^\n\r\t<>"']+|\\\\[^\n\r\t<>"']+/g
+    ) ?? []
+  for (const token of embedded) push(filePathFromClipboardToken(token))
+  return paths
+}
+
+function parseCfHdrop(buf: Buffer): string[] {
+  if (buf.length < 20) return []
+  const offset = buf.readUInt32LE(0)
+  const wide = buf.readUInt32LE(16) !== 0
+  if (offset < 20 || offset >= buf.length) return []
+  const text = wide ? buf.subarray(offset).toString('utf16le') : buf.subarray(offset).toString('latin1')
+  return text.split('\0').filter((p) => p && existsSync(p))
+}
+
+function uniquePaths(paths: string[]): string[] {
+  const seen = new Set<string>()
+  const out: string[] = []
+  for (const path of paths) {
+    const key = resolve(path)
+    if (seen.has(key)) continue
+    seen.add(key)
+    out.push(path)
+  }
+  return out
+}
+
+function readClipboardFilePaths(): { paths: string[]; formats: string[] } {
+  const formats = clipboard.availableFormats('clipboard')
+  const paths: string[] = []
+  const readTextFormat = (format: string): void => {
+    try {
+      const text = clipboard.read(format)
+      paths.push(...extractClipboardPathsFromText(text))
+    } catch {
+      try {
+        const buf = clipboard.readBuffer(format)
+        for (const text of decodeClipboardBuffer(buf)) paths.push(...extractClipboardPathsFromText(text))
+      } catch {
+        /* 일부 플랫폼 포맷은 Electron에서 읽기 실패할 수 있다. */
+      }
+    }
+  }
+
+  try {
+    const bookmark = clipboard.readBookmark()
+    paths.push(...extractClipboardPathsFromText(bookmark.url))
+  } catch {
+    /* macOS/Windows 북마크가 없는 경우 */
+  }
+
+  for (const format of formats) {
+    if (format === 'CF_HDROP') {
+      try {
+        paths.push(...parseCfHdrop(clipboard.readBuffer(format)))
+      } catch {
+        /* ignore */
+      }
+      continue
+    }
+    if (/^(FileNameW|FileName|NSFilenamesPboardType|public\.file-url|text\/uri-list|x-special\/gnome-copied-files)$/i.test(format)) {
+      readTextFormat(format)
+    }
+  }
+  paths.push(...extractClipboardPathsFromText(clipboard.readText('clipboard')))
+  return { paths: uniquePaths(paths), formats }
+}
+
+function remoteChild(parentUri: string, name: string): string {
+  const { profileId, path } = parseRemote(parentUri)
+  return makeRemote(profileId, posix.join(path, name))
+}
+
+async function ensureRemoteChildDir(parentUri: string, name: string): Promise<string> {
+  const child = remoteChild(parentUri, name)
+  try {
+    const st = await rfsStat(child)
+    if (!st.isDir) throw new Error('같은 이름의 파일이 이미 있습니다: ' + name)
+    return child
+  } catch (e) {
+    if (String(e).includes('같은 이름의 파일')) throw e
+    await rfsMkdir(parentUri, name)
+    return child
+  }
+}
+
+async function copyLocalPathInto(destDir: string, src: string): Promise<string> {
+  const st = await stat(src)
+  const dest = join(destDir, basename(src))
+  if (st.isDirectory()) await cp(src, dest, { recursive: true })
+  else await copyFile(src, dest)
+  return dest
+}
+
+async function uploadLocalPathIntoRemote(destDir: string, src: string): Promise<string> {
+  const st = await stat(src)
+  if (!st.isDirectory()) {
+    const buf = await readFile(src)
+    return await rfsWriteBytes(destDir, basename(src), buf)
+  }
+  const dir = await ensureRemoteChildDir(destDir, basename(src))
+  const entries = await readdir(src, { withFileTypes: true })
+  for (const entry of entries) {
+    await uploadLocalPathIntoRemote(dir, join(src, entry.name))
+  }
+  return dir
+}
+
+function remoteBasename(uri: string): string {
+  const { path } = parseRemote(uri)
+  return posix.basename(path) || 'download'
+}
+
+async function downloadRemoteToLocal(srcUri: string, destPath: string): Promise<number> {
+  const st = await rfsStat(srcUri)
+  if (!st.isDir) {
+    await mkdir(dirname(destPath), { recursive: true })
+    await writeFile(destPath, await rfsReadBytes(srcUri))
+    return 1
+  }
+  await mkdir(destPath, { recursive: true })
+  let count = 0
+  for (const entry of await rfsList(srcUri)) {
+    count += await downloadRemoteToLocal(entry.path, join(destPath, entry.name))
+  }
+  return count
+}
+
 ipcMain.handle('fs:mkdir', async (_e, p: { dir: string; name: string }) => {
   try {
     if (isRemote(p.dir)) await rfsMkdir(p.dir, p.name)
@@ -576,6 +822,8 @@ ipcMain.handle('fs:listPdfs', async (_e, dir: string) => {
   return out
 })
 
+ipcMain.handle('fs:clipboardFiles', async () => readClipboardFilePaths())
+
 ipcMain.handle('fs:readBytes', async (_e, filePath: string) => {
   try {
     const buf = isRemote(filePath) ? await rfsReadBytes(filePath) : await readLocalBytes(filePath)
@@ -648,19 +896,41 @@ ipcMain.handle('fs:copyInto', async (_e, p: { destDir: string; srcPaths: string[
   const remote = isRemote(p.destDir)
   for (const src of p.srcPaths) {
     try {
-      if (remote) {
-        const buf = await readFile(src) // 로컬 원본을 읽어 원격으로 업로드
-        copied.push(await rfsWriteBytes(p.destDir, basename(src), buf))
-      } else {
-        const dest = join(p.destDir, basename(src))
-        await copyFile(src, dest)
-        copied.push(dest)
-      }
+      copied.push(remote ? await uploadLocalPathIntoRemote(p.destDir, src) : await copyLocalPathInto(p.destDir, src))
     } catch {
       /* 개별 실패 무시 */
     }
   }
   return { copied }
+})
+
+ipcMain.handle('fs:download', async (_e, source: string) => {
+  if (!mainWindow) return { ok: false, error: '메인 창을 찾을 수 없습니다.' }
+  if (!isRemote(source)) return { ok: false, error: '원격 경로만 다운로드할 수 있습니다.' }
+  try {
+    const st = await rfsStat(source)
+    const name = remoteBasename(source)
+    if (st.isDir) {
+      const r = await dialog.showOpenDialog(mainWindow, {
+        title: '원격 폴더 다운로드 위치',
+        defaultPath: app.getPath('downloads'),
+        properties: ['openDirectory', 'createDirectory']
+      })
+      if (r.canceled || r.filePaths.length === 0) return { ok: true, canceled: true }
+      const path = join(r.filePaths[0], name)
+      const count = await downloadRemoteToLocal(source, path)
+      return { ok: true, path, count }
+    }
+    const r = await dialog.showSaveDialog(mainWindow, {
+      title: '원격 파일 다운로드',
+      defaultPath: join(app.getPath('downloads'), name)
+    })
+    if (r.canceled || !r.filePath) return { ok: true, canceled: true }
+    const count = await downloadRemoteToLocal(source, r.filePath)
+    return { ok: true, path: r.filePath, count }
+  } catch (e) {
+    return { ok: false, error: String(e) }
+  }
 })
 
 // 마크다운(HTML) → PDF (Electron 내장 printToPDF, 외부 의존성 없음)

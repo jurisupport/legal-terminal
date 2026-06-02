@@ -1489,6 +1489,21 @@ body {
   color: var(--fg-muted);
   flex-shrink: 0;
 }
+.recent-more {
+  margin-top: 8px;
+  padding: 7px 12px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: transparent;
+  color: var(--fg);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.recent-more:hover {
+  border-color: var(--accent);
+  background: var(--bg-alt);
+}
 
 .welcome-list code,
 .terminal-placeholder code {

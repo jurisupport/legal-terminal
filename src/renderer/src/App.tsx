@@ -146,6 +146,13 @@ const emitSettingsUpdated = (settings: AppSettings): void => {
   window.dispatchEvent(new CustomEvent<AppSettings>(SETTINGS_UPDATED_EVENT, { detail: settings }))
 }
 
+const sshConnFromProfile = (profile: SshProfile): SshConn => ({
+  host: profile.host,
+  user: profile.user,
+  port: profile.port,
+  identityFile: profile.identityFile
+})
+
 interface DocTab {
   id: string
   title: string
@@ -863,12 +870,7 @@ export default function App(): JSX.Element {
   ): { id: string; title: string } => {
     const title = name || remotePath.replace(/\/+$/, '').split('/').pop() || profile.label
     const draftsUri = remoteUri(profile.id, remotePath)
-    const ssh = {
-      host: profile.host,
-      user: profile.user,
-      port: profile.port,
-      identityFile: profile.identityFile
-    }
+    const ssh = sshConnFromProfile(profile)
     const tab: TermTab = {
       id: newId(),
       title,
@@ -1035,7 +1037,10 @@ export default function App(): JSX.Element {
     source?: TermTab,
     side: DockSide = termSide(source)
   ): void => {
-    const base = currentCase && currentCase.drafts === cwd ? currentCase : undefined
+    const base =
+      currentCase && (currentCase.drafts === cwd || currentCase.remotePath === cwd)
+        ? currentCase
+        : undefined
     const meta = base?.meta
     const tab: TermTab = {
       id: newId(),
@@ -1313,6 +1318,31 @@ export default function App(): JSX.Element {
     resolveCaseOpenTarget(caseOpenTarget, sshProfiles)
   )
   const isViewer = mode === 'viewer'
+  const sessionCaseSource: TermTab | undefined = currentCase
+    ? (() => {
+        const remote = parseRemoteUri(currentCase.drafts)
+        const profileId = currentCase.profileId ?? remote?.profileId
+        const savedProfile = profileId ? sshProfiles.find((p) => p.id === profileId) : undefined
+        const ssh = currentCase.ssh ?? (savedProfile ? sshConnFromProfile(savedProfile) : undefined)
+        const cwd = currentCase.remotePath ?? remote?.path ?? currentCase.drafts
+        return {
+          id: '__current_case__',
+          title: currentCase.name,
+          cwd,
+          recordsFolder: currentCase.records,
+          autoClaude: true,
+          jsId: currentCase.meta?.jsId,
+          court: currentCase.meta?.court,
+          caseNumber: currentCase.meta?.caseNumber,
+          caseName: currentCase.meta?.caseName,
+          client: currentCase.meta?.client,
+          ssh,
+          sshLabel: currentCase.sshLabel ?? savedProfile?.label,
+          profileId,
+          side: 'right'
+        }
+      })()
+    : undefined
 
   const buildWorkspaceSnapshot = async (): Promise<WorkspaceSnapshot> => {
     const docs = docTabs.map(toWorkspaceDoc).filter((t): t is WorkspaceDocTabPayload => !!t)
@@ -1486,16 +1516,48 @@ export default function App(): JSX.Element {
     return () => clearInterval(timer)
   }, [activeDraftsFolder, activeRecordsFolder])
 
+  const copyPathsTo = (dir: string, paths: string[]): void => {
+    if (!paths.length) return
+    window.lt.fs.copyInto(dir, paths).then((r) => {
+      if (r.copied.length === 0) {
+        window.alert('붙여넣기/복사할 수 있는 파일이 없습니다.')
+        return
+      }
+      setTreeRefresh((n) => n + 1)
+    })
+  }
   // 외부 파일을 특정 폴더로 복사 (드래그앤드롭)
   const copyFilesTo = (dir: string, files: FileList): void => {
     const paths = Array.from(files)
       .map((f) => window.lt.fs.pathForFile(f))
       .filter(Boolean)
-    if (!paths.length) return
-    window.lt.fs.copyInto(dir, paths).then(() => setTreeRefresh((n) => n + 1))
+    copyPathsTo(dir, paths)
+  }
+  const pasteFilesTo = async (dir: string): Promise<void> => {
+    const clip = await window.lt.fs.clipboardFiles()
+    if (clip.paths.length === 0) {
+      window.alert('클립보드에 붙여넣을 로컬 파일 경로가 없습니다.')
+      return
+    }
+    copyPathsTo(dir, clip.paths)
   }
   const onDropFiles = (files: FileList): void => {
     if (activeDraftsFolder) copyFilesTo(activeDraftsFolder, files)
+  }
+  const downloadEntry = (path: string, name: string, isDir: boolean): void => {
+    if (!isRemotePath(path)) return
+    window.lt.fs.download(path).then((r) => {
+      if (r.canceled) return
+      if (!r.ok) {
+        window.alert('다운로드 실패: ' + (r.error ?? '알 수 없는 오류'))
+        return
+      }
+      window.alert(
+        `${isDir ? '폴더' : '파일'} 다운로드 완료: ${name}` +
+          (r.count !== undefined ? `\n파일 ${r.count}개` : '') +
+          (r.path ? `\n${r.path}` : '')
+      )
+    })
   }
   // 트리 내부 이동 (드래그앤드롭)
   const moveEntry = (src: string, destDir: string): void => {
@@ -1935,6 +1997,8 @@ export default function App(): JSX.Element {
       onDropTo={copyFilesTo}
       onMove={moveEntry}
       onDelete={deleteEntry}
+      onPasteTo={pasteFilesTo}
+      onDownload={downloadEntry}
       onPickRecords={pickRecords}
       onApplySuggested={applySuggested}
       onOpenItem={onOpenItem}
@@ -1997,7 +2061,7 @@ export default function App(): JSX.Element {
             active: sessionListOpen,
             onClick: () => {
               const cur = termTabs.find((t) => t.id === activeTerm)
-              setSessionFilter(cur?.jsId ?? 'all')
+              setSessionFilter(cur?.jsId ?? sessionCaseSource?.jsId ?? 'all')
               setSessionListOpen((v) => !v)
             }
           }
@@ -2014,7 +2078,8 @@ export default function App(): JSX.Element {
           activeId={activeTerm}
           filter={sessionFilter}
           onFilter={setSessionFilter}
-          caseCwd={currentCase?.drafts}
+          caseCwd={sessionCaseSource?.cwd ?? currentCase?.drafts}
+          caseSource={sessionCaseSource}
           onSelect={(id) => {
             selectTerm(id)
             setSessionListOpen(false)
@@ -2133,6 +2198,7 @@ export default function App(): JSX.Element {
     const visibleTermId = activeParsed?.kind === 'terminal' ? activeParsed.id : ''
     const hasTerms = terms.length > 0
     const sessionListSide = termSide(activeTermTab)
+    const canOpenSessionList = hasTerms || (side === sessionListSide && !!sessionCaseSource)
 
     return (
       <div className={`work-pane work-${side}`} key={side}>
@@ -2184,7 +2250,7 @@ export default function App(): JSX.Element {
                   }
                 ]
               : []),
-            ...(hasTerms
+            ...(canOpenSessionList
               ? [
                   {
                     label: '☰',
@@ -2199,7 +2265,7 @@ export default function App(): JSX.Element {
                         setWorkActive(side, termKeyOf(cur.id))
                         setSessionFilter(cur.jsId ?? 'all')
                       } else {
-                        setSessionFilter('all')
+                        setSessionFilter(sessionCaseSource?.jsId ?? 'all')
                       }
                       setSessionListOpen((v) => !(v && side === sessionListSide))
                     }
@@ -2226,7 +2292,8 @@ export default function App(): JSX.Element {
             activeId={activeTerm}
             filter={sessionFilter}
             onFilter={setSessionFilter}
-            caseCwd={currentCase?.drafts}
+            caseCwd={sessionCaseSource?.cwd ?? currentCase?.drafts}
+            caseSource={sessionCaseSource}
             onSelect={(id) => {
               selectTerm(id)
               setSessionListOpen(false)
@@ -2646,6 +2713,8 @@ function DocsPanel({
   onDropTo,
   onMove,
   onDelete,
+  onPasteTo,
+  onDownload,
   onPickRecords,
   onApplySuggested,
   onOpenItem,
@@ -2670,6 +2739,8 @@ function DocsPanel({
   onDropTo: (dir: string, files: FileList) => void
   onMove: (src: string, destDir: string) => void
   onDelete: (path: string, name: string, isDir: boolean) => void
+  onPasteTo: (dir: string) => void
+  onDownload: (path: string, name: string, isDir: boolean) => void
   onPickRecords: () => void
   onApplySuggested: () => void
   onOpenItem: (it: OutlineItem) => void
@@ -2819,6 +2890,8 @@ function DocsPanel({
               onDropTo={onDropTo}
               onMove={onMove}
               onDelete={onDelete}
+              onPasteTo={onPasteTo}
+              onDownload={onDownload}
               pendingCreate={pendingCreate}
               sortMode={sortMode}
               filter={fileFindOpen ? fileFindQuery : ''}
@@ -3191,6 +3264,7 @@ function SessionList({
   filter,
   onFilter,
   caseCwd,
+  caseSource,
   onSelect,
   onResume,
   onClose
@@ -3200,6 +3274,7 @@ function SessionList({
   filter: string
   onFilter: (f: string) => void
   caseCwd?: string
+  caseSource?: TermTab
   onSelect: (id: string) => void
   onResume: (sessionId: string, cwd: string, title?: string, source?: TermTab) => void
   onClose: () => void
@@ -3229,18 +3304,41 @@ function SessionList({
       }
     } else hasFolder = true
   }
+  if (caseSource?.jsId) {
+    if (!seen.has(caseSource.jsId)) {
+      seen.add(caseSource.jsId)
+      caseOpts.push({
+        value: caseSource.jsId,
+        label:
+          [caseSource.caseNumber, caseSource.caseName].filter(Boolean).join(' ') ||
+          caseSource.title
+      })
+    }
+  } else if (caseSource) {
+    hasFolder = true
+  }
   const shown = sessions.filter((s) =>
     filter === 'all' ? true : filter === '__folder__' ? !s.jsId : s.jsId === filter
   )
 
   // 과거 세션을 읽을 cwd: 필터된 사건의 열린 세션 cwd → 없으면 현재 사건 cwd
   const activeSession = sessions.find((s) => s.id === activeId)
+  const caseFallback =
+    filter !== 'all' && filter !== '__folder__'
+      ? caseSource?.jsId === filter
+        ? caseSource
+        : undefined
+      : filter === '__folder__'
+        ? caseSource && !caseSource.jsId
+          ? caseSource
+          : undefined
+        : caseSource
   const filterSource =
     filter !== 'all' && filter !== '__folder__'
-      ? sessions.find((s) => s.jsId === filter)
+      ? (sessions.find((s) => s.jsId === filter) ?? caseFallback)
       : filter === '__folder__'
-        ? (shown.find((s) => s.id === activeId) ?? shown[0])
-        : activeSession
+        ? (shown.find((s) => s.id === activeId) ?? shown[0] ?? caseFallback)
+        : (activeSession ?? caseFallback)
   const filterCwd =
     filter !== 'all' && filter !== '__folder__'
       ? (filterSource?.cwd ?? caseCwd)
@@ -3324,6 +3422,8 @@ function SessionList({
   )
 }
 
+const RECENT_CASES_PAGE_SIZE = 10
+
 function Welcome({
   recent,
   onOpen
@@ -3331,6 +3431,14 @@ function Welcome({
   recent: { drafts: string; records?: string; name: string; ts: number }[]
   onOpen: (e: { drafts: string; records?: string; name: string }) => void | Promise<void>
 }): JSX.Element {
+  const [recentVisibleCount, setRecentVisibleCount] = useState(RECENT_CASES_PAGE_SIZE)
+  const visibleRecent = recent.slice(0, recentVisibleCount)
+  const hasMoreRecent = recentVisibleCount < recent.length
+
+  useEffect(() => {
+    setRecentVisibleCount(RECENT_CASES_PAGE_SIZE)
+  }, [recent.length])
+
   return (
     <div className="welcome">
       <h1>legal-terminal</h1>
@@ -3340,7 +3448,7 @@ function Welcome({
         <div className="recent">
           <h2 className="recent-title">최근 사건</h2>
           <ul className="recent-list">
-            {recent.map((r) => (
+            {visibleRecent.map((r) => (
               <li key={r.drafts} className="recent-item" onClick={() => void onOpen(r)} title={r.drafts}>
                 <span className="recent-name">⚖️ {r.name}</span>
                 {isRemotePath(r.drafts) && <span className="recent-tag">원격</span>}
@@ -3348,6 +3456,15 @@ function Welcome({
               </li>
             ))}
           </ul>
+          {hasMoreRecent && (
+            <button
+              className="recent-more"
+              type="button"
+              onClick={() => setRecentVisibleCount((count) => count + RECENT_CASES_PAGE_SIZE)}
+            >
+              더 보기
+            </button>
+          )}
         </div>
       )}
 

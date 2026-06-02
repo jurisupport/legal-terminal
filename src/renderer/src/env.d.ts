@@ -203,6 +203,10 @@ export interface LtApi {
       | { ok: true; size: number; isDir: boolean; mtimeMs?: number }
       | { ok: false; error: string }
     >
+    clipboardFiles: () => Promise<{ paths: string[]; formats: string[] }>
+    download: (
+      source: string
+    ) => Promise<{ ok: boolean; path?: string; count?: number; canceled?: boolean; error?: string }>
   }
   case: {
     getPairing: (drafts: string) => Promise<string | undefined>

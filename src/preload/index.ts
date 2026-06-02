@@ -160,6 +160,12 @@ const api = {
       ipcRenderer.invoke('fs:saveAs', { content, defaultPath }),
     copyInto: (destDir: string, srcPaths: string[]): Promise<{ copied: string[] }> =>
       ipcRenderer.invoke('fs:copyInto', { destDir, srcPaths }),
+    clipboardFiles: (): Promise<{ paths: string[]; formats: string[] }> =>
+      ipcRenderer.invoke('fs:clipboardFiles'),
+    download: (
+      source: string
+    ): Promise<{ ok: boolean; path?: string; count?: number; canceled?: boolean; error?: string }> =>
+      ipcRenderer.invoke('fs:download', source),
     move: (src: string, destDir: string): Promise<{ ok: boolean; path?: string; error?: string }> =>
       ipcRenderer.invoke('fs:move', { src, destDir }),
     delete: (path: string): Promise<{ ok: boolean; error?: string }> =>
