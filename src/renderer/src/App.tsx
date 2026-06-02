@@ -44,6 +44,26 @@ const SORT_OPTIONS: { value: SortMode; label: string; title: string }[] = [
 const CASE_OPEN_LOCAL = 'local'
 const CASE_OPEN_REMOTE_PREFIX = 'remote:'
 const SETTINGS_UPDATED_EVENT = 'lt:settings-updated'
+const DEFAULT_TERM_FONT_SIZE = 13
+const DEFAULT_MD_FONT_SIZE = 14
+const FONT_SIZE_MIN = 8
+const FONT_SIZE_MAX = 32
+const DEFAULT_MD_FONT = "'D2Coding', 'Cascadia Mono', Consolas, monospace"
+
+const MD_FONT_OPTIONS: { label: string; value: string }[] = [
+  { label: '기본값 (D2Coding 고정폭)', value: '' },
+  { label: '맑은 고딕 / Segoe UI', value: "'Malgun Gothic', 'Segoe UI', system-ui, sans-serif" },
+  {
+    label: 'Apple SD Gothic Neo',
+    value: "'Apple SD Gothic Neo', 'Malgun Gothic', system-ui, sans-serif"
+  },
+  {
+    label: 'Noto Sans KR',
+    value: "'Noto Sans KR', 'Apple SD Gothic Neo', 'Malgun Gothic', system-ui, sans-serif"
+  },
+  { label: '나눔고딕', value: "'Nanum Gothic', 'Malgun Gothic', system-ui, sans-serif" },
+  { label: 'Cascadia Mono / Consolas', value: "'Cascadia Mono', Consolas, 'D2Coding', monospace" }
+]
 
 const normalizePasteForPty = (text: string): string =>
   text.replace(/\r\n/g, '\n').replace(/\r/g, '\n').replace(/\n/g, '\r')
@@ -56,6 +76,11 @@ const resolveCaseOpenTarget = (target: string | undefined, profiles: SshProfile[
   return profileId && profiles.some((p) => p.id === profileId)
     ? remoteCaseOpenTarget(profileId)
     : CASE_OPEN_LOCAL
+}
+const clampFontSize = (value: string, fallback: number): number => {
+  const parsed = Number.parseInt(value, 10)
+  if (Number.isNaN(parsed)) return fallback
+  return Math.min(FONT_SIZE_MAX, Math.max(FONT_SIZE_MIN, parsed))
 }
 const emitSettingsUpdated = (settings: AppSettings): void => {
   window.dispatchEvent(new CustomEvent<AppSettings>(SETTINGS_UPDATED_EVENT, { detail: settings }))
@@ -3198,6 +3223,8 @@ function ImageViewer({
 function SettingsView(): JSX.Element {
   const [s, setS] = useState<AppSettings>({})
   const [loaded, setLoaded] = useState(false)
+  const [termFontSizeInput, setTermFontSizeInput] = useState(String(DEFAULT_TERM_FONT_SIZE))
+  const [mdFontSizeInput, setMdFontSizeInput] = useState(String(DEFAULT_MD_FONT_SIZE))
 
   useEffect(() => {
     const applySettings = (v: AppSettings): void => {
@@ -3213,10 +3240,30 @@ function SettingsView(): JSX.Element {
     return () => window.removeEventListener(SETTINGS_UPDATED_EVENT, onSettingsUpdated)
   }, [])
 
+  useEffect(() => {
+    setTermFontSizeInput(String(s.termFontSize ?? DEFAULT_TERM_FONT_SIZE))
+  }, [s.termFontSize])
+
+  useEffect(() => {
+    setMdFontSizeInput(String(s.mdFontSize ?? DEFAULT_MD_FONT_SIZE))
+  }, [s.mdFontSize])
+
   const savePatch = async (patch: Partial<AppSettings>): Promise<void> => {
     const next = await window.lt.settings.set(patch)
     setS(next)
     emitSettingsUpdated(next)
+  }
+
+  const commitTermFontSize = async (): Promise<void> => {
+    const next = clampFontSize(termFontSizeInput, s.termFontSize ?? DEFAULT_TERM_FONT_SIZE)
+    setTermFontSizeInput(String(next))
+    if (next !== (s.termFontSize ?? DEFAULT_TERM_FONT_SIZE)) await savePatch({ termFontSize: next })
+  }
+
+  const commitMdFontSize = async (): Promise<void> => {
+    const next = clampFontSize(mdFontSizeInput, s.mdFontSize ?? DEFAULT_MD_FONT_SIZE)
+    setMdFontSizeInput(String(next))
+    if (next !== (s.mdFontSize ?? DEFAULT_MD_FONT_SIZE)) await savePatch({ mdFontSize: next })
   }
 
   const pick = async (key: 'draftsRoot' | 'recordsRoot'): Promise<void> => {
@@ -3231,6 +3278,11 @@ function SettingsView(): JSX.Element {
 
   const profiles = s.sshProfiles ?? []
   const caseOpenValue = resolveCaseOpenTarget(s.caseOpenTarget, profiles)
+  const mdFontValue = s.mdFont === DEFAULT_MD_FONT ? '' : s.mdFont ?? ''
+  const mdFontOptions =
+    mdFontValue && !MD_FONT_OPTIONS.some((option) => option.value === mdFontValue)
+      ? [...MD_FONT_OPTIONS, { label: `현재 설정 (${mdFontValue})`, value: mdFontValue }]
+      : MD_FONT_OPTIONS
 
   return (
     <div className="settings">
@@ -3328,11 +3380,18 @@ function SettingsView(): JSX.Element {
             type="number"
             min={8}
             max={32}
-            value={s.termFontSize ?? 13}
-            onChange={async (e) => {
-              const n = parseInt(e.target.value, 10)
-              if (Number.isNaN(n)) return
-              await savePatch({ termFontSize: Math.min(32, Math.max(8, n)) })
+            value={termFontSizeInput}
+            onFocus={(e) => e.currentTarget.select()}
+            onChange={(e) => setTermFontSizeInput(e.target.value)}
+            onBlur={() => {
+              void commitTermFontSize()
+            }}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') e.currentTarget.blur()
+              if (e.key === 'Escape') {
+                setTermFontSizeInput(String(s.termFontSize ?? DEFAULT_TERM_FONT_SIZE))
+                e.currentTarget.blur()
+              }
             }}
           />
           <span className="muted small">px</span>
@@ -3344,14 +3403,28 @@ function SettingsView(): JSX.Element {
           마크다운 폰트 <span className="muted small">— 편집기(원본/서식)에 적용</span>
         </div>
         <div className="setting-value">
-          <input
-            className="setting-input"
-            placeholder="예: D2Coding, Malgun Gothic, Consolas"
-            defaultValue={s.mdFont ?? ''}
-            onBlur={async (e) => {
-              await savePatch({ mdFont: e.target.value.trim() })
+          <select
+            className="setting-select font-select"
+            value={mdFontValue}
+            onChange={(e) => {
+              void savePatch({ mdFont: e.target.value || undefined })
             }}
-          />
+          >
+            {mdFontOptions.map((option) => (
+              <option key={option.value || 'default'} value={option.value}>
+                {option.label}
+              </option>
+            ))}
+          </select>
+          <button
+            className="header-btn setting-reset-btn"
+            type="button"
+            onClick={() => {
+              void savePatch({ mdFont: undefined })
+            }}
+          >
+            기본값 복원
+          </button>
         </div>
       </section>
 
@@ -3363,11 +3436,18 @@ function SettingsView(): JSX.Element {
             type="number"
             min={8}
             max={32}
-            value={s.mdFontSize ?? 14}
-            onChange={async (e) => {
-              const n = parseInt(e.target.value, 10)
-              if (Number.isNaN(n)) return
-              await savePatch({ mdFontSize: Math.min(32, Math.max(8, n)) })
+            value={mdFontSizeInput}
+            onFocus={(e) => e.currentTarget.select()}
+            onChange={(e) => setMdFontSizeInput(e.target.value)}
+            onBlur={() => {
+              void commitMdFontSize()
+            }}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') e.currentTarget.blur()
+              if (e.key === 'Escape') {
+                setMdFontSizeInput(String(s.mdFontSize ?? DEFAULT_MD_FONT_SIZE))
+                e.currentTarget.blur()
+              }
             }}
           />
           <span className="muted small">px</span>

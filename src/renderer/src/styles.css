@@ -1615,6 +1615,10 @@ body {
   padding: 6px 10px;
   font-size: 13px;
 }
+.setting-select.font-select {
+  flex: 1;
+  min-width: 260px;
+}
 .setting-input {
   flex: 1;
   background: var(--bg-alt);
@@ -1626,6 +1630,10 @@ body {
 }
 .setting-input.narrow {
   flex: 0 0 80px;
+}
+.setting-reset-btn {
+  align-self: stretch;
+  min-width: 92px;
 }
 
 /* 소송기록 추천(페어링) 박스 */
