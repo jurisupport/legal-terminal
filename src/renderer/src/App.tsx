@@ -469,6 +469,10 @@ export default function App(): JSX.Element {
     setDocTabs((tabs) => closeTab(tabs, id, activeDoc, setActiveDoc))
   }
 
+  const openNewWorkspaceWindow = (): void => {
+    void window.lt.app.newWindow()
+  }
+
   // 단축키: Ctrl/Cmd+W 탭 닫기 / Ctrl/Cmd+N 새 문서 / Ctrl/Cmd+Shift+N 새 작업환경
   useEffect(() => {
     const onKey = (e: KeyboardEvent): void => {
@@ -488,7 +492,7 @@ export default function App(): JSX.Element {
         if (activeDoc) closeDoc(activeDoc)
       } else if (k === 'n' && e.shiftKey) {
         e.preventDefault()
-        void window.lt.app.newWindow() // 새 창(새 작업환경)
+        openNewWorkspaceWindow()
       } else if (k === 'n' && !e.shiftKey) {
         e.preventDefault()
         addDoc()
@@ -1713,6 +1717,8 @@ export default function App(): JSX.Element {
               label="사건 폴더를 열어 시작하세요 (작성문서 또는 사건기록 폴더)"
               actionLabel="사건 폴더 열기"
               onAction={() => void openConnOrLocal()}
+              secondaryLabel="새 작업환경 만들기"
+              onSecondary={openNewWorkspaceWindow}
             />
           ))}
         {termTabs.map((t) => (
@@ -1796,6 +1802,9 @@ export default function App(): JSX.Element {
           ))}
         </div>
         <div className="activitybar-bottom">
+          <button className="activity-item" title="새 작업환경 만들기" onClick={openNewWorkspaceWindow}>
+            <IconWorkspace />
+          </button>
           <button className="activity-item" title="설정" onClick={openSettings}>
             <IconSettings />
           </button>
