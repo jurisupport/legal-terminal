@@ -70,6 +70,8 @@ interface WorkspaceDocTabPayload {
 interface WorkspaceSnapshot {
   version: number
   savedAt: string
+  workspaceId?: string
+  workspaceLabel?: string
   mode: 'explorer' | 'cases' | 'viewer'
   docs: WorkspaceDocTabPayload[]
   terminals: TerminalTabPayload[]
@@ -80,10 +82,20 @@ interface WorkspaceSnapshot {
   crop?: { on: boolean; ratio: number }
 }
 
+interface WorkspaceEntry {
+  id: string
+  label: string
+  savedAt: string
+  path: string
+  docs: number
+  terminals: number
+}
+
 interface WorkspaceSaveResult {
   ok: boolean
   path?: string
   savedAt?: string
+  entry?: WorkspaceEntry
   error?: string
   canceled?: boolean
 }
@@ -92,8 +104,15 @@ interface WorkspaceLoadResult {
   ok: boolean
   path?: string
   snapshot?: WorkspaceSnapshot | null
+  entry?: WorkspaceEntry
   error?: string
   canceled?: boolean
+}
+
+interface WorkspaceListResult {
+  ok: boolean
+  entries?: WorkspaceEntry[]
+  error?: string
 }
 
 interface AppSettings {
@@ -271,7 +290,8 @@ const api = {
   workspace: {
     save: (snapshot: WorkspaceSnapshot): Promise<WorkspaceSaveResult> =>
       ipcRenderer.invoke('workspace:save', snapshot),
-    load: (): Promise<WorkspaceLoadResult> => ipcRenderer.invoke('workspace:load'),
+    list: (): Promise<WorkspaceListResult> => ipcRenderer.invoke('workspace:list'),
+    load: (id?: string): Promise<WorkspaceLoadResult> => ipcRenderer.invoke('workspace:load', id),
     exportFile: (snapshot: WorkspaceSnapshot): Promise<WorkspaceSaveResult> =>
       ipcRenderer.invoke('workspace:exportFile', snapshot),
     importFile: (): Promise<WorkspaceLoadResult> => ipcRenderer.invoke('workspace:importFile')

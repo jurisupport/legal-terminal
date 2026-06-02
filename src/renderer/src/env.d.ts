@@ -68,6 +68,8 @@ export interface WorkspaceDocTabPayload {
 export interface WorkspaceSnapshot {
   version: number
   savedAt: string
+  workspaceId?: string
+  workspaceLabel?: string
   mode: 'explorer' | 'cases' | 'viewer'
   docs: WorkspaceDocTabPayload[]
   terminals: TerminalTabPayload[]
@@ -78,10 +80,20 @@ export interface WorkspaceSnapshot {
   crop?: { on: boolean; ratio: number }
 }
 
+export interface WorkspaceEntry {
+  id: string
+  label: string
+  savedAt: string
+  path: string
+  docs: number
+  terminals: number
+}
+
 export interface WorkspaceSaveResult {
   ok: boolean
   path?: string
   savedAt?: string
+  entry?: WorkspaceEntry
   error?: string
   canceled?: boolean
 }
@@ -90,8 +102,15 @@ export interface WorkspaceLoadResult {
   ok: boolean
   path?: string
   snapshot?: WorkspaceSnapshot | null
+  entry?: WorkspaceEntry
   error?: string
   canceled?: boolean
+}
+
+export interface WorkspaceListResult {
+  ok: boolean
+  entries?: WorkspaceEntry[]
+  error?: string
 }
 
 export interface AppSettings {
@@ -252,7 +271,8 @@ export interface LtApi {
   }
   workspace: {
     save: (snapshot: WorkspaceSnapshot) => Promise<WorkspaceSaveResult>
-    load: () => Promise<WorkspaceLoadResult>
+    list: () => Promise<WorkspaceListResult>
+    load: (id?: string) => Promise<WorkspaceLoadResult>
     exportFile: (snapshot: WorkspaceSnapshot) => Promise<WorkspaceSaveResult>
     importFile: () => Promise<WorkspaceLoadResult>
   }

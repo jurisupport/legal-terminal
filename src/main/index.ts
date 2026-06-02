@@ -46,6 +46,7 @@ import {
 } from './pty/claude-pty'
 import { decodeTextBuffer } from './textEncoding'
 import {
+  listWorkspaceSnapshots,
   loadWorkspaceSnapshot,
   saveWorkspaceSnapshot,
   type WorkspaceSnapshot
@@ -275,7 +276,8 @@ ipcMain.handle('sessions:list', (_e, p: { cwd: string; ssh?: SshProfile }) =>
 ipcMain.handle('workspace:save', (_e, snapshot: WorkspaceSnapshot) =>
   saveWorkspaceSnapshot(snapshot)
 )
-ipcMain.handle('workspace:load', () => loadWorkspaceSnapshot())
+ipcMain.handle('workspace:list', () => listWorkspaceSnapshots())
+ipcMain.handle('workspace:load', (_e, id?: string) => loadWorkspaceSnapshot(id))
 ipcMain.handle('workspace:exportFile', async (e, snapshot: WorkspaceSnapshot) => {
   const win = BrowserWindow.fromWebContents(e.sender)
   const r = win

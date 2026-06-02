@@ -28,6 +28,8 @@ import type {
   RemoteEntry,
   TabPayload,
   WorkspaceDocTabPayload,
+  WorkspaceEntry,
+  WorkspaceLoadResult,
   WorkspaceSnapshot
 } from './env'
 
@@ -279,6 +281,14 @@ const isWorkspaceMode = (value: unknown): value is Mode =>
 
 const isWorkKey = (value: unknown): value is WorkTabKey =>
   typeof value === 'string' && parseWorkKey(value) !== null
+
+const formatWorkspaceSavedAt = (savedAt: string): string => {
+  const date = new Date(savedAt)
+  return Number.isNaN(date.getTime()) ? savedAt : date.toLocaleString('ko-KR')
+}
+
+const describeWorkspaceEntry = (entry: WorkspaceEntry, index: number): string =>
+  `${index + 1}. ${entry.label} · ${formatWorkspaceSavedAt(entry.savedAt)} · 문서 ${entry.docs}개 / 터미널 ${entry.terminals}개`
 
 const toWorkspaceDoc = (tab: DocTab): WorkspaceDocTabPayload | null => {
   if (!RESTORABLE_DOC_KINDS.has(tab.kind)) return null
@@ -1491,8 +1501,34 @@ export default function App(): JSX.Element {
     )
   }
 
+  const chooseWorkspaceEntry = (entries: WorkspaceEntry[]): WorkspaceEntry | null => {
+    if (entries.length === 0) return null
+    if (entries.length === 1) return entries[0]
+    const selected = window.prompt(
+      `불러올 작업환경 번호를 입력하세요.\n\n${entries.map(describeWorkspaceEntry).join('\n')}`,
+      '1'
+    )
+    if (selected === null) return null
+    const index = Number.parseInt(selected.trim(), 10) - 1
+    if (!Number.isInteger(index) || !entries[index]) {
+      window.alert('작업환경 번호가 올바르지 않습니다.')
+      return null
+    }
+    return entries[index]
+  }
+
+  const loadSavedWorkspace = async (): Promise<WorkspaceLoadResult> => {
+    const list = await window.lt.workspace.list()
+    if (!list.ok) return { ok: false, error: list.error ?? '작업환경 목록을 불러오지 못했습니다.' }
+    const entries = list.entries ?? []
+    if (entries.length === 0) return window.lt.workspace.load()
+    const entry = chooseWorkspaceEntry(entries)
+    if (!entry) return { ok: true, canceled: true, snapshot: null }
+    return window.lt.workspace.load(entry.id)
+  }
+
   const restoreWorkspace = async (importFile = false): Promise<void> => {
-    const result = importFile ? await window.lt.workspace.importFile() : await window.lt.workspace.load()
+    const result = importFile ? await window.lt.workspace.importFile() : await loadSavedWorkspace()
     if (result.canceled) return
     if (!result.ok) {
       window.alert('작업환경 복원 실패: ' + (result.error ?? '알 수 없는 오류'))
@@ -1504,7 +1540,7 @@ export default function App(): JSX.Element {
     }
     restoreWorkspaceSnapshot(result.snapshot)
     window.alert(
-      `작업환경 복원 완료\n문서 ${result.snapshot.docs?.length ?? 0}개, 터미널 ${
+      `작업환경 복원 완료${result.entry?.label ? `\n${result.entry.label}` : ''}\n문서 ${result.snapshot.docs?.length ?? 0}개, 터미널 ${
         result.snapshot.terminals?.length ?? 0
       }개`
     )
