@@ -113,3 +113,25 @@ export function IconSearch({ size = 16 }: IconProps): JSX.Element {
     </svg>
   )
 }
+
+export function IconSave({ size = 16 }: IconProps): JSX.Element {
+  return (
+    <svg {...base(size)}>
+      <path d="M5 4h13l1 1v15H5z" />
+      <path d="M8 4v6h8V4" />
+      <path d="M8 20v-6h8v6" />
+    </svg>
+  )
+}
+
+export function IconSaveAs({ size = 16 }: IconProps): JSX.Element {
+  return (
+    <svg {...base(size)}>
+      <path d="M4 4h11l4 4v6" />
+      <path d="M4 4v16h9" />
+      <path d="M15 4v5h5" />
+      <path d="M8 14h5" />
+      <path d="M15.5 19.5l4.5-4.5 1.5 1.5-4.5 4.5-2 .5z" />
+    </svg>
+  )
+}

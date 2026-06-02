@@ -8,6 +8,21 @@ const strike = Decoration.mark({ class: 'cm-md-strike' })
 const code = Decoration.mark({ class: 'cm-md-code' })
 const link = Decoration.mark({ class: 'cm-md-link' })
 const hidden = Decoration.replace({})
+const HTML_BREAK_RE = /^<br\s*\/?>$/i
+const HTML_BREAK_TOKEN_RE = /<br\s*\/?>/gi
+const ENTITY_RE = /&(#x[\da-f]+|#\d+|[a-z][\da-z]+);/gi
+
+const ENTITY_TEXT: Record<string, string> = {
+  amp: '&',
+  apos: "'",
+  emsp: '\u2003',
+  ensp: '\u2002',
+  gt: '>',
+  lt: '<',
+  nbsp: '\u00a0',
+  thinsp: '\u2009',
+  quot: '"'
+}
 
 // 비활성 행에서 숨길 서식 기호
 const MARKS = new Set([
@@ -59,6 +74,72 @@ class CheckboxWidget extends WidgetType {
   }
   ignoreEvent(): boolean {
     return false
+  }
+}
+
+class TextWidget extends WidgetType {
+  constructor(readonly text: string) {
+    super()
+  }
+  eq(o: TextWidget): boolean {
+    return o.text === this.text
+  }
+  toDOM(): HTMLElement {
+    const span = document.createElement('span')
+    span.textContent = this.text
+    return span
+  }
+}
+
+class HtmlBreakWidget extends WidgetType {
+  eq(): boolean {
+    return true
+  }
+  toDOM(): HTMLElement {
+    return document.createElement('br')
+  }
+}
+
+function decodeEntity(src: string): string | null {
+  const body = src.match(/^&(#x[\da-f]+|#\d+|[a-z][\da-z]+);$/i)?.[1]
+  if (!body) return null
+  if (body.startsWith('#x') || body.startsWith('#X')) {
+    const code = Number.parseInt(body.slice(2), 16)
+    return Number.isFinite(code) && code >= 0 && code <= 0x10ffff ? String.fromCodePoint(code) : null
+  }
+  if (body.startsWith('#')) {
+    const code = Number.parseInt(body.slice(1), 10)
+    return Number.isFinite(code) && code >= 0 && code <= 0x10ffff ? String.fromCodePoint(code) : null
+  }
+  return ENTITY_TEXT[body.toLowerCase()] ?? null
+}
+
+function addInactiveHtmlPreviewDecorations(
+  state: EditorState,
+  from: number,
+  to: number,
+  active: Set<number>,
+  deco: Range<Decoration>[]
+): void {
+  const src = state.doc.sliceString(from, to)
+  HTML_BREAK_TOKEN_RE.lastIndex = 0
+  for (const match of src.matchAll(HTML_BREAK_TOKEN_RE)) {
+    const start = from + match.index
+    if (active.has(state.doc.lineAt(start).number)) continue
+    deco.push(
+      Decoration.replace({ widget: new HtmlBreakWidget() }).range(start, start + match[0].length)
+    )
+  }
+
+  ENTITY_RE.lastIndex = 0
+  for (const match of src.matchAll(ENTITY_RE)) {
+    const text = decodeEntity(match[0])
+    if (!text) continue
+    const start = from + match.index
+    if (active.has(state.doc.lineAt(start).number)) continue
+    deco.push(
+      Decoration.replace({ widget: new TextWidget(text) }).range(start, start + match[0].length)
+    )
   }
 }
 
@@ -319,6 +400,26 @@ function build(state: EditorState): DecorationSet {
         // 이스케이프(\.): 백슬래시는 커서가 그 행에 있을 때만
         if (name === 'Escape') {
           if (!lineActive) deco.push(hidden.range(node.from, node.from + 1))
+          return undefined
+        }
+
+        if (!lineActive && name === 'Entity') {
+          const text = decodeEntity(state.doc.sliceString(node.from, node.to))
+          if (text) {
+            deco.push(Decoration.replace({ widget: new TextWidget(text) }).range(node.from, node.to))
+          }
+          return undefined
+        }
+
+        if (!lineActive && name === 'HTMLTag') {
+          if (HTML_BREAK_RE.test(state.doc.sliceString(node.from, node.to).trim())) {
+            deco.push(Decoration.replace({ widget: new HtmlBreakWidget() }).range(node.from, node.to))
+          }
+          return undefined
+        }
+
+        if (name === 'HTMLBlock') {
+          addInactiveHtmlPreviewDecorations(state, node.from, node.to, active, deco)
           return undefined
         }
 

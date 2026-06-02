@@ -20,6 +20,8 @@ const normalizeTerminalCopyText = (text: string): string => text.replace(/(^|[\r
 
 const WIN_IME_FIX_CLASS = 'lt-win-ime-fix'
 const WIN_IME_COMPOSING_CLASS = 'lt-ime-composing'
+const WIN_IME_FIXED_CLASS = 'lt-ime-fixed'
+const CLAUDE_INPUT_PROMPT_RE = /^\s*(?:[│┃]\s*)?[›>]\s/
 
 interface TerminalFindMatch {
   row: number
@@ -27,9 +29,26 @@ interface TerminalFindMatch {
   length: number
 }
 
+interface CellMetrics {
+  width: number
+  height: number
+}
+
+interface ImeAnchor {
+  row: number
+  col: number
+}
+
+interface TerminalCopyFeedback {
+  key: number
+  kind: 'success' | 'error'
+  text: string
+}
+
 const charCellWidth = (ch: string): number => (ch.charCodeAt(0) <= 0x7f ? 1 : 2)
 const textCellWidth = (text: string): number => Array.from(text).reduce((n, ch) => n + charCellWidth(ch), 0)
 const stringIndexToCell = (text: string, index: number): number => textCellWidth(text.slice(0, index))
+const clamp = (n: number, min: number, max: number): number => Math.max(min, Math.min(max, n))
 
 const getTerminalMatches = (term: XTerm, query: string): TerminalFindMatch[] => {
   const needle = query.trim()
@@ -49,27 +68,107 @@ const getTerminalMatches = (term: XTerm, query: string): TerminalFindMatch[] => 
   return out
 }
 
-const measureCellWidth = (term: XTerm): number | null => {
+const measureCellMetrics = (term: XTerm): CellMetrics | null => {
   const screen = term.element?.querySelector<HTMLElement>('.xterm-screen')
-  const width = screen?.getBoundingClientRect().width ?? 0
-  if (!width || !term.cols) return null
-  return width / term.cols
+  const bounds = screen?.getBoundingClientRect()
+  const width = bounds?.width ?? 0
+  const height = bounds?.height ?? 0
+  if (!width || !height || !term.cols || !term.rows) return null
+  return { width: width / term.cols, height: height / term.rows }
 }
 
-const installWindowsImeCorrection = (term: XTerm, platform: string): (() => void) => {
-  if (platform !== 'win32' || !term.element || !term.textarea) return () => {}
+const cursorViewportRow = (term: XTerm): number => {
+  const buffer = term.buffer.active
+  return buffer.baseY + buffer.cursorY - buffer.viewportY
+}
+
+const cursorAnchor = (term: XTerm): ImeAnchor | null => {
+  const row = cursorViewportRow(term)
+  if (row < 0 || row >= term.rows) return null
+  return {
+    row,
+    col: clamp(term.buffer.active.cursorX, 0, Math.max(0, term.cols - 1))
+  }
+}
+
+const findClaudeInputAnchor = (
+  term: XTerm,
+  previous: ImeAnchor | null,
+  preferCursor: boolean
+): ImeAnchor | null => {
+  const buffer = term.buffer.active
+  const cursorRow = cursorViewportRow(term)
+  for (let row = term.rows - 1; row >= 0; row--) {
+    const line = buffer.getLine(buffer.viewportY + row)?.translateToString(true) ?? ''
+    if (!CLAUDE_INPUT_PROMPT_RE.test(line)) continue
+
+    const promptIndex = line.search(/[›>]/)
+    const promptCol = promptIndex >= 0 ? stringIndexToCell(line, promptIndex + 2) : 2
+    const col =
+      preferCursor && cursorRow === row
+        ? Math.max(promptCol, buffer.cursorX)
+        : previous?.row === row
+          ? previous.col
+          : promptCol
+
+    return {
+      row,
+      col: clamp(col, 0, Math.max(0, term.cols - 1))
+    }
+  }
+  return null
+}
+
+interface WindowsImeCorrectionHandle {
+  setClaudeWorking: (value: boolean) => void
+  dispose: () => void
+}
+
+const installWindowsImeCorrection = (term: XTerm, platform: string): WindowsImeCorrectionHandle => {
+  if (platform !== 'win32' || !term.element || !term.textarea) {
+    return { setClaudeWorking: () => {}, dispose: () => {} }
+  }
 
   const element = term.element
   const textarea = term.textarea
   let active = true
+  let claudeWorking = false
+  let inputAnchor: ImeAnchor | null = null
   element.classList.add(WIN_IME_FIX_CLASS)
+
+  const refreshInputAnchor = (preferCursor: boolean): ImeAnchor | null => {
+    const promptAnchor = findClaudeInputAnchor(term, inputAnchor, preferCursor)
+    if (promptAnchor) {
+      inputAnchor = promptAnchor
+    } else if (preferCursor) {
+      inputAnchor = cursorAnchor(term) ?? inputAnchor
+    }
+    return inputAnchor
+  }
+
+  const clearFixedAnchor = (): void => {
+    element.classList.remove(WIN_IME_FIXED_CLASS)
+    element.style.removeProperty('--lt-ime-anchor-left')
+    element.style.removeProperty('--lt-ime-anchor-top')
+  }
 
   const syncCorrection = (): void => {
     if (!active || !element.classList.contains(WIN_IME_COMPOSING_CLASS)) return
-    const cellWidth = measureCellWidth(term)
+    const metrics = measureCellMetrics(term)
     const cursorX = term.buffer.active.cursorX
-    const offset = cellWidth && cursorX > 0 ? cellWidth : 0
+    const offset = metrics && cursorX > 0 ? metrics.width : 0
     element.style.setProperty('--lt-ime-cell-width', `${offset}px`)
+
+    const anchor = refreshInputAnchor(!claudeWorking)
+    if (claudeWorking && metrics && anchor) {
+      const fixedRow = clamp(anchor.row, 0, Math.max(0, term.rows - 1))
+      const fixedCol = clamp(anchor.col, 0, Math.max(0, term.cols - 1))
+      element.classList.add(WIN_IME_FIXED_CLASS)
+      element.style.setProperty('--lt-ime-anchor-left', `${fixedCol * metrics.width}px`)
+      element.style.setProperty('--lt-ime-anchor-top', `${fixedRow * metrics.height}px`)
+    } else {
+      clearFixedAnchor()
+    }
   }
 
   const scheduleCorrection = (): void => {
@@ -86,25 +185,42 @@ const installWindowsImeCorrection = (term: XTerm, platform: string): (() => void
   const onCompositionEnd = (): void => {
     element.classList.remove(WIN_IME_COMPOSING_CLASS)
     element.style.setProperty('--lt-ime-cell-width', '0px')
+    clearFixedAnchor()
   }
 
   textarea.addEventListener('compositionstart', onCompositionStart)
   textarea.addEventListener('compositionupdate', onCompositionUpdate)
   textarea.addEventListener('compositionend', onCompositionEnd)
   textarea.addEventListener('blur', onCompositionEnd)
-  const renderSync = term.onRender(syncCorrection)
-  const resizeSync = term.onResize(syncCorrection)
+  const renderSync = term.onRender(() => {
+    refreshInputAnchor(!claudeWorking)
+    syncCorrection()
+  })
+  const resizeSync = term.onResize(() => {
+    refreshInputAnchor(!claudeWorking)
+    syncCorrection()
+  })
 
-  return () => {
-    active = false
-    textarea.removeEventListener('compositionstart', onCompositionStart)
-    textarea.removeEventListener('compositionupdate', onCompositionUpdate)
-    textarea.removeEventListener('compositionend', onCompositionEnd)
-    textarea.removeEventListener('blur', onCompositionEnd)
-    renderSync.dispose()
-    resizeSync.dispose()
-    element.classList.remove(WIN_IME_FIX_CLASS, WIN_IME_COMPOSING_CLASS)
-    element.style.removeProperty('--lt-ime-cell-width')
+  return {
+    setClaudeWorking: (value: boolean): void => {
+      claudeWorking = value
+      refreshInputAnchor(!value)
+      if (!value) clearFixedAnchor()
+      else scheduleCorrection()
+    },
+    dispose: (): void => {
+      active = false
+      textarea.removeEventListener('compositionstart', onCompositionStart)
+      textarea.removeEventListener('compositionupdate', onCompositionUpdate)
+      textarea.removeEventListener('compositionend', onCompositionEnd)
+      textarea.removeEventListener('blur', onCompositionEnd)
+      renderSync.dispose()
+      resizeSync.dispose()
+      element.classList.remove(WIN_IME_FIX_CLASS, WIN_IME_COMPOSING_CLASS, WIN_IME_FIXED_CLASS)
+      element.style.removeProperty('--lt-ime-cell-width')
+      element.style.removeProperty('--lt-ime-anchor-left')
+      element.style.removeProperty('--lt-ime-anchor-top')
+    }
   }
 }
 
@@ -155,10 +271,38 @@ export default function Terminal({
   const findOpenRef = useRef(false)
   const findQueryRef = useRef('')
   const findIndexRef = useRef(-1)
+  const copyFeedbackSeq = useRef(0)
+  const copyFeedbackTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const mountedRef = useRef(false)
   const [findOpen, setFindOpen] = useState(false)
   const [findQuery, setFindQuery] = useState('')
   const [findCount, setFindCount] = useState(0)
   const [findIndex, setFindIndex] = useState(-1)
+  const [copyFeedback, setCopyFeedback] = useState<TerminalCopyFeedback | null>(null)
+
+  useEffect(() => {
+    mountedRef.current = true
+    return () => {
+      mountedRef.current = false
+      if (copyFeedbackTimerRef.current) clearTimeout(copyFeedbackTimerRef.current)
+    }
+  }, [])
+
+  const showCopyFeedback = (kind: TerminalCopyFeedback['kind']): void => {
+    if (!mountedRef.current) return
+    if (copyFeedbackTimerRef.current) clearTimeout(copyFeedbackTimerRef.current)
+    setCopyFeedback({
+      key: ++copyFeedbackSeq.current,
+      kind,
+      text: kind === 'success' ? '복사 완료' : '복사 실패'
+    })
+    copyFeedbackTimerRef.current = setTimeout(
+      () => {
+        if (mountedRef.current) setCopyFeedback(null)
+      },
+      kind === 'success' ? 1400 : 2400
+    )
+  }
 
   const setFindOpenState = (value: boolean): void => {
     findOpenRef.current = value
@@ -282,7 +426,7 @@ export default function Terminal({
       fit.fit()
       termRef.current = term
       fitRef.current = fit
-      const cleanupWindowsImeCorrection = installWindowsImeCorrection(term, appInfo.platform)
+      const windowsImeCorrection = installWindowsImeCorrection(term, appInfo.platform)
       // 새 터미널 생성 직후 활성 탭이면 바로 포커스 (커서가 그 터미널 안에 들어가게)
       if (visible) term.focus()
 
@@ -299,7 +443,14 @@ export default function Terminal({
       const copySelection = (): boolean => {
         const sel = normalizeTerminalCopyText(term.getSelection())
         if (!sel) return false
-        navigator.clipboard.writeText(sel)
+        if (!navigator.clipboard?.writeText) {
+          showCopyFeedback('error')
+          return true
+        }
+        void navigator.clipboard
+          .writeText(sel)
+          .then(() => showCopyFeedback('success'))
+          .catch(() => showCopyFeedback('error'))
         return true
       }
       // 복사/붙여넣기 키 처리. true=xterm/pty로 전달, false=가로채서 기본동작 차단.
@@ -367,7 +518,12 @@ export default function Terminal({
         if (!sel) return
         ev.preventDefault()
         ev.stopPropagation()
-        ev.clipboardData?.setData('text/plain', sel)
+        if (!ev.clipboardData) {
+          showCopyFeedback('error')
+          return
+        }
+        ev.clipboardData.setData('text/plain', sel)
+        showCopyFeedback('success')
       }
       mount.addEventListener('copy', onCopy, true)
       const onPaste = (ev: ClipboardEvent): void => {
@@ -404,6 +560,7 @@ export default function Terminal({
           return
         }
         working = false
+        windowsImeCorrection.setClaudeWorking(false)
         onStatusRef.current?.(isQuestion ? 'question' : 'done')
       }
       const offData = window.lt.pty.onData((p) => {
@@ -415,6 +572,7 @@ export default function Terminal({
         const busy = BUSY_RE.test(stripAnsi(p.data))
         if (busy && !working) {
           working = true
+          windowsImeCorrection.setClaudeWorking(true)
           recent = ''
           onStatusRef.current?.('working')
         }
@@ -466,7 +624,7 @@ export default function Terminal({
         mount.removeEventListener('copy', onCopy, true)
         mount.removeEventListener('paste', onPaste, true)
         ro.disconnect()
-        cleanupWindowsImeCorrection()
+        windowsImeCorrection.dispose()
         window.lt.pty.detach(id)
         term.dispose()
         termRef.current = null
@@ -531,6 +689,16 @@ export default function Terminal({
             termRef.current?.focus()
           }}
         />
+      )}
+      {copyFeedback && (
+        <div
+          key={copyFeedback.key}
+          className={`terminal-copy-feedback ${copyFeedback.kind}`}
+          role="status"
+          aria-live="polite"
+        >
+          {copyFeedback.text}
+        </div>
       )}
     </div>
   )

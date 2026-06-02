@@ -76,17 +76,19 @@ export function remoteRcloneInfo(
 export interface RemoteSyncOpts {
   profile: SshProfile
   direction: 'pull' | 'push' // pull: 클라우드→맥, push: 맥→클라우드
+  mode?: 'full' | 'folders' // folders: 파일은 건드리지 않고 폴더 구조만 생성
   macFolder: string // 맥의 사건 폴더 (예: /Users/me/OneDrive/진행중사건/강상우)
   dest: string // rclone 클라우드 대상 (예: onedrive:진행중사건/강상우)
 }
 
 let active: ReturnType<typeof spawn> | null = null
 
-// 맥에서 rclone copy --update 실행 (삭제 전파 안 함). 진행 로그를 'sync:progress'로 스트리밍.
+// 맥에서 rclone 동기화 실행 (삭제 전파 안 함). 진행 로그를 'sync:progress'로 스트리밍.
 export function runRemoteSync(
   opts: RemoteSyncOpts,
   wc: WebContents
 ): Promise<{ ok: boolean; code: number | null; error?: string }> {
+  const mode = opts.mode ?? 'full'
   const cloudDest = opts.dest.normalize('NFC')
   const cloudArg = shq(cloudDest)
   const macArg = shellPathArg(opts.macFolder)
@@ -102,16 +104,51 @@ export function runRemoteSync(
           'fi'
         ].join('\n')
       : ''
+  const ensureFolderDestination =
+    opts.direction === 'pull' ? 'mkdir -p "$dst" || exit 1' : '"$rclone_bin" mkdir "$dst" || exit 1'
   const rcloneCmd =
-    `${remoteRcloneBootstrap()}\n${checkSource}\n` +
-    `"$rclone_bin" copy ${src} ${dst} --update --create-empty-src-dirs --transfers=4 --checkers=8 ` +
-    `--retries=1 --low-level-retries=1 -v --stats-one-line --stats=1s`
+    mode === 'folders'
+      ? [
+          remoteRcloneBootstrap(),
+          checkSource,
+          `src=${src}`,
+          `dst=${dst}`,
+          ensureFolderDestination,
+          'tmp="${TMPDIR:-/tmp}/legal-terminal-rclone-dirs.$$"',
+          'trap \'rm -f "$tmp"\' EXIT HUP INT TERM',
+          'echo "폴더 목록을 읽는 중..."',
+          'if ! "$rclone_bin" lsf "$src" --dirs-only --recursive --format p > "$tmp"; then',
+          '  echo "폴더 목록을 읽지 못했습니다: $src" >&2',
+          '  exit 1',
+          'fi',
+          'join_path() {',
+          '  case "$1" in',
+          '    *:|*/) printf "%s%s\\n" "$1" "$2" ;;',
+          '    *) printf "%s/%s\\n" "$1" "$2" ;;',
+          '  esac',
+          '}',
+          'while IFS= read -r rel; do',
+          '  [ -z "$rel" ] && continue',
+          '  target=$(join_path "$dst" "$rel")',
+          opts.direction === 'pull'
+            ? '  mkdir -p "$target" || exit 1'
+            : '  "$rclone_bin" mkdir "$target" || exit 1',
+          '  echo "폴더 생성: $rel"',
+          'done < "$tmp"'
+        ].join('\n')
+      : `${remoteRcloneBootstrap()}\n${checkSource}\n` +
+        `"$rclone_bin" copy ${src} ${dst} --update --create-empty-src-dirs --transfers=4 --checkers=8 ` +
+        `--retries=1 --low-level-retries=1 -v --stats-one-line --stats=1s`
   const args = [...sshBaseArgs(opts.profile), rcloneCmd]
 
   const send = (line: string): void => {
     if (!wc.isDestroyed()) wc.send('sync:progress', line)
   }
-  send(`$ (맥미니에서) rclone ${opts.direction === 'pull' ? '내리기 ⬇' : '올리기 ⬆'}`)
+  send(
+    `$ (맥미니에서) rclone ${mode === 'folders' ? '폴더명만 ' : ''}${
+      opts.direction === 'pull' ? '내리기 ⬇' : '올리기 ⬆'
+    }`
+  )
   send(`  ${opts.direction === 'pull' ? cloudDest : opts.macFolder}`)
   send(`  → ${opts.direction === 'pull' ? opts.macFolder : cloudDest}`)
 

@@ -57,6 +57,43 @@ export type TabPayload =
   | { kind: 'doc'; path: string; title: string; side?: 'left' | 'right' }
   | { kind: 'terminal'; tab: TerminalTabPayload }
 
+export interface WorkspaceDocTabPayload {
+  id: string
+  title: string
+  kind: 'markdown' | 'mdview' | 'file' | 'pdf' | 'image' | 'hwp' | 'csv' | 'settings'
+  path?: string
+  side?: 'left' | 'right'
+}
+
+export interface WorkspaceSnapshot {
+  version: number
+  savedAt: string
+  mode: 'explorer' | 'cases' | 'viewer'
+  docs: WorkspaceDocTabPayload[]
+  terminals: TerminalTabPayload[]
+  activeDoc?: string
+  activeTerm?: string
+  activeWork?: { left?: string; right?: string }
+  currentCase?: unknown
+  crop?: { on: boolean; ratio: number }
+}
+
+export interface WorkspaceSaveResult {
+  ok: boolean
+  path?: string
+  savedAt?: string
+  error?: string
+  canceled?: boolean
+}
+
+export interface WorkspaceLoadResult {
+  ok: boolean
+  path?: string
+  snapshot?: WorkspaceSnapshot | null
+  error?: string
+  canceled?: boolean
+}
+
 export interface AppSettings {
   draftsRoot?: string
   recordsRoot?: string
@@ -194,6 +231,7 @@ export interface LtApi {
     run: (opts: {
       profile: SshProfile
       direction: 'pull' | 'push'
+      mode?: 'full' | 'folders'
       macFolder: string
       dest: string
     }) => Promise<{ ok: boolean; code: number | null; error?: string }>
@@ -207,6 +245,12 @@ export interface LtApi {
       ssh?: SshConn
     ) => Promise<{ sessionId: string; title?: string } | null>
     list: (cwd: string, ssh?: SshConn) => Promise<{ sessionId: string; title?: string; mtime: number }[]>
+  }
+  workspace: {
+    save: (snapshot: WorkspaceSnapshot) => Promise<WorkspaceSaveResult>
+    load: () => Promise<WorkspaceLoadResult>
+    exportFile: (snapshot: WorkspaceSnapshot) => Promise<WorkspaceSaveResult>
+    importFile: () => Promise<WorkspaceLoadResult>
   }
   claude: {
     ask: (payload: string) => Promise<void>

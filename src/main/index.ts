@@ -42,6 +42,11 @@ import {
   type CreatePtyOptions
 } from './pty/claude-pty'
 import { decodeTextBuffer } from './textEncoding'
+import {
+  loadWorkspaceSnapshot,
+  saveWorkspaceSnapshot,
+  type WorkspaceSnapshot
+} from './workspace'
 
 let mainWindow: BrowserWindow | null = null
 
@@ -262,6 +267,44 @@ ipcMain.handle('sessions:current', (_e, p: { cwd: string; since?: number; ssh?: 
 ipcMain.handle('sessions:list', (_e, p: { cwd: string; ssh?: SshProfile }) =>
   listSessions(p.cwd, 40, p.ssh)
 )
+
+// ── 작업환경 저장/복원 IPC ──
+ipcMain.handle('workspace:save', (_e, snapshot: WorkspaceSnapshot) =>
+  saveWorkspaceSnapshot(snapshot)
+)
+ipcMain.handle('workspace:load', () => loadWorkspaceSnapshot())
+ipcMain.handle('workspace:exportFile', async (e, snapshot: WorkspaceSnapshot) => {
+  const win = BrowserWindow.fromWebContents(e.sender)
+  const r = win
+    ? await dialog.showSaveDialog(win, {
+        title: '작업환경 내보내기',
+        defaultPath: 'legal-terminal-workspace.json',
+        filters: [{ name: 'JSON', extensions: ['json'] }]
+      })
+    : await dialog.showSaveDialog({
+        title: '작업환경 내보내기',
+        defaultPath: 'legal-terminal-workspace.json',
+        filters: [{ name: 'JSON', extensions: ['json'] }]
+      })
+  if (r.canceled || !r.filePath) return { ok: false, canceled: true }
+  return saveWorkspaceSnapshot(snapshot, r.filePath)
+})
+ipcMain.handle('workspace:importFile', async (e) => {
+  const win = BrowserWindow.fromWebContents(e.sender)
+  const r = win
+    ? await dialog.showOpenDialog(win, {
+        title: '작업환경 가져오기',
+        properties: ['openFile'],
+        filters: [{ name: 'JSON', extensions: ['json'] }]
+      })
+    : await dialog.showOpenDialog({
+        title: '작업환경 가져오기',
+        properties: ['openFile'],
+        filters: [{ name: 'JSON', extensions: ['json'] }]
+      })
+  if (r.canceled || r.filePaths.length === 0) return { ok: true, canceled: true, snapshot: null }
+  return loadWorkspaceSnapshot(r.filePaths[0])
+})
 
 // ── 설정 IPC ──
 ipcMain.handle('settings:get', () => getSettings())

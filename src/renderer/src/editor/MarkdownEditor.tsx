@@ -1,16 +1,48 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState, type KeyboardEvent } from 'react'
 import { Decoration, EditorView, keymap, drawSelection, dropCursor, type DecorationSet } from '@codemirror/view'
-import { EditorSelection, EditorState, Compartment, RangeSetBuilder, StateEffect, StateField } from '@codemirror/state'
+import {
+  EditorSelection,
+  EditorState,
+  Compartment,
+  RangeSetBuilder,
+  StateEffect,
+  StateField,
+  type ChangeDesc
+} from '@codemirror/state'
 import { defaultKeymap, history, historyKeymap, indentWithTab } from '@codemirror/commands'
 import { markdown } from '@codemirror/lang-markdown'
 import { GFM } from '@lezer/markdown'
 import { syntaxHighlighting, defaultHighlightStyle } from '@codemirror/language'
 import { livePreview } from './livePreview'
-import { mdToPrintHtml } from './mdExport'
+import { mdToPrintHtml, type PrintLayoutProfile } from './mdExport'
 import FindBar from '../search/FindBar'
-import { IconSearch } from '../icons/Icons'
+import { IconSave, IconSaveAs, IconSearch } from '../icons/Icons'
 
 const DEFAULT_MD_FONT = "'D2Coding', 'Cascadia Mono', Consolas, monospace"
+const DEFAULT_UNTITLED_NAME = '무제.md'
+
+interface TextReplacement {
+  from: number
+  to: number
+  insert: string
+}
+
+interface PositionBookmark {
+  line: number
+  column: number
+}
+
+interface SelectionBookmark {
+  ranges: { anchor: PositionBookmark; head: PositionBookmark }[]
+  mainIndex: number
+}
+
+interface ViewportBookmark {
+  pos: number
+  topOffset: number | null
+  scrollTop: number
+  scrollLeft: number
+}
 
 interface EditorFindRange {
   from: number
@@ -74,9 +106,112 @@ function makeTheme(family: string, size: number): ReturnType<typeof EditorView.t
   )
 }
 
+function isRemotePath(value?: string): boolean {
+  return !!value && value.startsWith('ssh://')
+}
+
+function fileNameOf(value?: string): string | undefined {
+  return value?.split(/[\\/]/).pop() || undefined
+}
+
+function joinDefaultPath(dir: string, name: string): string {
+  const sep = dir.includes('\\') ? '\\' : '/'
+  return `${dir.replace(/[\\/]+$/, '')}${sep}${name}`
+}
+
+function saveAsDefaultPath(currentPath?: string, defaultDir?: string): string | undefined {
+  if (currentPath && !isRemotePath(currentPath)) return currentPath
+  const name = fileNameOf(currentPath) ?? DEFAULT_UNTITLED_NAME
+  if (defaultDir && !isRemotePath(defaultDir)) return joinDefaultPath(defaultDir, name)
+  return name
+}
+
+function findMinimalReplacement(current: string, next: string): TextReplacement | null {
+  if (current === next) return null
+  const limit = Math.min(current.length, next.length)
+  let prefix = 0
+  while (prefix < limit && current.charCodeAt(prefix) === next.charCodeAt(prefix)) prefix++
+
+  let currentSuffix = current.length
+  let nextSuffix = next.length
+  while (
+    currentSuffix > prefix &&
+    nextSuffix > prefix &&
+    current.charCodeAt(currentSuffix - 1) === next.charCodeAt(nextSuffix - 1)
+  ) {
+    currentSuffix--
+    nextSuffix--
+  }
+
+  return { from: prefix, to: currentSuffix, insert: next.slice(prefix, nextSuffix) }
+}
+
+function bookmarkPosition(state: EditorState, pos: number): PositionBookmark {
+  const line = state.doc.lineAt(Math.max(0, Math.min(pos, state.doc.length)))
+  return { line: line.number, column: pos - line.from }
+}
+
+function restorePosition(state: EditorState, bookmark: PositionBookmark): number {
+  const line = state.doc.line(Math.max(1, Math.min(bookmark.line, state.doc.lines)))
+  return Math.min(line.from + bookmark.column, line.to)
+}
+
+function bookmarkSelection(state: EditorState): SelectionBookmark {
+  return {
+    mainIndex: state.selection.mainIndex,
+    ranges: state.selection.ranges.map((range) => ({
+      anchor: bookmarkPosition(state, range.anchor),
+      head: bookmarkPosition(state, range.head)
+    }))
+  }
+}
+
+function restoreSelection(state: EditorState, bookmark: SelectionBookmark): EditorSelection {
+  const ranges = bookmark.ranges.map((range) =>
+    EditorSelection.range(restorePosition(state, range.anchor), restorePosition(state, range.head))
+  )
+  return EditorSelection.create(ranges, Math.min(bookmark.mainIndex, ranges.length - 1))
+}
+
+function changeCoversSelection(changes: ChangeDesc, selection: EditorSelection): boolean {
+  return selection.ranges.some((range) => changes.touchesRange(range.from, range.to) === 'cover')
+}
+
+function captureViewport(view: EditorView): ViewportBookmark {
+  const scroller = view.scrollDOM
+  const rect = scroller.getBoundingClientRect()
+  const pos = view.posAtCoords({ x: rect.left + Math.min(24, rect.width / 2), y: rect.top + 8 }, false)
+  const coords = view.coordsAtPos(pos)
+  return {
+    pos,
+    topOffset: coords ? coords.top - rect.top : null,
+    scrollTop: scroller.scrollTop,
+    scrollLeft: scroller.scrollLeft
+  }
+}
+
+function restoreViewport(view: EditorView, bookmark: ViewportBookmark, changes: ChangeDesc): void {
+  const mappedPos = Math.max(0, Math.min(changes.mapPos(bookmark.pos, 1), view.state.doc.length))
+  window.requestAnimationFrame(() => {
+    const scroller = view.scrollDOM
+    scroller.scrollLeft = bookmark.scrollLeft
+    if (bookmark.topOffset == null) {
+      scroller.scrollTop = bookmark.scrollTop
+      return
+    }
+    const rect = scroller.getBoundingClientRect()
+    const coords = view.coordsAtPos(mappedPos)
+    if (!coords) {
+      scroller.scrollTop = bookmark.scrollTop
+      return
+    }
+    scroller.scrollTop += coords.top - rect.top - bookmark.topOffset
+  })
+}
+
 /**
  * 마크다운 편집기 (CodeMirror 6). 서식(라이브 프리뷰)·원본 두 모드 모두 편집 가능.
- * path 없으면 새 문서(스크래치) — Ctrl+S로 다른 이름 저장 후 자동 저장.
+ * path가 있으면 입력 후 자동 저장. path 없으면 Ctrl+S/저장으로 다른 이름 저장 후 자동 저장.
  */
 export default function MarkdownEditor({
   path,
@@ -105,6 +240,7 @@ export default function MarkdownEditor({
   const localDirtyRef = useRef(false)
   const applyingRemoteRef = useRef(false)
   const remoteSigRef = useRef('')
+  const remoteAppliedTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const findOpenRef = useRef(false)
   const findQueryRef = useRef('')
   const findIndexRef = useRef(-1)
@@ -112,11 +248,14 @@ export default function MarkdownEditor({
   const openFindRef = useRef<() => void>(() => {})
   const [preview, setPreview] = useState(true)
   const [err, setErr] = useState('')
+  const [saveError, setSaveError] = useState('')
+  const [remoteApplied, setRemoteApplied] = useState(false)
   const [saved, setSaved] = useState(!!path)
   const [findOpen, setFindOpen] = useState(false)
   const [findQuery, setFindQuery] = useState('')
   const [findCount, setFindCount] = useState(0)
   const [findIndex, setFindIndex] = useState(-1)
+  const [printLayout, setPrintLayout] = useState<PrintLayoutProfile>('default')
 
   const setSavedState = (value: boolean): void => {
     savedRef.current = value
@@ -133,6 +272,15 @@ export default function MarkdownEditor({
   const setFindIndexState = (value: number): void => {
     findIndexRef.current = value
     setFindIndex(value)
+  }
+
+  const pulseRemoteApplied = (): void => {
+    setRemoteApplied(true)
+    if (remoteAppliedTimer.current) clearTimeout(remoteAppliedTimer.current)
+    remoteAppliedTimer.current = setTimeout(() => {
+      remoteAppliedTimer.current = null
+      setRemoteApplied(false)
+    }, 1200)
   }
 
   const clearFindDecorations = (): void => {
@@ -178,7 +326,21 @@ export default function MarkdownEditor({
   }
   openFindRef.current = openFind
 
-  const saveNow = (): void => {
+  const refreshSavedSignature = (targetPath: string): void => {
+    window.lt.fs.stat(targetPath).then((s) => {
+      if (s.ok && pathRef.current === targetPath) remoteSigRef.current = `${s.size}:${s.mtimeMs ?? 0}`
+    })
+  }
+
+  const markSaved = (targetPath: string): void => {
+    localDirtyRef.current = false
+    setSaveError('')
+    setSavedState(true)
+    onDirtyRef.current?.(false)
+    refreshSavedSignature(targetPath)
+  }
+
+  const saveAsNow = (): void => {
     const v = viewRef.current
     if (!v) return
     if (saveTimer.current) {
@@ -186,26 +348,41 @@ export default function MarkdownEditor({
       saveTimer.current = null
     }
     const content = v.state.doc.toString()
-    if (pathRef.current) {
-      window.lt.fs.writeText(pathRef.current, content).then((r) => {
-        if (!r.ok || !pathRef.current) return
-        localDirtyRef.current = false
-        setSavedState(true)
-        window.lt.fs.stat(pathRef.current).then((s) => {
-          if (s.ok) remoteSigRef.current = `${s.size}:${s.mtimeMs ?? 0}`
-        })
-      })
-    } else {
-      window.lt.fs.saveAs(content, defaultDir).then((r) => {
-        if (r.ok && r.path) {
-          pathRef.current = r.path
-          onPath?.(r.path)
-          localDirtyRef.current = false
-          setSavedState(true)
-          onDirtyRef.current?.(false) // 이제 경로가 있으니 닫아도 안전
-        }
-      })
+    setSaveError('')
+    window.lt.fs.saveAs(content, saveAsDefaultPath(pathRef.current, defaultDir)).then((r) => {
+      if (r.ok && r.path) {
+        pathRef.current = r.path
+        onPath?.(r.path)
+        markSaved(r.path)
+        return
+      }
+      if (r.error) setSaveError(r.error)
+    })
+  }
+
+  const saveNow = (): void => {
+    const v = viewRef.current
+    if (!v) return
+    if (!pathRef.current) {
+      saveAsNow()
+      return
     }
+    if (saveTimer.current) {
+      clearTimeout(saveTimer.current)
+      saveTimer.current = null
+    }
+    const targetPath = pathRef.current
+    const content = v.state.doc.toString()
+    setSaveError('')
+    window.lt.fs.writeText(targetPath, content).then((r) => {
+      if (pathRef.current !== targetPath) return
+      if (!r.ok) {
+        setSaveError(r.error ?? '저장 실패')
+        setSavedState(false)
+        return
+      }
+      markSaved(targetPath)
+    })
   }
   const scheduleSave = (): void => {
     if (!pathRef.current) return // 새 문서는 Ctrl+S(다른 이름 저장) 때만
@@ -233,6 +410,7 @@ export default function MarkdownEditor({
               ...historyKeymap,
               indentWithTab,
               { key: 'Mod-f', run: () => (openFindRef.current(), true) },
+              { key: 'Shift-Mod-s', run: () => (saveAsNow(), true) },
               { key: 'Mod-s', run: () => (saveNow(), true) }
             ]),
             markdown({ extensions: GFM }),
@@ -272,6 +450,7 @@ export default function MarkdownEditor({
     return () => {
       alive = false
       if (pathRef.current) saveNow()
+      if (remoteAppliedTimer.current) clearTimeout(remoteAppliedTimer.current)
       viewRef.current?.destroy()
       viewRef.current = null
     }
@@ -308,16 +487,29 @@ export default function MarkdownEditor({
                 return
               }
               if (localDirtyRef.current || !savedRef.current) return
+              const replacement = findMinimalReplacement(current, next)
+              if (!replacement) return
+              const viewport = captureViewport(v)
+              const selectionBookmark = bookmarkSelection(v.state)
+              const previewTransaction = v.state.update({ changes: replacement })
+              const scrollEffect = v.scrollSnapshot().map(previewTransaction.changes)
+              const selection = changeCoversSelection(previewTransaction.changes, v.state.selection)
+                ? restoreSelection(previewTransaction.state, selectionBookmark)
+                : undefined
               applyingRemoteRef.current = true
               try {
                 v.dispatch({
-                  changes: { from: 0, to: v.state.doc.length, insert: next }
+                  changes: previewTransaction.changes,
+                  ...(selection ? { selection } : {}),
+                  ...(scrollEffect ? { effects: [scrollEffect] } : {})
                 })
+                restoreViewport(v, viewport, previewTransaction.changes)
               } finally {
                 applyingRemoteRef.current = false
               }
               localDirtyRef.current = false
               setSavedState(true)
+              pulseRemoteApplied()
             })
             .catch(() => {})
         })
@@ -350,8 +542,25 @@ export default function MarkdownEditor({
       </div>
     )
 
+  const onEditorKeyDown = (e: KeyboardEvent<HTMLDivElement>): void => {
+    if (e.defaultPrevented || !(e.ctrlKey || e.metaKey) || e.altKey || e.key.toLocaleLowerCase() !== 's') return
+    e.preventDefault()
+    e.stopPropagation()
+    if (e.shiftKey) saveAsNow()
+    else saveNow()
+  }
+  const saveStatus = saveError
+    ? '저장 실패'
+    : remoteApplied
+      ? '외부 수정 반영됨'
+      : saved
+        ? '저장됨'
+        : pathRef.current
+          ? '저장 중…'
+          : '미저장 (Ctrl+S)'
+
   return (
-    <div className="text-doc">
+    <div className="text-doc" onKeyDown={onEditorKeyDown}>
       <div className="text-toolbar">
         <button className={`tb-btn ${preview ? 'on' : ''}`} title="서식(라이브 프리뷰)" onClick={() => setPreview(true)}>
           서식
@@ -360,6 +569,28 @@ export default function MarkdownEditor({
           원본
         </button>
         <span className="tb-divider" />
+        <button className="tb-btn" title="저장 (Ctrl/Cmd+S)" aria-label="저장" onClick={saveNow}>
+          <IconSave size={14} />
+        </button>
+        <button
+          className="tb-btn"
+          title="다른 이름으로 저장 (Ctrl/Cmd+Shift+S)"
+          aria-label="다른 이름으로 저장"
+          onClick={saveAsNow}
+        >
+          <IconSaveAs size={14} />
+        </button>
+        <span className="tb-divider" />
+        <select
+          className="tb-select"
+          title="PDF 출력 양식"
+          aria-label="PDF 출력 양식"
+          value={printLayout}
+          onChange={(e) => setPrintLayout(e.target.value as PrintLayoutProfile)}
+        >
+          <option value="default">일반</option>
+          <option value="proof-of-content">내용증명</option>
+        </select>
         <button
           className="tb-btn"
           title="PDF로 내보내기"
@@ -370,7 +601,7 @@ export default function MarkdownEditor({
             const def =
               (pathRef.current?.replace(/\.[^.]+$/, '') ?? (defaultDir ? defaultDir + '\\' + name : name)) +
               '.pdf'
-            window.lt.export.mdToPdf(mdToPrintHtml(v.state.doc.toString(), name), def)
+            window.lt.export.mdToPdf(mdToPrintHtml(v.state.doc.toString(), name, printLayout), def)
           }}
         >
           PDF
@@ -412,7 +643,12 @@ export default function MarkdownEditor({
             </button>
           </>
         )}
-        <span className="tb-sep-text">{saved ? '저장됨' : pathRef.current ? '저장 중…' : '미저장 (Ctrl+S)'}</span>
+        <span
+          className={`tb-sep-text ${saveError ? 'error' : remoteApplied ? 'remote' : ''}`}
+          title={saveError || saveStatus}
+        >
+          {saveStatus}
+        </span>
       </div>
       {findOpen && (
         <FindBar
@@ -431,7 +667,10 @@ export default function MarkdownEditor({
           }}
         />
       )}
-      <div className={`cm-host ${preview ? 'preview' : 'source'}`} ref={hostRef} />
+      <div
+        className={`cm-host ${preview ? 'preview' : 'source'} ${remoteApplied ? 'remote-applied' : ''}`}
+        ref={hostRef}
+      />
     </div>
   )
 }

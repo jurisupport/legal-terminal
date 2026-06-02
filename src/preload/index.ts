@@ -59,6 +59,43 @@ type TabPayload =
   | { kind: 'doc'; path: string; title: string; side?: 'left' | 'right' }
   | { kind: 'terminal'; tab: TerminalTabPayload }
 
+interface WorkspaceDocTabPayload {
+  id: string
+  title: string
+  kind: 'markdown' | 'mdview' | 'file' | 'pdf' | 'image' | 'hwp' | 'csv' | 'settings'
+  path?: string
+  side?: 'left' | 'right'
+}
+
+interface WorkspaceSnapshot {
+  version: number
+  savedAt: string
+  mode: 'explorer' | 'cases' | 'viewer'
+  docs: WorkspaceDocTabPayload[]
+  terminals: TerminalTabPayload[]
+  activeDoc?: string
+  activeTerm?: string
+  activeWork?: { left?: string; right?: string }
+  currentCase?: unknown
+  crop?: { on: boolean; ratio: number }
+}
+
+interface WorkspaceSaveResult {
+  ok: boolean
+  path?: string
+  savedAt?: string
+  error?: string
+  canceled?: boolean
+}
+
+interface WorkspaceLoadResult {
+  ok: boolean
+  path?: string
+  snapshot?: WorkspaceSnapshot | null
+  error?: string
+  canceled?: boolean
+}
+
 interface AppSettings {
   draftsRoot?: string
   recordsRoot?: string
@@ -200,6 +237,7 @@ const api = {
     run: (opts: {
       profile: SshProfile
       direction: 'pull' | 'push'
+      mode?: 'full' | 'folders'
       macFolder: string
       dest: string
     }): Promise<{ ok: boolean; code: number | null; error?: string }> =>
@@ -223,6 +261,14 @@ const api = {
       ssh?: SshConn
     ): Promise<{ sessionId: string; title?: string; mtime: number }[]> =>
       ipcRenderer.invoke('sessions:list', { cwd, ssh })
+  },
+  workspace: {
+    save: (snapshot: WorkspaceSnapshot): Promise<WorkspaceSaveResult> =>
+      ipcRenderer.invoke('workspace:save', snapshot),
+    load: (): Promise<WorkspaceLoadResult> => ipcRenderer.invoke('workspace:load'),
+    exportFile: (snapshot: WorkspaceSnapshot): Promise<WorkspaceSaveResult> =>
+      ipcRenderer.invoke('workspace:exportFile', snapshot),
+    importFile: (): Promise<WorkspaceLoadResult> => ipcRenderer.invoke('workspace:importFile')
   },
   claude: {
     ask: (payload: string): Promise<void> => ipcRenderer.invoke('claude:ask', payload),

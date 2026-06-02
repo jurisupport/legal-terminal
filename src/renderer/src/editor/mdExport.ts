@@ -34,10 +34,30 @@ function extractColw(md: string): { md: string; widths: (number[] | null)[] } {
   return { md: out.join('\n'), widths }
 }
 
-const PRINT_CSS = `
-@page { margin: 18mm 16mm; }
+export type PrintLayoutProfile = 'default' | 'proof-of-content'
+
+interface PrintLayout {
+  fontSizePt: number
+  pageMargin: string
+}
+
+const PRINT_LAYOUTS: Record<PrintLayoutProfile, PrintLayout> = {
+  default: {
+    fontSizePt: 12,
+    pageMargin: '18mm 16mm'
+  },
+  'proof-of-content': {
+    fontSizePt: 12,
+    pageMargin: '20mm 15mm 40mm 15mm'
+  }
+}
+
+function printCss(profile: PrintLayoutProfile): string {
+  const layout = PRINT_LAYOUTS[profile]
+  return `
+@page { size: A4; margin: ${layout.pageMargin}; }
 * { box-sizing: border-box; }
-body { margin: 0; color: #111; font-family: 'Malgun Gothic','Segoe UI',system-ui,sans-serif; font-size: 11pt; line-height: 1.7; }
+body { margin: 0; color: #111; font-family: 'Malgun Gothic','Segoe UI',system-ui,sans-serif; font-size: ${layout.fontSizePt}pt; line-height: 1.7; }
 h1,h2,h3,h4 { font-weight: 700; line-height: 1.3; margin: 1.2em 0 .5em; }
 h1 { font-size: 1.8em; border-bottom: 1px solid #ccc; padding-bottom: .2em; }
 h2 { font-size: 1.45em; border-bottom: 1px solid #ddd; padding-bottom: .15em; }
@@ -57,9 +77,10 @@ table.fixed { table-layout: fixed; }
 th,td { border: 1px solid #999; padding: 5px 9px; text-align: left; word-break: break-word; }
 th { background: #f0f0f0; }
 `
+}
 
 /** 마크다운 → 인쇄용 전체 HTML 문서. 표 colw 주석은 colgroup 너비로 반영. */
-export function mdToPrintHtml(md: string, title = '문서'): string {
+export function mdToPrintHtml(md: string, title = '문서', profile: PrintLayoutProfile = 'default'): string {
   const { md: clean, widths } = extractColw(md)
   let body = marked.parse(clean, { gfm: true, breaks: true }) as string
   const queue = [...widths]
@@ -71,5 +92,5 @@ export function mdToPrintHtml(md: string, title = '문서'): string {
     }
     return '<table>'
   })
-  return `<!doctype html><html lang="ko"><head><meta charset="utf-8"><title>${title}</title><style>${PRINT_CSS}</style></head><body>${body}</body></html>`
+  return `<!doctype html><html lang="ko"><head><meta charset="utf-8"><title>${title}</title><style>${printCss(profile)}</style></head><body>${body}</body></html>`
 }

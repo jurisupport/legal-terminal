@@ -13,13 +13,23 @@ import {
   IconNewFolder,
   IconSync,
   IconWorkspace,
-  IconSearch
+  IconSearch,
+  IconSave
 } from './icons/Icons'
 import MarkdownEditor, { type MarkdownDocumentPayload } from './editor/MarkdownEditor'
 import FindBar from './search/FindBar'
 import CasesDashboard from './dashboard/CasesDashboard'
 import UpcomingHearings from './dashboard/UpcomingHearings'
-import type { AppSettings, JsCase, SshConn, SshProfile, RemoteEntry, TabPayload } from './env'
+import type {
+  AppSettings,
+  JsCase,
+  SshConn,
+  SshProfile,
+  RemoteEntry,
+  TabPayload,
+  WorkspaceDocTabPayload,
+  WorkspaceSnapshot
+} from './env'
 
 type Mode = 'explorer' | 'cases' | 'viewer'
 type DockSide = 'left' | 'right'
@@ -243,6 +253,64 @@ interface CurrentCase {
   sshLabel?: string
   profileId?: string
   remotePath?: string
+}
+
+const WORKSPACE_VERSION = 1
+const RESTORABLE_DOC_KINDS = new Set<DocTab['kind']>([
+  'markdown',
+  'mdview',
+  'file',
+  'pdf',
+  'image',
+  'hwp',
+  'csv',
+  'settings'
+])
+
+const isWorkspaceMode = (value: unknown): value is Mode =>
+  value === 'explorer' || value === 'cases' || value === 'viewer'
+
+const isWorkKey = (value: unknown): value is WorkTabKey =>
+  typeof value === 'string' && parseWorkKey(value) !== null
+
+const toWorkspaceDoc = (tab: DocTab): WorkspaceDocTabPayload | null => {
+  if (!RESTORABLE_DOC_KINDS.has(tab.kind)) return null
+  if (tab.kind !== 'settings' && !tab.path) return null
+  return {
+    id: tab.id,
+    title: tab.title,
+    kind: tab.kind as WorkspaceDocTabPayload['kind'],
+    path: tab.path,
+    side: docSide(tab)
+  }
+}
+
+const toDocTab = (tab: WorkspaceDocTabPayload): DocTab | null => {
+  if (!RESTORABLE_DOC_KINDS.has(tab.kind)) return null
+  if (tab.kind !== 'settings' && !tab.path) return null
+  return {
+    id: tab.id || `file-${++docSeq}`,
+    title: tab.title || tab.path?.split(/[\\/]/).pop() || '문서',
+    kind: tab.kind,
+    path: tab.path,
+    side: tab.side ?? 'left'
+  }
+}
+
+const sanitizeCurrentCase = (value: unknown): CurrentCase | null => {
+  if (!value || typeof value !== 'object') return null
+  const c = value as Partial<CurrentCase>
+  if (typeof c.drafts !== 'string' || typeof c.name !== 'string') return null
+  return {
+    drafts: c.drafts,
+    records: typeof c.records === 'string' ? c.records : undefined,
+    name: c.name,
+    meta: c.meta,
+    ssh: c.ssh,
+    sshLabel: typeof c.sshLabel === 'string' ? c.sshLabel : undefined,
+    profileId: typeof c.profileId === 'string' ? c.profileId : undefined,
+    remotePath: typeof c.remotePath === 'string' ? c.remotePath : undefined
+  }
 }
 
 interface JuriSupportLegalPromptContext {
@@ -1246,6 +1314,172 @@ export default function App(): JSX.Element {
   )
   const isViewer = mode === 'viewer'
 
+  const buildWorkspaceSnapshot = async (): Promise<WorkspaceSnapshot> => {
+    const docs = docTabs.map(toWorkspaceDoc).filter((t): t is WorkspaceDocTabPayload => !!t)
+    const terminals = await Promise.all(
+      termTabs.map(async (t) => {
+        const current = await window.lt.sessions
+          .current(t.cwd, (t.createdAt ?? 0) - 3000, t.ssh)
+          .catch(() => null)
+        return {
+          ...t,
+          side: termSide(t),
+          resumeSessionId: current?.sessionId ?? t.resumeSessionId,
+          sessionTitle: current?.title ?? t.sessionTitle
+        }
+      })
+    )
+    return {
+      version: WORKSPACE_VERSION,
+      savedAt: new Date().toISOString(),
+      mode,
+      docs,
+      terminals,
+      activeDoc,
+      activeTerm,
+      activeWork,
+      currentCase,
+      crop: { on: cropOn, ratio: cropRatio }
+    }
+  }
+
+  const sanitizeWorkspaceTerm = (raw: unknown): TermTab | null => {
+    if (!raw || typeof raw !== 'object') return null
+    const t = raw as Partial<TermTab>
+    if (typeof t.cwd !== 'string' || !t.cwd) return null
+    return {
+      id: typeof t.id === 'string' && t.id ? t.id : newId(),
+      title: typeof t.title === 'string' && t.title ? t.title : t.cwd.split(/[\\/]/).pop() || '세션',
+      cwd: t.cwd,
+      recordsFolder: typeof t.recordsFolder === 'string' ? t.recordsFolder : undefined,
+      suggestedRecords: typeof t.suggestedRecords === 'string' ? t.suggestedRecords : undefined,
+      autoClaude: t.autoClaude ?? true,
+      jsId: typeof t.jsId === 'string' ? t.jsId : undefined,
+      court: typeof t.court === 'string' ? t.court : undefined,
+      caseNumber: typeof t.caseNumber === 'string' ? t.caseNumber : undefined,
+      caseName: typeof t.caseName === 'string' ? t.caseName : undefined,
+      client: typeof t.client === 'string' ? t.client : undefined,
+      sessionTitle: typeof t.sessionTitle === 'string' ? t.sessionTitle : undefined,
+      renamed: !!t.renamed,
+      createdAt: Date.now(),
+      resumeSessionId: typeof t.resumeSessionId === 'string' ? t.resumeSessionId : undefined,
+      ssh: t.ssh,
+      sshLabel: typeof t.sshLabel === 'string' ? t.sshLabel : undefined,
+      profileId: typeof t.profileId === 'string' ? t.profileId : undefined,
+      side: t.side ?? 'right'
+    }
+  }
+
+  const restoreWorkspaceSnapshot = (snapshot: WorkspaceSnapshot): void => {
+    const snapshotDocs = Array.isArray(snapshot.docs) ? snapshot.docs : []
+    const snapshotTerms = Array.isArray(snapshot.terminals) ? snapshot.terminals : []
+    const nextDocs = [...docTabs]
+    const docIdMap = new Map<string, string>()
+    for (const saved of snapshotDocs) {
+      const tab = toDocTab(saved)
+      if (!tab) continue
+      const existingById = nextDocs.find((t) => t.id === tab.id)
+      const existingByPath = tab.path ? nextDocs.find((t) => t.path === tab.path) : undefined
+      const existing = existingById ?? existingByPath
+      if (existing) {
+        docIdMap.set(saved.id, existing.id)
+        continue
+      }
+      nextDocs.push(tab)
+      docIdMap.set(saved.id, tab.id)
+    }
+
+    const nextTerms = [...termTabs]
+    const termIdSet = new Set(nextTerms.map((t) => t.id))
+    for (const saved of snapshotTerms) {
+      const tab = sanitizeWorkspaceTerm(saved)
+      if (!tab || termIdSet.has(tab.id)) continue
+      nextTerms.push(tab)
+      termIdSet.add(tab.id)
+    }
+
+    setDocTabs(nextDocs)
+    setTermTabs(nextTerms)
+
+    const activeDocId =
+      (snapshot.activeDoc && docIdMap.get(snapshot.activeDoc)) ||
+      (activeDoc && nextDocs.some((t) => t.id === activeDoc) ? activeDoc : nextDocs[0]?.id ?? '')
+    const activeTermId =
+      (snapshot.activeTerm && nextTerms.some((t) => t.id === snapshot.activeTerm)
+        ? snapshot.activeTerm
+        : undefined) ||
+      (activeTerm && nextTerms.some((t) => t.id === activeTerm) ? activeTerm : nextTerms[0]?.id ?? '')
+    setActiveDoc(activeDocId)
+    setActiveTerm(activeTermId)
+
+    const validKeys = new Set([
+      ...nextDocs.map((t) => docKey(t.id)),
+      ...nextTerms.map((t) => termKeyOf(t.id))
+    ])
+    const firstKeyForSide = (side: DockSide): string => {
+      const doc = nextDocs.find((t) => docSide(t) === side)
+      if (doc) return docKey(doc.id)
+      const term = nextTerms.find((t) => termSide(t) === side)
+      return term ? termKeyOf(term.id) : ''
+    }
+    const left =
+      isWorkKey(snapshot.activeWork?.left) && validKeys.has(snapshot.activeWork.left)
+        ? snapshot.activeWork.left
+        : firstKeyForSide('left')
+    const activeTermTab = nextTerms.find((t) => t.id === activeTermId)
+    const right =
+      isWorkKey(snapshot.activeWork?.right) && validKeys.has(snapshot.activeWork.right)
+        ? snapshot.activeWork.right
+        : firstKeyForSide('right')
+    setActiveWork({ left, right })
+
+    if (isWorkspaceMode(snapshot.mode)) setMode(snapshot.mode)
+    const restoredCase = sanitizeCurrentCase(snapshot.currentCase)
+    setCurrentCase(restoredCase ?? (activeTermTab ? currentCaseFromTerm(activeTermTab) : currentCase))
+    if (snapshot.crop) {
+      setCropOn(!!snapshot.crop.on)
+      if (Number.isFinite(snapshot.crop.ratio)) setCropRatio(snapshot.crop.ratio)
+    }
+    setTreeRefresh((n) => n + 1)
+  }
+
+  const saveWorkspace = async (exportFile = false): Promise<void> => {
+    const snapshot = await buildWorkspaceSnapshot()
+    const skippedDocs = docTabs.length - snapshot.docs.length
+    const result = exportFile
+      ? await window.lt.workspace.exportFile(snapshot)
+      : await window.lt.workspace.save(snapshot)
+    if (result.canceled) return
+    if (!result.ok) {
+      window.alert('작업환경 저장 실패: ' + (result.error ?? '알 수 없는 오류'))
+      return
+    }
+    window.alert(
+      `작업환경 저장 완료\n문서 ${snapshot.docs.length}개, 터미널 ${snapshot.terminals.length}개` +
+        (skippedDocs > 0 ? `\n임시/미저장 문서 ${skippedDocs}개는 제외했습니다.` : '') +
+        (result.path ? `\n${result.path}` : '')
+    )
+  }
+
+  const restoreWorkspace = async (importFile = false): Promise<void> => {
+    const result = importFile ? await window.lt.workspace.importFile() : await window.lt.workspace.load()
+    if (result.canceled) return
+    if (!result.ok) {
+      window.alert('작업환경 복원 실패: ' + (result.error ?? '알 수 없는 오류'))
+      return
+    }
+    if (!result.snapshot) {
+      window.alert('저장된 작업환경이 없습니다.')
+      return
+    }
+    restoreWorkspaceSnapshot(result.snapshot)
+    window.alert(
+      `작업환경 복원 완료\n문서 ${result.snapshot.docs?.length ?? 0}개, 터미널 ${
+        result.snapshot.terminals?.length ?? 0
+      }개`
+    )
+  }
+
   useEffect(() => {
     if (!isRemotePath(activeDraftsFolder) && !isRemotePath(activeRecordsFolder)) return
     const timer = setInterval(() => setTreeRefresh((x) => x + 1), 5000)
@@ -2105,6 +2339,20 @@ export default function App(): JSX.Element {
           ))}
         </div>
         <div className="activitybar-bottom">
+          <button
+            className="activity-item"
+            title="작업환경 저장 (Shift: 파일로 내보내기)"
+            onClick={(e) => void saveWorkspace(e.shiftKey)}
+          >
+            <IconSave />
+          </button>
+          <button
+            className="activity-item"
+            title="작업환경 복원 (Shift: 파일에서 가져오기)"
+            onClick={(e) => void restoreWorkspace(e.shiftKey)}
+          >
+            <IconSync />
+          </button>
           <button className="activity-item" title="새 작업환경 만들기" onClick={openNewWorkspaceWindow}>
             <IconWorkspace />
           </button>
@@ -4404,6 +4652,7 @@ function SyncModal({
   const [macFolder, setMacFolder] = useState(init.macFolder)
   const [remoteName, setRemoteName] = useState('') // 예: "onedrive:"
   const [cloudPath, setCloudPath] = useState(cloudPathFromOneDrivePath(init.macFolder))
+  const [syncMode, setSyncMode] = useState<'full' | 'folders'>('full')
   const [info, setInfo] = useState<{ installed: boolean; remotes: string[]; error?: string } | null>(
     null
   )
@@ -4440,10 +4689,11 @@ function SyncModal({
   const run = (direction: 'pull' | 'push'): void => {
     if (!canRun) return
     const label = direction === 'pull' ? '내리기' : '올리기'
+    const modeLabel = syncMode === 'folders' ? '폴더명만' : '전체'
     setRunningDirection(direction)
-    setLog((l) => [...l, `${label} 시작: ${dest}`])
+    setLog((l) => [...l, `${label} 시작 (${modeLabel}): ${dest}`])
     window.lt.sync
-      .run({ profile, direction, macFolder, dest })
+      .run({ profile, direction, mode: syncMode, macFolder, dest })
       .then((r) => {
         if (!r.ok && r.error) setLog((l) => [...l, '오류: ' + r.error])
       })
@@ -4527,9 +4777,38 @@ function SyncModal({
                 onChange={(e) => setCloudPath(e.target.value)}
               />
             </label>
+            <div className="sync-field">
+              동기화 범위
+              <div className="sync-mode" role="group" aria-label="동기화 범위">
+                <button
+                  type="button"
+                  className={`sync-mode-btn ${syncMode === 'full' ? 'active' : ''}`}
+                  disabled={running}
+                  onClick={() => setSyncMode('full')}
+                >
+                  전체
+                </button>
+                <button
+                  type="button"
+                  className={`sync-mode-btn ${syncMode === 'folders' ? 'active' : ''}`}
+                  disabled={running}
+                  onClick={() => setSyncMode('folders')}
+                >
+                  폴더명만
+                </button>
+              </div>
+            </div>
             <p className="muted small">
-              대상: <code>{dest || '(리모트:경로 미정)'}</code> · copy --update(빈 폴더 포함,{' '}
-              <b>삭제 전파 안 함</b>)
+              대상: <code>{dest || '(리모트:경로 미정)'}</code> ·{' '}
+              {syncMode === 'folders' ? (
+                <>
+                  파일 복사 없이 폴더 구조만 생성(<b>삭제 전파 안 함</b>)
+                </>
+              ) : (
+                <>
+                  copy --update(빈 폴더 포함, <b>삭제 전파 안 함</b>)
+                </>
+              )}
             </p>
             <div className="sync-buttons">
               <button className="empty-action" disabled={!canRun} onClick={() => run('push')}>
