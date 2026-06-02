@@ -33,7 +33,7 @@ import {
   disposeRemote
 } from './remoteFs'
 import type { SshProfile } from './settings'
-import { currentSession, listSessions } from './sessions'
+import { currentSession, listSessions, rememberSessionMeta, type SessionSearchContext } from './sessions'
 import { parse as parseHwp } from 'hwp.js'
 import {
   createPty,
@@ -268,8 +268,11 @@ ipcMain.on('sync:cancel', () => cancelSync())
 ipcMain.handle('sessions:current', (_e, p: { cwd: string; since?: number; ssh?: SshProfile }) =>
   currentSession(p.cwd, p.since ?? 0, p.ssh)
 )
-ipcMain.handle('sessions:list', (_e, p: { cwd: string; ssh?: SshProfile }) =>
-  listSessions(p.cwd, 40, p.ssh)
+ipcMain.handle('sessions:list', (_e, p: { cwd: string; ssh?: SshProfile; context?: SessionSearchContext }) =>
+  listSessions(p.cwd, 40, p.ssh, p.context)
+)
+ipcMain.handle('sessions:remember', (_e, p: Parameters<typeof rememberSessionMeta>[0]) =>
+  rememberSessionMeta(p)
 )
 
 // ── 작업환경 저장/복원 IPC ──

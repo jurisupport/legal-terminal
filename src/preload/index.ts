@@ -89,6 +89,16 @@ interface WorkspaceEntry {
   path: string
   docs: number
   terminals: number
+  cwd?: string
+  folderName?: string
+  caseNumber?: string
+  caseName?: string
+  court?: string
+  client?: string
+  recordsFolder?: string
+  profileId?: string
+  sshLabel?: string
+  searchText?: string
 }
 
 interface WorkspaceSaveResult {
@@ -113,6 +123,41 @@ interface WorkspaceListResult {
   ok: boolean
   entries?: WorkspaceEntry[]
   error?: string
+}
+
+interface SessionSearchContext {
+  query?: string
+  displayTitle?: string
+  caseNumber?: string
+  caseName?: string
+  court?: string
+  client?: string
+  folderName?: string
+  recordsFolder?: string
+  profileId?: string
+  sshLabel?: string
+}
+
+interface SessionListEntry {
+  sessionId: string
+  title?: string
+  transcriptTitle?: string
+  mtime: number
+  cwd?: string
+  displayTitle?: string
+  caseNumber?: string
+  caseName?: string
+  folderName?: string
+  indexed?: boolean
+}
+
+interface SessionRememberInput extends SessionSearchContext {
+  sessionId: string
+  cwd: string
+  title?: string
+  transcriptTitle?: string
+  mtime?: number
+  ssh?: SshConn
 }
 
 interface AppSettings {
@@ -283,9 +328,12 @@ const api = {
       ipcRenderer.invoke('sessions:current', { cwd, since, ssh }),
     list: (
       cwd: string,
-      ssh?: SshConn
-    ): Promise<{ sessionId: string; title?: string; mtime: number }[]> =>
-      ipcRenderer.invoke('sessions:list', { cwd, ssh })
+      ssh?: SshConn,
+      context?: SessionSearchContext
+    ): Promise<SessionListEntry[]> =>
+      ipcRenderer.invoke('sessions:list', { cwd, ssh, context }),
+    remember: (input: SessionRememberInput): Promise<{ ok: boolean; error?: string }> =>
+      ipcRenderer.invoke('sessions:remember', input)
   },
   workspace: {
     save: (snapshot: WorkspaceSnapshot): Promise<WorkspaceSaveResult> =>

@@ -1563,6 +1563,27 @@ body {
   font-size: 12px;
   outline: none;
 }
+.sl-search-row {
+  padding: 7px 10px;
+  border-bottom: 1px solid var(--border);
+}
+.sl-search,
+.workspace-search {
+  width: 100%;
+  min-width: 0;
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 6px 8px;
+  font-size: 12px;
+  outline: none;
+}
+.sl-search:focus,
+.workspace-search:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px rgba(14, 99, 156, 0.35);
+}
 .sl-list {
   list-style: none;
   margin: 0;
@@ -1691,21 +1712,22 @@ body {
   overflow-y: scroll;
   background-color: #181818;
   scrollbar-width: thin;
+  scrollbar-color: #383838 #181818;
 }
 .xterm-host .xterm .xterm-viewport::-webkit-scrollbar {
   width: 12px;
 }
 .xterm-host .xterm .xterm-viewport::-webkit-scrollbar-track {
-  background: transparent;
+  background: #181818;
 }
 .xterm-host .xterm .xterm-viewport::-webkit-scrollbar-thumb {
-  background: rgba(180, 180, 180, 0.22);
-  border: 3px solid transparent;
+  background: #383838;
+  border: 3px solid #181818;
   border-radius: 7px;
   background-clip: content-box;
 }
 .xterm-host .xterm .xterm-viewport::-webkit-scrollbar-thumb:hover {
-  background: rgba(190, 190, 190, 0.42);
+  background: #4a4a4a;
   background-clip: content-box;
 }
 .xterm-host .xterm.lt-win-ime-fix .composition-view.active,
@@ -2233,6 +2255,9 @@ body {
 
 .workspace-picker {
   width: min(560px, 92vw);
+}
+.workspace-search {
+  margin: 8px 0 12px;
 }
 .workspace-list {
   display: flex;

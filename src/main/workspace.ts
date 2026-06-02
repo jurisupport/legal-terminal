@@ -18,6 +18,16 @@ export interface WorkspaceEntry {
   path: string
   docs: number
   terminals: number
+  cwd?: string
+  folderName?: string
+  caseNumber?: string
+  caseName?: string
+  court?: string
+  client?: string
+  recordsFolder?: string
+  profileId?: string
+  sshLabel?: string
+  searchText?: string
 }
 
 export interface WorkspaceSaveResult {
@@ -92,14 +102,48 @@ function displayNameFromPath(path?: string): string | undefined {
   return basename(clean) || clean
 }
 
-function workspaceIdentity(snapshot: WorkspaceSnapshot): { id: string; label: string } {
+function compactSearchText(parts: (string | number | undefined)[]): string {
+  return parts
+    .filter((part): part is string | number => part !== undefined && String(part).trim().length > 0)
+    .map((part) => String(part).normalize('NFKC').toLowerCase())
+    .join(' ')
+}
+
+function activeTermRecord(snapshot: WorkspaceSnapshot): Record<string, unknown> | null {
   const terminals = Array.isArray(snapshot.terminals) ? snapshot.terminals : []
   const activeTerm = asString(snapshot.activeTerm)
   const term =
     (activeTerm
       ? terminals.find((value) => asRecord(value)?.id === activeTerm)
       : undefined) ?? terminals[0]
-  const termRecord = asRecord(term)
+  return asRecord(term)
+}
+
+function workspaceEntryMetadata(snapshot: WorkspaceSnapshot): Partial<WorkspaceEntry> {
+  const termRecord = activeTermRecord(snapshot)
+  const currentCase = asRecord(snapshot.currentCase)
+  const currentMeta = asRecord(currentCase?.meta)
+  const cwd =
+    asString(termRecord?.cwd) ||
+    asString(currentCase?.remotePath) ||
+    asString(currentCase?.drafts)
+  const folderName = displayNameFromPath(asString(currentCase?.remotePath) || cwd)
+  return {
+    cwd,
+    folderName,
+    caseNumber: asString(termRecord?.caseNumber) || asString(currentMeta?.caseNumber),
+    caseName:
+      asString(termRecord?.caseName) || asString(currentMeta?.caseName) || asString(currentCase?.caseName),
+    court: asString(termRecord?.court) || asString(currentMeta?.court),
+    client: asString(termRecord?.client) || asString(currentMeta?.client),
+    recordsFolder: asString(termRecord?.recordsFolder) || asString(currentCase?.records),
+    profileId: asString(termRecord?.profileId) || asString(currentCase?.profileId),
+    sshLabel: asString(termRecord?.sshLabel) || asString(currentCase?.sshLabel)
+  }
+}
+
+function workspaceIdentity(snapshot: WorkspaceSnapshot): { id: string; label: string } {
+  const termRecord = activeTermRecord(snapshot)
   const cwd = asString(termRecord?.cwd)
   if (cwd) {
     const profileId = asString(termRecord?.profileId)
@@ -144,13 +188,27 @@ function entryFromSnapshot(
     fallback ??
     (metadataId && metadataLabel ? { id: metadataId, label: metadataLabel } : undefined) ??
     workspaceIdentity(snapshot)
+  const metadata = workspaceEntryMetadata(snapshot)
   return {
     id: identity.id,
     label: identity.label,
     savedAt: snapshot.savedAt,
     path,
     docs: arrayLength(snapshot.docs),
-    terminals: arrayLength(snapshot.terminals)
+    terminals: arrayLength(snapshot.terminals),
+    ...metadata,
+    searchText: compactSearchText([
+      identity.label,
+      metadata.caseNumber,
+      metadata.caseName,
+      metadata.court,
+      metadata.client,
+      metadata.folderName,
+      metadata.cwd,
+      metadata.recordsFolder,
+      metadata.profileId,
+      metadata.sshLabel
+    ])
   }
 }
 

@@ -1,6 +1,7 @@
+import { app } from 'electron'
 import { homedir } from 'os'
-import { join } from 'path'
-import { readdir, stat, open } from 'fs/promises'
+import { dirname, join } from 'path'
+import { mkdir, open, readFile, readdir, stat, writeFile } from 'fs/promises'
 import { execFile } from 'child_process'
 import type { SshProfile } from './settings'
 
@@ -22,8 +23,233 @@ interface TranscriptHead {
   head: string
 }
 
+export interface SessionListEntry {
+  sessionId: string
+  title?: string
+  transcriptTitle?: string
+  mtime: number
+  cwd?: string
+  displayTitle?: string
+  caseNumber?: string
+  caseName?: string
+  folderName?: string
+  indexed?: boolean
+}
+
+export interface SessionSearchContext {
+  query?: string
+  displayTitle?: string
+  caseNumber?: string
+  caseName?: string
+  court?: string
+  client?: string
+  folderName?: string
+  recordsFolder?: string
+  profileId?: string
+  sshLabel?: string
+}
+
+export interface SessionMetaInput extends SessionSearchContext {
+  sessionId: string
+  cwd: string
+  title?: string
+  transcriptTitle?: string
+  mtime?: number
+  ssh?: SshConn
+}
+
+interface SessionMeta extends SessionMetaInput {
+  key: string
+  sourceKey: string
+  updatedAt: string
+  searchText: string
+}
+
+interface SessionIndex {
+  version: number
+  entries: SessionMeta[]
+}
+
+const SESSION_INDEX_VERSION = 1
+const MAX_SESSION_INDEX_ENTRIES = 600
+
 function shq(s: string): string {
   return `'${s.replace(/'/g, "'\\''")}'`
+}
+
+function sessionIndexPath(): string {
+  return join(app.getPath('userData'), 'session-index.json')
+}
+
+function remoteSourceKey(ssh: SshConn): string {
+  return `ssh:${ssh.user}@${ssh.host}:${ssh.port ?? 22}`
+}
+
+function sourceKey(ssh?: SshConn): string {
+  return ssh ? remoteSourceKey(ssh) : 'local'
+}
+
+function pathLeaf(path?: string): string | undefined {
+  if (!path) return undefined
+  const clean = path.replace(/[\\/]+$/, '')
+  return clean.split(/[\\/]/).filter(Boolean).pop() || clean
+}
+
+function searchNorm(value?: string): string {
+  return (value ?? '')
+    .normalize('NFKC')
+    .toLowerCase()
+    .replace(/\s+/g, '')
+}
+
+function searchText(parts: (string | number | undefined)[]): string {
+  return parts
+    .filter((part): part is string | number => part !== undefined && String(part).trim().length > 0)
+    .map((part) => String(part).normalize('NFKC').toLowerCase())
+    .join(' ')
+}
+
+function sessionKey(sessionId: string, ssh?: SshConn): string {
+  return `${sourceKey(ssh)}:${sessionId}`
+}
+
+function sameSource(meta: SessionMeta, ssh?: SshConn): boolean {
+  return meta.sourceKey === sourceKey(ssh)
+}
+
+function isSessionMeta(value: unknown): value is SessionMeta {
+  if (!value || typeof value !== 'object') return false
+  const v = value as Partial<SessionMeta>
+  return (
+    typeof v.key === 'string' &&
+    typeof v.sourceKey === 'string' &&
+    typeof v.sessionId === 'string' &&
+    typeof v.cwd === 'string' &&
+    typeof v.updatedAt === 'string' &&
+    typeof v.searchText === 'string'
+  )
+}
+
+async function readSessionIndex(): Promise<SessionMeta[]> {
+  try {
+    const raw = await readFile(sessionIndexPath(), 'utf8')
+    const parsed = JSON.parse(raw) as SessionIndex
+    return Array.isArray(parsed.entries) ? parsed.entries.filter(isSessionMeta) : []
+  } catch (e) {
+    const code = (e as NodeJS.ErrnoException).code
+    if (code === 'ENOENT') return []
+    return []
+  }
+}
+
+async function writeSessionIndex(entries: SessionMeta[]): Promise<void> {
+  const file = sessionIndexPath()
+  await mkdir(dirname(file), { recursive: true })
+  const sorted = [...entries]
+    .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+    .slice(0, MAX_SESSION_INDEX_ENTRIES)
+  await writeFile(
+    file,
+    JSON.stringify({ version: SESSION_INDEX_VERSION, entries: sorted }, null, 2),
+    'utf8'
+  )
+}
+
+function buildSessionMeta(input: SessionMetaInput): SessionMeta {
+  const folderName = input.folderName || pathLeaf(input.cwd)
+  const key = sessionKey(input.sessionId, input.ssh)
+  return {
+    ...input,
+    key,
+    sourceKey: sourceKey(input.ssh),
+    folderName,
+    updatedAt: new Date().toISOString(),
+    searchText: searchText([
+      input.sessionId,
+      input.title,
+      input.transcriptTitle,
+      input.displayTitle,
+      input.caseNumber,
+      input.caseName,
+      input.court,
+      input.client,
+      folderName,
+      input.cwd,
+      input.recordsFolder,
+      input.profileId,
+      input.sshLabel,
+      input.ssh?.host,
+      input.ssh?.user
+    ])
+  }
+}
+
+export async function rememberSessionMeta(input: SessionMetaInput): Promise<{ ok: boolean; error?: string }> {
+  try {
+    if (!input.sessionId || !input.cwd) return { ok: false, error: '세션 ID와 cwd가 필요합니다.' }
+    const nextMeta = buildSessionMeta(input)
+    const entries = await readSessionIndex()
+    const previous = entries.find((entry) => entry.key === nextMeta.key)
+    const merged: SessionMeta = previous
+      ? buildSessionMeta({
+          ...previous,
+          ...input,
+          displayTitle: input.displayTitle || previous.displayTitle,
+          title: input.title || previous.title,
+          transcriptTitle: input.transcriptTitle || previous.transcriptTitle,
+          mtime: input.mtime ?? previous.mtime,
+          folderName: input.folderName || previous.folderName,
+          ssh: input.ssh || previous.ssh
+        })
+      : nextMeta
+    await writeSessionIndex([merged, ...entries.filter((entry) => entry.key !== merged.key)])
+    return { ok: true }
+  } catch (e) {
+    return { ok: false, error: String(e instanceof Error ? e.message : e) }
+  }
+}
+
+function matchIndexedSession(meta: SessionMeta, cwd: string, context?: SessionSearchContext): boolean {
+  if (meta.cwd === cwd) return true
+  const needles = [
+    context?.query,
+    context?.caseNumber,
+    context?.caseName,
+    context?.folderName,
+    context?.displayTitle
+  ].filter((value): value is string => !!value && value.trim().length > 0)
+  if (!needles.length) return false
+
+  if (context?.caseNumber && searchNorm(meta.caseNumber) === searchNorm(context.caseNumber)) return true
+  const folderNeedle = searchNorm(context?.folderName)
+  if (folderNeedle.length >= 2) {
+    const folder = searchNorm(meta.folderName || pathLeaf(meta.cwd))
+    if (folder.length >= 2 && (folder.includes(folderNeedle) || folderNeedle.includes(folder))) return true
+  }
+  const haystack = searchNorm(meta.searchText)
+  return needles.every((needle) => haystack.includes(searchNorm(needle)))
+}
+
+function decorateSession(
+  session: { sessionId: string; title?: string; mtime: number; cwd?: string },
+  meta?: SessionMeta,
+  context?: SessionSearchContext
+): SessionListEntry {
+  const displayTitle = meta?.displayTitle || context?.displayTitle
+  const transcriptTitle = session.title || meta?.transcriptTitle || meta?.title
+  const title = displayTitle || meta?.title || transcriptTitle
+  return {
+    sessionId: session.sessionId,
+    title,
+    transcriptTitle,
+    mtime: session.mtime || meta?.mtime || 0,
+    cwd: session.cwd || meta?.cwd,
+    displayTitle,
+    caseNumber: meta?.caseNumber || context?.caseNumber,
+    caseName: meta?.caseName || context?.caseName,
+    folderName: meta?.folderName || context?.folderName,
+    indexed: !!meta
+  }
 }
 
 function sshBaseArgs(ssh: SshConn): string[] {
@@ -156,22 +382,55 @@ function parseHead(content: string): { cwd?: string; title?: string } {
 export async function listSessions(
   cwd: string,
   limit = 40,
-  ssh?: SshConn
-): Promise<{ sessionId: string; title?: string; mtime: number }[]> {
+  ssh?: SshConn,
+  context?: SessionSearchContext
+): Promise<SessionListEntry[]> {
+  const indexed = await readSessionIndex()
+  const indexedByKey = new Map(
+    indexed.filter((meta) => sameSource(meta, ssh)).map((meta) => [meta.sessionId, meta])
+  )
+  const out: SessionListEntry[] = []
+  const seen = new Set<string>()
+  const push = (entry: SessionListEntry): void => {
+    if (seen.has(entry.sessionId) || out.length >= limit) return
+    seen.add(entry.sessionId)
+    out.push(entry)
+  }
+
   if (ssh) {
     const ts = await listRemoteTranscriptHeads(ssh)
-    const out: { sessionId: string; title?: string; mtime: number }[] = []
     for (const t of ts) {
       if (out.length >= limit) break
       const p = parseHead(t.head)
       if (p.cwd && p.cwd === cwd) {
-        out.push({ sessionId: t.sessionId, title: p.title, mtime: t.mtime })
+        push(
+          decorateSession(
+            { sessionId: t.sessionId, title: p.title, mtime: t.mtime, cwd: p.cwd },
+            indexedByKey.get(t.sessionId),
+            context
+          )
+        )
       }
     }
-    return out
+    for (const meta of indexed) {
+      if (out.length >= limit) break
+      if (!sameSource(meta, ssh) || !matchIndexedSession(meta, cwd, context)) continue
+      push(
+        decorateSession(
+          {
+            sessionId: meta.sessionId,
+            title: meta.transcriptTitle || meta.title,
+            mtime: meta.mtime ?? Date.parse(meta.updatedAt),
+            cwd: meta.cwd
+          },
+          meta,
+          context
+        )
+      )
+    }
+    return out.sort((a, b) => b.mtime - a.mtime)
   }
   const ts = await listTranscripts()
-  const out: { sessionId: string; title?: string; mtime: number }[] = []
   for (const t of ts) {
     if (out.length >= limit) break
     let head: string
@@ -182,10 +441,32 @@ export async function listSessions(
     }
     const p = parseHead(head)
     if (p.cwd && p.cwd === cwd) {
-      out.push({ sessionId: t.sessionId, title: p.title, mtime: t.mtime })
+      push(
+        decorateSession(
+          { sessionId: t.sessionId, title: p.title, mtime: t.mtime, cwd: p.cwd },
+          indexedByKey.get(t.sessionId),
+          context
+        )
+      )
     }
   }
-  return out
+  for (const meta of indexed) {
+    if (out.length >= limit) break
+    if (!sameSource(meta, ssh) || !matchIndexedSession(meta, cwd, context)) continue
+    push(
+      decorateSession(
+        {
+          sessionId: meta.sessionId,
+          title: meta.transcriptTitle || meta.title,
+          mtime: meta.mtime ?? Date.parse(meta.updatedAt),
+          cwd: meta.cwd
+        },
+        meta,
+        context
+      )
+    )
+  }
+  return out.sort((a, b) => b.mtime - a.mtime)
 }
 
 // 주어진 cwd의 claude 세션 제목. since가 주어지면 그 시각 이후 갱신된 transcript만 본다

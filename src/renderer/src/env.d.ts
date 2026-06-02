@@ -87,6 +87,16 @@ export interface WorkspaceEntry {
   path: string
   docs: number
   terminals: number
+  cwd?: string
+  folderName?: string
+  caseNumber?: string
+  caseName?: string
+  court?: string
+  client?: string
+  recordsFolder?: string
+  profileId?: string
+  sshLabel?: string
+  searchText?: string
 }
 
 export interface WorkspaceSaveResult {
@@ -111,6 +121,41 @@ export interface WorkspaceListResult {
   ok: boolean
   entries?: WorkspaceEntry[]
   error?: string
+}
+
+export interface SessionSearchContext {
+  query?: string
+  displayTitle?: string
+  caseNumber?: string
+  caseName?: string
+  court?: string
+  client?: string
+  folderName?: string
+  recordsFolder?: string
+  profileId?: string
+  sshLabel?: string
+}
+
+export interface SessionListEntry {
+  sessionId: string
+  title?: string
+  transcriptTitle?: string
+  mtime: number
+  cwd?: string
+  displayTitle?: string
+  caseNumber?: string
+  caseName?: string
+  folderName?: string
+  indexed?: boolean
+}
+
+export interface SessionRememberInput extends SessionSearchContext {
+  sessionId: string
+  cwd: string
+  title?: string
+  transcriptTitle?: string
+  mtime?: number
+  ssh?: SshConn
 }
 
 export interface AppSettings {
@@ -267,7 +312,12 @@ export interface LtApi {
       since?: number,
       ssh?: SshConn
     ) => Promise<{ sessionId: string; title?: string } | null>
-    list: (cwd: string, ssh?: SshConn) => Promise<{ sessionId: string; title?: string; mtime: number }[]>
+    list: (
+      cwd: string,
+      ssh?: SshConn,
+      context?: SessionSearchContext
+    ) => Promise<SessionListEntry[]>
+    remember: (input: SessionRememberInput) => Promise<{ ok: boolean; error?: string }>
   }
   workspace: {
     save: (snapshot: WorkspaceSnapshot) => Promise<WorkspaceSaveResult>

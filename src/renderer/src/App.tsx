@@ -23,6 +23,9 @@ import UpcomingHearings from './dashboard/UpcomingHearings'
 import type {
   AppSettings,
   JsCase,
+  SessionListEntry,
+  SessionRememberInput,
+  SessionSearchContext,
   SshConn,
   SshProfile,
   RemoteEntry,
@@ -290,6 +293,70 @@ const formatWorkspaceSavedAt = (savedAt: string): string => {
 const describeWorkspaceEntry = (entry: WorkspaceEntry, index: number): string =>
   `${index + 1}. ${entry.label} · ${formatWorkspaceSavedAt(entry.savedAt)} · 문서 ${entry.docs}개 / 터미널 ${entry.terminals}개`
 
+const pathLeaf = (path?: string): string | undefined => {
+  if (!path) return undefined
+  const clean = path.replace(/[\\/]+$/, '')
+  return clean.split(/[\\/]/).filter(Boolean).pop() || clean
+}
+
+const searchNorm = (value?: string): string =>
+  (value ?? '')
+    .normalize('NFKC')
+    .toLowerCase()
+    .replace(/\s+/g, '')
+
+const matchesSearch = (parts: (string | number | undefined)[], query: string): boolean => {
+  const tokens = query
+    .split(/\s+/)
+    .map(searchNorm)
+    .filter(Boolean)
+  if (!tokens.length) return true
+  const haystack = searchNorm(
+    parts
+      .filter((part): part is string | number => part !== undefined && String(part).trim().length > 0)
+      .join(' ')
+  )
+  return tokens.every((token) => haystack.includes(token))
+}
+
+const koreanSessionTitle = (source?: Partial<TermTab>): string | undefined => {
+  if (!source) return undefined
+  const court = source.court ? abbrevCourt(source.court) : undefined
+  const legalTitle = [court, source.caseNumber, source.caseName, source.client].filter(Boolean).join(' ')
+  return legalTitle || source.title
+}
+
+const sessionContextForTerm = (source?: TermTab, query = ''): SessionSearchContext | undefined => {
+  if (!source && !query.trim()) return undefined
+  return {
+    query: query.trim() || undefined,
+    displayTitle: koreanSessionTitle(source),
+    caseNumber: source?.caseNumber,
+    caseName: source?.caseName,
+    court: source?.court,
+    client: source?.client,
+    folderName: pathLeaf(source?.cwd),
+    recordsFolder: source?.recordsFolder,
+    profileId: source?.profileId,
+    sshLabel: source?.sshLabel
+  }
+}
+
+const sessionRememberInput = (
+  source: TermTab,
+  sessionId: string,
+  title?: string,
+  mtime?: number
+): SessionRememberInput => ({
+  ...(sessionContextForTerm(source) ?? {}),
+  sessionId,
+  cwd: source.cwd,
+  title: koreanSessionTitle(source) || title,
+  transcriptTitle: title,
+  mtime,
+  ssh: source.ssh
+})
+
 const toWorkspaceDoc = (tab: DocTab): WorkspaceDocTabPayload | null => {
   if (!RESTORABLE_DOC_KINDS.has(tab.kind)) return null
   if (tab.kind !== 'settings' && !tab.path) return null
@@ -480,6 +547,7 @@ export default function App(): JSX.Element {
   const [activeTerm, setActiveTerm] = useState<string>('')
   const [termFocusNonce, setTermFocusNonce] = useState<Record<string, number>>({})
   const termTabsRef = useRef<TermTab[]>([])
+  const rememberedSessionsRef = useRef<Set<string>>(new Set())
   const [activeWork, setActiveWork] = useState<Record<DockSide, string>>({
     left: docOnly ? '' : docKey('doc-welcome'),
     right: ''
@@ -778,6 +846,13 @@ export default function App(): JSX.Element {
     return off
   }, [])
 
+  const rememberSessionForTerm = (term: TermTab, sessionId: string, title?: string, mtime?: number): void => {
+    const key = `${term.ssh ? `${term.ssh.user}@${term.ssh.host}:${term.ssh.port ?? 22}` : 'local'}:${sessionId}:${title ?? ''}:${term.caseNumber ?? ''}:${term.cwd}`
+    if (rememberedSessionsRef.current.has(key)) return
+    rememberedSessionsRef.current.add(key)
+    void window.lt.sessions.remember(sessionRememberInput(term, sessionId, title, mtime)).catch(() => {})
+  }
+
   // claude 세션 제목(ai-title)을 주기적으로 읽어 탭 이름에 반영 (수동 변경한 탭 제외)
   const termKey = termTabs.map((t) => t.id + ':' + t.cwd).join('|')
   useEffect(() => {
@@ -788,7 +863,9 @@ export default function App(): JSX.Element {
         if (t.renamed || t.ssh) return // 원격 transcript 조회는 세션 목록을 열 때만 수행
         // 이 터미널이 시작된 이후의 세션만 매칭 (과거 세션 제목 방지)
         window.lt.sessions.current(t.cwd, (t.createdAt ?? 0) - 3000, t.ssh).then((r) => {
-          if (!alive || !r?.title) return
+          if (!alive || !r) return
+          rememberSessionForTerm(t, r.sessionId, r.title)
+          if (!r.title) return
           setTermTabs((tabs) =>
             tabs.map((x) =>
               x.id === t.id && !x.renamed && x.sessionTitle !== r.title
@@ -1366,6 +1443,7 @@ export default function App(): JSX.Element {
         const current = await window.lt.sessions
           .current(t.cwd, (t.createdAt ?? 0) - 3000, t.ssh)
           .catch(() => null)
+        if (current?.sessionId) rememberSessionForTerm(t, current.sessionId, current.title)
         return {
           ...t,
           side: termSide(t),
@@ -3332,9 +3410,8 @@ function SessionList({
   onResume: (sessionId: string, cwd: string, title?: string, source?: TermTab) => void
   onClose: () => void
 }): JSX.Element {
-  const [past, setPast] = useState<{ sessionId: string; title?: string; mtime: number }[] | null>(
-    null
-  )
+  const [past, setPast] = useState<SessionListEntry[] | null>(null)
+  const [query, setQuery] = useState('')
 
   useEffect(() => {
     const close = (): void => onClose()
@@ -3370,8 +3447,25 @@ function SessionList({
   } else if (caseSource) {
     hasFolder = true
   }
-  const shown = sessions.filter((s) =>
+  const shownBase = sessions.filter((s) =>
     filter === 'all' ? true : filter === '__folder__' ? !s.jsId : s.jsId === filter
+  )
+  const shown = shownBase.filter((s) =>
+    matchesSearch(
+      [
+        s.title,
+        s.sessionTitle,
+        s.caseNumber,
+        s.caseName,
+        s.court,
+        s.client,
+        pathLeaf(s.cwd),
+        s.cwd,
+        s.recordsFolder,
+        s.sshLabel
+      ],
+      query
+    )
   )
 
   // 과거 세션을 읽을 cwd: 필터된 사건의 열린 세션 cwd → 없으면 현재 사건 cwd
@@ -3389,8 +3483,8 @@ function SessionList({
   const filterSource =
     filter !== 'all' && filter !== '__folder__'
       ? (sessions.find((s) => s.jsId === filter) ?? caseFallback)
-      : filter === '__folder__'
-        ? (shown.find((s) => s.id === activeId) ?? shown[0] ?? caseFallback)
+    : filter === '__folder__'
+        ? (shownBase.find((s) => s.id === activeId) ?? shownBase[0] ?? caseFallback)
         : (activeSession ?? caseFallback)
   const filterCwd =
     filter !== 'all' && filter !== '__folder__'
@@ -3404,11 +3498,34 @@ function SessionList({
     }
     let alive = true
     setPast(null)
-    window.lt.sessions.list(filterCwd, filterSource?.ssh).then((r) => alive && setPast(r))
+    const context = sessionContextForTerm(filterSource, query)
+    window.lt.sessions.list(filterCwd, filterSource?.ssh, context).then((r) => {
+      if (!alive) return
+      if (filterSource) {
+        r.forEach((entry) => {
+          void window.lt.sessions
+            .remember(sessionRememberInput(filterSource, entry.sessionId, entry.transcriptTitle || entry.title, entry.mtime))
+            .catch(() => {})
+        })
+      }
+      setPast(r)
+    })
     return () => {
       alive = false
     }
-  }, [filterCwd, filterSource?.ssh?.host, filterSource?.ssh?.user, filterSource?.ssh?.port, filterSource?.ssh?.identityFile])
+  }, [
+    filterCwd,
+    filterSource?.id,
+    filterSource?.caseNumber,
+    filterSource?.caseName,
+    filterSource?.cwd,
+    filterSource?.profileId,
+    filterSource?.ssh?.host,
+    filterSource?.ssh?.user,
+    filterSource?.ssh?.port,
+    filterSource?.ssh?.identityFile,
+    query
+  ])
 
   const fmt = (ms: number): string => {
     const d = new Date(ms)
@@ -3434,6 +3551,14 @@ function SessionList({
           ))}
           {hasFolder && <option value="__folder__">폴더 세션</option>}
         </select>
+      </div>
+      <div className="sl-search-row">
+        <input
+          className="sl-search"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          placeholder="사건번호·사건명·작성서류 폴더명 검색"
+        />
       </div>
       <ul className="sl-list">
         <li className="sl-section">열린 세션</li>
@@ -3464,10 +3589,14 @@ function SessionList({
               key={p.sessionId}
               className="sl-row past"
               onClick={() => onResume(p.sessionId, filterCwd, p.title, filterSource)}
-              title={`${p.sessionId}\nclaude --resume 로 이어서 열기`}
+              title={`${p.sessionId}\n${p.cwd ?? filterCwd}\nclaude --resume 로 이어서 열기`}
             >
               <span className="sl-name">↻ {p.title || '(제목 없음)'}</span>
-              <span className="sl-sub">{fmt(p.mtime)}</span>
+              <span className="sl-sub">
+                {[p.transcriptTitle && p.transcriptTitle !== p.title ? p.transcriptTitle : undefined, p.folderName, fmt(p.mtime)]
+                  .filter(Boolean)
+                  .join(' · ')}
+              </span>
             </li>
           ))}
       </ul>
@@ -3564,9 +3693,25 @@ function TextDoc({ text, note }: { text: string; note?: string }): JSX.Element {
   const [findOpen, setFindOpen] = useState(false)
   const [findQuery, setFindQuery] = useState('')
   const [findIndex, setFindIndex] = useState(-1)
+  const [docFont, setDocFont] = useState({ family: DEFAULT_MD_FONT, size: DEFAULT_MD_FONT_SIZE })
   const rootRef = useRef<HTMLDivElement>(null)
   const ranges = findTextRanges(text, findQuery)
   const activeFindIndex = ranges.length ? Math.max(0, Math.min(findIndex, ranges.length - 1)) : -1
+
+  useEffect(() => {
+    let alive = true
+    const applySettings = (s: AppSettings): void => {
+      if (!alive) return
+      setDocFont({ family: s.mdFont || DEFAULT_MD_FONT, size: s.mdFontSize || DEFAULT_MD_FONT_SIZE })
+    }
+    window.lt.settings.get().then(applySettings).catch(() => {})
+    const onSettingsUpdated = (e: Event): void => applySettings((e as CustomEvent<AppSettings>).detail)
+    window.addEventListener(SETTINGS_UPDATED_EVENT, onSettingsUpdated)
+    return () => {
+      alive = false
+      window.removeEventListener(SETTINGS_UPDATED_EVENT, onSettingsUpdated)
+    }
+  }, [])
 
   useEffect(() => {
     if (findIndex !== activeFindIndex) setFindIndex(activeFindIndex)
@@ -3646,7 +3791,10 @@ function TextDoc({ text, note }: { text: string; note?: string }): JSX.Element {
           onClose={() => setFindOpen(false)}
         />
       )}
-      <pre className={`file-view ${wrap ? 'wrap' : ''}`}>
+      <pre
+        className={`file-view ${wrap ? 'wrap' : ''}`}
+        style={{ fontFamily: docFont.family, fontSize: `${docFont.size}px` }}
+      >
         {renderText()}
         {note ? '\n\n' + note : ''}
       </pre>
@@ -4252,7 +4400,7 @@ function SettingsView(): JSX.Element {
 
       <section className="setting-row">
         <div className="setting-label">
-          마크다운 폰트 <span className="muted small">— 편집기(원본/서식)에 적용</span>
+          마크다운 폰트 <span className="muted small">— 편집기·텍스트·HWP 미리보기에 적용</span>
         </div>
         <div className="setting-value">
           <select
@@ -4489,19 +4637,46 @@ function WorkspacePicker({
   onRefresh: () => void
   onClose: () => void
 }): JSX.Element {
+  const [query, setQuery] = useState('')
+  const filteredEntries = entries.filter((entry) =>
+    matchesSearch(
+      [
+        entry.label,
+        entry.caseNumber,
+        entry.caseName,
+        entry.court,
+        entry.client,
+        entry.folderName,
+        entry.cwd,
+        entry.recordsFolder,
+        entry.sshLabel,
+        entry.searchText
+      ],
+      query
+    )
+  )
   return (
     <div className="modal-overlay" onMouseDown={onClose}>
       <div className="modal workspace-picker" onMouseDown={(e) => e.stopPropagation()}>
         <div className="modal-title">저장된 작업환경 가져오기</div>
+        <input
+          className="workspace-search"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          placeholder="사건번호·사건명·작성서류 폴더명 검색"
+        />
         <div className="workspace-list">
           {loading && <p className="muted pad small">불러오는 중…</p>}
           {!loading && error && <p className="muted pad small">불러오기 실패: {error}</p>}
           {!loading && !error && entries.length === 0 && (
             <p className="muted pad small">저장된 작업환경이 없습니다.</p>
           )}
+          {!loading && !error && entries.length > 0 && filteredEntries.length === 0 && (
+            <p className="muted pad small">검색 결과가 없습니다.</p>
+          )}
           {!loading &&
             !error &&
-            entries.map((entry, index) => (
+            filteredEntries.map((entry, index) => (
               <button
                 key={entry.id}
                 className="workspace-row"
@@ -4511,7 +4686,11 @@ function WorkspacePicker({
               >
                 <span className="workspace-row-main">
                   <span className="workspace-row-title">{entry.label}</span>
-                  <span className="muted small">{formatWorkspaceSavedAt(entry.savedAt)}</span>
+                  <span className="muted small">
+                    {[entry.caseNumber, entry.folderName, formatWorkspaceSavedAt(entry.savedAt)]
+                      .filter(Boolean)
+                      .join(' · ')}
+                  </span>
                 </span>
                 <span className="workspace-row-meta">
                   문서 {entry.docs} · 터미널 {entry.terminals}
