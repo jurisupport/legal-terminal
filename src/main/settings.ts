@@ -30,6 +30,8 @@ export interface Settings {
   draftsRoot?: string
   /** 소송기록 루트 — 사건별 전자소송기록 폴더가 하위에 존재 */
   recordsRoot?: string
+  /** 사건 대시보드에서 좌클릭 기본 열기 대상: local 또는 remote:<sshProfileId> */
+  caseOpenTarget?: string
   /** PDF 기본 배율: 'fit_page' | 'fit_width' | '50' | '100' | '125' | '150' | '200' */
   pdfZoom?: string
   /** 터미널 폰트 패밀리 */

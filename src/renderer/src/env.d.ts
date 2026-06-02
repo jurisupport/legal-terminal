@@ -59,6 +59,7 @@ export type TabPayload =
 export interface AppSettings {
   draftsRoot?: string
   recordsRoot?: string
+  caseOpenTarget?: string
   pdfZoom?: string
   termFont?: string
   termFontSize?: number

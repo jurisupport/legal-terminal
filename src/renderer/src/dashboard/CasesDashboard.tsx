@@ -50,6 +50,7 @@ export default function CasesDashboard({
   onOpenWorkspace,
   onOpenRemote,
   sshProfiles = [],
+  defaultOpenProfileId,
   onBrief,
   onDraft,
   onChanged
@@ -57,6 +58,7 @@ export default function CasesDashboard({
   onOpenWorkspace: (c: JsCase) => void
   onOpenRemote?: (c: JsCase, profile: SshProfile) => void
   sshProfiles?: SshProfile[]
+  defaultOpenProfileId?: string
   onBrief: (c: JsCase) => void
   onDraft: (c: JsCase) => void
   onChanged?: () => void
@@ -70,6 +72,14 @@ export default function CasesDashboard({
   const [menu, setMenu] = useState<{ x: number; y: number; c: JsCase } | null>(null)
   const [detail, setDetail] = useState<Record<string, JsCase>>({}) // 펼친 사건 상세
   const searchTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const defaultOpenProfile = defaultOpenProfileId
+    ? sshProfiles.find((p) => p.id === defaultOpenProfileId)
+    : undefined
+  const remoteMenuProfiles = sshProfiles.filter((p) => p.id !== defaultOpenProfile?.id)
+  const openDefault = (c: JsCase): void => {
+    if (defaultOpenProfile && onOpenRemote) onOpenRemote(c, defaultOpenProfile)
+    else onOpenWorkspace(c)
+  }
 
   const load = (q?: string): void => {
     setLoading(true)
@@ -217,7 +227,7 @@ export default function CasesDashboard({
             <div
               key={c.id}
               className="case-card"
-              onClick={() => onOpenWorkspace(c)}
+              onClick={() => openDefault(c)}
               onContextMenu={(e) => {
                 e.preventDefault()
                 setMenu({ x: e.clientX, y: e.clientY, c })
@@ -293,10 +303,13 @@ export default function CasesDashboard({
               ['✳ Claude에 브리핑 요청', () => onBrief(menu.c)],
               ['✍ 준비서면 초안 (/brief-protocol)', () => onDraft(menu.c)],
               ...(onOpenRemote && sshProfiles.length
-                ? (sshProfiles.map((p) => [
-                    `🔗 ${p.label}에서 열기`,
-                    () => onOpenRemote(menu.c, p)
-                  ]) as [string, () => void][])
+                  ? ([
+                      ...(defaultOpenProfile ? [['📁 로컬에서 열기', () => onOpenWorkspace(menu.c)]] : []),
+                      ...remoteMenuProfiles.map((p) => [
+                        `🔗 ${p.label}에서 열기`,
+                        () => onOpenRemote(menu.c, p)
+                      ])
+                    ] as [string, () => void][])
                 : []),
               ['—', null],
               ['🌐 JuriSupport에서 보기', () => openExt(caseWebUrl(menu.c.id))],

@@ -15,6 +15,7 @@ asar: true
 asarUnpack:
   - '**/node_modules/@lydell/**'
   - '**/*.node'
+afterPack: build/afterPack.cjs
 
 # prebuilt 네이티브(@lydell/node-pty) 사용 — 재빌드 안 함
 npmRebuild: false

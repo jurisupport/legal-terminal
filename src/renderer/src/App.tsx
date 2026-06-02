@@ -17,7 +17,7 @@ import {
 import MarkdownEditor, { type MarkdownDocumentPayload } from './editor/MarkdownEditor'
 import CasesDashboard from './dashboard/CasesDashboard'
 import UpcomingHearings from './dashboard/UpcomingHearings'
-import type { JsCase, SshConn, SshProfile, RemoteEntry, TabPayload } from './env'
+import type { AppSettings, JsCase, SshConn, SshProfile, RemoteEntry, TabPayload } from './env'
 
 type Mode = 'explorer' | 'cases' | 'viewer'
 type DockSide = 'left' | 'right'
@@ -41,8 +41,25 @@ const SORT_OPTIONS: { value: SortMode; label: string; title: string }[] = [
   { value: 'mtime-asc', label: '수정↑', title: '오래된 수정순' }
 ]
 
+const CASE_OPEN_LOCAL = 'local'
+const CASE_OPEN_REMOTE_PREFIX = 'remote:'
+const SETTINGS_UPDATED_EVENT = 'lt:settings-updated'
+
 const normalizePasteForPty = (text: string): string =>
   text.replace(/\r\n/g, '\n').replace(/\r/g, '\n').replace(/\n/g, '\r')
+
+const remoteCaseOpenTarget = (profileId: string): string => `${CASE_OPEN_REMOTE_PREFIX}${profileId}`
+const caseOpenProfileId = (target?: string): string | undefined =>
+  target?.startsWith(CASE_OPEN_REMOTE_PREFIX) ? target.slice(CASE_OPEN_REMOTE_PREFIX.length) : undefined
+const resolveCaseOpenTarget = (target: string | undefined, profiles: SshProfile[]): string => {
+  const profileId = caseOpenProfileId(target)
+  return profileId && profiles.some((p) => p.id === profileId)
+    ? remoteCaseOpenTarget(profileId)
+    : CASE_OPEN_LOCAL
+}
+const emitSettingsUpdated = (settings: AppSettings): void => {
+  window.dispatchEvent(new CustomEvent<AppSettings>(SETTINGS_UPDATED_EVENT, { detail: settings }))
+}
 
 interface DocTab {
   id: string
@@ -286,11 +303,17 @@ export default function App(): JSX.Element {
   })
   const [draftsRoot, setDraftsRoot] = useState<string | undefined>()
   const [recordsRoot, setRecordsRoot] = useState<string | undefined>()
+  const [caseOpenTarget, setCaseOpenTarget] = useState<string>(CASE_OPEN_LOCAL)
   // SSH 접속 프로필 + 접속 선택/원격 폴더 선택 모달 상태
   const [sshProfiles, setSshProfiles] = useState<SshProfile[]>([])
   const [connMenu, setConnMenu] = useState(false)
   const [remotePick, setRemotePick] = useState<SshProfile | null>(null)
-  const [recordsPick, setRecordsPick] = useState<SshProfile | null>(null)
+  const [recordsPick, setRecordsPick] = useState<{
+    profile: SshProfile
+    draftsPath?: string
+    title?: string
+    startPath?: string
+  } | null>(null)
   const [syncInit, setSyncInit] = useState<{
     profile: SshProfile
     macFolder: string
@@ -322,6 +345,13 @@ export default function App(): JSX.Element {
   const closeActiveTermRef = useRef<() => void>(() => {})
 
   useEffect(() => {
+    const applySettings = (s: AppSettings): void => {
+      const profiles = s.sshProfiles ?? []
+      setDraftsRoot(s.draftsRoot)
+      setRecordsRoot(s.recordsRoot)
+      setSshProfiles(profiles)
+      setCaseOpenTarget(resolveCaseOpenTarget(s.caseOpenTarget, profiles))
+    }
     window.lt?.app
       .info()
       .then((i) => {
@@ -329,12 +359,11 @@ export default function App(): JSX.Element {
         setInfo(`Electron ${i.versions.electron} · Node ${i.versions.node} · ${i.platform}`)
       })
       .catch(() => setInfo('preload 브리지 미연결'))
-    window.lt?.settings.get().then((s) => {
-      setDraftsRoot(s.draftsRoot)
-      setRecordsRoot(s.recordsRoot)
-      setSshProfiles(s.sshProfiles ?? [])
-    })
+    window.lt?.settings.get().then(applySettings)
     window.lt?.case.history().then(setRecent)
+    const onSettingsUpdated = (e: Event): void => applySettings((e as CustomEvent<AppSettings>).detail)
+    window.addEventListener(SETTINGS_UPDATED_EVENT, onSettingsUpdated)
+    return () => window.removeEventListener(SETTINGS_UPDATED_EVENT, onSettingsUpdated)
   }, [])
 
   termTabsRef.current = termTabs
@@ -991,13 +1020,46 @@ export default function App(): JSX.Element {
   // 터미널이 닫혀 있어도 현재 사건 컨텍스트에 적용된다.
   const pickRecords = async (): Promise<void> => {
     const cur = termTabs.find((t) => t.id === activeTerm)
-    // 원격 사건이면 원격 폴더 선택기(기록 모드)를 띄운다.
-    if (cur?.ssh && cur.profileId) {
-      const prof = sshProfiles.find((p) => p.id === cur.profileId)
-      if (prof) {
-        setRecordsPick(prof)
-        return
+    const remoteCtx =
+      cur?.ssh && cur.profileId
+        ? {
+            profileId: cur.profileId,
+            draftsPath: cur.cwd,
+            title: cur.title,
+            records: cur.recordsFolder
+          }
+        : !cur && currentCase?.ssh && currentCase.profileId && currentCase.remotePath
+          ? {
+              profileId: currentCase.profileId,
+              draftsPath: currentCase.remotePath,
+              title: currentCase.name,
+              records: currentCase.records
+            }
+          : null
+    if (remoteCtx) {
+      let profiles = sshProfiles
+      let prof = profiles.find((p) => p.id === remoteCtx.profileId)
+      if (!prof) {
+        const s = await window.lt.settings.get()
+        profiles = s.sshProfiles ?? []
+        setSshProfiles(profiles)
+        prof = profiles.find((p) => p.id === remoteCtx.profileId)
       }
+      if (prof) {
+        const currentRecords =
+          remoteCtx.records && isRemotePath(remoteCtx.records)
+            ? remotePlain(remoteCtx.records, prof.id)
+            : undefined
+        setRecordsPick({
+          profile: prof,
+          draftsPath: remoteCtx.draftsPath,
+          title: remoteCtx.title,
+          startPath: currentRecords || prof.recordsRoot || '~'
+        })
+      } else {
+        window.alert('이 사건에 연결된 SSH 프로필을 찾을 수 없습니다. 설정에서 SSH 프로필을 확인하세요.')
+      }
+      return
     }
     const draftsForPair = cur?.cwd ?? currentCase?.drafts
     const r = await window.lt.dialog.pickFolder({
@@ -1047,6 +1109,9 @@ export default function App(): JSX.Element {
       : (activeTermTab?.cwd ?? currentCase?.drafts)
   const activeRecordsFolder = activeTermTab?.recordsFolder ?? currentCase?.records
   const activeSuggestedRecords = activeTermTab?.suggestedRecords
+  const defaultCaseOpenProfileId = caseOpenProfileId(
+    resolveCaseOpenTarget(caseOpenTarget, sshProfiles)
+  )
   const isViewer = mode === 'viewer'
 
   useEffect(() => {
@@ -1727,6 +1792,7 @@ export default function App(): JSX.Element {
             onOpenWorkspace={openCaseWorkspace}
             onOpenRemote={openCaseRemote}
             sshProfiles={sshProfiles}
+            defaultOpenProfileId={defaultCaseOpenProfileId}
             onBrief={briefCaseToClaude}
             onDraft={draftCaseWithClaude}
             onChanged={() => setJsNonce((n) => n + 1)}
@@ -1821,23 +1887,26 @@ export default function App(): JSX.Element {
       {/* 원격 소송기록 폴더 선택 (기록뷰어) */}
       {recordsPick && (
         <RemoteFolderPicker
-          profile={recordsPick}
+          profile={recordsPick.profile}
           title="소송기록 폴더 선택"
           confirmLabel="이 폴더로 지정"
-          startPath={recordsPick.recordsRoot}
+          startPath={recordsPick.startPath}
           onCancel={() => setRecordsPick(null)}
           onPick={(remotePath) => {
-            const uri = remoteUri(recordsPick.id, remotePath)
+            const uri = remoteUri(recordsPick.profile.id, remotePath)
             const cur = termTabs.find((t) => t.id === activeTerm)
             setTermTabs((tabs) =>
-              tabs.map((t) => (t.id === activeTerm ? { ...t, recordsFolder: uri } : t))
+              tabs.map((t) => (activeTerm && t.id === activeTerm ? { ...t, recordsFolder: uri } : t))
             )
             setCurrentCase((c) => (c ? { ...c, records: uri } : c))
             // 페어링 기억 → 다음에 이 사건을 열면 자동 적용
-            if (cur?.ssh && cur.profileId) {
-              const drafts = remoteUri(cur.profileId, cur.cwd)
+            const draftsPath = recordsPick.draftsPath ?? (cur?.ssh ? cur.cwd : undefined)
+            if (draftsPath) {
+              const drafts = remoteUri(recordsPick.profile.id, draftsPath)
               window.lt.case.setPairing(drafts, uri)
-              window.lt.case.addHistory({ drafts, records: uri, name: cur.title }).then(setRecent)
+              window.lt.case
+                .addHistory({ drafts, records: uri, name: recordsPick.title ?? cur?.title ?? '사건' })
+                .then(setRecent)
             }
             setRecordsPick(null)
           }}
@@ -3127,23 +3196,28 @@ function ImageViewer({
 }
 
 function SettingsView(): JSX.Element {
-  const [s, setS] = useState<{
-    draftsRoot?: string
-    recordsRoot?: string
-    pdfZoom?: string
-    termFont?: string
-    termFontSize?: number
-    mdFont?: string
-    mdFontSize?: number
-  }>({})
+  const [s, setS] = useState<AppSettings>({})
   const [loaded, setLoaded] = useState(false)
 
   useEffect(() => {
-    window.lt.settings.get().then((v) => {
-      setS(v)
+    const applySettings = (v: AppSettings): void => {
+      setS({
+        ...v,
+        caseOpenTarget: resolveCaseOpenTarget(v.caseOpenTarget, v.sshProfiles ?? [])
+      })
       setLoaded(true)
-    })
+    }
+    window.lt.settings.get().then(applySettings)
+    const onSettingsUpdated = (e: Event): void => applySettings((e as CustomEvent<AppSettings>).detail)
+    window.addEventListener(SETTINGS_UPDATED_EVENT, onSettingsUpdated)
+    return () => window.removeEventListener(SETTINGS_UPDATED_EVENT, onSettingsUpdated)
   }, [])
+
+  const savePatch = async (patch: Partial<AppSettings>): Promise<void> => {
+    const next = await window.lt.settings.set(patch)
+    setS(next)
+    emitSettingsUpdated(next)
+  }
 
   const pick = async (key: 'draftsRoot' | 'recordsRoot'): Promise<void> => {
     const title =
@@ -3152,9 +3226,11 @@ function SettingsView(): JSX.Element {
         : '소송기록 루트 폴더 선택 (사건별 전자소송기록)'
     const r = await window.lt.dialog.pickFolder({ title, defaultPath: s[key] })
     if (!r) return
-    const next = await window.lt.settings.set({ [key]: r.path })
-    setS(next)
+    await savePatch({ [key]: r.path })
   }
+
+  const profiles = s.sshProfiles ?? []
+  const caseOpenValue = resolveCaseOpenTarget(s.caseOpenTarget, profiles)
 
   return (
     <div className="settings">
@@ -3187,6 +3263,26 @@ function SettingsView(): JSX.Element {
 
       <section className="setting-row">
         <div className="setting-label">
+          사건 기본 열기 <span className="muted small">— 사건 대시보드에서 클릭할 때 사용할 위치</span>
+        </div>
+        <div className="setting-value">
+          <select
+            className="setting-select"
+            value={caseOpenValue}
+            onChange={(e) => savePatch({ caseOpenTarget: e.target.value })}
+          >
+            <option value={CASE_OPEN_LOCAL}>로컬</option>
+            {profiles.map((p) => (
+              <option key={p.id} value={remoteCaseOpenTarget(p.id)}>
+                원격: {p.label}
+              </option>
+            ))}
+          </select>
+        </div>
+      </section>
+
+      <section className="setting-row">
+        <div className="setting-label">
           PDF 기본 배율 <span className="muted small">— 전자소송기록을 열 때 적용</span>
         </div>
         <div className="setting-value">
@@ -3194,8 +3290,7 @@ function SettingsView(): JSX.Element {
             className="setting-select"
             value={s.pdfZoom ?? 'fit_page'}
             onChange={async (e) => {
-              const next = await window.lt.settings.set({ pdfZoom: e.target.value })
-              setS(next)
+              await savePatch({ pdfZoom: e.target.value })
             }}
           >
             <option value="fit_page">쪽 맞춤</option>
@@ -3219,8 +3314,7 @@ function SettingsView(): JSX.Element {
             placeholder="예: Cascadia Mono, D2Coding, Consolas"
             defaultValue={s.termFont ?? ''}
             onBlur={async (e) => {
-              const next = await window.lt.settings.set({ termFont: e.target.value.trim() })
-              setS(next)
+              await savePatch({ termFont: e.target.value.trim() })
             }}
           />
         </div>
@@ -3238,8 +3332,7 @@ function SettingsView(): JSX.Element {
             onChange={async (e) => {
               const n = parseInt(e.target.value, 10)
               if (Number.isNaN(n)) return
-              const next = await window.lt.settings.set({ termFontSize: Math.min(32, Math.max(8, n)) })
-              setS(next)
+              await savePatch({ termFontSize: Math.min(32, Math.max(8, n)) })
             }}
           />
           <span className="muted small">px</span>
@@ -3256,8 +3349,7 @@ function SettingsView(): JSX.Element {
             placeholder="예: D2Coding, Malgun Gothic, Consolas"
             defaultValue={s.mdFont ?? ''}
             onBlur={async (e) => {
-              const next = await window.lt.settings.set({ mdFont: e.target.value.trim() })
-              setS(next)
+              await savePatch({ mdFont: e.target.value.trim() })
             }}
           />
         </div>
@@ -3275,8 +3367,7 @@ function SettingsView(): JSX.Element {
             onChange={async (e) => {
               const n = parseInt(e.target.value, 10)
               if (Number.isNaN(n)) return
-              const next = await window.lt.settings.set({ mdFontSize: Math.min(32, Math.max(8, n)) })
-              setS(next)
+              await savePatch({ mdFontSize: Math.min(32, Math.max(8, n)) })
             }}
           />
           <span className="muted small">px</span>
@@ -3311,7 +3402,7 @@ function SshProfilesEditor(): JSX.Element {
 
   const save = (next: SshProfile[]): void => {
     setProfiles(next)
-    void window.lt.settings.set({ sshProfiles: next })
+    void window.lt.settings.set({ sshProfiles: next }).then(emitSettingsUpdated)
   }
   const update = (id: string, patch: Partial<SshProfile>): void =>
     save(profiles.map((p) => (p.id === id ? { ...p, ...patch } : p)))
@@ -3803,9 +3894,12 @@ function SyncModal({
     null
   )
   const [log, setLog] = useState<string[]>([])
-  const [running, setRunning] = useState(false)
+  const [runningDirection, setRunningDirection] = useState<'pull' | 'push' | null>(null)
   const logRef = useRef<HTMLPreElement>(null)
   const profile = profiles.find((p) => p.id === profileId) ?? init.profile
+  const running = runningDirection !== null
+  const runningLabel =
+    runningDirection === 'pull' ? '내리기' : runningDirection === 'push' ? '올리기' : ''
 
   // 진행 로그 구독
   useEffect(() => window.lt.sync.onProgress((line) => setLog((l) => [...l, line])), [])
@@ -3831,16 +3925,26 @@ function SyncModal({
   const canRun = Boolean(!running && info?.installed && macFolder.trim() && remoteName)
   const run = (direction: 'pull' | 'push'): void => {
     if (!canRun) return
-    setRunning(true)
-    window.lt.sync.run({ profile, direction, macFolder, dest }).then((r) => {
-      setRunning(false)
-      if (!r.ok && r.error) setLog((l) => [...l, '오류: ' + r.error])
-    })
+    const label = direction === 'pull' ? '내리기' : '올리기'
+    setRunningDirection(direction)
+    setLog((l) => [...l, `${label} 시작: ${dest}`])
+    window.lt.sync
+      .run({ profile, direction, macFolder, dest })
+      .then((r) => {
+        if (!r.ok && r.error) setLog((l) => [...l, '오류: ' + r.error])
+      })
+      .catch((e) => setLog((l) => [...l, '오류: ' + String(e)]))
+      .finally(() => setRunningDirection(null))
+  }
+  const cancelRun = (): void => {
+    if (!running) return
+    setLog((l) => [...l, `${runningLabel} 중단 요청...`])
+    window.lt.sync.cancel()
   }
 
   return (
     <div className="modal-overlay" onMouseDown={running ? undefined : onClose}>
-      <div className="modal sync-modal" onMouseDown={(e) => e.stopPropagation()}>
+      <div className="modal sync-modal" aria-busy={running} onMouseDown={(e) => e.stopPropagation()}>
         <div className="modal-title">⇅ 동기화 (맥미니 rclone · 사건폴더 ↔ OneDrive 클라우드)</div>
 
         <label className="sync-field">
@@ -3915,12 +4019,26 @@ function SyncModal({
             </p>
             <div className="sync-buttons">
               <button className="empty-action" disabled={!canRun} onClick={() => run('push')}>
-                ⬆ 올리기 (맥 → 클라우드)
+                {runningDirection === 'push' ? '올리기 진행 중...' : '⬆ 올리기 (맥 → 클라우드)'}
               </button>
               <button className="empty-action" disabled={!canRun} onClick={() => run('pull')}>
-                ⬇ 내리기 (클라우드 → 맥)
+                {runningDirection === 'pull' ? '내리기 진행 중...' : '⬇ 내리기 (클라우드 → 맥)'}
               </button>
             </div>
+            {running && (
+              <div className="sync-status" role="status" aria-live="polite">
+                <div className="sync-status-main">
+                  <span className="sync-spinner" aria-hidden="true" />
+                  <div>
+                    <b>{runningLabel} 진행 중...</b>
+                    <span>완료될 때까지 동기화 버튼은 비활성화됩니다.</span>
+                  </div>
+                </div>
+                <button className="header-btn danger" onClick={cancelRun}>
+                  중단
+                </button>
+              </div>
+            )}
             {log.length > 0 && (
               <pre className="sync-log" ref={logRef}>
                 {log.join('\n')}
@@ -3932,11 +4050,6 @@ function SyncModal({
         {!info && <p className="muted pad small">맥미니 rclone 확인 중…</p>}
 
         <div className="modal-actions">
-          {running && (
-            <button className="header-btn danger" onClick={() => window.lt.sync.cancel()}>
-              중단
-            </button>
-          )}
           <button className="header-btn" onClick={onClose} disabled={running}>
             닫기
           </button>

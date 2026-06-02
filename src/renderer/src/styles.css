@@ -1898,6 +1898,14 @@ body {
 .empty-action:hover {
   filter: brightness(1.12);
 }
+.empty-action:disabled {
+  opacity: 0.45;
+  cursor: default;
+  filter: none;
+}
+.empty-action:disabled:hover {
+  filter: none;
+}
 .empty-secondary {
   margin-top: 10px;
 }
@@ -2181,6 +2189,43 @@ body {
 }
 .sync-buttons .empty-action {
   flex: 1;
+  min-height: 34px;
+}
+.sync-status {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 0 0 10px;
+  padding: 9px 10px;
+  border: 1px solid rgba(14, 99, 156, 0.75);
+  border-radius: 6px;
+  background: rgba(14, 99, 156, 0.13);
+}
+.sync-status-main {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
+}
+.sync-status-main b {
+  display: block;
+  color: var(--fg);
+  font-size: 12.5px;
+}
+.sync-status-main span {
+  display: block;
+  color: var(--fg-muted);
+  font-size: 11px;
+}
+.sync-spinner {
+  width: 15px;
+  height: 15px;
+  flex: 0 0 15px;
+  border: 2px solid rgba(255, 255, 255, 0.28);
+  border-top-color: var(--accent-fg);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
 }
 .sync-log {
   height: 200px;
