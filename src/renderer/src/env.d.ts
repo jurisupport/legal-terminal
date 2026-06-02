@@ -63,6 +63,8 @@ export interface AppSettings {
   pdfZoom?: string
   termFont?: string
   termFontSize?: number
+  notificationSound?: string
+  notificationVolume?: number
   mdFont?: string
   mdFontSize?: number
   sshProfiles?: SshProfile[]

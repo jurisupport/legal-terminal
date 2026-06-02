@@ -13,6 +13,8 @@ export type SortMode = 'name-asc' | 'name-desc' | 'mtime-desc' | 'mtime-asc'
 export const LT_PATH = 'application/x-lt-path'
 
 const koCollator = new Intl.Collator('ko', { numeric: true, sensitivity: 'base' })
+const SEARCH_DEPTH_LIMIT = 8
+const SEARCH_RESULT_LIMIT = 300
 
 export function sortEntries<T extends Entry>(entries: T[], mode: SortMode): T[] {
   return [...entries].sort((a, b) => {
@@ -35,6 +37,15 @@ function fileIcon(name: string): string {
   return '📄'
 }
 
+function normalizeSearchText(text: string): string {
+  return text.toLocaleLowerCase('ko-KR')
+}
+
+function relativePath(root: string, path: string): string {
+  if (!path.startsWith(root)) return path
+  return path.slice(root.length).replace(/^[\\/]+/, '')
+}
+
 /** 활성 사건 폴더(root)의 파일트리. 폴더는 펼칠 때 지연 로딩. */
 export default function FileTree({
   root,
@@ -46,7 +57,8 @@ export default function FileTree({
   pendingCreate = null,
   sortMode = 'name-asc',
   onCreate,
-  onCancelCreate
+  onCancelCreate,
+  filter = ''
 }: {
   root: string
   refreshNonce?: number
@@ -58,12 +70,16 @@ export default function FileTree({
   sortMode?: SortMode
   onCreate?: (name: string, type: 'file' | 'folder') => void
   onCancelCreate?: () => void
+  filter?: string
 }): JSX.Element {
   const [entries, setEntries] = useState<Entry[] | null>(null)
+  const [searchEntries, setSearchEntries] = useState<Entry[] | null>(null)
+  const [searchErr, setSearchErr] = useState('')
   const [err, setErr] = useState<string>('')
   const [rootOver, setRootOver] = useState(false)
   const lastRoot = useRef<string | null>(null)
   const entriesRef = useRef<Entry[] | null>(null)
+  const query = filter.trim()
   // 우클릭 컨텍스트 메뉴 (삭제 등)
   const [menu, setMenu] = useState<{ x: number; y: number; entry: Entry } | null>(null)
   const onContext = (e: React.MouseEvent, entry: Entry): void => {
@@ -108,6 +124,48 @@ export default function FileTree({
     }
   }, [root, refreshNonce])
 
+  useEffect(() => {
+    if (!query) {
+      setSearchEntries(null)
+      setSearchErr('')
+      return
+    }
+    let alive = true
+    const needle = normalizeSearchText(query)
+    const out: Entry[] = []
+
+    const walk = async (dir: string, depth: number): Promise<void> => {
+      if (depth > SEARCH_DEPTH_LIMIT || out.length >= SEARCH_RESULT_LIMIT) return
+      let list: Entry[]
+      try {
+        list = await window.lt.fs.list(dir)
+      } catch (e) {
+        if (depth === 0) throw e
+        return
+      }
+      for (const entry of list) {
+        if (!entry.isDir && normalizeSearchText(entry.name).includes(needle)) out.push(entry)
+        if (out.length >= SEARCH_RESULT_LIMIT) return
+        if (entry.isDir) await walk(entry.path, depth + 1)
+      }
+    }
+
+    setSearchEntries(null)
+    setSearchErr('')
+    walk(root, 0)
+      .then(() => {
+        if (alive) setSearchEntries(out)
+      })
+      .catch((e) => {
+        if (!alive) return
+        setSearchEntries([])
+        setSearchErr(String(e))
+      })
+    return () => {
+      alive = false
+    }
+  }, [root, refreshNonce, query])
+
   // 트리 빈 영역/루트로 드롭 → root 폴더로 이동(내부) 또는 복사(외부)
   const rootDrop = (e: React.DragEvent): void => {
     e.preventDefault()
@@ -133,6 +191,38 @@ export default function FileTree({
       }}
       onDrop={rootDrop}
     >
+      {query ? (
+        <>
+          {searchErr && <li className="tree-node muted pad">검색 실패: {searchErr}</li>}
+          {!searchErr && !searchEntries && <li className="tree-node muted pad">검색 중…</li>}
+          {!searchErr && searchEntries && searchEntries.length === 0 && (
+            <li className="tree-node muted pad">검색 결과가 없습니다.</li>
+          )}
+          {!searchErr &&
+            searchEntries &&
+            sortEntries(searchEntries, sortMode).map((e) => (
+              <li key={e.path}>
+                <div
+                  className="tree-row tree-search-row"
+                  style={{ paddingLeft: 8 }}
+                  title={e.path}
+                  draggable
+                  onClick={() => onOpenFile(e.path, e.name)}
+                  onDragStart={(ev) => {
+                    ev.stopPropagation()
+                    ev.dataTransfer.setData(LT_PATH, e.path)
+                    ev.dataTransfer.effectAllowed = 'copyMove'
+                  }}
+                >
+                  <span className="tree-icon">{fileIcon(e.name)}</span>
+                  <span className="tree-name">{e.name}</span>
+                  <span className="tree-path">{relativePath(root, e.path)}</span>
+                </div>
+              </li>
+            ))}
+        </>
+      ) : (
+        <>
       {pendingCreate && (
         <li>
           <div className="tree-row" style={{ paddingLeft: 8 }}>
@@ -172,6 +262,8 @@ export default function FileTree({
             onContext={onContext}
           />
         ))}
+        </>
+      )}
       {menu && (
         <ul
           className="ctx-menu"

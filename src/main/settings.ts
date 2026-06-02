@@ -38,6 +38,10 @@ export interface Settings {
   termFont?: string
   /** 터미널 글자 크기(px) */
   termFontSize?: number
+  /** 터미널 작업 완료/질문 대기 알림음 */
+  notificationSound?: string
+  /** 터미널 작업 완료/질문 대기 알림음 볼륨(0-100) */
+  notificationVolume?: number
   /** 마크다운 원본(소스) 폰트 패밀리 */
   mdFont?: string
   /** 마크다운 글자 크기(px) */

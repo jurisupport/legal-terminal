@@ -12,9 +12,11 @@ import {
   IconNewFile,
   IconNewFolder,
   IconSync,
-  IconWorkspace
+  IconWorkspace,
+  IconSearch
 } from './icons/Icons'
 import MarkdownEditor, { type MarkdownDocumentPayload } from './editor/MarkdownEditor'
+import FindBar from './search/FindBar'
 import CasesDashboard from './dashboard/CasesDashboard'
 import UpcomingHearings from './dashboard/UpcomingHearings'
 import type { AppSettings, JsCase, SshConn, SshProfile, RemoteEntry, TabPayload } from './env'
@@ -49,6 +51,8 @@ const DEFAULT_MD_FONT_SIZE = 14
 const FONT_SIZE_MIN = 8
 const FONT_SIZE_MAX = 32
 const DEFAULT_MD_FONT = "'D2Coding', 'Cascadia Mono', Consolas, monospace"
+const DEFAULT_NOTIFICATION_SOUND: NotificationSound = 'chime'
+const DEFAULT_NOTIFICATION_VOLUME = 85
 
 const MD_FONT_OPTIONS: { label: string; value: string }[] = [
   { label: '기본값 (D2Coding 고정폭)', value: '' },
@@ -64,6 +68,41 @@ const MD_FONT_OPTIONS: { label: string; value: string }[] = [
   { label: '나눔고딕', value: "'Nanum Gothic', 'Malgun Gothic', system-ui, sans-serif" },
   { label: 'Cascadia Mono / Consolas', value: "'Cascadia Mono', Consolas, 'D2Coding', monospace" }
 ]
+
+type NotificationSound = 'chime' | 'ding' | 'success' | 'bell' | 'none'
+
+const NOTIFICATION_SOUND_OPTIONS: { label: string; value: NotificationSound }[] = [
+  { label: '기본 차임', value: 'chime' },
+  { label: '맑은 딩', value: 'ding' },
+  { label: '완료 상승음', value: 'success' },
+  { label: '강한 벨', value: 'bell' },
+  { label: '소리 끔', value: 'none' }
+]
+
+interface NotificationTone {
+  frequency: number
+  start: number
+  duration: number
+  type?: OscillatorType
+  gain?: number
+}
+
+const NOTIFICATION_TONES: Record<Exclude<NotificationSound, 'none'>, NotificationTone[]> = {
+  chime: [
+    { frequency: 880, start: 0, duration: 0.13, gain: 0.18 },
+    { frequency: 1320, start: 0.12, duration: 0.17, gain: 0.16 }
+  ],
+  ding: [{ frequency: 1046.5, start: 0, duration: 0.24, gain: 0.19 }],
+  success: [
+    { frequency: 659.25, start: 0, duration: 0.11, gain: 0.16 },
+    { frequency: 880, start: 0.1, duration: 0.12, gain: 0.17 },
+    { frequency: 1174.66, start: 0.21, duration: 0.18, gain: 0.16 }
+  ],
+  bell: [
+    { frequency: 740, start: 0, duration: 0.18, type: 'triangle', gain: 0.23 },
+    { frequency: 1480, start: 0.02, duration: 0.14, type: 'sine', gain: 0.11 }
+  ]
+}
 
 const normalizePasteForPty = (text: string): string =>
   text.replace(/\r\n/g, '\n').replace(/\r/g, '\n').replace(/\n/g, '\r')
@@ -81,6 +120,18 @@ const clampFontSize = (value: string, fallback: number): number => {
   const parsed = Number.parseInt(value, 10)
   if (Number.isNaN(parsed)) return fallback
   return Math.min(FONT_SIZE_MAX, Math.max(FONT_SIZE_MIN, parsed))
+}
+const resolveNotificationSound = (value?: string): NotificationSound =>
+  NOTIFICATION_SOUND_OPTIONS.some((option) => option.value === value)
+    ? (value as NotificationSound)
+    : DEFAULT_NOTIFICATION_SOUND
+const clampNotificationVolume = (
+  value: string | number | undefined,
+  fallback = DEFAULT_NOTIFICATION_VOLUME
+): number => {
+  const parsed = typeof value === 'number' ? value : Number.parseFloat(value ?? '')
+  if (!Number.isFinite(parsed)) return fallback
+  return Math.min(100, Math.max(0, Math.round(parsed)))
 }
 const emitSettingsUpdated = (settings: AppSettings): void => {
   window.dispatchEvent(new CustomEvent<AppSettings>(SETTINGS_UPDATED_EVENT, { detail: settings }))
@@ -257,7 +308,7 @@ function abbrevCourt(court: string): string {
     .trim()
 }
 
-// 완료 알림음 (외부 파일 없이 WebAudio로 짧은 두 톤). 컨텍스트를 1개만 만들어 재사용하고
+// 완료 알림음 (외부 파일 없이 WebAudio로 합성). 컨텍스트를 1개만 만들어 재사용하고
 // 자동재생 정책 때문에 사용자 제스처(클릭)에서 resume 해 둔다.
 let _actx: AudioContext | null = null
 function getAudioCtx(): AudioContext | null {
@@ -277,25 +328,32 @@ function getAudioCtx(): AudioContext | null {
 if (typeof window !== 'undefined') {
   window.addEventListener('pointerdown', () => void getAudioCtx(), { capture: true })
 }
-function beep(): void {
+function playNotificationSound(
+  sound = DEFAULT_NOTIFICATION_SOUND,
+  volume = DEFAULT_NOTIFICATION_VOLUME
+): void {
+  if (sound === 'none') return
+  const volumeRatio = clampNotificationVolume(volume) / 100
+  if (volumeRatio <= 0) return
   const ctx = getAudioCtx()
   if (!ctx) return
-  const play = (freq: number, start: number, dur: number): void => {
+  const tones = NOTIFICATION_TONES[sound]
+  const play = ({ frequency, start, duration, type = 'sine', gain = 0.16 }: NotificationTone): void => {
     const o = ctx.createOscillator()
     const g = ctx.createGain()
-    o.type = 'sine'
-    o.frequency.value = freq
+    o.type = type
+    o.frequency.value = frequency
     o.connect(g)
     g.connect(ctx.destination)
     const t0 = ctx.currentTime + start
+    const peak = Math.max(0.0001, gain * volumeRatio)
     g.gain.setValueAtTime(0.0001, t0)
-    g.gain.exponentialRampToValueAtTime(0.09, t0 + 0.01)
-    g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur)
+    g.gain.exponentialRampToValueAtTime(peak, t0 + 0.012)
+    g.gain.exponentialRampToValueAtTime(0.0001, t0 + duration)
     o.start(t0)
-    o.stop(t0 + dur)
+    o.stop(t0 + duration + 0.02)
   }
-  play(880, 0, 0.12)
-  play(1320, 0.12, 0.15)
+  tones.forEach(play)
 }
 
 let docSeq = 0
@@ -329,6 +387,9 @@ export default function App(): JSX.Element {
   const [draftsRoot, setDraftsRoot] = useState<string | undefined>()
   const [recordsRoot, setRecordsRoot] = useState<string | undefined>()
   const [caseOpenTarget, setCaseOpenTarget] = useState<string>(CASE_OPEN_LOCAL)
+  const [notificationSound, setNotificationSound] =
+    useState<NotificationSound>(DEFAULT_NOTIFICATION_SOUND)
+  const [notificationVolume, setNotificationVolume] = useState(DEFAULT_NOTIFICATION_VOLUME)
   // SSH 접속 프로필 + 접속 선택/원격 폴더 선택 모달 상태
   const [sshProfiles, setSshProfiles] = useState<SshProfile[]>([])
   const [connMenu, setConnMenu] = useState(false)
@@ -376,6 +437,8 @@ export default function App(): JSX.Element {
       setRecordsRoot(s.recordsRoot)
       setSshProfiles(profiles)
       setCaseOpenTarget(resolveCaseOpenTarget(s.caseOpenTarget, profiles))
+      setNotificationSound(resolveNotificationSound(s.notificationSound))
+      setNotificationVolume(clampNotificationVolume(s.notificationVolume))
     }
     window.lt?.app
       .info()
@@ -1014,7 +1077,7 @@ export default function App(): JSX.Element {
         return n
       })
     } else {
-      beep()
+      playNotificationSound(notificationSound, notificationVolume)
       const bg = id !== activeTermRef.current
       if (bg) setTermAttention((s) => new Set(s).add(id))
       if (status === 'question' && bg) pushToast(id)
@@ -2205,10 +2268,29 @@ function DocsPanel({
   const title = { explorer: '탐색기', cases: '다가오는 기일', viewer: '문서' }[mode]
   const [dragOver, setDragOver] = useState(false)
   const [sortMode, setSortMode] = useState<SortMode>('name-asc')
+  const [fileFindOpen, setFileFindOpen] = useState(false)
+  const [fileFindQuery, setFileFindQuery] = useState('')
   const canDrop = mode === 'explorer' && !!draftsFolder
+  const closeFileFind = (): void => {
+    setFileFindOpen(false)
+    setFileFindQuery('')
+  }
   return (
     <div
       className={`sidebar ${dragOver ? 'drag-over' : ''}`}
+      tabIndex={0}
+      onMouseDown={(e) => {
+        const target = e.target as HTMLElement
+        if (!target.closest('input, button, select')) e.currentTarget.focus()
+      }}
+      onKeyDown={(e) => {
+        const primary = e.metaKey || e.ctrlKey
+        if (mode !== 'explorer' || !primary || e.shiftKey || e.altKey) return
+        if (e.key.toLowerCase() !== 'f') return
+        e.preventDefault()
+        e.stopPropagation()
+        setFileFindOpen(true)
+      }}
       onDragOver={(e) => {
         if (!canDrop) return
         e.preventDefault()
@@ -2245,6 +2327,15 @@ function DocsPanel({
                 <button className="tool-btn" title="새 파일" disabled={!draftsFolder} onClick={onNewFile}>
                   <IconNewFile size={15} />
                   <span className="sr-only">새 파일</span>
+                </button>
+                <button
+                  className={`tool-btn ${fileFindOpen ? 'on' : ''}`}
+                  title="파일명 찾기"
+                  disabled={!draftsFolder}
+                  onClick={() => setFileFindOpen((v) => !v)}
+                >
+                  <IconSearch size={15} />
+                  <span className="sr-only">파일명 찾기</span>
                 </button>
                 <button
                   className="tool-btn"
@@ -2284,6 +2375,17 @@ function DocsPanel({
                 ))}
               </select>
             </div>
+            {fileFindOpen && (
+              <div className="explorer-find-row">
+                <FindBar
+                  value={fileFindQuery}
+                  placeholder="파일명 찾기"
+                  resultLabel={fileFindQuery.trim() ? '파일명' : ''}
+                  onChange={setFileFindQuery}
+                  onClose={closeFileFind}
+                />
+              </div>
+            )}
           </>
         ) : (
           <>
@@ -2320,6 +2422,7 @@ function DocsPanel({
               onDelete={onDelete}
               pendingCreate={pendingCreate}
               sortMode={sortMode}
+              filter={fileFindOpen ? fileFindQuery : ''}
               onCreate={onCreateEntry}
               onCancelCreate={onCancelCreate}
             />
@@ -2864,11 +2967,81 @@ function DocPlaceholder({ title }: { title: string }): JSX.Element {
   )
 }
 
+interface TextFindRange {
+  start: number
+  end: number
+}
+
+function findTextRanges(text: string, query: string): TextFindRange[] {
+  const needle = query.trim()
+  if (!needle) return []
+  const haystack = text.toLocaleLowerCase('ko-KR')
+  const target = needle.toLocaleLowerCase('ko-KR')
+  const out: TextFindRange[] = []
+  let index = haystack.indexOf(target)
+  while (index >= 0 && out.length < 2000) {
+    out.push({ start: index, end: index + needle.length })
+    index = haystack.indexOf(target, index + Math.max(needle.length, 1))
+  }
+  return out
+}
+
 /** 텍스트 문서 표시 — 자동 줄바꿈 기본 ON(토글) */
 function TextDoc({ text, note }: { text: string; note?: string }): JSX.Element {
   const [wrap, setWrap] = useState(true)
+  const [findOpen, setFindOpen] = useState(false)
+  const [findQuery, setFindQuery] = useState('')
+  const [findIndex, setFindIndex] = useState(-1)
+  const rootRef = useRef<HTMLDivElement>(null)
+  const ranges = findTextRanges(text, findQuery)
+  const activeFindIndex = ranges.length ? Math.max(0, Math.min(findIndex, ranges.length - 1)) : -1
+
+  useEffect(() => {
+    if (findIndex !== activeFindIndex) setFindIndex(activeFindIndex)
+  }, [activeFindIndex, findIndex])
+
+  useEffect(() => {
+    if (!findOpen || activeFindIndex < 0) return
+    rootRef.current
+      ?.querySelector('.text-find-active')
+      ?.scrollIntoView({ block: 'center', inline: 'nearest' })
+  }, [activeFindIndex, findOpen, findQuery])
+
+  const nextFind = (): void =>
+    setFindIndex((i) => (ranges.length ? (i + 1 + ranges.length) % ranges.length : -1))
+  const prevFind = (): void =>
+    setFindIndex((i) => (ranges.length ? (i - 1 + ranges.length) % ranges.length : -1))
+
+  const renderText = (): ReactNode => {
+    if (!ranges.length) return text
+    const parts: ReactNode[] = []
+    let pos = 0
+    ranges.forEach((range, i) => {
+      if (range.start > pos) parts.push(text.slice(pos, range.start))
+      parts.push(
+        <mark key={`${range.start}-${i}`} className={i === activeFindIndex ? 'text-find-active' : 'text-find-match'}>
+          {text.slice(range.start, range.end)}
+        </mark>
+      )
+      pos = range.end
+    })
+    if (pos < text.length) parts.push(text.slice(pos))
+    return parts
+  }
+
   return (
-    <div className="text-doc">
+    <div
+      ref={rootRef}
+      className="text-doc"
+      tabIndex={0}
+      onKeyDown={(e) => {
+        const primary = e.metaKey || e.ctrlKey
+        if (!primary || e.shiftKey || e.altKey || e.key.toLowerCase() !== 'f') return
+        e.preventDefault()
+        e.stopPropagation()
+        setFindOpen(true)
+      }}
+    >
       <div className="text-toolbar">
         <button
           className={`tb-btn ${wrap ? 'on' : ''}`}
@@ -2877,9 +3050,32 @@ function TextDoc({ text, note }: { text: string; note?: string }): JSX.Element {
         >
           줄바꿈
         </button>
+        <span className="tb-divider" />
+        <button
+          className={`tb-btn ${findOpen ? 'on' : ''}`}
+          title="문서에서 찾기"
+          onClick={() => setFindOpen((v) => !v)}
+        >
+          <IconSearch size={14} />
+          <span className="sr-only">문서에서 찾기</span>
+        </button>
       </div>
+      {findOpen && (
+        <FindBar
+          value={findQuery}
+          placeholder="문서에서 찾기"
+          resultLabel={findQuery.trim() ? `${activeFindIndex + 1}/${ranges.length}` : ''}
+          onChange={(v) => {
+            setFindQuery(v)
+            setFindIndex(0)
+          }}
+          onPrev={prevFind}
+          onNext={nextFind}
+          onClose={() => setFindOpen(false)}
+        />
+      )}
       <pre className={`file-view ${wrap ? 'wrap' : ''}`}>
-        {text}
+        {renderText()}
         {note ? '\n\n' + note : ''}
       </pre>
     </div>
@@ -3234,6 +3430,7 @@ function SettingsView(): JSX.Element {
   const [loaded, setLoaded] = useState(false)
   const [termFontSizeInput, setTermFontSizeInput] = useState(String(DEFAULT_TERM_FONT_SIZE))
   const [mdFontSizeInput, setMdFontSizeInput] = useState(String(DEFAULT_MD_FONT_SIZE))
+  const [notificationVolumeInput, setNotificationVolumeInput] = useState(DEFAULT_NOTIFICATION_VOLUME)
 
   useEffect(() => {
     const applySettings = (v: AppSettings): void => {
@@ -3257,6 +3454,10 @@ function SettingsView(): JSX.Element {
     setMdFontSizeInput(String(s.mdFontSize ?? DEFAULT_MD_FONT_SIZE))
   }, [s.mdFontSize])
 
+  useEffect(() => {
+    setNotificationVolumeInput(clampNotificationVolume(s.notificationVolume))
+  }, [s.notificationVolume])
+
   const savePatch = async (patch: Partial<AppSettings>): Promise<void> => {
     const next = await window.lt.settings.set(patch)
     setS(next)
@@ -3275,6 +3476,14 @@ function SettingsView(): JSX.Element {
     if (next !== (s.mdFontSize ?? DEFAULT_MD_FONT_SIZE)) await savePatch({ mdFontSize: next })
   }
 
+  const commitNotificationVolume = async (): Promise<void> => {
+    const next = clampNotificationVolume(notificationVolumeInput)
+    setNotificationVolumeInput(next)
+    if (next !== clampNotificationVolume(s.notificationVolume)) {
+      await savePatch({ notificationVolume: next })
+    }
+  }
+
   const pick = async (key: 'draftsRoot' | 'recordsRoot'): Promise<void> => {
     const title =
       key === 'draftsRoot'
@@ -3287,6 +3496,8 @@ function SettingsView(): JSX.Element {
 
   const profiles = s.sshProfiles ?? []
   const caseOpenValue = resolveCaseOpenTarget(s.caseOpenTarget, profiles)
+  const notificationSound = resolveNotificationSound(s.notificationSound)
+  const notificationVolume = clampNotificationVolume(notificationVolumeInput)
   const mdFontValue = s.mdFont === DEFAULT_MD_FONT ? '' : s.mdFont ?? ''
   const mdFontOptions =
     mdFontValue && !MD_FONT_OPTIONS.some((option) => option.value === mdFontValue)
@@ -3404,6 +3615,66 @@ function SettingsView(): JSX.Element {
             }}
           />
           <span className="muted small">px</span>
+        </div>
+      </section>
+
+      <section className="setting-row">
+        <div className="setting-label">
+          작업 완료 알림음 <span className="muted small">— 완료·질문 대기 전환 시 재생</span>
+        </div>
+        <div className="setting-value notification-sound-row">
+          <select
+            className="setting-select"
+            value={notificationSound}
+            onChange={(e) => {
+              const nextSound = resolveNotificationSound(e.target.value)
+              setS((current) => ({ ...current, notificationSound: nextSound }))
+              void savePatch({ notificationSound: nextSound })
+              playNotificationSound(nextSound, notificationVolume)
+            }}
+          >
+            {NOTIFICATION_SOUND_OPTIONS.map((option) => (
+              <option key={option.value} value={option.value}>
+                {option.label}
+              </option>
+            ))}
+          </select>
+          <button
+            className="header-btn setting-preview-btn"
+            type="button"
+            onClick={() => playNotificationSound(notificationSound, notificationVolume)}
+          >
+            미리듣기
+          </button>
+        </div>
+      </section>
+
+      <section className="setting-row">
+        <div className="setting-label">알림음 볼륨</div>
+        <div className="setting-value notification-volume-row">
+          <input
+            className="setting-range"
+            type="range"
+            min={0}
+            max={100}
+            step={5}
+            value={notificationVolume}
+            aria-label="알림음 볼륨"
+            onChange={(e) => {
+              const nextVolume = clampNotificationVolume(e.target.value)
+              setNotificationVolumeInput(nextVolume)
+            }}
+            onPointerUp={() => {
+              void commitNotificationVolume()
+            }}
+            onKeyUp={() => {
+              void commitNotificationVolume()
+            }}
+            onBlur={() => {
+              void commitNotificationVolume()
+            }}
+          />
+          <span className="setting-range-value">{notificationVolume}%</span>
         </div>
       </section>
 

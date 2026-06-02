@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Terminal as XTerm } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import { CanvasAddon } from '@xterm/addon-canvas'
@@ -6,6 +6,7 @@ import { WebglAddon } from '@xterm/addon-webgl'
 import '@xterm/xterm/css/xterm.css'
 import { LT_PATH } from '../filetree/FileTree'
 import type { SshConn } from '../env'
+import FindBar from '../search/FindBar'
 
 // D2Coding(번들, 한글:영문=2:1 고정폭)을 우선 — 한글/영문 폭이 한 폰트로 통일되어 정렬이 맞는다.
 const DEFAULT_FONT = "'D2Coding', 'Cascadia Mono', Consolas, monospace"
@@ -17,6 +18,34 @@ const normalizePasteForPty = (text: string): string =>
 
 const WIN_IME_FIX_CLASS = 'lt-win-ime-fix'
 const WIN_IME_COMPOSING_CLASS = 'lt-ime-composing'
+
+interface TerminalFindMatch {
+  row: number
+  col: number
+  length: number
+}
+
+const charCellWidth = (ch: string): number => (ch.charCodeAt(0) <= 0x7f ? 1 : 2)
+const textCellWidth = (text: string): number => Array.from(text).reduce((n, ch) => n + charCellWidth(ch), 0)
+const stringIndexToCell = (text: string, index: number): number => textCellWidth(text.slice(0, index))
+
+const getTerminalMatches = (term: XTerm, query: string): TerminalFindMatch[] => {
+  const needle = query.trim()
+  if (!needle) return []
+  const target = needle.toLocaleLowerCase('ko-KR')
+  const out: TerminalFindMatch[] = []
+  const buffer = term.buffer.active
+  for (let row = 0; row < buffer.length; row++) {
+    const line = buffer.getLine(row)?.translateToString(true) ?? ''
+    const haystack = line.toLocaleLowerCase('ko-KR')
+    let index = haystack.indexOf(target)
+    while (index >= 0 && out.length < 2000) {
+      out.push({ row, col: stringIndexToCell(line, index), length: textCellWidth(needle) })
+      index = haystack.indexOf(target, index + Math.max(needle.length, 1))
+    }
+  }
+  return out
+}
 
 const measureCellWidth = (term: XTerm): number | null => {
   const screen = term.element?.querySelector<HTMLElement>('.xterm-screen')
@@ -121,6 +150,51 @@ export default function Terminal({
   onStatusRef.current = onStatus
   const onCycleRef = useRef(onCycleTab)
   onCycleRef.current = onCycleTab
+  const findOpenRef = useRef(false)
+  const findQueryRef = useRef('')
+  const findIndexRef = useRef(-1)
+  const [findOpen, setFindOpen] = useState(false)
+  const [findQuery, setFindQuery] = useState('')
+  const [findCount, setFindCount] = useState(0)
+  const [findIndex, setFindIndex] = useState(-1)
+
+  const setFindOpenState = (value: boolean): void => {
+    findOpenRef.current = value
+    setFindOpen(value)
+  }
+  const setFindQueryState = (value: string): void => {
+    findQueryRef.current = value
+    setFindQuery(value)
+  }
+  const setFindIndexState = (value: number): void => {
+    findIndexRef.current = value
+    setFindIndex(value)
+  }
+
+  const applyFind = (query: string, requestedIndex: number): void => {
+    const term = termRef.current
+    if (!term) return
+    const matches = getTerminalMatches(term, query)
+    const index = matches.length
+      ? (requestedIndex < 0 ? 0 : (requestedIndex + matches.length) % matches.length)
+      : -1
+    setFindCount(matches.length)
+    setFindIndexState(index)
+    if (index >= 0) {
+      const match = matches[index]
+      term.scrollToLine(Math.max(0, match.row - Math.floor(term.rows / 3)))
+      term.select(match.col, match.row, match.length)
+    } else {
+      term.clearSelection()
+    }
+  }
+
+  const openFind = (): void => {
+    const selected = termRef.current?.getSelection().trim()
+    if (selected && selected.length <= 120 && !/[\r\n]/.test(selected)) setFindQueryState(selected)
+    setFindOpenState(true)
+    setFindIndexState(0)
+  }
 
   // 파일 드롭(탐색기/OS) → 경로 추출 후 콜백. xterm 내부보다 먼저 잡도록 캡처 단계 네이티브 리스너.
   useEffect(() => {
@@ -249,6 +323,11 @@ export default function Terminal({
           onCycleRef.current?.(k === 'pageup' ? -1 : 1)
           return false
         }
+        if (k === 'f' && !e.shiftKey && !e.altKey) {
+          e.stopPropagation()
+          openFind()
+          return false
+        }
         if (k === 'c') {
           const sel = term.getSelection()
           if (sel && (e.shiftKey || !e.altKey)) {
@@ -317,6 +396,9 @@ export default function Terminal({
       const offData = window.lt.pty.onData((p) => {
         if (p.id !== id) return
         term.write(p.data)
+        if (findOpenRef.current && findQueryRef.current.trim()) {
+          window.setTimeout(() => applyFind(findQueryRef.current, findIndexRef.current), 0)
+        }
         const busy = BUSY_RE.test(stripAnsi(p.data))
         if (busy && !working) {
           working = true
@@ -410,5 +492,32 @@ export default function Terminal({
     return () => cancelAnimationFrame(raf)
   }, [focusNonce, visible])
 
-  return <div className="xterm-host" ref={hostRef} />
+  useEffect(() => {
+    if (findOpen) applyFind(findQuery, 0)
+    else termRef.current?.clearSelection()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [findOpen, findQuery])
+
+  return (
+    <div className="terminal-surface">
+      <div className="xterm-host" ref={hostRef} />
+      {findOpen && (
+        <FindBar
+          value={findQuery}
+          placeholder="터미널에서 찾기"
+          resultLabel={findQuery.trim() ? (findCount ? `${findIndex + 1}/${findCount}` : '0/0') : ''}
+          onChange={(value) => {
+            setFindQueryState(value)
+            setFindIndexState(0)
+          }}
+          onPrev={() => applyFind(findQuery, findIndex - 1)}
+          onNext={() => applyFind(findQuery, findIndex + 1)}
+          onClose={() => {
+            setFindOpenState(false)
+            termRef.current?.focus()
+          }}
+        />
+      )}
+    </div>
+  )
 }

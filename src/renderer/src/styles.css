@@ -312,6 +312,11 @@ body {
   border-color: var(--fg-muted);
   background: rgba(255, 255, 255, 0.04);
 }
+.tool-btn.on {
+  color: var(--fg);
+  border-color: var(--accent);
+  background: rgba(14, 99, 156, 0.22);
+}
 .sort-select {
   height: 26px;
   max-width: 78px;
@@ -330,6 +335,63 @@ body {
 .remote-sort {
   max-width: 92px;
   flex: 0 0 auto;
+}
+.explorer-find-row {
+  display: flex;
+  min-width: 0;
+  padding: 4px 8px 6px;
+}
+.find-bar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  width: 100%;
+  min-width: 0;
+  max-width: 360px;
+  padding: 4px;
+  background: var(--bg-alt);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.35);
+}
+.find-input {
+  flex: 1;
+  min-width: 0;
+  height: 26px;
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0 8px;
+  font-size: 12px;
+  outline: none;
+}
+.find-input:focus {
+  border-color: var(--accent);
+}
+.find-count {
+  min-width: 34px;
+  color: var(--fg-muted);
+  font-size: 11px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.find-btn {
+  width: 24px;
+  height: 24px;
+  flex: 0 0 auto;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--fg-muted);
+  cursor: pointer;
+  padding: 0;
+}
+.find-btn:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--fg);
+  border-color: var(--fg-muted);
 }
 .sr-only {
   position: absolute;
@@ -378,6 +440,17 @@ body {
 .tree-name {
   overflow: hidden;
   text-overflow: ellipsis;
+}
+.tree-search-row .tree-name {
+  flex: 0 1 auto;
+}
+.tree-path {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--fg-muted);
+  font-size: 11px;
 }
 .tree-input {
   flex: 1;
@@ -457,10 +530,12 @@ body {
 /* 텍스트 문서 (파일/HWP) */
 .text-doc,
 .image-doc {
+  position: relative;
   flex: 1;
   min-height: 0;
   display: flex;
   flex-direction: column;
+  outline: none;
 }
 .text-toolbar {
   height: 30px;
@@ -488,6 +563,17 @@ body {
 .file-view.wrap {
   white-space: pre-wrap;
   word-break: break-word;
+}
+.text-find-match,
+.cm-find-match {
+  background: rgba(224, 168, 92, 0.35);
+  color: inherit;
+  border-radius: 2px;
+}
+.text-find-active,
+.cm-find-active {
+  background: rgba(14, 99, 156, 0.75);
+  color: #fff;
 }
 
 /* CodeMirror 마크다운 편집기 */
@@ -1521,10 +1607,32 @@ body {
   position: absolute;
   inset: 0;
 }
+.terminal-surface {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+}
 .xterm-host {
   width: 100%;
   height: 100%;
   padding: 6px 8px;
+}
+.terminal-surface > .find-bar {
+  position: absolute;
+  top: 8px;
+  right: 12px;
+  z-index: 25;
+}
+.text-doc > .find-bar {
+  position: absolute;
+  top: 36px;
+  right: 12px;
+  z-index: 30;
+}
+.explorer-find-row .find-bar {
+  max-width: none;
+  box-shadow: none;
 }
 .xterm-host .xterm {
   height: 100%;
@@ -1638,6 +1746,26 @@ body {
 }
 .setting-input.narrow {
   flex: 0 0 80px;
+}
+.notification-sound-row,
+.notification-volume-row {
+  flex-wrap: wrap;
+}
+.setting-preview-btn {
+  align-self: stretch;
+  min-width: 78px;
+}
+.setting-range {
+  flex: 1;
+  min-width: 220px;
+  accent-color: var(--accent);
+}
+.setting-range-value {
+  min-width: 44px;
+  color: var(--fg-muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
 }
 .setting-reset-btn {
   align-self: stretch;

@@ -104,3 +104,12 @@ export function IconWorkspace({ size = 16 }: IconProps): JSX.Element {
     </svg>
   )
 }
+
+export function IconSearch({ size = 16 }: IconProps): JSX.Element {
+  return (
+    <svg {...base(size)}>
+      <circle cx="10.5" cy="10.5" r="5.5" />
+      <path d="M15 15l5 5" />
+    </svg>
+  )
+}

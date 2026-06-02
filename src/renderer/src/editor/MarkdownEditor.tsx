@@ -1,14 +1,59 @@
 import { useEffect, useRef, useState } from 'react'
-import { EditorView, keymap, drawSelection, dropCursor } from '@codemirror/view'
-import { EditorState, Compartment } from '@codemirror/state'
+import { Decoration, EditorView, keymap, drawSelection, dropCursor, type DecorationSet } from '@codemirror/view'
+import { EditorSelection, EditorState, Compartment, RangeSetBuilder, StateEffect, StateField } from '@codemirror/state'
 import { defaultKeymap, history, historyKeymap, indentWithTab } from '@codemirror/commands'
 import { markdown } from '@codemirror/lang-markdown'
 import { GFM } from '@lezer/markdown'
 import { syntaxHighlighting, defaultHighlightStyle } from '@codemirror/language'
 import { livePreview } from './livePreview'
 import { mdToPrintHtml } from './mdExport'
+import FindBar from '../search/FindBar'
+import { IconSearch } from '../icons/Icons'
 
 const DEFAULT_MD_FONT = "'D2Coding', 'Cascadia Mono', Consolas, monospace"
+
+interface EditorFindRange {
+  from: number
+  to: number
+  active: boolean
+}
+
+const setFindDecorations = StateEffect.define<EditorFindRange[]>()
+
+const findHighlightField = StateField.define<DecorationSet>({
+  create: () => Decoration.none,
+  update(deco, tr) {
+    let next = deco.map(tr.changes)
+    for (const effect of tr.effects) {
+      if (!effect.is(setFindDecorations)) continue
+      const builder = new RangeSetBuilder<Decoration>()
+      for (const range of effect.value) {
+        builder.add(
+          range.from,
+          range.to,
+          Decoration.mark({ class: range.active ? 'cm-find-match cm-find-active' : 'cm-find-match' })
+        )
+      }
+      next = builder.finish()
+    }
+    return next
+  },
+  provide: (field) => EditorView.decorations.from(field)
+})
+
+function findEditorRanges(text: string, query: string): { from: number; to: number }[] {
+  const needle = query.trim()
+  if (!needle) return []
+  const haystack = text.toLocaleLowerCase('ko-KR')
+  const target = needle.toLocaleLowerCase('ko-KR')
+  const out: { from: number; to: number }[] = []
+  let index = haystack.indexOf(target)
+  while (index >= 0 && out.length < 2000) {
+    out.push({ from: index, to: index + needle.length })
+    index = haystack.indexOf(target, index + Math.max(needle.length, 1))
+  }
+  return out
+}
 
 export interface MarkdownDocumentPayload {
   title: string
@@ -60,14 +105,78 @@ export default function MarkdownEditor({
   const localDirtyRef = useRef(false)
   const applyingRemoteRef = useRef(false)
   const remoteSigRef = useRef('')
+  const findOpenRef = useRef(false)
+  const findQueryRef = useRef('')
+  const findIndexRef = useRef(-1)
+  const applyFindRef = useRef<(query: string, requestedIndex: number) => void>(() => {})
+  const openFindRef = useRef<() => void>(() => {})
   const [preview, setPreview] = useState(true)
   const [err, setErr] = useState('')
   const [saved, setSaved] = useState(!!path)
+  const [findOpen, setFindOpen] = useState(false)
+  const [findQuery, setFindQuery] = useState('')
+  const [findCount, setFindCount] = useState(0)
+  const [findIndex, setFindIndex] = useState(-1)
 
   const setSavedState = (value: boolean): void => {
     savedRef.current = value
     setSaved(value)
   }
+  const setFindOpenState = (value: boolean): void => {
+    findOpenRef.current = value
+    setFindOpen(value)
+  }
+  const setFindQueryState = (value: string): void => {
+    findQueryRef.current = value
+    setFindQuery(value)
+  }
+  const setFindIndexState = (value: number): void => {
+    findIndexRef.current = value
+    setFindIndex(value)
+  }
+
+  const clearFindDecorations = (): void => {
+    viewRef.current?.dispatch({ effects: setFindDecorations.of([]) })
+    setFindCount(0)
+    setFindIndexState(-1)
+  }
+
+  const applyFind = (query: string, requestedIndex: number): void => {
+    const view = viewRef.current
+    if (!view) return
+    const ranges = findEditorRanges(view.state.doc.toString(), query)
+    const index = ranges.length
+      ? (requestedIndex < 0 ? 0 : (requestedIndex + ranges.length) % ranges.length)
+      : -1
+    setFindCount(ranges.length)
+    setFindIndexState(index)
+    view.dispatch({
+      effects: setFindDecorations.of(
+        ranges.map((range, i) => ({ ...range, active: i === index }))
+      ),
+      ...(index >= 0
+        ? {
+            selection: EditorSelection.range(ranges[index].from, ranges[index].to),
+            scrollIntoView: true
+          }
+        : {})
+    })
+  }
+  applyFindRef.current = applyFind
+
+  const openFind = (): void => {
+    const view = viewRef.current
+    if (view) {
+      const sel = view.state.selection.main
+      if (!sel.empty) {
+        const selected = view.state.sliceDoc(sel.from, sel.to)
+        if (selected.length <= 120 && !/[\r\n]/.test(selected)) setFindQueryState(selected)
+      }
+    }
+    setFindOpenState(true)
+    setFindIndexState(0)
+  }
+  openFindRef.current = openFind
 
   const saveNow = (): void => {
     const v = viewRef.current
@@ -123,11 +232,13 @@ export default function MarkdownEditor({
               ...defaultKeymap,
               ...historyKeymap,
               indentWithTab,
+              { key: 'Mod-f', run: () => (openFindRef.current(), true) },
               { key: 'Mod-s', run: () => (saveNow(), true) }
             ]),
             markdown({ extensions: GFM }),
             syntaxHighlighting(defaultHighlightStyle),
             EditorView.lineWrapping,
+            findHighlightField,
             makeTheme(family, size),
             previewComp.current.of(preview ? livePreview : []),
             EditorView.updateListener.of((u) => {
@@ -142,6 +253,12 @@ export default function MarkdownEditor({
                 scheduleSave()
                 // 경로 없는(스크래치) 문서에 내용이 있으면 닫을 때 사라짐 → dirty
                 onDirtyRef.current?.(!pathRef.current && u.state.doc.length > 0)
+                if (findOpenRef.current) {
+                  window.setTimeout(
+                    () => applyFindRef.current(findQueryRef.current, findIndexRef.current),
+                    0
+                  )
+                }
               }
             })
           ]
@@ -220,6 +337,12 @@ export default function MarkdownEditor({
     })
   }, [preview])
 
+  useEffect(() => {
+    if (findOpen) applyFind(findQuery, 0)
+    else clearFindDecorations()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [findOpen, findQuery])
+
   if (err)
     return (
       <div className="welcome">
@@ -252,6 +375,14 @@ export default function MarkdownEditor({
         >
           PDF
         </button>
+        <button
+          className={`tb-btn ${findOpen ? 'on' : ''}`}
+          title="문서에서 찾기"
+          onClick={openFind}
+        >
+          <IconSearch size={14} />
+          <span className="sr-only">문서에서 찾기</span>
+        </button>
         {onAsk && (
           <>
             <span className="tb-divider" />
@@ -283,6 +414,23 @@ export default function MarkdownEditor({
         )}
         <span className="tb-sep-text">{saved ? '저장됨' : pathRef.current ? '저장 중…' : '미저장 (Ctrl+S)'}</span>
       </div>
+      {findOpen && (
+        <FindBar
+          value={findQuery}
+          placeholder="문서에서 찾기"
+          resultLabel={findQuery.trim() ? (findCount ? `${findIndex + 1}/${findCount}` : '0/0') : ''}
+          onChange={(value) => {
+            setFindQueryState(value)
+            setFindIndexState(0)
+          }}
+          onPrev={() => applyFind(findQuery, findIndex - 1)}
+          onNext={() => applyFind(findQuery, findIndex + 1)}
+          onClose={() => {
+            setFindOpenState(false)
+            viewRef.current?.focus()
+          }}
+        />
+      )}
       <div className={`cm-host ${preview ? 'preview' : 'source'}`} ref={hostRef} />
     </div>
   )
