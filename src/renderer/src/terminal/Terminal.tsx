@@ -16,6 +16,8 @@ const DEFAULT_FONT = "'D2Coding', 'Cascadia Mono', Consolas, monospace"
 const normalizePasteForPty = (text: string): string =>
   text.replace(/\r\n/g, '\n').replace(/\r/g, '\n').replace(/\n/g, '\r')
 
+const normalizeTerminalCopyText = (text: string): string => text.replace(/(^|[\r\n]) {2}/g, '$1')
+
 const WIN_IME_FIX_CLASS = 'lt-win-ime-fix'
 const WIN_IME_COMPOSING_CLASS = 'lt-ime-composing'
 
@@ -294,6 +296,12 @@ export default function Terminal({
           pasteText(txt)
         })
       }
+      const copySelection = (): boolean => {
+        const sel = normalizeTerminalCopyText(term.getSelection())
+        if (!sel) return false
+        navigator.clipboard.writeText(sel)
+        return true
+      }
       // 복사/붙여넣기 키 처리. true=xterm/pty로 전달, false=가로채서 기본동작 차단.
       term.attachCustomKeyEventHandler((e) => {
         const primary = isMac ? e.metaKey && !e.ctrlKey : e.ctrlKey
@@ -329,10 +337,9 @@ export default function Terminal({
           return false
         }
         if (k === 'c') {
-          const sel = term.getSelection()
-          if (sel && (e.shiftKey || !e.altKey)) {
+          if (term.hasSelection() && (e.shiftKey || !e.altKey)) {
             // 선택이 있으면 복사하고 차단 (선택 없을 땐 통과 → Ctrl+C 인터럽트 유지)
-            navigator.clipboard.writeText(sel)
+            copySelection()
             return false
           }
           if (isMac) return false // 선택 없는 Cmd+C는 셸 인터럽트로 보내지 않는다. Ctrl+C는 위 primary 조건 밖이라 통과.
@@ -348,15 +355,21 @@ export default function Terminal({
       // 우클릭: 선택 있으면 복사, 없으면 붙여넣기 (VS Code 터미널과 동일)
       const onCtx = (ev: MouseEvent): void => {
         ev.preventDefault()
-        const sel = term.getSelection()
-        if (sel) {
-          navigator.clipboard.writeText(sel)
+        if (copySelection()) {
           term.clearSelection()
         } else {
           pasteFromClipboard()
         }
       }
       mount.addEventListener('contextmenu', onCtx)
+      const onCopy = (ev: ClipboardEvent): void => {
+        const sel = normalizeTerminalCopyText(term.getSelection())
+        if (!sel) return
+        ev.preventDefault()
+        ev.stopPropagation()
+        ev.clipboardData?.setData('text/plain', sel)
+      }
+      mount.addEventListener('copy', onCopy, true)
       const onPaste = (ev: ClipboardEvent): void => {
         const txt = ev.clipboardData?.getData('text/plain')
         if (!txt) return
@@ -450,6 +463,7 @@ export default function Terminal({
         onBellDisp.dispose()
         if (idleTimer) clearTimeout(idleTimer)
         mount.removeEventListener('contextmenu', onCtx)
+        mount.removeEventListener('copy', onCopy, true)
         mount.removeEventListener('paste', onPaste, true)
         ro.disconnect()
         cleanupWindowsImeCorrection()

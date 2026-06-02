@@ -41,6 +41,7 @@ import {
   killAllPty,
   type CreatePtyOptions
 } from './pty/claude-pty'
+import { decodeTextBuffer } from './textEncoding'
 
 let mainWindow: BrowserWindow | null = null
 
@@ -694,12 +695,13 @@ ipcMain.handle('fs:readText', async (_e, filePath: string) => {
     const st = await rfsStat(filePath)
     if (!TEXT_EXT.has(ext)) return { ext, kind: 'binary' as const, text: '', size: st.size }
     const buf = await rfsReadBytes(filePath)
+    const decoded = decodeTextBuffer(buf, MAX_TEXT_BYTES)
     return {
       ext,
       kind: 'text' as const,
-      text: buf.subarray(0, MAX_TEXT_BYTES).toString('utf8'),
+      text: decoded.text,
       size: st.size,
-      truncated: buf.length > MAX_TEXT_BYTES
+      truncated: decoded.truncated
     }
   }
   const info = await stat(filePath)
@@ -707,13 +709,13 @@ ipcMain.handle('fs:readText', async (_e, filePath: string) => {
     return { ext, kind: 'binary' as const, text: '', size: info.size }
   }
   const buf = await readLocalBytes(filePath)
-  const truncated = buf.length > MAX_TEXT_BYTES
+  const decoded = decodeTextBuffer(buf, MAX_TEXT_BYTES)
   return {
     ext,
     kind: 'text' as const,
-    text: buf.subarray(0, MAX_TEXT_BYTES).toString('utf8'),
+    text: decoded.text,
     size: info.size,
-    truncated
+    truncated: decoded.truncated
   }
 })
 
