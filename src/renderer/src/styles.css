@@ -1193,11 +1193,15 @@ body {
   border-top-color: var(--statusbar);
 }
 .tab-title {
+  flex: 1 1 auto;
+  min-width: 0;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 .tab-rename {
+  flex: 1 1 auto;
+  min-width: 0;
   background: var(--bg);
   border: 1px solid var(--accent);
   color: var(--fg);
@@ -1205,7 +1209,6 @@ body {
   padding: 0 4px;
   font-size: 12px;
   outline: none;
-  width: 140px;
 }
 /* claude 완료 표시 */
 .tab-dot {
@@ -1311,6 +1314,7 @@ body {
   }
 }
 .tab-close {
+  flex-shrink: 0;
   background: transparent;
   border: none;
   color: inherit;
