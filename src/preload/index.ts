@@ -59,6 +59,11 @@ type TabPayload =
   | { kind: 'doc'; path: string; title: string; side?: 'left' | 'right' }
   | { kind: 'terminal'; tab: TerminalTabPayload }
 
+interface TabMoveResult {
+  action: 'moved' | 'none'
+  removeSource?: boolean
+}
+
 interface WorkspaceDocTabPayload {
   id: string
   title: string
@@ -181,7 +186,12 @@ const api = {
       versions: { electron: string; node: string; chrome: string }
     }> => ipcRenderer.invoke('app:info'),
     openExternal: (url: string): Promise<void> => ipcRenderer.invoke('app:openExternal', url),
-    newWindow: (): Promise<void> => ipcRenderer.invoke('window:new')
+    newWindow: (): Promise<void> => ipcRenderer.invoke('window:new'),
+    onCloseActiveTab: (cb: () => void): (() => void) => {
+      const listener = (): void => cb()
+      ipcRenderer.on('app:closeActiveTab', listener)
+      return () => ipcRenderer.removeListener('app:closeActiveTab', listener)
+    }
   },
   dialog: {
     openCase: (): Promise<{ path: string; name: string } | null> =>
@@ -355,7 +365,9 @@ const api = {
   tabs: {
     beginDrag: (payload: TabPayload): Promise<void> =>
       ipcRenderer.invoke('tabs:beginDrag', payload),
-    endDrag: (): Promise<{ action: 'moved' | 'none' }> => ipcRenderer.invoke('tabs:endDrag'),
+    dropOnTabBar: (side?: 'left' | 'right'): Promise<TabMoveResult> =>
+      ipcRenderer.invoke('tabs:dropOnTabBar', { side }),
+    endDrag: (): Promise<TabMoveResult> => ipcRenderer.invoke('tabs:endDrag'),
     ready: (): Promise<void> => ipcRenderer.invoke('tabs:ready'),
     onReceive: (cb: (p: TabPayload) => void): (() => void) => {
       const listener = (_e: unknown, p: TabPayload): void => cb(p)

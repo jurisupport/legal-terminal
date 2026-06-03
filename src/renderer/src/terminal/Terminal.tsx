@@ -273,18 +273,21 @@ export default function Terminal({
   const findIndexRef = useRef(-1)
   const copyFeedbackSeq = useRef(0)
   const copyFeedbackTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const fileDropHintTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const mountedRef = useRef(false)
   const [findOpen, setFindOpen] = useState(false)
   const [findQuery, setFindQuery] = useState('')
   const [findCount, setFindCount] = useState(0)
   const [findIndex, setFindIndex] = useState(-1)
   const [copyFeedback, setCopyFeedback] = useState<TerminalCopyFeedback | null>(null)
+  const [fileDropHint, setFileDropHint] = useState(false)
 
   useEffect(() => {
     mountedRef.current = true
     return () => {
       mountedRef.current = false
       if (copyFeedbackTimerRef.current) clearTimeout(copyFeedbackTimerRef.current)
+      if (fileDropHintTimerRef.current) clearTimeout(fileDropHintTimerRef.current)
     }
   }, [])
 
@@ -302,6 +305,19 @@ export default function Terminal({
       },
       kind === 'success' ? 1400 : 2400
     )
+  }
+  const showFileDropHint = (): void => {
+    if (!mountedRef.current) return
+    setFileDropHint(true)
+    if (fileDropHintTimerRef.current) clearTimeout(fileDropHintTimerRef.current)
+    fileDropHintTimerRef.current = setTimeout(() => {
+      if (mountedRef.current) setFileDropHint(false)
+    }, 200)
+  }
+  const clearFileDropHint = (): void => {
+    if (fileDropHintTimerRef.current) clearTimeout(fileDropHintTimerRef.current)
+    fileDropHintTimerRef.current = null
+    if (mountedRef.current) setFileDropHint(false)
   }
 
   const setFindOpenState = (value: boolean): void => {
@@ -353,12 +369,14 @@ export default function Terminal({
       e.preventDefault()
       e.stopPropagation()
       if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy'
+      showFileDropHint()
     }
     const onDrop = (e: DragEvent): void => {
       const dt = e.dataTransfer
       if (!wanted(dt)) return
       e.preventDefault()
       e.stopPropagation()
+      clearFileDropHint()
       const internal = dt!.getData(LT_PATH)
       const paths = internal
         ? [internal]
@@ -367,12 +385,18 @@ export default function Terminal({
             .filter(Boolean)
       if (paths.length) onDropRef.current?.(paths)
     }
+    const onLeave = (e: DragEvent): void => {
+      if (host.contains(e.relatedTarget as Node | null)) return
+      clearFileDropHint()
+    }
     host.addEventListener('dragenter', allow, true)
     host.addEventListener('dragover', allow, true)
+    host.addEventListener('dragleave', onLeave, true)
     host.addEventListener('drop', onDrop, true)
     return () => {
       host.removeEventListener('dragenter', allow, true)
       host.removeEventListener('dragover', allow, true)
+      host.removeEventListener('dragleave', onLeave, true)
       host.removeEventListener('drop', onDrop, true)
     }
   }, [])
@@ -671,8 +695,14 @@ export default function Terminal({
   }, [findOpen, findQuery])
 
   return (
-    <div className="terminal-surface">
+    <div className={`terminal-surface ${fileDropHint ? 'file-drop-target' : ''}`}>
       <div className="xterm-host" ref={hostRef} />
+      {fileDropHint && (
+        <div className="drop-guide terminal-drop-guide" role="status" aria-live="polite">
+          <strong>Claude에 파일 전달</strong>
+          <span>파일 경로와 질문 초안을 현재 터미널에 삽입</span>
+        </div>
+      )}
       {findOpen && (
         <FindBar
           value={findQuery}

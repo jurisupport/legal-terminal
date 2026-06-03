@@ -57,6 +57,11 @@ export type TabPayload =
   | { kind: 'doc'; path: string; title: string; side?: 'left' | 'right' }
   | { kind: 'terminal'; tab: TerminalTabPayload }
 
+export interface TabMoveResult {
+  action: 'moved' | 'none'
+  removeSource?: boolean
+}
+
 export interface WorkspaceDocTabPayload {
   id: string
   title: string
@@ -216,6 +221,7 @@ export interface LtApi {
     }>
     openExternal: (url: string) => Promise<void>
     newWindow: () => Promise<void>
+    onCloseActiveTab: (cb: () => void) => () => void
   }
   dialog: {
     openCase: () => Promise<{ path: string; name: string } | null>
@@ -332,7 +338,8 @@ export interface LtApi {
   }
   tabs: {
     beginDrag: (payload: TabPayload) => Promise<void>
-    endDrag: () => Promise<{ action: 'moved' | 'none' }>
+    dropOnTabBar: (side?: 'left' | 'right') => Promise<TabMoveResult>
+    endDrag: () => Promise<TabMoveResult>
     ready: () => Promise<void>
     onReceive: (cb: (p: TabPayload) => void) => () => void
   }

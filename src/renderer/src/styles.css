@@ -191,9 +191,12 @@ body {
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  position: relative;
 }
 .sidebar.drag-over {
-  box-shadow: inset 0 0 0 2px var(--accent);
+  box-shadow:
+    inset 0 0 0 2px var(--accent),
+    inset 0 0 38px color-mix(in srgb, var(--accent) 18%, transparent);
 }
 /* 서증·참고자료 패널 (뷰어 모드) */
 .evid-panel {
@@ -393,6 +396,7 @@ body {
   list-style: none;
   margin: 0;
   padding: 0;
+  position: relative;
 }
 /* 최상위 트리: 빈 영역에도 드롭(루트로 이동)할 수 있게 높이 확보 */
 .sidebar-body > .tree {
@@ -402,6 +406,30 @@ body {
   background: rgba(14, 99, 156, 0.12);
   box-shadow: inset 0 0 0 1px var(--accent);
 }
+.tree.drop-target-root::after,
+.tree-row.drop-target::after {
+  content: attr(data-drop-label);
+  position: absolute;
+  z-index: 6;
+  right: 8px;
+  top: 4px;
+  max-width: min(260px, calc(100% - 24px));
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 4px 8px;
+  border-radius: 4px;
+  border: 1px solid color-mix(in srgb, var(--accent) 70%, transparent);
+  background: rgba(30, 30, 30, 0.94);
+  color: var(--fg);
+  font-size: 11px;
+  line-height: 1.25;
+  pointer-events: none;
+  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.35);
+}
+.tree.drop-target-root::after {
+  top: 8px;
+}
 .tree-row {
   display: flex;
   align-items: center;
@@ -410,6 +438,7 @@ body {
   cursor: pointer;
   white-space: nowrap;
   user-select: none;
+  position: relative;
 }
 .tree-row:hover {
   background: rgba(255, 255, 255, 0.06);
@@ -447,6 +476,37 @@ body {
 .tree-row.drop-target {
   background: rgba(14, 99, 156, 0.35);
   box-shadow: inset 0 0 0 1px var(--accent);
+}
+.drop-guide {
+  position: absolute;
+  z-index: 45;
+  pointer-events: none;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  max-width: min(340px, calc(100% - 32px));
+  padding: 10px 12px;
+  border-radius: 6px;
+  border: 1px solid color-mix(in srgb, var(--accent) 72%, transparent);
+  background: rgba(31, 38, 43, 0.94);
+  color: var(--fg);
+  box-shadow: 0 10px 26px rgba(0, 0, 0, 0.45);
+}
+.drop-guide strong {
+  font-size: 12px;
+  font-weight: 700;
+}
+.drop-guide span {
+  color: var(--fg-muted);
+  font-size: 11.5px;
+}
+.sidebar-drop-guide {
+  left: 16px;
+  right: 16px;
+  top: 50%;
+  transform: translateY(-50%);
+  align-items: center;
+  text-align: center;
 }
 .pad {
   padding: 8px 16px;
@@ -1228,6 +1288,27 @@ body {
   align-items: stretch;
   overflow: hidden;
   flex-shrink: 0;
+  position: relative;
+  transition:
+    background-color 120ms ease,
+    box-shadow 120ms ease;
+}
+.tabs.drop-target {
+  background: color-mix(in srgb, var(--accent) 16%, var(--tab-inactive));
+  box-shadow:
+    inset 0 0 0 1px color-mix(in srgb, var(--accent) 76%, transparent),
+    inset 0 -2px 0 var(--accent);
+}
+.tabs.drop-target::after {
+  content: "";
+  position: absolute;
+  left: 6px;
+  right: 6px;
+  top: 5px;
+  bottom: 5px;
+  border: 1px dashed color-mix(in srgb, var(--accent) 86%, transparent);
+  border-radius: 4px;
+  pointer-events: none;
 }
 .tabs-scroll {
   flex: 1;
@@ -1646,6 +1727,18 @@ body {
   height: 100%;
   min-height: 0;
   overflow: hidden;
+}
+.terminal-surface.file-drop-target {
+  box-shadow:
+    inset 0 0 0 2px var(--accent),
+    inset 0 0 46px color-mix(in srgb, var(--accent) 16%, transparent);
+}
+.terminal-drop-guide {
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  align-items: center;
+  text-align: center;
 }
 .xterm-host {
   width: 100%;
@@ -2179,6 +2272,24 @@ body {
   justify-content: space-between;
   padding: 0 12px;
   font-size: 12px;
+}
+
+.status-left,
+.status-right {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.status-left {
+  flex: 0 1 auto;
+  padding-right: 12px;
+}
+
+.status-right {
+  flex: 1 1 auto;
+  text-align: right;
 }
 
 /* ── 유틸 ── */

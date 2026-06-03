@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react'
 import Terminal from './terminal/Terminal'
 import FileTree, { LT_PATH, sortEntries, type SortMode } from './filetree/FileTree'
-import PdfViewer from './viewer/PdfViewer'
+import PdfViewer, { type PdfViewStatus } from './viewer/PdfViewer'
 import RecordViewer from './viewer/RecordViewer'
 import { parseRecordFiles, type ParsedRecord, type OutlineItem } from './viewer/recordOutline'
 import {
@@ -60,6 +60,7 @@ const SORT_OPTIONS: { value: SortMode; label: string; title: string }[] = [
 const CASE_OPEN_LOCAL = 'local'
 const CASE_OPEN_REMOTE_PREFIX = 'remote:'
 const SETTINGS_UPDATED_EVENT = 'lt:settings-updated'
+const TAB_DND_TYPE = 'application/x-legal-terminal-tab'
 const DEFAULT_TERM_FONT_SIZE = 13
 const DEFAULT_MD_FONT_SIZE = 14
 const FONT_SIZE_MIN = 8
@@ -194,6 +195,7 @@ interface TermTab {
 
 type WorkTabKind = 'doc' | 'terminal'
 type WorkTabKey = `${WorkTabKind}:${string}`
+type TermRunStatus = 'working' | 'done' | 'question'
 
 const docSide = (tab?: DocTab): DockSide => tab?.side ?? 'left'
 const termSide = (tab?: TermTab): DockSide => tab?.side ?? 'right'
@@ -317,6 +319,101 @@ const pathLeaf = (path?: string): string | undefined => {
   if (!path) return undefined
   const clean = path.replace(/[\\/]+$/, '')
   return clean.split(/[\\/]/).filter(Boolean).pop() || clean
+}
+
+const joinStatus = (parts: (string | undefined | false)[]): string =>
+  parts.filter((part): part is string => !!part).join(' · ')
+
+const docKindStatus = (kind: DocTab['kind']): string | undefined => {
+  switch (kind) {
+    case 'welcome':
+      return '시작하기'
+    case 'settings':
+      return '설정'
+    case 'mdview':
+    case 'markdown':
+      return '문서'
+    case 'pdf':
+      return 'PDF'
+    case 'image':
+      return '이미지'
+    case 'hwp':
+      return 'HWP'
+    case 'csv':
+      return 'CSV'
+    case 'file':
+      return '파일'
+  }
+}
+
+const pdfZoomLabel = (mode: PdfViewStatus['zoomMode']): string => {
+  if (mode === 'fit_page') return '쪽맞춤'
+  if (mode === 'fit_width') return '폭맞춤'
+  return '사용자 배율'
+}
+
+const samePdfStatus = (a: PdfViewStatus | undefined, b: PdfViewStatus): boolean =>
+  !!a &&
+  a.page === b.page &&
+  a.pages === b.pages &&
+  a.zoomPct === b.zoomPct &&
+  a.zoomMode === b.zoomMode &&
+  a.cropOn === b.cropOn &&
+  a.cropRatio === b.cropRatio
+
+const describeDocStatus = (
+  tab: DocTab | undefined,
+  dirty: boolean,
+  pdfStatus?: PdfViewStatus
+): string | undefined => {
+  if (!tab) return undefined
+  if (tab.kind === 'welcome' || tab.kind === 'settings') return docKindStatus(tab.kind)
+  if (tab.kind === 'pdf' && pdfStatus) {
+    const pages = pdfStatus.pages || '…'
+    return joinStatus([
+      tab.title,
+      `${pdfStatus.page}/${pages}쪽`,
+      `${pdfStatus.zoomPct}%`,
+      pdfZoomLabel(pdfStatus.zoomMode),
+      pdfStatus.cropOn && `여백 ${Math.round(pdfStatus.cropRatio * 100)}%`
+    ])
+  }
+  return joinStatus([tab.title, dirty ? '변경 있음' : docKindStatus(tab.kind)])
+}
+
+const describeCaseStatus = (term?: TermTab, currentCase?: CurrentCase | null): string | undefined => {
+  const court = term?.court ?? currentCase?.meta?.court
+  const caseNumber = term?.caseNumber ?? currentCase?.meta?.caseNumber
+  const caseName = term?.caseName ?? currentCase?.meta?.caseName
+  const label = [caseNumber, caseName].filter(Boolean).join(' ') || undefined
+  return joinStatus([court, label || term?.title || currentCase?.name])
+}
+
+const describeRecordsStatus = (
+  recordsFolder: string | undefined,
+  suggestedRecords: string | undefined,
+  hasCase: boolean
+): string | undefined => {
+  if (suggestedRecords) return '추천 소송기록 있음'
+  if (recordsFolder) return '소송기록 연결됨'
+  if (hasCase) return '소송기록 없음'
+  return undefined
+}
+
+const describeTermStatus = (term: TermTab | undefined, status?: TermRunStatus): string | undefined => {
+  if (!term) return undefined
+  const run =
+    status === 'working'
+      ? 'Claude 작업 중'
+      : status === 'question'
+        ? 'Claude 질문 대기'
+        : status === 'done'
+          ? 'Claude 완료'
+          : term.autoClaude
+            ? 'Claude 대기'
+            : '터미널 대기'
+  const connection = term.ssh ? `원격 ${term.sshLabel ?? term.ssh.host}` : '로컬'
+  return joinStatus([run, connection])
 }
 
 const searchNorm = (value?: string): string =>
@@ -553,7 +650,7 @@ export default function App(): JSX.Element {
   const docOnly = window.location.hash.includes('docOnly')
   const termOnly = window.location.hash.includes('termOnly')
   const [mode, setMode] = useState<Mode>('explorer')
-  const [info, setInfo] = useState<string>('')
+  const [bridgeStatus, setBridgeStatus] = useState<string>('')
   const [platform, setPlatform] = useState<string>('')
 
   const [docTabs, setDocTabs] = useState<DocTab[]>(() =>
@@ -600,6 +697,7 @@ export default function App(): JSX.Element {
 
   // 활성 PDF의 목차 분류 결과 + 페이지 점프 신호
   const [pdfRecord, setPdfRecord] = useState<{ path: string; parsed: ParsedRecord } | null>(null)
+  const [pdfStatus, setPdfStatus] = useState<Record<string, PdfViewStatus>>({})
   const [pdfJump, setPdfJump] = useState<{ page: number; nonce: number } | undefined>()
   const jumpNonce = useRef(0)
 
@@ -622,6 +720,7 @@ export default function App(): JSX.Element {
   // 탐색기 인라인 생성 (VS Code식: 트리에 입력칸이 떠서 이름 입력)
   const [pendingCreate, setPendingCreate] = useState<'file' | 'folder' | null>(null)
   const closeActiveTermRef = useRef<() => void>(() => {})
+  const closeActiveTabRef = useRef<() => void>(() => {})
 
   useEffect(() => {
     const applySettings = (s: AppSettings): void => {
@@ -637,9 +736,9 @@ export default function App(): JSX.Element {
       .info()
       .then((i) => {
         setPlatform(i.platform)
-        setInfo(`Electron ${i.versions.electron} · Node ${i.versions.node} · ${i.platform}`)
+        setBridgeStatus('')
       })
-      .catch(() => setInfo('preload 브리지 미연결'))
+      .catch(() => setBridgeStatus('preload 브리지 미연결'))
     window.lt?.settings.get().then(applySettings)
     window.lt?.case.history().then(setRecent)
     const onSettingsUpdated = (e: Event): void => applySettings((e as CustomEvent<AppSettings>).detail)
@@ -655,6 +754,8 @@ export default function App(): JSX.Element {
     window.addEventListener('beforeunload', killWindowTerms)
     return () => window.removeEventListener('beforeunload', killWindowTerms)
   }, [])
+
+  useEffect(() => window.lt.app.onCloseActiveTab(() => closeActiveTabRef.current()), [])
 
   const setWorkActive = (side: DockSide, key: WorkTabKey): void => {
     setActiveWork((active) => ({ ...active, [side]: key }))
@@ -726,6 +827,12 @@ export default function App(): JSX.Element {
       n.delete(id)
       return n
     })
+    setPdfStatus((s) => {
+      if (!s[id]) return s
+      const n = { ...s }
+      delete n[id]
+      return n
+    })
     setDocTabs((tabs) => closeTab(tabs, id, activeDoc, setActiveDoc))
   }
 
@@ -741,10 +848,10 @@ export default function App(): JSX.Element {
       const k = e.key.toLowerCase()
       const inTerm = (document.activeElement as HTMLElement | null)?.closest?.('.term-col')
       if (k === 'w' && !e.shiftKey) {
-        if (platform === 'darwin' && activeTerm) {
+        if (platform === 'darwin') {
           e.preventDefault()
           e.stopPropagation()
-          closeActiveTermRef.current()
+          closeActiveTabRef.current()
           return
         }
         if (inTerm) return // 터미널 포커스 시 claude로 (단어 삭제)
@@ -852,13 +959,25 @@ export default function App(): JSX.Element {
   receiveTabRef.current = (p) => {
     if (p.kind === 'terminal') {
       const tab = { ...(p.tab as TermTab), side: (p.tab as TermTab).side ?? 'right' }
-      setTermTabs((tabs) => (tabs.some((t) => t.id === tab.id) ? tabs : [...tabs, tab]))
+      setTermTabs((tabs) =>
+        tabs.some((t) => t.id === tab.id)
+          ? tabs.map((t) => (t.id === tab.id ? { ...t, side: termSide(tab) } : t))
+          : [...tabs, tab]
+      )
       setActiveTerm(tab.id)
       setCurrentCase(currentCaseFromTerm(tab))
       setWorkActive(termSide(tab), termKeyOf(tab.id))
       return
     }
-    openFileRef.current(p.path, p.title, p.side ?? 'left')
+    const side = p.side ?? 'left'
+    const existing = docTabs.find((t) => t.path === p.path)
+    if (existing) {
+      setDocTabs((tabs) => tabs.map((t) => (t.id === existing.id ? { ...t, side } : t)))
+      setActiveDoc(existing.id)
+      setWorkActive(side, docKey(existing.id))
+      return
+    }
+    openFileRef.current(p.path, p.title, side)
   }
   useEffect(() => {
     const off = window.lt.tabs.onReceive((p) => receiveTabRef.current(p))
@@ -1282,7 +1401,7 @@ export default function App(): JSX.Element {
   }
 
   // 터미널 작업 상태(진행중/완료/질문대기). 완료·질문 전이에서만 소리.
-  const onTermStatus = (id: string, status: 'working' | 'done' | 'question'): void => {
+  const onTermStatus = (id: string, status: TermRunStatus): void => {
     setTermStatus((m) => {
       const n = new Map(m)
       n.set(id, status)
@@ -1906,10 +2025,22 @@ export default function App(): JSX.Element {
   const [sessionFilter, setSessionFilter] = useState<string>('all')
   // claude 완료 주목 표시가 필요한 터미널 id 집합 + 진행중/완료 상태
   const [termAttention, setTermAttention] = useState<Set<string>>(new Set())
-  const [termStatus, setTermStatus] = useState<Map<string, 'working' | 'done' | 'question'>>(
-    new Map()
-  )
+  const [termStatus, setTermStatus] = useState<Map<string, TermRunStatus>>(new Map())
   const [toasts, setToasts] = useState<{ key: number; termId: string; title: string }[]>([])
+
+  const updatePdfStatus = (tabId: string, status: PdfViewStatus): void => {
+    setPdfStatus((s) => (samePdfStatus(s[tabId], status) ? s : { ...s, [tabId]: status }))
+  }
+  const activePdfStatus = activeDocTab?.kind === 'pdf' ? pdfStatus[activeDocTab.id] : undefined
+  const activeTermRunStatus = activeTerm ? termStatus.get(activeTerm) : undefined
+  const statusInfo =
+    joinStatus([
+      describeDocStatus(activeDocTab, !!activeDocTab && dirtyDocs.has(activeDocTab.id), activePdfStatus),
+      describeCaseStatus(activeTermTab, currentCase),
+      describeRecordsStatus(activeRecordsFolder, activeSuggestedRecords, !!(activeTermTab || currentCase)),
+      describeTermStatus(activeTermTab, activeTermRunStatus),
+      bridgeStatus || undefined
+    ]) || '작업환경 준비'
 
   // Ctrl+W 등으로 터미널 닫기 — claude가 작업 중이면 확인 후 닫는다.
   const closeTermWithConfirm = (id: string): void => {
@@ -1920,6 +2051,24 @@ export default function App(): JSX.Element {
   }
   closeActiveTermRef.current = (): void => {
     if (activeTerm) closeTermWithConfirm(activeTerm)
+  }
+  closeActiveTabRef.current = (): void => {
+    const activeEl = document.activeElement as HTMLElement | null
+    const inTerm = activeEl?.closest?.('.term-col')
+    const inDoc = activeEl?.closest?.('.doc-content')
+    if (inTerm && activeTerm) {
+      closeTermWithConfirm(activeTerm)
+      return
+    }
+    if (inDoc && activeDoc) {
+      closeDoc(activeDoc)
+      return
+    }
+    if (activeTerm) {
+      closeTermWithConfirm(activeTerm)
+      return
+    }
+    if (activeDoc) closeDoc(activeDoc)
   }
 
   const caseRef = (c: JsCase): string => `${c.caseNumber ?? ''} ${c.caseName ?? ''}`.trim() || c.id
@@ -2069,12 +2218,12 @@ export default function App(): JSX.Element {
   // 탭 드래그 중일 때 셸 어디서든 dragover를 허용(이동 커서) — 실제 찢기는 onDragEnd가 처리.
   const shellDragProps = {
     onDragOver: (e: React.DragEvent) => {
-      if (!tabDragging) return
+      if (!tabDragging && !e.dataTransfer.types.includes(TAB_DND_TYPE)) return
       e.preventDefault()
       e.dataTransfer.dropEffect = 'move'
     },
     onDrop: (e: React.DragEvent) => {
-      if (tabDragging) e.preventDefault()
+      if (tabDragging || e.dataTransfer.types.includes(TAB_DND_TYPE)) e.preventDefault()
     }
   }
 
@@ -2130,6 +2279,7 @@ export default function App(): JSX.Element {
               )
             }
             onAskDoc={() => askClaude('')}
+            onStatus={(status) => updatePdfStatus(tab.id, status)}
           />
         ) : (
           <PdfViewer
@@ -2142,6 +2292,7 @@ export default function App(): JSX.Element {
             onCropOn={setCropOn}
             onCropRatio={setCropRatio}
             onAskDoc={() => askClaude('')}
+            onStatus={(status) => updatePdfStatus(tab.id, status)}
           />
         ))}
       {tab?.kind === 'settings' && <SettingsView />}
@@ -2164,6 +2315,7 @@ export default function App(): JSX.Element {
       onClose={closeDoc}
       onAdd={() => addDoc('left')}
       addTitle="새 문서"
+      dropSide="left"
       onReorder={reorderDocs}
       onTearOut={closeDoc}
       onDragActive={setTabDragging}
@@ -2232,6 +2384,7 @@ export default function App(): JSX.Element {
         onClose={closeTerm}
         onAdd={() => addTermSame()}
         addTitle="새 터미널"
+        dropSide="right"
         onReorder={reorderTerms}
         onTearOut={detachTerm}
         onDragActive={setTabDragging}
@@ -2385,6 +2538,7 @@ export default function App(): JSX.Element {
     const hasTerms = terms.length > 0
     const sessionListSide = termSide(activeTermTab)
     const canOpenSessionList = hasTerms || (side === sessionListSide && !!sessionCaseSource)
+    const canMoveActiveTab = !!activeKey
 
     return (
       <div className={`work-pane work-${side}`} key={side}>
@@ -2403,8 +2557,9 @@ export default function App(): JSX.Element {
             if (parsed.kind === 'doc') closeDoc(parsed.id)
             else closeTerm(parsed.id)
           }}
-          onAdd={() => addDoc(side)}
-          addTitle="새 문서"
+          onAdd={() => (side === 'right' ? addTermSame(side) : addDoc(side))}
+          addTitle={side === 'right' ? '새 터미널' : '새 문서'}
+          dropSide={side}
           onReorder={(from, to) => {
             const f = parseWorkKey(from)
             const t = parseWorkKey(to)
@@ -2427,11 +2582,18 @@ export default function App(): JSX.Element {
             )
           }}
           extraLeft={[
-            ...(activeKey
+            ...(canMoveActiveTab
               ? [
                   {
                     label: side === 'left' ? '⇥' : '⇤',
-                    title: side === 'left' ? '활성 탭 오른쪽으로 이동' : '활성 탭 왼쪽으로 이동',
+                    title:
+                      activeParsed?.kind === 'doc'
+                        ? side === 'left'
+                          ? '문서를 오른쪽으로 이동'
+                          : '문서를 왼쪽으로 이동'
+                        : side === 'left'
+                          ? '터미널을 오른쪽으로 이동'
+                          : '터미널을 왼쪽으로 이동',
                     onClick: () => moveWorkTabToSide(activeKey, otherSide(side))
                   }
                 ]
@@ -2459,18 +2621,22 @@ export default function App(): JSX.Element {
                 ]
               : [])
           ]}
-          extra={[
-            {
-              label: '＋T',
-              title: '새 터미널',
-              onClick: () => addTermSame(side)
-            },
-            {
-              icon: <IconWorkspace size={15} />,
-              title: '새 작업환경 열기',
-              onClick: () => void openConnOrLocal()
-            }
-          ]}
+          extra={
+            side === 'left'
+              ? [
+                  {
+                    label: '＋T',
+                    title: '새 터미널',
+                    onClick: () => addTermSame(side)
+                  },
+                  {
+                    icon: <IconWorkspace size={15} />,
+                    title: '새 작업환경 열기',
+                    onClick: () => void openConnOrLocal()
+                  }
+                ]
+              : undefined
+          }
         />
         {sessionListOpen && side === sessionListSide && (
           <SessionList
@@ -2499,16 +2665,12 @@ export default function App(): JSX.Element {
                   label={`「${currentCase.name}」 — 오른쪽에 열린 탭이 없습니다`}
                   actionLabel="이 사건에서 터미널 열기"
                   onAction={() => addTermSame(side)}
-                  secondaryLabel="새 문서"
-                  onSecondary={() => addDoc(side)}
                 />
               ) : (
                 <Empty
                   label="오른쪽에 열린 탭이 없습니다"
-                  actionLabel="터미널 열기"
-                  onAction={() => addTermSame(side)}
-                  secondaryLabel="새 문서"
-                  onSecondary={() => addDoc(side)}
+                  actionLabel="작업환경 시작"
+                  onAction={() => void openConnOrLocal()}
                 />
               )
             ) : (
@@ -2566,7 +2728,7 @@ export default function App(): JSX.Element {
         {terminalPanel}
         <div className="statusbar">
           <span className="status-left">legal-terminal · 터미널</span>
-          <span className="status-right">{info}</span>
+          <span className="status-right">{statusInfo}</span>
         </div>
       </div>
     )
@@ -2628,7 +2790,7 @@ export default function App(): JSX.Element {
 
       <div className="statusbar" key="status">
         <span className="status-left">legal-terminal · {modeLabel(mode)}</span>
-        <span className="status-right">{info}</span>
+        <span className="status-right">{statusInfo}</span>
       </div>
 
       <SelectionAsk onAsk={askClaude} />
@@ -2958,6 +3120,8 @@ function DocsPanel({
   const [fileFindOpen, setFileFindOpen] = useState(false)
   const [fileFindQuery, setFileFindQuery] = useState('')
   const canDrop = mode === 'explorer' && !!draftsFolder
+  const canDropFiles = (e: React.DragEvent): boolean =>
+    canDrop && e.dataTransfer.types.includes('Files')
   const closeFileFind = (): void => {
     setFileFindOpen(false)
     setFileFindQuery('')
@@ -2979,18 +3143,25 @@ function DocsPanel({
         setFileFindOpen(true)
       }}
       onDragOver={(e) => {
-        if (!canDrop) return
+        if (!canDropFiles(e)) return
         e.preventDefault()
+        e.dataTransfer.dropEffect = 'copy'
         setDragOver(true)
       }}
       onDragLeave={() => setDragOver(false)}
       onDrop={(e) => {
-        if (!canDrop) return
+        if (!canDropFiles(e)) return
         e.preventDefault()
         setDragOver(false)
         if (e.dataTransfer.files.length) onDropFiles(e.dataTransfer.files)
       }}
     >
+      {dragOver && (
+        <div className="drop-guide sidebar-drop-guide" role="status" aria-live="polite">
+          <strong>작성서류 폴더에 복사</strong>
+          <span>파일을 현재 사건 폴더에 추가</span>
+        </div>
+      )}
       <div className={`sidebar-header ${mode === 'explorer' ? 'explorer-header' : ''}`}>
         {mode === 'explorer' ? (
           <>
@@ -3254,6 +3425,7 @@ interface TabBarProps {
   onClose: (id: string) => void
   onAdd?: () => void
   addTitle: string
+  dropSide?: DockSide
   extra?:
     | { label?: string; icon?: ReactNode; title: string; onClick: () => void }
     | { label?: string; icon?: ReactNode; title: string; onClick: () => void }[]
@@ -3273,6 +3445,7 @@ function TabBar({
   onClose,
   onAdd,
   addTitle,
+  dropSide,
   extra,
   extraLeft,
   onReorder,
@@ -3283,7 +3456,9 @@ function TabBar({
   const scrollRef = useRef<HTMLDivElement>(null)
   const [overflow, setOverflow] = useState(false)
   const [editing, setEditing] = useState<{ id: string; value: string } | null>(null)
+  const [dropHint, setDropHint] = useState(false)
   const dragId = useRef<string | null>(null)
+  const dropHintTimer = useRef<number | null>(null)
   const draggable = !!onTearOut
   const extraLeftItems = extraLeft ? (Array.isArray(extraLeft) ? extraLeft : [extraLeft]) : []
   const extraItems = extra ? (Array.isArray(extra) ? extra : [extra]) : []
@@ -3298,10 +3473,45 @@ function TabBar({
     return () => ro.disconnect()
   }, [tabs.length])
 
+  useEffect(
+    () => () => {
+      if (dropHintTimer.current) window.clearTimeout(dropHintTimer.current)
+    },
+    []
+  )
+
   const scrollBy = (d: number): void => scrollRef.current?.scrollBy({ left: d, behavior: 'smooth' })
+  const isTabDrop = (e: React.DragEvent): boolean => e.dataTransfer.types.includes(TAB_DND_TYPE)
+  const showDropHint = (): void => {
+    setDropHint(true)
+    if (dropHintTimer.current) window.clearTimeout(dropHintTimer.current)
+    dropHintTimer.current = window.setTimeout(() => setDropHint(false), 180)
+  }
+  const clearDropHint = (): void => {
+    if (dropHintTimer.current) window.clearTimeout(dropHintTimer.current)
+    dropHintTimer.current = null
+    setDropHint(false)
+  }
 
   return (
-    <div className="tabs">
+    <div
+      className={`tabs ${dropHint ? 'drop-target' : ''}`}
+      data-drop-side={dropSide}
+      onDragOver={(e) => {
+        if (!draggable || !isTabDrop(e)) return
+        e.preventDefault()
+        e.dataTransfer.dropEffect = 'move'
+        showDropHint()
+      }}
+      onDrop={(e) => {
+        if (!draggable || !isTabDrop(e)) return
+        e.preventDefault()
+        e.stopPropagation()
+        clearDropHint()
+        void window.lt.tabs.dropOnTabBar(dropSide)
+      }}
+      onDragLeave={() => clearDropHint()}
+    >
       {extraLeftItems.map((item, i) => (
         <button
           key={i}
@@ -3341,6 +3551,7 @@ function TabBar({
                 ? (e) => {
                     dragId.current = t.id
                     e.dataTransfer.effectAllowed = 'move'
+                    e.dataTransfer.setData(TAB_DND_TYPE, t.id)
                     onDragActive?.(true)
                     if (t.dragPayload) void window.lt.tabs.beginDrag(t.dragPayload)
                   }
@@ -3358,6 +3569,7 @@ function TabBar({
                 ? (e) => {
                     e.preventDefault()
                     if (dragId.current && dragId.current !== t.id) {
+                      e.stopPropagation()
                       onReorder?.(dragId.current, t.id)
                       void window.lt.tabs.endDrag()
                     }
@@ -3372,8 +3584,9 @@ function TabBar({
                     dragId.current = null
                     onDragActive?.(false)
                     if (!id || !t.dragPayload) return
+                    await new Promise((resolve) => window.setTimeout(resolve, 20))
                     const r = await window.lt.tabs.endDrag()
-                    if (r?.action === 'moved') onTearOut?.(id)
+                    if (r?.action === 'moved' && r.removeSource !== false) onTearOut?.(id)
                   }
                 : undefined
             }

@@ -230,11 +230,35 @@ function createWindow(setMain = true, opts?: { docOnly?: boolean; termOnly?: boo
 
   if (setMain) mainWindow = win
 
-  win.on('ready-to-show', () => {
+  win.webContents.on('before-input-event', (event, input) => {
+    const key = input.key.toLowerCase()
+    const closeTab =
+      input.type === 'keyDown' &&
+      process.platform === 'darwin' &&
+      input.meta &&
+      !input.control &&
+      !input.alt &&
+      !input.shift &&
+      key === 'w'
+    if (!closeTab) return
+    event.preventDefault()
+    win.webContents.send('app:closeActiveTab')
+  })
+
+  let revealed = false
+  const revealWindow = (): void => {
+    if (revealed || win.isDestroyed()) return
+    revealed = true
     if (!detached) win.maximize()
     win.show()
+    win.moveTop()
+    win.focus()
+    if (process.platform === 'darwin') app.focus({ steal: true })
     if (setMain && !detached) scheduleUpdateCheck(win)
-  })
+  }
+  win.on('ready-to-show', revealWindow)
+  win.webContents.once('did-finish-load', () => setTimeout(revealWindow, 0))
+  setTimeout(revealWindow, 3000)
 
   win.webContents.setWindowOpenHandler((details) => {
     shell.openExternal(details.url)
@@ -273,69 +297,133 @@ interface TabPayload {
   side?: 'left' | 'right'
   tab?: unknown
 }
-let pendingTabDrag: { payload: TabPayload; sourceId: number } | null = null
+interface TabMoveResult {
+  action: 'moved' | 'none'
+  removeSource?: boolean
+}
+interface TabDropTarget {
+  side?: 'left' | 'right'
+}
+let pendingTabDrag: {
+  payload: TabPayload
+  sourceWindowId: number | null
+  completed?: TabMoveResult
+} | null = null
 // 새 창은 렌더러가 준비되기 전이라 페이로드를 큐잉했다가 'tabs:ready' 때 전달.
 const pendingReceive = new Map<number, TabPayload[]>()
 
 ipcMain.handle('tabs:beginDrag', (e, payload: TabPayload) => {
-  pendingTabDrag = { payload, sourceId: e.sender.id }
+  pendingTabDrag = { payload, sourceWindowId: BrowserWindow.fromWebContents(e.sender)?.id ?? null }
+})
+
+ipcMain.handle('tabs:dropOnTabBar', (e, target: TabDropTarget): TabMoveResult => {
+  const drag = pendingTabDrag
+  if (!drag) return { action: 'none' }
+  const targetWindow = BrowserWindow.fromWebContents(e.sender)
+  if (!targetWindow) return { action: 'none' }
+  const payload = withPayloadSide(drag.payload, target.side)
+  if (targetWindow.id === drag.sourceWindowId) {
+    if (!target.side || target.side === payloadSide(drag.payload)) return { action: 'none' }
+    targetWindow.webContents.send('tabs:receive', payload)
+    drag.completed = { action: 'moved', removeSource: false }
+    return drag.completed
+  }
+  targetWindow.webContents.send('tabs:receive', payload)
+  targetWindow.focus()
+  drag.completed = { action: 'moved', removeSource: true }
+  return drag.completed
 })
 
 // 렌더러 마운트 완료 신호 → 큐에 쌓인 탭 전달
 ipcMain.handle('tabs:ready', (e) => {
-  const q = pendingReceive.get(e.sender.id)
+  const win = BrowserWindow.fromWebContents(e.sender)
+  const q = pendingReceive.get(e.sender.id) ?? (win ? pendingReceive.get(win.id) : undefined)
   if (q) {
     for (const p of q) e.sender.send('tabs:receive', p)
     pendingReceive.delete(e.sender.id)
+    if (win) pendingReceive.delete(win.id)
   }
 })
 
 // 화면좌표 pt가 해당 창의 지정 탭바 위인지 렌더러에 물어 판정.
 // (window.screenX/Y + getBoundingClientRect = 스크린 좌표, zoom=1에서 DIP와 일치)
-async function isOverTabBar(
+async function tabDropTarget(
   win: BrowserWindow,
   pt: { x: number; y: number },
   selector: string
-): Promise<boolean> {
+): Promise<TabDropTarget | null> {
   const safeSelector = JSON.stringify(selector)
   try {
     return await win.webContents.executeJavaScript(
       `(() => {
-        const el = document.querySelector(${safeSelector});
-        if (!el) return false;
-        const r = el.getBoundingClientRect();
-        const x = window.screenX + r.left, y = window.screenY + r.top;
-        return ${pt.x} >= x && ${pt.x} <= x + r.width && ${pt.y} >= y && ${pt.y} <= y + r.height;
+        for (const el of document.querySelectorAll(${safeSelector})) {
+          const r = el.getBoundingClientRect();
+          const x = window.screenX + r.left, y = window.screenY + r.top;
+          if (${pt.x} < x || ${pt.x} > x + r.width || ${pt.y} < y || ${pt.y} > y + r.height) continue;
+          const pane = el.closest('.work-pane, .term-col, .body-col');
+          const side =
+            el.getAttribute('data-drop-side') ||
+            (pane?.classList.contains('work-left') ? 'left' : undefined) ||
+            (pane?.classList.contains('work-right') ? 'right' : undefined) ||
+            (pane?.classList.contains('term-col') ? 'right' : undefined) ||
+            (pane?.classList.contains('body-col') ? 'left' : undefined);
+          return { side };
+        }
+        return null;
       })()`
     )
   } catch {
-    return false
+    return null
   }
 }
 
-ipcMain.handle('tabs:endDrag', async () => {
+const payloadSide = (payload: TabPayload): 'left' | 'right' | undefined => {
+  if (payload.kind === 'terminal' && payload.tab && typeof payload.tab === 'object') {
+    const side = (payload.tab as { side?: unknown }).side
+    return side === 'left' || side === 'right' ? side : undefined
+  }
+  return payload.side
+}
+
+const withPayloadSide = (payload: TabPayload, side?: 'left' | 'right'): TabPayload => {
+  if (!side) return payload
+  if (payload.kind === 'terminal' && payload.tab && typeof payload.tab === 'object') {
+    return { ...payload, tab: { ...(payload.tab as Record<string, unknown>), side } }
+  }
+  return { ...payload, side }
+}
+
+ipcMain.handle('tabs:endDrag', async (): Promise<TabMoveResult> => {
   const drag = pendingTabDrag
   pendingTabDrag = null
   if (!drag) return { action: 'none' }
+  if (drag.completed) return drag.completed
   const pt = screen.getCursorScreenPoint()
   const wins = BrowserWindow.getAllWindows().filter((w) => !w.isDestroyed())
   const kind = drag.payload.kind ?? 'doc'
   const targetSelector = '.work-pane > .tabs, .term-col > .tabs, .body-col > .tabs'
   // 1) 어떤 창의 같은 종류 탭바 위에서 놓였는가?
   for (const w of wins) {
-    if (await isOverTabBar(w, pt, targetSelector)) {
-      // 같은 창 탭바 = 재정렬(렌더러 onDrop이 처리), 찢기 아님
-      if (w.id === drag.sourceId) return { action: 'none' }
+    const target = await tabDropTarget(w, pt, targetSelector)
+    if (target) {
+      const payload = withPayloadSide(drag.payload, target.side)
+      if (w.id === drag.sourceWindowId) {
+        // 같은 창의 같은 쪽 탭바 = 재정렬(렌더러 onDrop이 처리), 찢기 아님.
+        if (!target.side || target.side === payloadSide(drag.payload)) return { action: 'none' }
+        // 같은 창의 반대쪽 탭바 = 기존 탭의 side만 갱신.
+        w.webContents.send('tabs:receive', payload)
+        return { action: 'moved', removeSource: false }
+      }
       // 다른 창 탭바 = 그 창으로 이동(merge)
-      w.webContents.send('tabs:receive', drag.payload)
+      w.webContents.send('tabs:receive', payload)
       w.focus()
-      return { action: 'moved' }
+      return { action: 'moved', removeSource: true }
     }
   }
   // 2) 탭바 밖(본문/창 밖 등)에서 놓임 → 새 전용 창으로 찢기
   const win = createWindow(false, kind === 'terminal' ? { termOnly: true } : { docOnly: true })
-  pendingReceive.set(win.id, [drag.payload])
-  return { action: 'moved' }
+  pendingReceive.set(win.webContents.id, [drag.payload])
+  return { action: 'moved', removeSource: true }
 })
 
 // 앱 정보 핑 (preload 브리지 동작 확인용)

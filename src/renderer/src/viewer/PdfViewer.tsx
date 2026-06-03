@@ -6,7 +6,15 @@ import { parseRecordOutline, type ParsedRecord } from './recordOutline'
 
 pdfjs.GlobalWorkerOptions.workerSrc = workerUrl
 
-type ZoomMode = 'fit_page' | 'fit_width' | 'custom'
+export type PdfZoomMode = 'fit_page' | 'fit_width' | 'custom'
+export interface PdfViewStatus {
+  page: number
+  pages: number
+  zoomPct: number
+  zoomMode: PdfZoomMode
+  cropOn: boolean
+  cropRatio: number
+}
 const CROP_OPTIONS = [0.05, 0.1, 0.15, 0.2, 0.25]
 const isRemotePath = (p: string): boolean => p.startsWith('ssh://')
 const isLocalCloudPath = (p: string): boolean =>
@@ -19,7 +27,7 @@ function cleanPdfError(e: unknown): string {
     .replace(/^Error:\s*/u, '')
 }
 
-function resolveDefault(pdfZoom?: string): { mode: ZoomMode; scale: number } {
+function resolveDefault(pdfZoom?: string): { mode: PdfZoomMode; scale: number } {
   if (pdfZoom === 'fit_width') return { mode: 'fit_width', scale: 1 }
   if (pdfZoom === 'fit_page' || !pdfZoom) return { mode: 'fit_page', scale: 1 }
   const n = parseInt(pdfZoom, 10)
@@ -42,7 +50,8 @@ export default function PdfViewer({
   cropRatio,
   onCropOn,
   onCropRatio,
-  onAskDoc
+  onAskDoc,
+  onStatus
 }: {
   path: string
   onOutline?: (path: string, parsed: ParsedRecord) => void
@@ -54,6 +63,7 @@ export default function PdfViewer({
   onCropOn: (v: boolean) => void
   onCropRatio: (r: number) => void
   onAskDoc?: () => void // 이 문서에 대해 Claude에 묻기 (선택 없이)
+  onStatus?: (status: PdfViewStatus) => void
 }): JSX.Element {
   const wrapRef = useRef<HTMLDivElement>(null)
   const canvasRef = useRef<HTMLCanvasElement>(null)
@@ -68,7 +78,7 @@ export default function PdfViewer({
 
   const [numPages, setNumPages] = useState(0)
   const [page, setPage] = useState(1)
-  const [mode, setMode] = useState<ZoomMode>('fit_page')
+  const [mode, setMode] = useState<PdfZoomMode>('fit_page')
   const [customScale, setCustomScale] = useState(1.0)
   const [rotation, setRotation] = useState(0)
   const [panMode, setPanMode] = useState(true)
@@ -86,6 +96,17 @@ export default function PdfViewer({
   pageRef.current = page
   nextDocRef.current = onNextDoc
   prevDocRef.current = onPrevDoc
+
+  useEffect(() => {
+    onStatus?.({
+      page,
+      pages: numPages,
+      zoomPct: effPct,
+      zoomMode: mode,
+      cropOn,
+      cropRatio
+    })
+  }, [cropOn, cropRatio, effPct, mode, numPages, onStatus, page])
 
   // 마지막/첫 페이지 경계에서 다음/이전 문서로 이동. 버튼 클릭 후에도 키보드가 먹도록 뷰어에 포커스 복원.
   // 로딩 중(numPages=0)엔 무시 — 새 문서가 뜨기 전 입력이 다음다음 문서로 건너뛰는 것 방지.

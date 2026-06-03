@@ -92,6 +92,7 @@ export default function FileTree({
   const [searchErr, setSearchErr] = useState('')
   const [err, setErr] = useState<string>('')
   const [rootOver, setRootOver] = useState(false)
+  const [rootDropLabel, setRootDropLabel] = useState('')
   const lastRoot = useRef<string | null>(null)
   const entriesRef = useRef<Entry[] | null>(null)
   const query = filter.trim()
@@ -200,6 +201,7 @@ export default function FileTree({
   const rootDrop = (e: React.DragEvent): void => {
     e.preventDefault()
     setRootOver(false)
+    setRootDropLabel('')
     const src = e.dataTransfer.getData(LT_PATH)
     if (src) onMove?.(src, root)
     else if (e.dataTransfer.files.length) onDropTo?.(root, e.dataTransfer.files)
@@ -208,17 +210,23 @@ export default function FileTree({
   return (
     <ul
       className={`tree ${rootOver ? 'drop-target-root' : ''}`}
+      data-drop-label={rootDropLabel}
       onContextMenu={onRootContext}
       onDragOver={(e) => {
         // 내부 경로 또는 외부 파일일 때만 드롭 허용
         if (!e.dataTransfer.types.includes(LT_PATH) && !e.dataTransfer.types.includes('Files')) return
         e.preventDefault()
-        e.dataTransfer.dropEffect = e.dataTransfer.types.includes(LT_PATH) ? 'move' : 'copy'
+        const internal = e.dataTransfer.types.includes(LT_PATH)
+        e.dataTransfer.dropEffect = internal ? 'move' : 'copy'
+        setRootDropLabel(internal ? '작성서류 루트로 이동' : '작성서류 루트에 복사')
         setRootOver(true)
       }}
       onDragLeave={(e) => {
         // 자식으로 들어간 경우는 무시 (루트 밖으로 나갈 때만 해제)
-        if (e.currentTarget === e.target) setRootOver(false)
+        if (e.currentTarget === e.target) {
+          setRootOver(false)
+          setRootDropLabel('')
+        }
       }}
       onDrop={rootDrop}
     >
@@ -374,6 +382,7 @@ function TreeNode({
   const [open, setOpen] = useState(false)
   const [children, setChildren] = useState<Entry[] | null>(null)
   const [over, setOver] = useState(false)
+  const [dropLabel, setDropLabel] = useState('')
   // spring-load: 드래그한 채 폴더 위에 머물면 자동으로 펼침
   const springTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
 
@@ -415,6 +424,7 @@ function TreeNode({
     <li>
       <div
         className={`tree-row ${over ? 'drop-target' : ''}`}
+        data-drop-label={dropLabel}
         style={{ paddingLeft: 8 + depth * 14 }}
         onClick={onClick}
         onContextMenu={(e) => onContext?.(e, entry)}
@@ -437,9 +447,9 @@ function TreeNode({
                   return
                 e.preventDefault()
                 e.stopPropagation()
-                e.dataTransfer.dropEffect = e.dataTransfer.types.includes(LT_PATH)
-                  ? 'move'
-                  : 'copy'
+                const internal = e.dataTransfer.types.includes(LT_PATH)
+                e.dataTransfer.dropEffect = internal ? 'move' : 'copy'
+                setDropLabel(internal ? `${entry.name} 폴더로 이동` : `${entry.name} 폴더에 복사`)
                 setOver(true)
                 // 닫힌 폴더 위에 머물면 ~0.6초 후 자동으로 펼침
                 if (!open && !springTimer.current) {
@@ -457,6 +467,7 @@ function TreeNode({
           // 실제로 행 밖으로 나갔을 때만 해제 (spring-load 타이머 유지)
           if (e.currentTarget.contains(e.relatedTarget as Node)) return
           setOver(false)
+          setDropLabel('')
           clearSpring()
         }}
         onDrop={
@@ -465,6 +476,7 @@ function TreeNode({
                 e.preventDefault()
                 e.stopPropagation()
                 setOver(false)
+                setDropLabel('')
                 clearSpring()
                 const src = e.dataTransfer.getData(LT_PATH)
                 if (src) {

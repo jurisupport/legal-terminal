@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import PdfViewer from './PdfViewer'
+import PdfViewer, { type PdfViewStatus } from './PdfViewer'
 
 export interface RecordItem {
   path: string
@@ -19,7 +19,8 @@ export default function RecordViewer({
   onCropOn,
   onCropRatio,
   onCurrent,
-  onAskDoc
+  onAskDoc,
+  onStatus
 }: {
   items: RecordItem[]
   startPath: string
@@ -29,6 +30,7 @@ export default function RecordViewer({
   onCropRatio: (r: number) => void
   onCurrent?: (item: RecordItem) => void
   onAskDoc?: () => void
+  onStatus?: (status: PdfViewStatus) => void
 }): JSX.Element {
   // 시작 문서 인덱스 (마운트 시 1회). 이후엔 내부 이동이 주도.
   const [index, setIndex] = useState(() => {
@@ -67,6 +69,7 @@ export default function RecordViewer({
       onNextDoc={() => setIndex((i) => Math.min(items.length - 1, i + 1))}
       onPrevDoc={() => setIndex((i) => Math.max(0, i - 1))}
       onAskDoc={onAskDoc}
+      onStatus={onStatus}
     />
   )
 }
