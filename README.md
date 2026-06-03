@@ -81,7 +81,21 @@ powershell -NoProfile -ExecutionPolicy Bypass -File $installer
 
 ## 다운로드 (macOS)
 
-### 1) 이 파일을 받으세요
+### 방법 1. 터미널 한 줄 설치
+
+1. 키보드에서 **Command(⌘) + Space**를 누릅니다.
+2. `Terminal`을 입력하고 **터미널**을 실행합니다.
+3. 열린 창에 아래 한 줄을 붙여넣고 **Enter**를 누릅니다.
+
+처음 설치와 업데이트 모두 같은 명령을 씁니다. Mac 종류(Apple Silicon/Intel)는 자동으로 감지합니다.
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/jurisupport/legal-terminal/main/install-mac.sh | bash
+```
+
+Claude Code를 처음 쓰는 Mac이라면 아래 **처음이라면 먼저 준비하세요**를 확인한 뒤 `claude` 1회 로그인 → legal-terminal 실행 순서로 진행하면 됩니다.
+
+### 방법 2. 직접 내려받기
 
 👉 **[Mac Apple Silicon용 내려받기](https://github.com/jurisupport/legal-terminal/releases/latest/download/legal-terminal-mac-arm64.dmg)** — M1/M2/M3/M4 Mac용
 
@@ -89,9 +103,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File $installer
 
 - 압축 파일이 필요하면: [Apple Silicon zip](https://github.com/jurisupport/legal-terminal/releases/latest/download/legal-terminal-mac-arm64.zip)
 
-### 2) "손상되었기 때문에 휴지통으로 이동" 경고가 뜨면
+### 막히는 경우
 
-아직 코드서명/공증 전 빌드라서 macOS Gatekeeper가 앱을 막을 수 있습니다. 실제 파일이 깨진 것이 아니라 격리(quarantine) 속성 때문에 생기는 경우가 많습니다.
+아직 코드서명/공증 전 빌드라서 macOS Gatekeeper가 앱을 막을 수 있습니다. **"손상되었기 때문에 휴지통으로 이동"** 경고가 뜨면 실제 파일이 깨진 것이 아니라 격리(quarantine) 속성 때문인 경우가 많습니다.
 
 테스트용으로 실행할 때는 앱 위치에 맞춰 아래 명령을 실행한 뒤 Finder에서 앱을 우클릭 → **열기**로 실행하세요.
 
@@ -105,7 +119,7 @@ xattr -dr com.apple.quarantine ~/Downloads/legal-terminal.app
 
 정식 배포에서는 Apple Developer ID 서명과 notarization을 붙이면 이 경고가 사라집니다.
 
-### 3) 처음이라면 먼저 준비하세요
+### 처음이라면 먼저 준비하세요
 
 - Node.js 20 이상
 - Claude Code CLI (`claude`) 로그인 1회

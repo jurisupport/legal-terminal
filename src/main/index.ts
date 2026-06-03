@@ -1,5 +1,6 @@
 import { app, BrowserWindow, shell, ipcMain, dialog, screen, Menu, clipboard } from 'electron'
 import { spawn } from 'child_process'
+import { request } from 'https'
 import { join, basename, dirname, extname, resolve, sep, posix } from 'path'
 import { readdir, readFile, stat, writeFile, copyFile, rm, mkdir, rename, cp } from 'fs/promises'
 import { existsSync } from 'fs'
@@ -53,6 +54,146 @@ import {
 } from './workspace'
 
 let mainWindow: BrowserWindow | null = null
+let updateCheckStarted = false
+
+interface GitHubReleaseAsset {
+  name?: string
+  browser_download_url?: string
+}
+
+interface GitHubRelease {
+  tag_name?: string
+  html_url?: string
+  assets?: GitHubReleaseAsset[]
+}
+
+function parseVersionParts(version: string): number[] {
+  return version
+    .trim()
+    .replace(/^v/i, '')
+    .split(/[.-]/)
+    .slice(0, 3)
+    .map((part) => {
+      const n = Number.parseInt(part, 10)
+      return Number.isFinite(n) ? n : 0
+    })
+}
+
+function compareVersions(a: string, b: string): number {
+  const left = parseVersionParts(a)
+  const right = parseVersionParts(b)
+  for (let i = 0; i < 3; i += 1) {
+    const delta = (left[i] ?? 0) - (right[i] ?? 0)
+    if (delta !== 0) return delta
+  }
+  return 0
+}
+
+function preferredUpdateAssetNames(): string[] {
+  if (process.platform === 'win32') {
+    return ['legal-terminal-Setup.exe']
+  }
+
+  if (process.platform === 'darwin') {
+    if (process.arch === 'arm64') {
+      return ['legal-terminal-mac-arm64.dmg', 'legal-terminal-mac-arm64.zip']
+    }
+
+    return ['legal-terminal-mac-x64.zip', 'legal-terminal-mac-x64.dmg']
+  }
+
+  return []
+}
+
+function fetchLatestRelease(): Promise<GitHubRelease> {
+  return new Promise((resolvePromise, reject) => {
+    const req = request(
+      'https://api.github.com/repos/jurisupport/legal-terminal/releases/latest',
+      {
+        headers: {
+          Accept: 'application/vnd.github+json',
+          'User-Agent': 'legal-terminal-update-check'
+        },
+        timeout: 8000
+      },
+      (res) => {
+        let body = ''
+        res.setEncoding('utf8')
+        res.on('data', (chunk) => {
+          body += chunk
+        })
+        res.on('end', () => {
+          if (!res.statusCode || res.statusCode < 200 || res.statusCode >= 300) {
+            reject(new Error(`GitHub release check failed: HTTP ${res.statusCode ?? 'unknown'}`))
+            return
+          }
+
+          try {
+            resolvePromise(JSON.parse(body) as GitHubRelease)
+          } catch (error) {
+            reject(error)
+          }
+        })
+      }
+    )
+
+    req.on('timeout', () => req.destroy(new Error('GitHub release check timed out')))
+    req.on('error', reject)
+    req.end()
+  })
+}
+
+function updateDownloadUrl(release: GitHubRelease): string | null {
+  const assets = Array.isArray(release.assets) ? release.assets : []
+  for (const name of preferredUpdateAssetNames()) {
+    const asset = assets.find((candidate) => candidate.name === name)
+    if (asset?.browser_download_url) return asset.browser_download_url
+  }
+
+  return release.html_url ?? null
+}
+
+async function checkForUpdates(win: BrowserWindow): Promise<void> {
+  try {
+    const release = await fetchLatestRelease()
+    const latestVersion = release.tag_name?.replace(/^v/i, '')
+    if (!latestVersion || compareVersions(latestVersion, app.getVersion()) <= 0) return
+
+    const settings = await getSettings()
+    if (settings.ignoredUpdateVersion === latestVersion) return
+
+    const url = updateDownloadUrl(release)
+    if (!url) return
+
+    const result = await dialog.showMessageBox(win, {
+      type: 'info',
+      title: 'legal-terminal 업데이트',
+      message: `새 버전 ${latestVersion}을 사용할 수 있습니다.`,
+      detail: `현재 버전은 ${app.getVersion()}입니다. 최신 설치 파일을 다운로드할까요?`,
+      buttons: ['다운로드', '나중에', '이번 버전 다시 알리지 않기'],
+      defaultId: 0,
+      cancelId: 1
+    })
+
+    if (result.response === 0) {
+      await shell.openExternal(url)
+    } else if (result.response === 2) {
+      await setSettings({ ignoredUpdateVersion: latestVersion })
+    }
+  } catch (error) {
+    console.warn('[update] update check failed', error)
+  }
+}
+
+function scheduleUpdateCheck(win: BrowserWindow): void {
+  if (updateCheckStarted) return
+  if (!app.isPackaged && process.env['LEGAL_TERMINAL_CHECK_UPDATE_IN_DEV'] !== '1') return
+
+  updateCheckStarted = true
+  setTimeout(() => {
+    if (!win.isDestroyed()) void checkForUpdates(win)
+  }, 4000)
+}
 
 function createWindow(setMain = true, opts?: { docOnly?: boolean; termOnly?: boolean }): BrowserWindow {
   const docOnly = !!opts?.docOnly
@@ -92,6 +233,7 @@ function createWindow(setMain = true, opts?: { docOnly?: boolean; termOnly?: boo
   win.on('ready-to-show', () => {
     if (!detached) win.maximize()
     win.show()
+    if (setMain && !detached) scheduleUpdateCheck(win)
   })
 
   win.webContents.setWindowOpenHandler((details) => {

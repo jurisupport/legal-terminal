@@ -221,6 +221,26 @@ const parseRemoteUri = (uri: string): { profileId: string; path: string } | null
   return { profileId: rest.slice(0, slash), path: rest.slice(slash) }
 }
 
+const claudeReadablePath = (path: string, term?: TermTab): string => {
+  const remote = parseRemoteUri(path)
+  if (remote && term?.profileId === remote.profileId) return remote.path
+  return path
+}
+
+const fileAccessNote = (path: string, term?: TermTab): string | undefined => {
+  const remote = parseRemoteUri(path)
+  if (remote && term?.profileId !== remote.profileId) {
+    return '주의: 이 파일은 앱의 원격 URI입니다. 같은 SSH 프로필의 터미널에서 열려 있지 않으면 Claude가 직접 읽지 못할 수 있습니다.'
+  }
+  if (!remote && term?.ssh) {
+    return '주의: 이 파일은 로컬 경로입니다. 현재 Claude가 원격 터미널에서 실행 중이면 원격에 같은 파일이 있어야 직접 읽을 수 있습니다.'
+  }
+  return undefined
+}
+
+const formatFileMtime = (mtimeMs?: number): string =>
+  mtimeMs ? new Date(mtimeMs).toLocaleString('ko-KR') : '알 수 없음'
+
 function useRemoteFileVersion(path?: string, intervalMs = 2500): number {
   const [version, setVersion] = useState(0)
   const sigRef = useRef('')
@@ -1794,6 +1814,37 @@ export default function App(): JSX.Element {
     if (activeTerm) pasteToTerm(activeTerm, payload)
     else window.lt.claude.ask(payload)
   }
+
+  const buildFreshFilePrompt = async (
+    path: string,
+    label: string,
+    term?: TermTab
+  ): Promise<string> => {
+    const stat = await window.lt.fs.stat(path).catch((e) => ({
+      ok: false as const,
+      error: String(e)
+    }))
+    const readablePath = claudeReadablePath(path, term)
+    const note = fileAccessNote(path, term)
+    const lines = [
+      '작업 기준 파일:',
+      `- 파일명: ${label}`,
+      `- 앱 경로: ${path}`,
+      readablePath !== path ? `- Claude가 직접 읽을 경로: ${readablePath}` : undefined,
+      stat.ok
+        ? `- 현재 저장본: ${stat.size} bytes, 수정시각 ${formatFileMtime(stat.mtimeMs)}`
+        : `- 현재 저장본 확인 실패: ${stat.error}`,
+      note ? `- ${note}` : undefined,
+      '',
+      '반드시 다음 순서로 진행해줘:',
+      '1. 위 경로의 현재 저장된 파일을 디스크에서 다시 읽는다.',
+      '2. 이전 대화의 초안, 임시 파일, 기억 속 내용은 기준으로 쓰지 않는다.',
+      '3. 요청한 부분만 수정하고 사용자가 편집한 다른 부분은 보존한다.',
+      '4. 수정 후 변경 요약과 보존 여부를 알려준다.',
+      ''
+    ].filter((line): line is string => line !== undefined)
+    return lines.join('\n')
+  }
   // 메인 창: 다른 창에서 온 Claude 질문을 활성 터미널에 주입.
   useEffect(
     () =>
@@ -1806,23 +1857,34 @@ export default function App(): JSX.Element {
 
   // 파일 1개를 "물어보기" 형태로 전송 (경로 포함 → claude가 실제 파일을 읽음).
   const askAboutFile = (termId: string, path: string, label: string): void => {
-    pasteToTerm(termId, `「${label}」(${path}) 파일에 대해 `)
+    const term = termTabs.find((t) => t.id === termId)
+    void buildFreshFilePrompt(path, label, term).then((prompt) => {
+      pasteToTerm(termId, `${prompt}위 파일에 대해 `)
+    })
   }
 
   // 활성 문서명+경로 + (있으면) 선택 텍스트로 claude 프롬프트 주입. 텍스트 없으면 문서 전체에 대해 묻기.
-  const askClaude = (text: string): void => {
-    const d = docTabs.find((x) => x.id === activeDoc)
-    const docName = d?.title
-    const docPath = d?.path
-    const ref = docName ? `「${docName}」${docPath ? `(${docPath})` : ''}` : ''
-    const t = text.trim()
-    let payload: string
-    if (t) {
-      payload = ref ? `${ref} 중 다음 부분:\n"${t}"\n\n` : `"${t}"\n\n`
-    } else if (docName) {
-      payload = `${ref} 파일에 대해 `
-    } else return
-    sendClaude(payload)
+  const askClaude = (text: string, opts?: { docPath?: string }): void => {
+    void (async () => {
+      const d = docTabs.find((x) => x.id === activeDoc)
+      const docPath = opts?.docPath ?? d?.path
+      const docName = opts?.docPath ? (opts.docPath.split(/[\\/]/).pop() ?? d?.title) : d?.title
+      const ref = docName ? `「${docName}」${docPath ? `(${docPath})` : ''}` : ''
+      const t = text.trim()
+      const filePrompt =
+        docPath && docName ? await buildFreshFilePrompt(docPath, docName, activeTermTab) : ''
+      let payload: string
+      if (t) {
+        payload = filePrompt
+          ? `${filePrompt}아래 선택 내용은 위치 힌트야. 최종 기준은 위 경로에서 다시 읽은 현재 저장본으로 삼아줘.\n\n<selection>\n${t}\n</selection>\n\n`
+          : ref
+            ? `${ref} 중 다음 부분:\n"${t}"\n\n`
+            : `"${t}"\n\n`
+      } else if (docName) {
+        payload = filePrompt ? `${filePrompt}위 파일에 대해 ` : `${ref} 파일에 대해 `
+      } else return
+      sendClaude(payload)
+    })()
   }
 
   const sendMarkdownToJuriSupport = (doc: MarkdownDocumentPayload): void => {
@@ -1994,7 +2056,11 @@ export default function App(): JSX.Element {
       const p = paths[0]
       askAboutFile(termId, p, p.split(/[\\/]/).pop() ?? p)
     } else {
-      pasteToTerm(termId, `다음 파일들에 대해:\n${paths.map((p) => `- ${p}`).join('\n')}\n\n`)
+      void Promise.all(
+        paths.map((p) => buildFreshFilePrompt(p, p.split(/[\\/]/).pop() ?? p, tab))
+      ).then((prompts) => {
+        pasteToTerm(termId, `${prompts.join('\n')}위 파일들에 대해:\n${paths.map((p) => `- ${p}`).join('\n')}\n\n`)
+      })
     }
   }
 
@@ -2034,7 +2100,7 @@ export default function App(): JSX.Element {
           path={tab.path}
           defaultDir={draftsRoot}
           onPath={(p) => setDocPath(tab.id, p)}
-          onAsk={() => askClaude('')}
+          onAsk={(savedPath) => askClaude('', { docPath: savedPath })}
           onSendToJuriSupport={sendMarkdownToJuriSupport}
           onDirty={(d) =>
             setDirtyDocs((s) => {

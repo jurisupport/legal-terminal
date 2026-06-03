@@ -224,7 +224,7 @@ export default function MarkdownEditor({
   path?: string
   defaultDir?: string
   onPath?: (path: string) => void
-  onAsk?: () => void
+  onAsk?: (savedPath?: string) => void
   onSendToJuriSupport?: (doc: MarkdownDocumentPayload) => void
   // 닫으면 데이터가 사라질 위험(저장 안 된 새 문서에 내용 있음)을 알린다
   onDirty?: (dirty: boolean) => void
@@ -340,32 +340,32 @@ export default function MarkdownEditor({
     refreshSavedSignature(targetPath)
   }
 
-  const saveAsNow = (): void => {
+  const saveAsNow = (): Promise<string | undefined> => {
     const v = viewRef.current
-    if (!v) return
+    if (!v) return Promise.resolve(undefined)
     if (saveTimer.current) {
       clearTimeout(saveTimer.current)
       saveTimer.current = null
     }
     const content = v.state.doc.toString()
     setSaveError('')
-    window.lt.fs.saveAs(content, saveAsDefaultPath(pathRef.current, defaultDir)).then((r) => {
+    return window.lt.fs.saveAs(content, saveAsDefaultPath(pathRef.current, defaultDir)).then((r) => {
       if (r.ok && r.path) {
         pathRef.current = r.path
         onPath?.(r.path)
         markSaved(r.path)
-        return
+        return r.path
       }
       if (r.error) setSaveError(r.error)
+      return undefined
     })
   }
 
-  const saveNow = (): void => {
+  const saveNow = (): Promise<string | undefined> => {
     const v = viewRef.current
-    if (!v) return
+    if (!v) return Promise.resolve(undefined)
     if (!pathRef.current) {
-      saveAsNow()
-      return
+      return saveAsNow()
     }
     if (saveTimer.current) {
       clearTimeout(saveTimer.current)
@@ -374,14 +374,15 @@ export default function MarkdownEditor({
     const targetPath = pathRef.current
     const content = v.state.doc.toString()
     setSaveError('')
-    window.lt.fs.writeText(targetPath, content).then((r) => {
-      if (pathRef.current !== targetPath) return
+    return window.lt.fs.writeText(targetPath, content).then((r) => {
+      if (pathRef.current !== targetPath) return undefined
       if (!r.ok) {
         setSaveError(r.error ?? '저장 실패')
         setSavedState(false)
-        return
+        return undefined
       }
       markSaved(targetPath)
+      return targetPath
     })
   }
   const scheduleSave = (): void => {
@@ -410,8 +411,8 @@ export default function MarkdownEditor({
               ...historyKeymap,
               indentWithTab,
               { key: 'Mod-f', run: () => (openFindRef.current(), true) },
-              { key: 'Shift-Mod-s', run: () => (saveAsNow(), true) },
-              { key: 'Mod-s', run: () => (saveNow(), true) }
+              { key: 'Shift-Mod-s', run: () => (void saveAsNow(), true) },
+              { key: 'Mod-s', run: () => (void saveNow(), true) }
             ]),
             markdown({ extensions: GFM }),
             syntaxHighlighting(defaultHighlightStyle),
@@ -449,7 +450,7 @@ export default function MarkdownEditor({
       .catch((e) => alive && setErr(String(e)))
     return () => {
       alive = false
-      if (pathRef.current) saveNow()
+      if (pathRef.current) void saveNow()
       if (remoteAppliedTimer.current) clearTimeout(remoteAppliedTimer.current)
       viewRef.current?.destroy()
       viewRef.current = null
@@ -546,8 +547,8 @@ export default function MarkdownEditor({
     if (e.defaultPrevented || !(e.ctrlKey || e.metaKey) || e.altKey || e.key.toLocaleLowerCase() !== 's') return
     e.preventDefault()
     e.stopPropagation()
-    if (e.shiftKey) saveAsNow()
-    else saveNow()
+    if (e.shiftKey) void saveAsNow()
+    else void saveNow()
   }
   const saveStatus = saveError
     ? '저장 실패'
@@ -569,14 +570,14 @@ export default function MarkdownEditor({
           원본
         </button>
         <span className="tb-divider" />
-        <button className="tb-btn" title="저장 (Ctrl/Cmd+S)" aria-label="저장" onClick={saveNow}>
+        <button className="tb-btn" title="저장 (Ctrl/Cmd+S)" aria-label="저장" onClick={() => void saveNow()}>
           <IconSave size={14} />
         </button>
         <button
           className="tb-btn"
           title="다른 이름으로 저장 (Ctrl/Cmd+Shift+S)"
           aria-label="다른 이름으로 저장"
-          onClick={saveAsNow}
+          onClick={() => void saveAsNow()}
         >
           <IconSaveAs size={14} />
         </button>
@@ -617,7 +618,16 @@ export default function MarkdownEditor({
         {onAsk && (
           <>
             <span className="tb-divider" />
-            <button className="tb-btn" title="이 문서에 대해 Claude에 물어보기" onClick={onAsk}>
+            <button
+              className="tb-btn"
+              title="이 문서에 대해 Claude에 물어보기"
+              onClick={() => {
+                void saveNow().then((savedPath) => {
+                  if (pathRef.current && !savedPath) return
+                  onAsk(savedPath ?? pathRef.current)
+                })
+              }}
+            >
               ✳ Claude
             </button>
           </>

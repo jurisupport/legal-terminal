@@ -48,6 +48,8 @@ export interface Settings {
   mdFontSize?: number
   /** JuriSupport MCP 토큰 (safeStorage로 암호화된 base64) */
   jurisupportTokenEnc?: string
+  /** 사용자가 건너뛴 최신 릴리스 버전. 더 높은 버전이 나오면 다시 알린다. */
+  ignoredUpdateVersion?: string
 }
 
 function configPath(): string {
