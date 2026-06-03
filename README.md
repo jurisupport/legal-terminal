@@ -40,30 +40,44 @@
 
 ## 다운로드 (Windows)
 
-### 1) 이 파일을 받으세요
+### 방법 1. PowerShell 한 줄 설치
 
-👉 **[legal-terminal 설치 (Setup) 내려받기](https://github.com/jurisupport/legal-terminal/releases/latest/download/legal-terminal-Setup.exe)** — 대부분 이 파일 하나면 됩니다. 받은 뒤 더블클릭해서 설치하세요.
+1. 키보드에서 **Win** 키를 누릅니다.
+2. `PowerShell`을 입력합니다.
+3. **Windows PowerShell** 또는 **PowerShell**을 클릭해 실행합니다.
+4. 열린 창에 아래 한 줄을 붙여넣고 **Enter**를 누릅니다.
 
-- 설치하기 싫고 바로 실행만: **[포터블 버전](https://github.com/jurisupport/legal-terminal/releases/latest/download/legal-terminal-portable.exe)** (다운로드 후 더블클릭, 설치 불필요)
-- 기존 버전 때문에 설치/제거가 막히면: 최신 설치본을 다시 실행하세요. 기존 제거기가 실패해도 복구 설치로 진행됩니다.
+처음 설치와 업데이트 모두 같은 명령을 씁니다.
 
-### 2) 설치할 때 "Windows의 PC 보호" 경고 푸는 법
+```powershell
+irm https://raw.githubusercontent.com/jurisupport/legal-terminal/main/install.ps1 | iex
+```
 
-아직 코드서명 전이라 처음 실행하면 파란색 **"Windows의 PC 보호(Windows protected your PC)"** 창이 뜹니다. 정상이며, 이렇게 통과합니다.
+설치 중 **jurisupport-plugins**가 없으면 설치할지 물어보고, **Claude Code**가 없으면 먼저 설치합니다. 설치 후 `claude` 1회 로그인 → legal-terminal 실행 순서로 진행하면 됩니다.
 
-1. 창에서 **추가 정보(More info)** 클릭
-2. 아래에 나타나는 **실행(Run anyway)** 클릭
+### 방법 2. 직접 내려받기
 
-> 그래도 막히면: 받은 `.exe`를 **우클릭 → 속성 → 하단 "차단 해제(Unblock)" 체크 → 확인** 후 다시 실행하세요.
+PowerShell을 쓰지 않으려면 설치 파일을 직접 내려받아 실행하세요.
 
-### 3) 처음이라면 — `jurisupport-plugins`부터 설치하세요
+👉 **[legal-terminal 설치 (Setup) 내려받기](https://github.com/jurisupport/legal-terminal/releases/latest/download/legal-terminal-Setup.exe)**
 
-legal-terminal은 PC에 설치된 **Claude Code**와 **변호사용 플러그인**을 그대로 사용합니다. 아직 이것들이 없다면, **먼저 [`jurisupport-plugins`](https://github.com/jurisupport/jurisupport-plugins)를 설치**하세요. 설치 스크립트가 의존성(Node 등)·**Claude Code**·송무 플러그인·판례·법령·사건기록 검색 도구·PII 보호 훅까지 한 번에 구성해 줍니다.
+- 설치 없이 바로 실행: **[포터블 버전](https://github.com/jurisupport/legal-terminal/releases/latest/download/legal-terminal-portable.exe)**
+- 기존 버전 때문에 설치/제거가 막히면 최신 설치본을 다시 실행하세요. 기존 제거기가 실패해도 복구 설치로 진행됩니다.
 
-- Windows: `windows-bootstrap.ps1`
-- macOS/Linux/WSL: `install.sh`
+### 막히는 경우
 
-설치 후 `claude` 1회 로그인 → 그다음 legal-terminal 설치본을 실행하면 됩니다. (사건 대시보드의 JuriSupport 연동은 선택 사항 — 아래 참고)
+회사 보안 정책 때문에 `irm ... | iex`가 막히거나, 실행 전에 스크립트 내용을 확인하고 싶다면 아래처럼 파일로 저장한 뒤 실행하세요.
+
+```powershell
+$installer = "$env:TEMP\legal-terminal-install.ps1"
+iwr https://raw.githubusercontent.com/jurisupport/legal-terminal/main/install.ps1 -UseBasicParsing -OutFile $installer
+notepad $installer
+powershell -NoProfile -ExecutionPolicy Bypass -File $installer
+```
+
+설치 파일 실행 중 파란색 **"Windows의 PC 보호(Windows protected your PC)"** 창이 뜨면 정상입니다. 창에서 **추가 정보(More info)** → **실행(Run anyway)** 을 누르세요.
+
+그래도 막히면 받은 `.exe`를 **우클릭 → 속성 → 하단 "차단 해제(Unblock)" 체크 → 확인** 후 다시 실행하세요.
 
 ## 다운로드 (macOS)
 
