@@ -3911,7 +3911,7 @@ function FileView({ path }: { path: string }): JSX.Element {
   return <TextDoc text={state.text} note={state.truncated ? '… (이하 생략, 2MB 초과)' : undefined} />
 }
 
-/** HWP(.hwp) — 텍스트만 추출해 표시 */
+/** HWP/HWPX — 텍스트만 추출해 표시 */
 function HwpView({ path }: { path: string }): JSX.Element {
   const remoteVersion = useRemoteFileVersion(path)
   const [state, setState] = useState<{ loading: boolean; text: string; err: string }>({
@@ -3933,7 +3933,7 @@ function HwpView({ path }: { path: string }): JSX.Element {
       alive = false
     }
   }, [path, remoteVersion])
-  if (state.loading) return <div className="welcome"><p className="muted">HWP 텍스트 추출 중…</p></div>
+  if (state.loading) return <div className="welcome"><p className="muted">HWP/HWPX 텍스트 추출 중…</p></div>
   if (state.err) return <div className="welcome"><p className="muted">{state.err}</p></div>
   return <TextDoc text={state.text} />
 }

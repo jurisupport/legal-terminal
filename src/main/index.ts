@@ -35,7 +35,7 @@ import {
 } from './remoteFs'
 import type { SshProfile } from './settings'
 import { currentSession, listSessions, rememberSessionMeta, type SessionSearchContext } from './sessions'
-import { parse as parseHwp } from 'hwp.js'
+import { extractHwpText } from './hwpText'
 import {
   createPty,
   writePty,
@@ -982,28 +982,14 @@ ipcMain.handle('fs:readBytes', async (_e, filePath: string) => {
   }
 })
 
-// HWP(.hwp, HWP5) 텍스트만 추출 — 이미지/표 등 서식은 무시하고 본문 텍스트만
+// HWP/HWPX 텍스트만 추출 — 이미지/표 등 서식은 무시하고 본문 텍스트만
 ipcMain.handle('fs:readHwpText', async (_e, filePath: string) => {
   const ext = extname(filePath).toLowerCase()
-  if (ext === '.hwpx') {
-    return { ok: false, text: '', error: 'HWPX 형식은 아직 지원하지 않습니다 (.hwp만 지원).' }
-  }
   try {
     const buf = isRemote(filePath) ? await rfsReadBytes(filePath) : await readLocalBytes(filePath)
-    const doc = parseHwp(buf as unknown as Parameters<typeof parseHwp>[0])
-    const lines: string[] = []
-    for (const section of doc.sections) {
-      for (const para of section.content) {
-        let line = ''
-        for (const ch of para.content) {
-          if ((ch.type as number) === 0 && typeof ch.value === 'string') line += ch.value
-        }
-        lines.push(line)
-      }
-    }
-    return { ok: true, text: lines.join('\n').replace(/\n{3,}/g, '\n\n') }
+    return { ok: true, text: extractHwpText(buf, ext) }
   } catch (e) {
-    return { ok: false, text: '', error: 'HWP 파싱 실패: ' + String(e) }
+    return { ok: false, text: '', error: 'HWP/HWPX 파싱 실패: ' + String(e) }
   }
 })
 
