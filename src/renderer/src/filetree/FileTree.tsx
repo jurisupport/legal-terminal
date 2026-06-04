@@ -9,6 +9,11 @@ export interface Entry {
 
 export type SortMode = 'name-asc' | 'name-desc' | 'mtime-desc' | 'mtime-asc'
 
+export interface PendingCreateRequest {
+  type: 'file' | 'folder'
+  dir?: string
+}
+
 // 트리 내부 드래그 식별용 MIME (외부 OS 파일 드롭과 구분)
 export const LT_PATH = 'application/x-lt-path'
 
@@ -57,6 +62,15 @@ function parentPath(path: string, fallback: string): string {
   return path.slice(0, slash)
 }
 
+function pathKey(path: string): string {
+  const trimmed = path.replace(/[\\/]+$/, '')
+  return trimmed || path
+}
+
+function createTargetDir(pendingCreate: PendingCreateRequest | null, fallback: string): string {
+  return pendingCreate?.dir ?? fallback
+}
+
 /** 활성 사건 폴더(root)의 파일트리. 폴더는 펼칠 때 지연 로딩. */
 export default function FileTree({
   root,
@@ -69,6 +83,7 @@ export default function FileTree({
   onDownload,
   pendingCreate = null,
   sortMode = 'name-asc',
+  onRequestCreate,
   onCreate,
   onCancelCreate,
   filter = ''
@@ -81,9 +96,10 @@ export default function FileTree({
   onDelete?: (path: string, name: string, isDir: boolean) => void
   onPasteTo?: (dir: string) => void
   onDownload?: (path: string, name: string, isDir: boolean) => void
-  pendingCreate?: 'file' | 'folder' | null
+  pendingCreate?: PendingCreateRequest | null
   sortMode?: SortMode
-  onCreate?: (name: string, type: 'file' | 'folder') => void
+  onRequestCreate?: (dir: string, type: 'file' | 'folder') => void
+  onCreate?: (name: string, type: 'file' | 'folder', dir?: string) => void
   onCancelCreate?: () => void
   filter?: string
 }): JSX.Element {
@@ -96,6 +112,8 @@ export default function FileTree({
   const lastRoot = useRef<string | null>(null)
   const entriesRef = useRef<Entry[] | null>(null)
   const query = filter.trim()
+  const rootCreate =
+    pendingCreate && pathKey(createTargetDir(pendingCreate, root)) === pathKey(root)
   // 우클릭 컨텍스트 메뉴 (붙여넣기/다운로드/삭제 등)
   const [menu, setMenu] = useState<{
     x: number
@@ -263,45 +281,37 @@ export default function FileTree({
         </>
       ) : (
         <>
-      {pendingCreate && (
-        <li>
-          <div className="tree-row" style={{ paddingLeft: 8 }}>
-            <span className="tree-icon">{pendingCreate === 'folder' ? '📁' : '📄'}</span>
-            <input
-              className="tree-input"
-              autoFocus
-              placeholder={pendingCreate === 'folder' ? '폴더 이름' : '파일 이름 (비우면 무제)'}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter') onCreate?.((e.target as HTMLInputElement).value, pendingCreate)
-                else if (e.key === 'Escape') onCancelCreate?.()
-              }}
-              onBlur={(e) =>
-                e.target.value.trim() ? onCreate?.(e.target.value, pendingCreate) : onCancelCreate?.()
-              }
+          {rootCreate && pendingCreate && (
+            <CreateEntryRow
+              type={pendingCreate.type}
+              depth={0}
+              onCreate={(name) => onCreate?.(name, pendingCreate.type, root)}
+              onCancel={onCancelCreate}
             />
-          </div>
-        </li>
-      )}
-      {err && <li className="tree-node muted pad">불러오기 실패: {err}</li>}
-      {!err && !entries && <li className="tree-node muted pad">불러오는 중…</li>}
-      {!err && entries && entries.length === 0 && !pendingCreate && (
-        <li className="tree-node muted pad">빈 폴더</li>
-      )}
-      {!err &&
-        entries &&
-        sortEntries(entries, sortMode).map((e) => (
-          <TreeNode
-            key={e.path}
-            entry={e}
-            depth={0}
-            refreshNonce={refreshNonce}
-            sortMode={sortMode}
-            onOpenFile={onOpenFile}
-            onDropTo={onDropTo}
-            onMove={onMove}
-            onContext={onContext}
-          />
-        ))}
+          )}
+          {err && <li className="tree-node muted pad">불러오기 실패: {err}</li>}
+          {!err && !entries && <li className="tree-node muted pad">불러오는 중…</li>}
+          {!err && entries && entries.length === 0 && !rootCreate && (
+            <li className="tree-node muted pad">빈 폴더</li>
+          )}
+          {!err &&
+            entries &&
+            sortEntries(entries, sortMode).map((e) => (
+              <TreeNode
+                key={e.path}
+                entry={e}
+                depth={0}
+                refreshNonce={refreshNonce}
+                sortMode={sortMode}
+                onOpenFile={onOpenFile}
+                onDropTo={onDropTo}
+                onMove={onMove}
+                onContext={onContext}
+                pendingCreate={pendingCreate}
+                onCreate={onCreate}
+                onCancelCreate={onCancelCreate}
+              />
+            ))}
         </>
       )}
       {menu && (
@@ -313,6 +323,30 @@ export default function FileTree({
           }}
           onMouseDown={(e) => e.stopPropagation()}
         >
+          {onRequestCreate && (
+            <>
+              <li
+                className="ctx-item"
+                onClick={() => {
+                  const dir = menu.pasteDir
+                  setMenu(null)
+                  onRequestCreate(dir, 'file')
+                }}
+              >
+                새 문서
+              </li>
+              <li
+                className="ctx-item"
+                onClick={() => {
+                  const dir = menu.pasteDir
+                  setMenu(null)
+                  onRequestCreate(dir, 'folder')
+                }}
+              >
+                새 폴더
+              </li>
+            </>
+          )}
           {onPasteTo && (
             <li
               className="ctx-item"
@@ -368,7 +402,10 @@ function TreeNode({
   onOpenFile,
   onDropTo,
   onMove,
-  onContext
+  onContext,
+  pendingCreate,
+  onCreate,
+  onCancelCreate
 }: {
   entry: Entry
   depth: number
@@ -378,6 +415,9 @@ function TreeNode({
   onDropTo?: (dir: string, files: FileList) => void
   onMove?: (src: string, destDir: string) => void
   onContext?: (e: React.MouseEvent, entry: Entry) => void
+  pendingCreate?: PendingCreateRequest | null
+  onCreate?: (name: string, type: 'file' | 'folder', dir?: string) => void
+  onCancelCreate?: () => void
 }): JSX.Element {
   const [open, setOpen] = useState(false)
   const [children, setChildren] = useState<Entry[] | null>(null)
@@ -407,6 +447,16 @@ function TreeNode({
     if (entry.isDir && open) loadChildren()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [refreshNonce])
+
+  const isCreateTarget =
+    !!pendingCreate && entry.isDir && pathKey(createTargetDir(pendingCreate, '')) === pathKey(entry.path)
+
+  useEffect(() => {
+    if (!isCreateTarget) return
+    if (!open) setOpen(true)
+    if (children === null) loadChildren()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isCreateTarget, entry.path])
 
   const onClick = (): void => {
     if (!entry.isDir) {
@@ -495,6 +545,14 @@ function TreeNode({
       </div>
       {entry.isDir && open && children && (
         <ul className="tree">
+          {isCreateTarget && pendingCreate && (
+            <CreateEntryRow
+              type={pendingCreate.type}
+              depth={depth + 1}
+              onCreate={(name) => onCreate?.(name, pendingCreate.type, entry.path)}
+              onCancel={onCancelCreate}
+            />
+          )}
           {sortEntries(children, sortMode).map((c) => (
             <TreeNode
               key={c.path}
@@ -506,10 +564,45 @@ function TreeNode({
               onDropTo={onDropTo}
               onMove={onMove}
               onContext={onContext}
+              pendingCreate={pendingCreate}
+              onCreate={onCreate}
+              onCancelCreate={onCancelCreate}
             />
           ))}
         </ul>
       )}
+    </li>
+  )
+}
+
+function CreateEntryRow({
+  type,
+  depth,
+  onCreate,
+  onCancel
+}: {
+  type: 'file' | 'folder'
+  depth: number
+  onCreate: (name: string) => void
+  onCancel?: () => void
+}): JSX.Element {
+  return (
+    <li>
+      <div className="tree-row" style={{ paddingLeft: 8 + depth * 14 }}>
+        <span className="tree-icon">{type === 'folder' ? '📁' : '📄'}</span>
+        <input
+          className="tree-input"
+          autoFocus
+          placeholder={type === 'folder' ? '폴더 이름' : '파일 이름 (비우면 무제)'}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') onCreate((e.target as HTMLInputElement).value)
+            else if (e.key === 'Escape') onCancel?.()
+          }}
+          onBlur={(e) =>
+            e.target.value.trim() ? onCreate(e.target.value) : onCancel?.()
+          }
+        />
+      </div>
     </li>
   )
 }

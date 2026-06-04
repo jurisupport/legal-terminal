@@ -23,6 +23,13 @@ interface RemoteEntry {
   mtimeMs?: number
 }
 
+interface FolderMatchSuggestion {
+  path: string
+  name: string
+  reason: string
+  score: number
+}
+
 interface PtyCreateOpts {
   id: string
   cwd?: string
@@ -39,6 +46,7 @@ interface TerminalTabPayload {
   cwd: string
   recordsFolder?: string
   suggestedRecords?: string
+  suggestedRecordOptions?: FolderMatchSuggestion[]
   autoClaude?: boolean
   jsId?: string
   court?: string
@@ -179,6 +187,48 @@ interface AppSettings {
   sshProfiles?: SshProfile[]
 }
 
+type AgentPermissionMode = 'ask' | 'plan' | 'acceptEdits' | 'dontAsk'
+
+interface AgentAttachment {
+  kind: 'file' | 'folder' | 'selection' | 'pdf-page-range' | 'terminal-snippet'
+  label: string
+  path?: string
+  range?: { startLine?: number; endLine?: number; startPage?: number; endPage?: number }
+  text?: string
+}
+
+interface AgentCreateOptions {
+  id: string
+  cwd: string
+  title?: string
+  model?: string
+  permissionMode?: AgentPermissionMode
+  resumeSessionId?: string
+  tools?: string[]
+  allowedTools?: string[]
+  disallowedTools?: string[]
+  source?: 'local' | 'ssh'
+}
+
+interface AgentSendInput {
+  text: string
+  attachments?: AgentAttachment[]
+}
+
+interface AgentPermissionDecision {
+  requestId: string
+  decision: 'allow' | 'reject'
+  message?: string
+  remember?: boolean
+}
+
+interface AgentCommandResult {
+  ok: boolean
+  error?: string
+}
+
+type AgentEvent = { type: string; sessionId?: string; [key: string]: unknown }
+
 const api = {
   app: {
     info: (): Promise<{
@@ -187,6 +237,8 @@ const api = {
     }> => ipcRenderer.invoke('app:info'),
     openExternal: (url: string): Promise<void> => ipcRenderer.invoke('app:openExternal', url),
     newWindow: (): Promise<void> => ipcRenderer.invoke('window:new'),
+    requestAttention: (reason?: 'done' | 'question'): void =>
+      ipcRenderer.send('app:requestAttention', { reason }),
     onCloseActiveTab: (cb: () => void): (() => void) => {
       const listener = (): void => cb()
       ipcRenderer.on('app:closeActiveTab', listener)
@@ -344,6 +396,23 @@ const api = {
       ipcRenderer.invoke('sessions:list', { cwd, ssh, context }),
     remember: (input: SessionRememberInput): Promise<{ ok: boolean; error?: string }> =>
       ipcRenderer.invoke('sessions:remember', input)
+  },
+  agent: {
+    create: (opts: AgentCreateOptions): Promise<AgentCommandResult> =>
+      ipcRenderer.invoke('agent:create', opts),
+    send: (sessionId: string, input: AgentSendInput): Promise<AgentCommandResult> =>
+      ipcRenderer.invoke('agent:send', { sessionId, input }),
+    approve: (decision: AgentPermissionDecision): Promise<AgentCommandResult> =>
+      ipcRenderer.invoke('agent:approve', decision),
+    interrupt: (sessionId: string): Promise<AgentCommandResult> =>
+      ipcRenderer.invoke('agent:interrupt', sessionId),
+    close: (sessionId: string): Promise<AgentCommandResult> =>
+      ipcRenderer.invoke('agent:close', sessionId),
+    onEvent: (cb: (event: AgentEvent) => void): (() => void) => {
+      const listener = (_e: unknown, event: AgentEvent): void => cb(event)
+      ipcRenderer.on('agent:event', listener)
+      return () => ipcRenderer.removeListener('agent:event', listener)
+    }
   },
   workspace: {
     save: (snapshot: WorkspaceSnapshot): Promise<WorkspaceSaveResult> =>

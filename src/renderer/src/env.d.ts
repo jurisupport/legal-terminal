@@ -21,6 +21,13 @@ export interface RemoteEntry {
   mtimeMs?: number
 }
 
+export interface FolderMatchSuggestion {
+  path: string
+  name: string
+  reason: string
+  score: number
+}
+
 export interface PtyCreateOpts {
   id: string
   cwd?: string
@@ -37,6 +44,7 @@ export interface TerminalTabPayload {
   cwd: string
   recordsFolder?: string
   suggestedRecords?: string
+  suggestedRecordOptions?: FolderMatchSuggestion[]
   autoClaude?: boolean
   jsId?: string
   court?: string
@@ -177,6 +185,48 @@ export interface AppSettings {
   sshProfiles?: SshProfile[]
 }
 
+export type AgentPermissionMode = 'ask' | 'plan' | 'acceptEdits' | 'dontAsk'
+
+export interface AgentAttachment {
+  kind: 'file' | 'folder' | 'selection' | 'pdf-page-range' | 'terminal-snippet'
+  label: string
+  path?: string
+  range?: { startLine?: number; endLine?: number; startPage?: number; endPage?: number }
+  text?: string
+}
+
+export interface AgentCreateOptions {
+  id: string
+  cwd: string
+  title?: string
+  model?: string
+  permissionMode?: AgentPermissionMode
+  resumeSessionId?: string
+  tools?: string[]
+  allowedTools?: string[]
+  disallowedTools?: string[]
+  source?: 'local' | 'ssh'
+}
+
+export interface AgentSendInput {
+  text: string
+  attachments?: AgentAttachment[]
+}
+
+export interface AgentPermissionDecision {
+  requestId: string
+  decision: 'allow' | 'reject'
+  message?: string
+  remember?: boolean
+}
+
+export interface AgentCommandResult {
+  ok: boolean
+  error?: string
+}
+
+export type AgentEvent = { type: string; sessionId?: string; [key: string]: unknown }
+
 export interface JsParty {
   role: string
   position: string | null
@@ -221,6 +271,7 @@ export interface LtApi {
     }>
     openExternal: (url: string) => Promise<void>
     newWindow: () => Promise<void>
+    requestAttention: (reason?: 'done' | 'question') => void
     onCloseActiveTab: (cb: () => void) => () => void
   }
   dialog: {
@@ -324,6 +375,14 @@ export interface LtApi {
       context?: SessionSearchContext
     ) => Promise<SessionListEntry[]>
     remember: (input: SessionRememberInput) => Promise<{ ok: boolean; error?: string }>
+  }
+  agent: {
+    create: (opts: AgentCreateOptions) => Promise<AgentCommandResult>
+    send: (sessionId: string, input: AgentSendInput) => Promise<AgentCommandResult>
+    approve: (decision: AgentPermissionDecision) => Promise<AgentCommandResult>
+    interrupt: (sessionId: string) => Promise<AgentCommandResult>
+    close: (sessionId: string) => Promise<AgentCommandResult>
+    onEvent: (cb: (event: AgentEvent) => void) => () => void
   }
   workspace: {
     save: (snapshot: WorkspaceSnapshot) => Promise<WorkspaceSaveResult>

@@ -52,9 +52,11 @@ import {
   saveWorkspaceSnapshot,
   type WorkspaceSnapshot
 } from './workspace'
+import { disposeAgentSessions, registerAgentIpc } from './agent/agent-service'
 
 let mainWindow: BrowserWindow | null = null
 let updateCheckStarted = false
+const dockBounceByWindow = new Map<number, number>()
 
 interface GitHubReleaseAsset {
   name?: string
@@ -195,6 +197,29 @@ function scheduleUpdateCheck(win: BrowserWindow): void {
   }, 4000)
 }
 
+function stopWindowAttention(win: BrowserWindow): void {
+  if (!win.isDestroyed()) win.flashFrame(false)
+  const bounceId = dockBounceByWindow.get(win.id)
+  if (bounceId !== undefined && process.platform === 'darwin' && app.dock) {
+    app.dock.cancelBounce(bounceId)
+  }
+  dockBounceByWindow.delete(win.id)
+}
+
+function requestWindowAttention(win: BrowserWindow, reason?: 'done' | 'question'): void {
+  if (win.isDestroyed() || win.isFocused()) return
+
+  if (process.platform === 'darwin' && app.dock) {
+    if (!dockBounceByWindow.has(win.id)) {
+      const type = reason === 'question' ? 'critical' : 'informational'
+      dockBounceByWindow.set(win.id, app.dock.bounce(type))
+    }
+    return
+  }
+
+  win.flashFrame(true)
+}
+
 function createWindow(setMain = true, opts?: { docOnly?: boolean; termOnly?: boolean }): BrowserWindow {
   const docOnly = !!opts?.docOnly
   const termOnly = !!opts?.termOnly
@@ -229,6 +254,12 @@ function createWindow(setMain = true, opts?: { docOnly?: boolean; termOnly?: boo
   })
 
   if (setMain) mainWindow = win
+
+  win.on('focus', () => stopWindowAttention(win))
+  win.on('closed', () => {
+    stopWindowAttention(win)
+    if (mainWindow === win) mainWindow = null
+  })
 
   win.webContents.on('before-input-event', (event, input) => {
     const key = input.key.toLowerCase()
@@ -279,6 +310,11 @@ function createWindow(setMain = true, opts?: { docOnly?: boolean; termOnly?: boo
 // 새 창 (새 작업환경)
 ipcMain.handle('window:new', () => {
   createWindow(false)
+})
+
+ipcMain.on('app:requestAttention', (e, payload?: { reason?: 'done' | 'question' }) => {
+  const win = BrowserWindow.fromWebContents(e.sender)
+  if (win) requestWindowAttention(win, payload?.reason)
 })
 
 // 문서 전용(찢어낸) 창 등에서 'Claude에 물어보기' → 메인 창의 활성 터미널로 전달
@@ -1256,6 +1292,8 @@ ipcMain.handle('fs:readText', async (_e, filePath: string) => {
 })
 
 // ── PTY (터미널) IPC ──
+registerAgentIpc(ipcMain)
+
 ipcMain.handle('pty:create', (e, opts: CreatePtyOptions) => {
   createPty(opts, e.sender)
 })
@@ -1267,6 +1305,7 @@ ipcMain.on('pty:detach', (e, { id }: { id: string }) => detachPty(id, e.sender))
 ipcMain.on('pty:kill', (_e, { id }: { id: string }) => killPty(id))
 
 app.on('before-quit', () => {
+  disposeAgentSessions()
   killAllPty()
   disposeRemote()
 })

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react'
 import Terminal from './terminal/Terminal'
-import FileTree, { LT_PATH, sortEntries, type SortMode } from './filetree/FileTree'
+import FileTree, { LT_PATH, sortEntries, type PendingCreateRequest, type SortMode } from './filetree/FileTree'
 import PdfViewer, { type PdfViewStatus } from './viewer/PdfViewer'
 import RecordViewer from './viewer/RecordViewer'
 import { parseRecordFiles, type ParsedRecord, type OutlineItem } from './viewer/recordOutline'
@@ -176,6 +176,7 @@ interface TermTab {
   cwd: string
   recordsFolder?: string
   suggestedRecords?: string // 페어링으로 추천된 소송기록 폴더 (사용자가 '열기' 눌러야 적용)
+  suggestedRecordOptions?: FolderMatchSuggestion[]
   autoClaude?: boolean // 사건 열기 = claude 자동 실행, + 새 터미널 = 빈 셸
   // JuriSupport 사건에서 연 세션의 메타 (자동 명명·사건별 필터용)
   jsId?: string
@@ -196,6 +197,13 @@ interface TermTab {
 type WorkTabKind = 'doc' | 'terminal'
 type WorkTabKey = `${WorkTabKind}:${string}`
 type TermRunStatus = 'working' | 'done' | 'question'
+
+interface FolderMatchSuggestion {
+  path: string
+  name: string
+  reason: string
+  score: number
+}
 
 const docSide = (tab?: DocTab): DockSide => tab?.side ?? 'left'
 const termSide = (tab?: TermTab): DockSide => tab?.side ?? 'right'
@@ -421,6 +429,16 @@ const searchNorm = (value?: string): string =>
     .normalize('NFKC')
     .toLowerCase()
     .replace(/\s+/g, '')
+
+const matchNorm = (value?: string | null): string =>
+  (value ?? '')
+    .normalize('NFC')
+    .normalize('NFKC')
+    .toLowerCase()
+    .replace(/[\s_\-.,()[\]{}·]+/g, '')
+
+const fileNameFromPath = (path: string): string =>
+  path.replace(/[\\/]+$/, '').split(/[\\/]/).pop() || path
 
 const matchesSearch = (parts: (string | number | undefined)[], query: string): boolean => {
   const tokens = query
@@ -688,6 +706,8 @@ export default function App(): JSX.Element {
   const [syncInit, setSyncInit] = useState<{
     profile: SshProfile
     macFolder: string
+    folderLabel?: string
+    directions?: 'both' | 'pull-only'
   } | null>(null)
   const [workspacePick, setWorkspacePick] = useState<{
     loading: boolean
@@ -718,7 +738,7 @@ export default function App(): JSX.Element {
   const [treeRefresh, setTreeRefresh] = useState(0)
 
   // 탐색기 인라인 생성 (VS Code식: 트리에 입력칸이 떠서 이름 입력)
-  const [pendingCreate, setPendingCreate] = useState<'file' | 'folder' | null>(null)
+  const [pendingCreate, setPendingCreate] = useState<PendingCreateRequest | null>(null)
   const closeActiveTermRef = useRef<() => void>(() => {})
   const closeActiveTabRef = useRef<() => void>(() => {})
 
@@ -1055,7 +1075,8 @@ export default function App(): JSX.Element {
     records?: string,
     suggested?: string,
     caseMeta?: CaseMeta,
-    side: DockSide = 'right'
+    side: DockSide = 'right',
+    suggestedOptions?: FolderMatchSuggestion[]
   ): void => {
     const tab: TermTab = {
       id: newId(),
@@ -1063,6 +1084,7 @@ export default function App(): JSX.Element {
       cwd: drafts,
       recordsFolder: records,
       suggestedRecords: suggested,
+      suggestedRecordOptions: suggestedOptions,
       autoClaude: true, // 사건 열기 → claude 자동 실행
       createdAt: Date.now(),
       side,
@@ -1139,15 +1161,26 @@ export default function App(): JSX.Element {
     profile: SshProfile,
     remotePath: string,
     title: string,
-    records?: string
+    records?: string,
+    suggestions?: FolderMatchSuggestion[]
   ): void => {
-    if (!records) return
+    if (!records && !suggestions?.length) return
     setTermTabs((tabs) =>
-      tabs.map((t) => (t.id === tabId ? { ...t, recordsFolder: records } : t))
+      tabs.map((t) =>
+        t.id === tabId
+          ? {
+              ...t,
+              recordsFolder: records,
+              suggestedRecords: records ? undefined : suggestions?.[0]?.path,
+              suggestedRecordOptions: records ? undefined : suggestions
+            }
+          : t
+      )
     )
     setCurrentCase((c) =>
-      c?.profileId === profile.id && c.remotePath === remotePath ? { ...c, records } : c
+      c?.profileId === profile.id && c.remotePath === remotePath && records ? { ...c, records } : c
     )
+    if (!records) return
     const drafts = remoteUri(profile.id, remotePath)
     window.lt.case.setPairing(drafts, records)
     window.lt.case.addHistory({ drafts, records, name: title }).then(setRecent)
@@ -1161,7 +1194,7 @@ export default function App(): JSX.Element {
     c?: JsCase
   ): void => {
     void resolveRemoteRecords(profile, remotePath, c)
-      .then((records) => attachRemoteRecords(tabId, profile, remotePath, title, records))
+      .then((r) => attachRemoteRecords(tabId, profile, remotePath, title, r.records, r.suggestions))
       .catch(() => {})
   }
 
@@ -1176,15 +1209,16 @@ export default function App(): JSX.Element {
     profile: SshProfile,
     draftsRemotePath: string,
     c?: JsCase
-  ): Promise<string | undefined> => {
+  ): Promise<{ records?: string; suggestions?: FolderMatchSuggestion[] }> => {
     const draftsKey = remoteUri(profile.id, draftsRemotePath)
     const paired = await window.lt.case.getPairing(draftsKey)
-    if (paired) return paired
-    if (!profile.recordsRoot) return undefined
+    if (paired) return { records: paired }
+    if (!profile.recordsRoot) return {}
     const recRoot = remoteUri(profile.id, profile.recordsRoot)
-    if (c) return await matchCaseFolder(recRoot, c)
+    if (c) return resolveFolderMatch(await matchCaseFolders(recRoot, c))
     const name = draftsRemotePath.replace(/\/+$/, '').split('/').pop() ?? ''
-    return await matchRemoteByName(recRoot, name)
+    const matched = await matchRemoteByName(recRoot, name)
+    return matched ? { records: matched } : {}
   }
 
   // 원격 루트(ssh:// URI)에서 폴더명으로 매칭 — 소송기록 폴더 자동 지정용. 매칭 항목의 ssh:// URI 반환.
@@ -1192,19 +1226,33 @@ export default function App(): JSX.Element {
     try {
       const list = await window.lt.fs.list(rootUri)
       const dirs = list.filter((e) => e.isDir)
-      const norm = (s: string): string => s.replace(/\s+/g, '').toLowerCase()
-      const n = norm(name)
+      const n = matchNorm(name)
       if (n.length < 2) return undefined
       return (
-        dirs.find((d) => norm(d.name) === n)?.path ??
-        dirs.find((d) => norm(d.name).includes(n) || n.includes(norm(d.name)))?.path
+        dirs.find((d) => matchNorm(d.name) === n)?.path ??
+        dirs.find((d) => {
+          const dn = matchNorm(d.name)
+          return dn.includes(n) || n.includes(dn)
+        })?.path
       )
     } catch {
       return undefined
     }
   }
 
-  // rclone 동기화 모달 열기 — 맥의 사건 폴더(원격 경로)를 추정해 프리필.
+  const syncProfileForRemote = (profileId: string): SshProfile =>
+    sshProfiles.find((p) => p.id === profileId) ?? sshProfiles[0]
+
+  const localMirrorPathForSync = (
+    localPath: string,
+    profile: SshProfile,
+    root?: string
+  ): string => {
+    const name = localPath.replace(/[\\/]+$/, '').split(/[\\/]/).pop() ?? ''
+    return root ? root.replace(/\/+$/, '') + '/' + name : ''
+  }
+
+  // rclone 동기화 모달 열기 — 맥의 작성서류 폴더(원격 경로)를 추정해 프리필.
   // (클라우드 경유 모델: 맥에서 rclone 실행 → 맥 폴더 ↔ OneDrive 클라우드)
   const openSync = (): void => {
     if (sshProfiles.length === 0) {
@@ -1212,21 +1260,48 @@ export default function App(): JSX.Element {
       return
     }
     const cur = termTabs.find((t) => t.id === activeTerm)
-    const baseName = (p: string): string => p.replace(/[\\/]+$/, '').split(/[\\/]/).pop() ?? ''
     if (cur?.ssh && cur.profileId) {
       // 활성 사건이 원격 → 그 맥 폴더를 그대로 사용
-      const profile = sshProfiles.find((p) => p.id === cur.profileId) ?? sshProfiles[0]
+      const profile = syncProfileForRemote(cur.profileId)
       setSyncInit({ profile, macFolder: cur.cwd })
     } else {
       // 활성 사건이 로컬 → 첫 프로필의 원격 작성서류 루트 하위 동일 폴더명으로 추정
       const localPath = cur?.cwd ?? currentCase?.drafts ?? ''
-      const name = baseName(localPath)
       const profile = sshProfiles[0]
       setSyncInit({
         profile,
-        macFolder: profile.draftsRoot ? profile.draftsRoot.replace(/\/+$/, '') + '/' + name : ''
+        macFolder: localMirrorPathForSync(localPath, profile, profile.draftsRoot)
       })
     }
+  }
+
+  // 소송기록 폴더는 기록뷰어에서 클라우드 → 맥/로컬 최신화만 제공한다.
+  const openRecordsSync = (): void => {
+    if (sshProfiles.length === 0) {
+      window.alert('먼저 설정에서 SSH 접속 프로필을 추가하세요.')
+      return
+    }
+    if (!activeRecordsFolder) {
+      window.alert('먼저 소송기록 폴더를 지정하세요.')
+      return
+    }
+    const remote = parseRemoteUri(activeRecordsFolder)
+    if (remote) {
+      setSyncInit({
+        profile: syncProfileForRemote(remote.profileId),
+        macFolder: remote.path,
+        folderLabel: '소송기록 폴더',
+        directions: 'pull-only'
+      })
+      return
+    }
+    const profile = sshProfiles[0]
+    setSyncInit({
+      profile,
+      macFolder: localMirrorPathForSync(activeRecordsFolder, profile, profile.recordsRoot),
+      folderLabel: '소송기록 폴더',
+      directions: 'pull-only'
+    })
   }
 
   // 📁/＋ 클릭: 저장된 SSH 프로필이 있으면 접속 선택 메뉴, 없으면 바로 로컬 폴더 선택.
@@ -1336,6 +1411,8 @@ export default function App(): JSX.Element {
       title: cur.title,
       cwd: cur.cwd,
       recordsFolder: cur.recordsFolder,
+      suggestedRecords: cur.suggestedRecords,
+      suggestedRecordOptions: cur.suggestedRecordOptions,
       autoClaude: true, // 새 터미널도 일괄적으로 claude 실행
       createdAt: Date.now(),
       jsId: cur.jsId,
@@ -1354,15 +1431,25 @@ export default function App(): JSX.Element {
   }
 
   // 추천 소송기록 폴더 적용 ('열기' 클릭 시)
-  const applySuggested = (): void => {
+  const applySuggested = (path?: string): void => {
     const cur = termTabs.find((t) => t.id === activeTerm)
-    if (!cur?.suggestedRecords) return
-    const rec = cur.suggestedRecords
+    if (!cur) return
+    if (!cur.suggestedRecords && !path) return
+    const rec = path ?? cur.suggestedRecords
+    if (!rec) return
     setTermTabs((tabs) =>
       tabs.map((t) =>
-        t.id === activeTerm ? { ...t, recordsFolder: rec, suggestedRecords: undefined } : t
+        t.id === activeTerm
+          ? {
+              ...t,
+              recordsFolder: rec,
+              suggestedRecords: undefined,
+              suggestedRecordOptions: undefined
+            }
+          : t
       )
     )
+    setCurrentCase((c) => (c ? { ...c, records: rec } : c))
     const drafts = historyDraftsForTerm(cur)
     window.lt.case.setPairing(drafts, rec)
     window.lt.case.addHistory({ drafts, records: rec, name: cur.title }).then(setRecent)
@@ -1416,6 +1503,7 @@ export default function App(): JSX.Element {
       })
     } else {
       playNotificationSound(notificationSound, notificationVolume)
+      window.lt.app.requestAttention(status)
       const bg = id !== activeTermRef.current
       if (bg) setTermAttention((s) => new Set(s).add(id))
       if (status === 'question' && bg) pushToast(id)
@@ -1505,7 +1593,16 @@ export default function App(): JSX.Element {
     if (!r) return
     if (cur) {
       setTermTabs((tabs) =>
-        tabs.map((t) => (t.id === activeTerm ? { ...t, recordsFolder: r.path } : t))
+        tabs.map((t) =>
+          t.id === activeTerm
+            ? {
+                ...t,
+                recordsFolder: r.path,
+                suggestedRecords: undefined,
+                suggestedRecordOptions: undefined
+              }
+            : t
+        )
       )
     }
     // 터미널 유무와 무관하게 현재 사건 컨텍스트에도 반영(뷰어가 이걸 참조)
@@ -1545,6 +1642,7 @@ export default function App(): JSX.Element {
       : (activeTermTab?.cwd ?? currentCase?.drafts)
   const activeRecordsFolder = activeTermTab?.recordsFolder ?? currentCase?.records
   const activeSuggestedRecords = activeTermTab?.suggestedRecords
+  const activeSuggestedRecordOptions = activeTermTab?.suggestedRecordOptions
   const defaultCaseOpenProfileId = caseOpenProfileId(
     resolveCaseOpenTarget(caseOpenTarget, sshProfiles)
   )
@@ -1615,6 +1713,19 @@ export default function App(): JSX.Element {
       cwd: t.cwd,
       recordsFolder: typeof t.recordsFolder === 'string' ? t.recordsFolder : undefined,
       suggestedRecords: typeof t.suggestedRecords === 'string' ? t.suggestedRecords : undefined,
+      suggestedRecordOptions: Array.isArray(t.suggestedRecordOptions)
+        ? t.suggestedRecordOptions
+            .filter(
+              (s): s is FolderMatchSuggestion =>
+                !!s &&
+                typeof s === 'object' &&
+                typeof s.path === 'string' &&
+                typeof s.name === 'string' &&
+                typeof s.reason === 'string' &&
+                typeof s.score === 'number'
+            )
+            .slice(0, 6)
+        : undefined,
       autoClaude: t.autoClaude ?? true,
       jsId: typeof t.jsId === 'string' ? t.jsId : undefined,
       court: typeof t.court === 'string' ? t.court : undefined,
@@ -1846,18 +1957,24 @@ export default function App(): JSX.Element {
   }
 
   // 탐색기 인라인 생성: 버튼 → 트리에 입력칸 표시
-  const newFile = (): void => (activeDraftsFolder ? setPendingCreate('file') : addDoc())
+  const newFile = (): void =>
+    activeDraftsFolder ? setPendingCreate({ type: 'file', dir: activeDraftsFolder }) : addDoc()
   const newFolder = (): void => {
-    if (activeDraftsFolder) setPendingCreate('folder')
+    if (activeDraftsFolder) setPendingCreate({ type: 'folder', dir: activeDraftsFolder })
   }
 
-  const onCreateEntry = (name: string, type: 'file' | 'folder'): void => {
+  const onCreateEntry = (name: string, type: 'file' | 'folder', targetDir?: string): void => {
     setPendingCreate(null)
-    const dir = activeDraftsFolder
+    const dir = targetDir ?? activeDraftsFolder
     if (!dir) return
     const n = name.trim()
     if (type === 'folder') {
-      if (n) window.lt.fs.mkdir(dir, n).then(() => setTreeRefresh((x) => x + 1))
+      if (n) {
+        window.lt.fs.mkdir(dir, n).then((r) => {
+          if (r.ok) setTreeRefresh((x) => x + 1)
+          else if (r.error) window.alert('폴더 생성 실패: ' + r.error)
+        })
+      }
       return
     }
     // 파일: 이름 없으면 무제 스크래치(저장 시 이름 물어봄)
@@ -1873,6 +1990,8 @@ export default function App(): JSX.Element {
       if (r.ok && r.path) {
         setTreeRefresh((x) => x + 1)
         openFile(r.path, r.path.split(/[\\/]/).pop() ?? fn)
+      } else if (r.error) {
+        window.alert('문서 생성 실패: ' + r.error)
       }
     })
   }
@@ -2073,35 +2192,69 @@ export default function App(): JSX.Element {
 
   const caseRef = (c: JsCase): string => `${c.caseNumber ?? ''} ${c.caseName ?? ''}`.trim() || c.id
 
-  // 폴더명 자동 매칭 (사건번호 우선 → 사건명/당사자명 부분일치)
-  const matchCaseFolder = async (root: string, c: JsCase): Promise<string | undefined> => {
+  const resolveFolderMatch = (
+    suggestions: FolderMatchSuggestion[]
+  ): { records?: string; suggestions?: FolderMatchSuggestion[] } => {
+    const top = suggestions[0]
+    if (!top) return {}
+    const nextScore = suggestions[1]?.score ?? 0
+    if (top.reason === '사건번호 일치' && top.score > nextScore) return { records: top.path }
+    return { suggestions }
+  }
+
+  // 폴더명 자동 매칭 후보 (사건번호 우선 → 사건명/당사자명 부분일치)
+  const matchCaseFolders = async (root: string, c: JsCase): Promise<FolderMatchSuggestion[]> => {
     try {
       const list = await window.lt.fs.list(root)
       const dirs = list.filter((e) => e.isDir)
-      const norm = (s: string): string => s.replace(/\s+/g, '').toLowerCase()
-      if (c.caseNumber) {
-        const no = norm(c.caseNumber)
-        const hit = dirs.find((d) => norm(d.name).includes(no))
-        if (hit) return hit.path
+      const candidates = new Map<string, FolderMatchSuggestion>()
+      const put = (path: string, name: string, reason: string, score: number): void => {
+        const prev = candidates.get(path)
+        if (!prev || score > prev.score) candidates.set(path, { path, name, reason, score })
       }
-      const keys = [c.caseName, ...c.parties.map((p) => p.party.name)]
+      if (c.caseNumber) {
+        const no = matchNorm(c.caseNumber)
+        for (const d of dirs) {
+          const dn = matchNorm(d.name)
+          if (dn.includes(no)) put(d.path, d.name, '사건번호 일치', dn === no ? 120 : 100)
+        }
+      }
+      const caseNameKey = matchNorm(c.caseName)
+      if (caseNameKey.length >= 2) {
+        for (const d of dirs) {
+          if (matchNorm(d.name).includes(caseNameKey)) put(d.path, d.name, '사건명 일치', 80)
+        }
+      }
+      const partyKeys = c.parties
+        .map((p) => p.party.name)
         .filter(Boolean)
-        .map((s) => norm(s as string))
+        .map((s) => matchNorm(s as string))
         .filter((s) => s.length >= 2)
-      const hit = dirs.find((d) => keys.some((k) => norm(d.name).includes(k)))
-      return hit?.path
+      for (const d of dirs) {
+        const dn = matchNorm(d.name)
+        if (partyKeys.some((k) => dn.includes(k))) put(d.path, d.name, '당사자명 일치', 60)
+      }
+      return [...candidates.values()].sort((a, b) => b.score - a.score || a.name.localeCompare(b.name))
     } catch {
-      return undefined
+      return []
     }
   }
+
+  const matchCaseFolder = async (root: string, c: JsCase): Promise<string | undefined> =>
+    (await matchCaseFolders(root, c))[0]?.path
 
   // 좌클릭: 사건 작업환경 열기 (폴더 매칭 → 없으면 직접 지정 → 터미널/뷰어 연결)
   const openCaseWorkspace = async (c: JsCase): Promise<void> => {
     const saved = await window.lt.case.getJsPairing(c.id)
     let drafts = saved?.drafts
     let records = saved?.records
+    let recordSuggestions: FolderMatchSuggestion[] = []
     if (!drafts && draftsRoot) drafts = await matchCaseFolder(draftsRoot, c)
-    if (!records && recordsRoot) records = await matchCaseFolder(recordsRoot, c)
+    if (!records && recordsRoot) {
+      const resolved = resolveFolderMatch(await matchCaseFolders(recordsRoot, c))
+      records = resolved.records
+      recordSuggestions = resolved.records ? [] : (resolved.suggestions ?? [])
+    }
     if (!drafts) {
       // 자동 매칭 실패 → 사용자가 직접 작성서류 폴더 지정
       const picked = await window.lt.dialog.pickFolder({
@@ -2112,6 +2265,7 @@ export default function App(): JSX.Element {
       drafts = picked.path
     }
     await window.lt.case.setJsPairing(c.id, drafts, records)
+    const suggested = records ? undefined : recordSuggestions[0]?.path
     // 세션 자동 명명: 법원(약칭) · 사건번호 · 사건명
     const court = c.court || ''
     const client = c.parties
@@ -2135,12 +2289,19 @@ export default function App(): JSX.Element {
       setTermTabs((tabs) =>
         tabs.map((t) =>
           t.id === existing.id
-            ? { ...t, ...meta, title: name, recordsFolder: records ?? t.recordsFolder }
+            ? {
+                ...t,
+                ...meta,
+                title: name,
+                recordsFolder: records ?? t.recordsFolder,
+                suggestedRecords: suggested,
+                suggestedRecordOptions: recordSuggestions.length ? recordSuggestions : undefined
+              }
             : t
         )
       )
     } else {
-      createCase(drafts, name, records, undefined, meta)
+      createCase(drafts, name, records, suggested, meta, 'right', recordSuggestions)
     }
     setMode('explorer')
   }
@@ -2150,6 +2311,7 @@ export default function App(): JSX.Element {
     profile: SshProfile
     name: string
     meta: CaseMeta
+    caseData: JsCase
   } | null>(null)
   const openCaseRemote = async (c: JsCase, profile: SshProfile): Promise<void> => {
     const court = c.court || ''
@@ -2180,7 +2342,7 @@ export default function App(): JSX.Element {
       setMode('explorer')
     } else {
       // 작성서류 매칭 실패 → 폴더 선택기로 직접 지정 (소송기록은 picker onPick에서 resolve)
-      setRemoteCasePick({ profile, name, meta })
+      setRemoteCasePick({ profile, name, meta, caseData: c })
     }
   }
 
@@ -2329,6 +2491,7 @@ export default function App(): JSX.Element {
       draftsFolder={activeDraftsFolder}
       recordsFolder={activeRecordsFolder}
       suggestedRecords={activeSuggestedRecords}
+      suggestedRecordOptions={activeSuggestedRecordOptions}
       record={panelRecord}
       refreshNonce={treeRefresh}
       onOpenFile={openFile}
@@ -2338,6 +2501,7 @@ export default function App(): JSX.Element {
       onPasteTo={pasteFilesTo}
       onDownload={downloadEntry}
       onPickRecords={pickRecords}
+      onSyncRecords={sshProfiles.length > 0 ? openRecordsSync : undefined}
       onApplySuggested={applySuggested}
       onOpenItem={onOpenItem}
       onDropFiles={onDropFiles}
@@ -2348,6 +2512,7 @@ export default function App(): JSX.Element {
       onOpenCase={openCaseWorkspace}
       jsNonce={jsNonce}
       pendingCreate={pendingCreate}
+      onRequestCreate={(dir, type) => setPendingCreate({ type, dir })}
       onCreateEntry={onCreateEntry}
       onCancelCreate={() => setPendingCreate(null)}
     />
@@ -2848,10 +3013,10 @@ export default function App(): JSX.Element {
           title={`「${remoteCasePick.name}」 작성서류 폴더 선택`}
           onCancel={() => setRemoteCasePick(null)}
           onPick={async (remotePath) => {
-            const { profile, name, meta } = remoteCasePick
+            const { profile, name, meta, caseData } = remoteCasePick
             setRemoteCasePick(null)
             const opened = createRemoteCase(profile, remotePath, name, meta)
-            resolveRemoteRecordsLater(opened.id, profile, remotePath, opened.title)
+            resolveRemoteRecordsLater(opened.id, profile, remotePath, opened.title, caseData)
             setMode('explorer')
           }}
         />
@@ -2878,7 +3043,16 @@ export default function App(): JSX.Element {
             const uri = remoteUri(recordsPick.profile.id, remotePath)
             const cur = termTabs.find((t) => t.id === activeTerm)
             setTermTabs((tabs) =>
-              tabs.map((t) => (activeTerm && t.id === activeTerm ? { ...t, recordsFolder: uri } : t))
+              tabs.map((t) =>
+                activeTerm && t.id === activeTerm
+                  ? {
+                      ...t,
+                      recordsFolder: uri,
+                      suggestedRecords: undefined,
+                      suggestedRecordOptions: undefined
+                    }
+                  : t
+              )
             )
             setCurrentCase((c) => (c ? { ...c, records: uri } : c))
             // 페어링 기억 → 다음에 이 사건을 열면 자동 적용
@@ -3066,6 +3240,7 @@ function DocsPanel({
   draftsFolder,
   recordsFolder,
   suggestedRecords,
+  suggestedRecordOptions,
   record,
   refreshNonce,
   onOpenFile,
@@ -3075,6 +3250,7 @@ function DocsPanel({
   onPasteTo,
   onDownload,
   onPickRecords,
+  onSyncRecords,
   onApplySuggested,
   onOpenItem,
   onDropFiles,
@@ -3085,6 +3261,7 @@ function DocsPanel({
   onOpenCase,
   jsNonce,
   pendingCreate,
+  onRequestCreate,
   onCreateEntry,
   onCancelCreate
 }: {
@@ -3092,6 +3269,7 @@ function DocsPanel({
   draftsFolder?: string
   recordsFolder?: string
   suggestedRecords?: string
+  suggestedRecordOptions?: FolderMatchSuggestion[]
   record: ParsedRecord | null
   refreshNonce: number
   onOpenFile: (path: string, name: string) => void
@@ -3101,7 +3279,8 @@ function DocsPanel({
   onPasteTo: (dir: string) => void
   onDownload: (path: string, name: string, isDir: boolean) => void
   onPickRecords: () => void
-  onApplySuggested: () => void
+  onSyncRecords?: () => void
+  onApplySuggested: (path?: string) => void
   onOpenItem: (it: OutlineItem) => void
   onDropFiles: (files: FileList) => void
   onNewFolder: () => void
@@ -3110,8 +3289,9 @@ function DocsPanel({
   onOpenWorkspace: () => void
   onOpenCase: (c: JsCase) => void
   jsNonce: number
-  pendingCreate: 'file' | 'folder' | null
-  onCreateEntry: (name: string, type: 'file' | 'folder') => void
+  pendingCreate: PendingCreateRequest | null
+  onRequestCreate: (dir: string, type: 'file' | 'folder') => void
+  onCreateEntry: (name: string, type: 'file' | 'folder', dir?: string) => void
   onCancelCreate: () => void
 }): JSX.Element {
   const title = { explorer: '탐색기', cases: '다가오는 기일', viewer: '문서' }[mode]
@@ -3240,9 +3420,21 @@ function DocsPanel({
             <span className="sidebar-title">{title}</span>
             <span className="header-actions">
               {mode === 'viewer' && recordsFolder && (
-                <button className="header-btn" title="소송기록 폴더 변경" onClick={onPickRecords}>
-                  변경
-                </button>
+                <>
+                  {onSyncRecords && (
+                    <button
+                      className="tool-btn"
+                      title="소송기록 클라우드에서 최신화"
+                      onClick={onSyncRecords}
+                    >
+                      <IconSync size={15} />
+                      <span className="sr-only">소송기록 최신화</span>
+                    </button>
+                  )}
+                  <button className="header-btn" title="소송기록 폴더 변경" onClick={onPickRecords}>
+                    변경
+                  </button>
+                </>
               )}
             </span>
           </>
@@ -3263,6 +3455,7 @@ function DocsPanel({
               pendingCreate={pendingCreate}
               sortMode={sortMode}
               filter={fileFindOpen ? fileFindQuery : ''}
+              onRequestCreate={onRequestCreate}
               onCreate={onCreateEntry}
               onCancelCreate={onCancelCreate}
             />
@@ -3280,7 +3473,15 @@ function DocsPanel({
               )}
             </>
           ) : (
-            <RecordsBody {...{ draftsFolder, suggestedRecords, onPickRecords, onApplySuggested }} />
+            <RecordsBody
+              {...{
+                draftsFolder,
+                suggestedRecords,
+                suggestedRecordOptions,
+                onPickRecords,
+                onApplySuggested
+              }}
+            />
           ))}
         {mode === 'cases' && <UpcomingHearings nonce={jsNonce} onPick={onOpenCase} />}
       </div>
@@ -3374,22 +3575,50 @@ function OutlineList({
 function RecordsBody({
   draftsFolder,
   suggestedRecords,
+  suggestedRecordOptions,
   onPickRecords,
   onApplySuggested
 }: {
   draftsFolder?: string
   suggestedRecords?: string
+  suggestedRecordOptions?: FolderMatchSuggestion[]
   onPickRecords: () => void
-  onApplySuggested: () => void
+  onApplySuggested: (path?: string) => void
 }): JSX.Element {
-  if (suggestedRecords)
+  const suggestions =
+    suggestedRecordOptions?.length
+      ? suggestedRecordOptions
+      : suggestedRecords
+        ? [
+            {
+              path: suggestedRecords,
+              name: fileNameFromPath(suggestedRecords),
+              reason: '이전 연결',
+              score: 0
+            }
+          ]
+        : []
+  if (suggestions.length)
     return (
       <div className="suggest pad">
-        <p className="muted small">이전에 연결한 소송기록 폴더가 있습니다:</p>
-        <p className="suggest-path">{suggestedRecords}</p>
+        <p className="muted small">연결할 수 있는 소송기록 폴더 후보가 있습니다:</p>
+        <div className="suggest-list">
+          {suggestions.slice(0, 6).map((s) => (
+            <button
+              key={s.path}
+              className="suggest-option"
+              title={s.path}
+              onClick={() => onApplySuggested(s.path)}
+            >
+              <span className="suggest-name">{s.name}</span>
+              <span className="suggest-reason">{s.reason}</span>
+              <span className="suggest-path">{s.path}</span>
+            </button>
+          ))}
+        </div>
         <div className="suggest-actions">
-          <button className="empty-action" onClick={onApplySuggested}>
-            이 폴더 열기
+          <button className="empty-action" onClick={() => onApplySuggested(suggestions[0]?.path)}>
+            첫 후보 열기
           </button>
           <button className="header-btn" onClick={onPickRecords}>
             다른 폴더…
@@ -5108,6 +5337,15 @@ const REMOTE_START_POINTS = [
   { label: 'OneDrive', path: '~/Library/CloudStorage/OneDrive' },
   { label: 'Documents', path: '~/Documents' }
 ]
+const REMOTE_FOLDER_SEARCH_DEPTH = 5
+const REMOTE_FOLDER_SEARCH_LIMIT = 150
+
+function joinRemotePickerPath(dir: string, name: string): string {
+  const cleanDir = dir.trim().replace(/\/+$/, '')
+  if (!cleanDir || cleanDir === '~') return `~/${name}`
+  if (cleanDir === '/') return `/${name}`
+  return `${cleanDir}/${name}`
+}
 
 // 원격(SSH) 사건 폴더 탐색·선택. ssh.listDir(키/agent 인증)로 목록을 받고,
 // 실패 시(비밀번호 인증 등) 원격 경로를 직접 입력하는 폴백을 제공한다.
@@ -5132,14 +5370,30 @@ function RemoteFolderPicker({
   const [err, setErr] = useState<string>('')
   const [loading, setLoading] = useState(false)
   const [pathInput, setPathInput] = useState(initial)
-  const [syncOpen, setSyncOpen] = useState<{ macFolder: string; reloadPath: string } | null>(null)
+  const [syncOpen, setSyncOpen] = useState<{
+    macFolder: string
+    reloadPath: string
+    folderLabel: string
+  } | null>(null)
   const [sortMode, setSortMode] = useState<SortMode>('name-asc')
+  const [folderQuery, setFolderQuery] = useState('')
+  const [folderSearching, setFolderSearching] = useState(false)
+  const [folderSearchResults, setFolderSearchResults] = useState<RemoteEntry[] | null>(null)
+  const [folderSearchErr, setFolderSearchErr] = useState('')
+  const [newFolderName, setNewFolderName] = useState('')
+  const [creatingFolder, setCreatingFolder] = useState(false)
+  const [createFolderErr, setCreateFolderErr] = useState('')
+  const folderSearchSeq = useRef(0)
 
   const load = (path: string): void => {
     const nextPath = path.trim() || '~'
+    folderSearchSeq.current++
     setPathInput(nextPath)
     setLoading(true)
     setErr('')
+    setFolderSearching(false)
+    setFolderSearchResults(null)
+    setFolderSearchErr('')
     window.lt.ssh
       .listDir(profile, nextPath)
       .then((r) => {
@@ -5173,10 +5427,96 @@ function RemoteFolderPicker({
   const canUsePathInput = pathInput.trim().length > 0
   const syncPath = (pathInput.trim() || cwd).trim()
   const canSyncOneDrive = looksLikeOneDrivePath(syncPath)
+  const syncFolderLabel = title.includes('소송기록') ? '소송기록 폴더' : '사건폴더'
+  const visibleDirs = folderSearchResults ? sortEntries(folderSearchResults, sortMode) : dirs
+  const folderQueryText = folderQuery.trim()
+  const canCreateFolder = !loading && !err && !!cwd.trim() && !!newFolderName.trim() && !creatingFolder
   const closeSync = (): void => {
     const reloadPath = syncOpen?.reloadPath
     setSyncOpen(null)
     if (reloadPath) load(reloadPath)
+  }
+  const clearFolderSearch = (): void => {
+    folderSearchSeq.current++
+    setFolderQuery('')
+    setFolderSearching(false)
+    setFolderSearchResults(null)
+    setFolderSearchErr('')
+  }
+  const searchFolders = (): void => {
+    if (!folderQueryText) {
+      clearFolderSearch()
+      return
+    }
+    const seq = ++folderSearchSeq.current
+    const results: RemoteEntry[] = []
+    const seen = new Set<string>()
+    setFolderSearching(true)
+    setFolderSearchResults(null)
+    setFolderSearchErr('')
+
+    const walk = async (dir: string, depth: number): Promise<void> => {
+      if (depth > REMOTE_FOLDER_SEARCH_DEPTH || results.length >= REMOTE_FOLDER_SEARCH_LIMIT) return
+      const r = await window.lt.ssh.listDir(profile, dir)
+      if (folderSearchSeq.current !== seq) return
+      if (!r.ok) {
+        if (depth === 0) throw new Error(r.error)
+        return
+      }
+      const children = r.entries.filter((entry) => entry.isDir)
+      for (const entry of children) {
+        if (results.length >= REMOTE_FOLDER_SEARCH_LIMIT) return
+        if (!seen.has(entry.path) && matchesSearch([entry.name, entry.path], folderQueryText)) {
+          seen.add(entry.path)
+          results.push(entry)
+        }
+      }
+      for (const entry of children) {
+        if (results.length >= REMOTE_FOLDER_SEARCH_LIMIT) return
+        await walk(entry.path, depth + 1)
+      }
+    }
+
+    void walk(cwd, 0)
+      .then(() => {
+        if (folderSearchSeq.current !== seq) return
+        setFolderSearchResults(results)
+        setFolderSearching(false)
+      })
+      .catch((e: unknown) => {
+        if (folderSearchSeq.current !== seq) return
+        setFolderSearchResults([])
+        setFolderSearchErr(e instanceof Error ? e.message : String(e))
+        setFolderSearching(false)
+      })
+  }
+  const createRemoteFolder = (): void => {
+    const name = newFolderName.trim()
+    if (!name || creatingFolder) return
+    if (/[\\/]/.test(name)) {
+      setCreateFolderErr('폴더 이름에는 / 또는 \\ 문자를 넣을 수 없습니다.')
+      return
+    }
+    const parentUri = remoteUri(profile.id, cwd)
+    const createdPath = joinRemotePickerPath(cwd, name)
+    setCreatingFolder(true)
+    setCreateFolderErr('')
+    window.lt.fs
+      .mkdir(parentUri, name)
+      .then((r) => {
+        setCreatingFolder(false)
+        if (!r.ok) {
+          setCreateFolderErr(r.error ?? '폴더를 만들지 못했습니다.')
+          return
+        }
+        setNewFolderName('')
+        clearFolderSearch()
+        load(createdPath)
+      })
+      .catch((e: unknown) => {
+        setCreatingFolder(false)
+        setCreateFolderErr(e instanceof Error ? e.message : String(e))
+      })
   }
 
   return (
@@ -5234,7 +5574,8 @@ function RemoteFolderPicker({
               onClick={() =>
                 setSyncOpen({
                   macFolder: syncPath,
-                  reloadPath: syncPath
+                  reloadPath: syncPath,
+                  folderLabel: syncFolderLabel
                 })
               }
             >
@@ -5274,8 +5615,50 @@ function RemoteFolderPicker({
               입력 경로 선택
             </button>
           </form>
+          <form
+            className="remote-search"
+            onSubmit={(e) => {
+              e.preventDefault()
+              searchFolders()
+            }}
+          >
+            <input
+              className="setting-input"
+              placeholder="현재 폴더 아래 폴더명 검색"
+              value={folderQuery}
+              onChange={(e) => setFolderQuery(e.target.value)}
+            />
+            <button className="header-btn" type="submit" disabled={!folderQueryText || loading || folderSearching}>
+              {folderSearching ? '검색 중' : '검색'}
+            </button>
+            {(folderQuery || folderSearchResults) && (
+              <button className="header-btn" type="button" onClick={clearFolderSearch}>
+                지우기
+              </button>
+            )}
+          </form>
+          <form
+            className="remote-create"
+            onSubmit={(e) => {
+              e.preventDefault()
+              createRemoteFolder()
+            }}
+          >
+            <input
+              className="setting-input"
+              placeholder="현재 위치에 새 폴더 이름"
+              value={newFolderName}
+              onChange={(e) => setNewFolderName(e.target.value)}
+            />
+            <button className="header-btn" type="submit" disabled={!canCreateFolder}>
+              {creatingFolder ? '생성 중' : '새 폴더'}
+            </button>
+          </form>
+          {createFolderErr && <pre className="remote-err">{createFolderErr}</pre>}
+          {folderSearchErr && <pre className="remote-err">{folderSearchErr}</pre>}
           <div className="remote-list">
             {loading && <p className="muted pad small">불러오는 중…</p>}
+            {!loading && folderSearching && <p className="muted pad small">폴더를 검색하는 중…</p>}
             {!loading && err && (
               <div className="pad">
                 <p className="muted small">
@@ -5284,21 +5667,25 @@ function RemoteFolderPicker({
                 <pre className="remote-err">{err}</pre>
               </div>
             )}
-            {!loading && !err && dirs.length === 0 && (
+            {!loading && !folderSearching && !err && visibleDirs.length === 0 && (
               <p className="muted pad small">
-                하위 폴더가 없습니다. 아래 ‘{confirmLabel}’를 누르거나 상위로 이동하세요.
+                {folderSearchResults
+                  ? '검색 결과가 없습니다.'
+                  : `하위 폴더가 없습니다. 아래 ‘${confirmLabel}’를 누르거나 상위로 이동하세요.`}
               </p>
             )}
             {!loading &&
+              !folderSearching &&
               !err &&
-              dirs.map((e) => (
+              visibleDirs.map((e) => (
                 <button
                   key={e.path}
-                  className="remote-row"
+                  className={`remote-row ${folderSearchResults ? 'remote-search-row' : ''}`}
                   onClick={() => load(e.path)}
                   title={e.path}
                 >
-                  📁 {e.name}
+                  <span className="remote-row-name">📁 {e.name}</span>
+                  {folderSearchResults && <span className="remote-row-path">{e.path}</span>}
                 </button>
               ))}
           </div>
@@ -5315,7 +5702,12 @@ function RemoteFolderPicker({
       {syncOpen && (
         <SyncModal
           profiles={[profile]}
-          init={{ profile, macFolder: syncOpen.macFolder }}
+          init={{
+            profile,
+            macFolder: syncOpen.macFolder,
+            folderLabel: syncOpen.folderLabel,
+            directions: 'pull-only'
+          }}
           onClose={closeSync}
         />
       )}
@@ -5331,7 +5723,12 @@ function SyncModal({
   onClose
 }: {
   profiles: SshProfile[]
-  init: { profile: SshProfile; macFolder: string }
+  init: {
+    profile: SshProfile
+    macFolder: string
+    folderLabel?: string
+    directions?: 'both' | 'pull-only'
+  }
   onClose: () => void
 }): JSX.Element {
   const [profileId, setProfileId] = useState(init.profile.id)
@@ -5347,6 +5744,8 @@ function SyncModal({
   const logRef = useRef<HTMLPreElement>(null)
   const profile = profiles.find((p) => p.id === profileId) ?? init.profile
   const running = runningDirection !== null
+  const folderLabel = init.folderLabel ?? '사건폴더'
+  const pullOnly = init.directions === 'pull-only'
   const runningLabel =
     runningDirection === 'pull' ? '내리기' : runningDirection === 'push' ? '올리기' : ''
 
@@ -5395,7 +5794,10 @@ function SyncModal({
   return (
     <div className="modal-overlay" onMouseDown={running ? undefined : onClose}>
       <div className="modal sync-modal" aria-busy={running} onMouseDown={(e) => e.stopPropagation()}>
-        <div className="modal-title">⇅ 동기화 (맥미니 rclone · 사건폴더 ↔ OneDrive 클라우드)</div>
+        <div className="modal-title">
+          ⇅ 동기화 (맥미니 rclone · {folderLabel}
+          {pullOnly ? ' ← OneDrive 클라우드' : ' ↔ OneDrive 클라우드'})
+        </div>
 
         <label className="sync-field">
           접속 프로필 (맥미니)
@@ -5446,7 +5848,7 @@ function SyncModal({
               </select>
             </label>
             <label className="sync-field">
-              맥 사건 폴더
+              맥 {folderLabel}
               <input
                 className="setting-input"
                 value={macFolder}
@@ -5497,9 +5899,11 @@ function SyncModal({
               )}
             </p>
             <div className="sync-buttons">
-              <button className="empty-action" disabled={!canRun} onClick={() => run('push')}>
-                {runningDirection === 'push' ? '올리기 진행 중...' : '⬆ 올리기 (맥 → 클라우드)'}
-              </button>
+              {!pullOnly && (
+                <button className="empty-action" disabled={!canRun} onClick={() => run('push')}>
+                  {runningDirection === 'push' ? '올리기 진행 중...' : '⬆ 올리기 (맥 → 클라우드)'}
+                </button>
+              )}
               <button className="empty-action" disabled={!canRun} onClick={() => run('pull')}>
                 {runningDirection === 'pull' ? '내리기 진행 중...' : '⬇ 내리기 (클라우드 → 맥)'}
               </button>

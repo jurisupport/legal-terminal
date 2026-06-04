@@ -100,6 +100,18 @@ class HtmlBreakWidget extends WidgetType {
   }
 }
 
+class HorizontalRuleWidget extends WidgetType {
+  eq(): boolean {
+    return true
+  }
+  toDOM(): HTMLElement {
+    const hr = document.createElement('div')
+    hr.className = 'cm-md-hr'
+    hr.setAttribute('role', 'separator')
+    return hr
+  }
+}
+
 function decodeEntity(src: string): string | null {
   const body = src.match(/^&(#x[\da-f]+|#\d+|[a-z][\da-z]+);$/i)?.[1]
   if (!body) return null
@@ -421,6 +433,20 @@ function build(state: EditorState): DecorationSet {
         if (name === 'HTMLBlock') {
           addInactiveHtmlPreviewDecorations(state, node.from, node.to, active, deco)
           return undefined
+        }
+
+        // 수평선: 비활성 행에서는 Markdown 기호 대신 구분선으로 표시
+        if (name === 'HorizontalRule') {
+          const line = state.doc.lineAt(node.from)
+          if (!active.has(line.number)) {
+            deco.push(
+              Decoration.replace({
+                widget: new HorizontalRuleWidget(),
+                block: true
+              }).range(line.from, line.to)
+            )
+          }
+          return false
         }
 
         // 인용블록: 줄마다 좌측 바

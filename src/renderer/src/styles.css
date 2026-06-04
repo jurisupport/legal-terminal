@@ -698,6 +698,12 @@ body {
 .cm-md-bullet {
   color: var(--fg-muted);
 }
+.cm-md-hr {
+  width: 100%;
+  height: 0;
+  margin: 0.8em 0;
+  border-top: 1px solid color-mix(in srgb, var(--fg-muted) 62%, transparent);
+}
 .cm-md-quote {
   border-left: 3px solid var(--accent);
   padding-left: 14px !important;
@@ -878,7 +884,7 @@ body {
 }
 .md-body hr {
   border: none;
-  border-top: 1px solid var(--border);
+  border-top: 1px solid color-mix(in srgb, var(--fg-muted) 62%, transparent);
   margin: 1.6em 0;
 }
 .md-body img {
@@ -1981,6 +1987,40 @@ body {
 }
 
 /* 소송기록 추천(페어링) 박스 */
+.suggest-list {
+  display: grid;
+  gap: 8px;
+  margin: 6px 0 10px;
+}
+.suggest-option {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 4px 8px;
+  width: 100%;
+  text-align: left;
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 8px 10px;
+  cursor: pointer;
+}
+.suggest-option:hover {
+  border-color: var(--accent);
+  background: var(--bg-activity);
+}
+.suggest-name {
+  min-width: 0;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.suggest-reason {
+  color: var(--accent);
+  font-size: 11px;
+  white-space: nowrap;
+}
 .suggest-path {
   font-family: var(--font-mono);
   font-size: 12px;
@@ -1990,6 +2030,14 @@ body {
   border-radius: 4px;
   margin: 6px 0 10px;
   word-break: break-all;
+}
+.suggest-option .suggest-path {
+  grid-column: 1 / -1;
+  margin: 0;
+  padding: 0;
+  color: var(--fg-muted);
+  background: transparent;
+  border-radius: 0;
 }
 .suggest-actions {
   display: flex;
@@ -2478,7 +2526,9 @@ body {
   color: var(--fg);
 }
 .remote-quick,
-.remote-jump {
+.remote-jump,
+.remote-search,
+.remote-create {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
@@ -2497,7 +2547,9 @@ body {
 .remote-chip:hover {
   background: var(--bg-alt);
 }
-.remote-jump .setting-input {
+.remote-jump .setting-input,
+.remote-search .setting-input,
+.remote-create .setting-input {
   flex: 1 1 280px;
   min-width: 180px;
 }
@@ -2511,7 +2563,9 @@ body {
   background: var(--bg);
 }
 .remote-row {
-  display: block;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
   width: 100%;
   text-align: left;
   background: transparent;
@@ -2524,6 +2578,20 @@ body {
 }
 .remote-row:hover {
   background: var(--bg-alt);
+}
+.remote-row-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.remote-row-path {
+  color: var(--fg-muted);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .remote-err {
   white-space: pre-wrap;
