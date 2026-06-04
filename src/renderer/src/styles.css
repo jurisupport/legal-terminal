@@ -17,6 +17,9 @@
   --fg-muted: #858585;
   --accent: #0e639c;
   --accent-fg: #ffffff;
+  --link: #8cc8ff;
+  --link-hover: #b9ddff;
+  --link-muted: #a7d4ff;
   --statusbar: #007acc;
   --tab-active: #1e1e1e;
   --tab-inactive: #2d2d2d;
@@ -665,8 +668,11 @@ body {
   font-size: 0.92em;
 }
 .cm-md-link {
-  color: #5aa0ff;
+  color: var(--link);
   text-decoration: underline;
+  text-decoration-color: color-mix(in srgb, var(--link) 72%, transparent);
+  text-decoration-thickness: 1px;
+  text-underline-offset: 2px;
 }
 .cm-md-heading {
   font-weight: 700;
@@ -838,11 +844,15 @@ body {
   margin: 0.2em 0;
 }
 .md-body a {
-  color: #5aa0ff;
-  text-decoration: none;
+  color: var(--link);
+  text-decoration: underline;
+  text-decoration-color: color-mix(in srgb, var(--link) 72%, transparent);
+  text-decoration-thickness: 1px;
+  text-underline-offset: 2px;
 }
 .md-body a:hover {
-  text-decoration: underline;
+  color: var(--link-hover);
+  text-decoration-color: currentColor;
 }
 .md-body code {
   font-family: var(--font-mono);
@@ -1149,17 +1159,21 @@ body {
 .dash-link {
   background: none;
   border: none;
-  color: #6cb6ff;
+  color: var(--link);
   cursor: pointer;
   font-size: 14px;
   padding: 4px;
+  text-decoration: underline;
+  text-decoration-color: color-mix(in srgb, var(--link) 72%, transparent);
+  text-underline-offset: 2px;
 }
 .dash-link:hover {
-  text-decoration: underline;
+  color: var(--link-hover);
+  text-decoration-color: currentColor;
 }
 .dash-link.sub {
   font-size: 12px;
-  color: var(--fg-muted);
+  color: var(--link-muted);
 }
 .dash-or {
   margin-top: 22px;

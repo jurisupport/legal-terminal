@@ -430,7 +430,13 @@ export default function Terminal({
               windowsPty: { backend: 'conpty' as const, buildNumber: 22621 }
             }
           : {}),
-        theme: { background: '#181818', foreground: '#cccccc', cursor: '#cccccc' }
+        theme: {
+          background: '#181818',
+          foreground: '#cccccc',
+          cursor: '#cccccc',
+          blue: '#8cc8ff',
+          brightBlue: '#b9ddff'
+        }
       })
       const fit = new FitAddon()
       term.loadAddon(fit)
