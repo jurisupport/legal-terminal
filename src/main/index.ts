@@ -1155,22 +1155,23 @@ ipcMain.handle('fs:download', async (_e, source: string) => {
 })
 
 // 마크다운(HTML) → PDF (Electron 내장 printToPDF, 외부 의존성 없음)
-ipcMain.handle('export:mdToPdf', async (_e, p: { html: string; defaultPath?: string }) => {
-  if (!mainWindow) return { ok: false }
-  const r = await dialog.showSaveDialog(mainWindow, {
+ipcMain.handle('export:mdToPdf', async (e, p: { html: string; defaultPath?: string }) => {
+  const parentWindow = BrowserWindow.fromWebContents(e.sender) ?? mainWindow
+  if (!parentWindow || parentWindow.isDestroyed()) return { ok: false }
+  const r = await dialog.showSaveDialog(parentWindow, {
     defaultPath: p.defaultPath,
     filters: [{ name: 'PDF', extensions: ['pdf'] }]
   })
   if (r.canceled || !r.filePath) return { ok: false }
   const tmp = join(app.getPath('temp'), `lt-print-${Date.now()}.html`)
-  const win = new BrowserWindow({
+  const printWindow = new BrowserWindow({
     show: false,
     webPreferences: { javascript: false, sandbox: true }
   })
   try {
     await writeFile(tmp, p.html, 'utf8')
-    await win.loadFile(tmp)
-    const pdf = await win.webContents.printToPDF({
+    await printWindow.loadFile(tmp)
+    const pdf = await printWindow.webContents.printToPDF({
       printBackground: true,
       pageSize: 'A4',
       margins: { top: 0.6, bottom: 0.6, left: 0.6, right: 0.6 }
@@ -1180,7 +1181,7 @@ ipcMain.handle('export:mdToPdf', async (_e, p: { html: string; defaultPath?: str
   } catch (e) {
     return { ok: false, error: String(e) }
   } finally {
-    win.destroy()
+    printWindow.destroy()
     rm(tmp, { force: true }).catch(() => {})
   }
 })
