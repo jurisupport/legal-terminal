@@ -100,18 +100,6 @@ class HtmlBreakWidget extends WidgetType {
   }
 }
 
-class HorizontalRuleWidget extends WidgetType {
-  eq(): boolean {
-    return true
-  }
-  toDOM(): HTMLElement {
-    const hr = document.createElement('div')
-    hr.className = 'cm-md-hr'
-    hr.setAttribute('role', 'separator')
-    return hr
-  }
-}
-
 function decodeEntity(src: string): string | null {
   const body = src.match(/^&(#x[\da-f]+|#\d+|[a-z][\da-z]+);$/i)?.[1]
   if (!body) return null
@@ -439,12 +427,8 @@ function build(state: EditorState): DecorationSet {
         if (name === 'HorizontalRule') {
           const line = state.doc.lineAt(node.from)
           if (!active.has(line.number)) {
-            deco.push(
-              Decoration.replace({
-                widget: new HorizontalRuleWidget(),
-                block: true
-              }).range(line.from, line.to)
-            )
+            deco.push(Decoration.line({ class: 'cm-md-hr-line' }).range(line.from))
+            deco.push(hidden.range(line.from, line.to))
           }
           return false
         }

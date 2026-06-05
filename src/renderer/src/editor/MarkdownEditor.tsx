@@ -119,9 +119,18 @@ function joinDefaultPath(dir: string, name: string): string {
   return `${dir.replace(/[\\/]+$/, '')}${sep}${name}`
 }
 
-function saveAsDefaultPath(currentPath?: string, defaultDir?: string): string | undefined {
+function defaultSaveName(title?: string): string {
+  const name = title?.trim().replace(/[\\/]+/g, '-')
+  return name || DEFAULT_UNTITLED_NAME
+}
+
+function saveAsDefaultPath(
+  currentPath?: string,
+  defaultDir?: string,
+  title?: string
+): string | undefined {
   if (currentPath && !isRemotePath(currentPath)) return currentPath
-  const name = fileNameOf(currentPath) ?? DEFAULT_UNTITLED_NAME
+  const name = fileNameOf(currentPath) ?? defaultSaveName(title)
   if (defaultDir && !isRemotePath(defaultDir)) return joinDefaultPath(defaultDir, name)
   return name
 }
@@ -214,6 +223,7 @@ function restoreViewport(view: EditorView, bookmark: ViewportBookmark, changes: 
  * path가 있으면 입력 후 자동 저장. path 없으면 Ctrl+S/저장으로 다른 이름 저장 후 자동 저장.
  */
 export default function MarkdownEditor({
+  title,
   path,
   defaultDir,
   onPath,
@@ -221,6 +231,7 @@ export default function MarkdownEditor({
   onSendToJuriSupport,
   onDirty
 }: {
+  title?: string
   path?: string
   defaultDir?: string
   onPath?: (path: string) => void
@@ -349,7 +360,7 @@ export default function MarkdownEditor({
     }
     const content = v.state.doc.toString()
     setSaveError('')
-    return window.lt.fs.saveAs(content, saveAsDefaultPath(pathRef.current, defaultDir)).then((r) => {
+    return window.lt.fs.saveAs(content, saveAsDefaultPath(pathRef.current, defaultDir, title)).then((r) => {
       if (r.ok && r.path) {
         pathRef.current = r.path
         onPath?.(r.path)
@@ -390,6 +401,13 @@ export default function MarkdownEditor({
     if (saveTimer.current) clearTimeout(saveTimer.current)
     saveTimer.current = setTimeout(saveNow, 700)
   }
+
+  useEffect(() => {
+    if (pathRef.current === path) return
+    pathRef.current = path
+    if (!localDirtyRef.current) setSavedState(!!path)
+    if (path) refreshSavedSignature(path)
+  }, [path])
 
   useEffect(() => {
     let alive = true

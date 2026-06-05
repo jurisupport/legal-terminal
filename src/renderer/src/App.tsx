@@ -497,6 +497,16 @@ const matchNorm = (value?: string | null): string =>
 const fileNameFromPath = (path: string): string =>
   path.replace(/[\\/]+$/, '').split(/[\\/]/).pop() || path
 
+const MARKDOWN_EXT_RE = /\.(md|markdown)$/i
+const FILE_EXT_RE = /\.[A-Za-z][A-Za-z0-9]{0,9}$/
+
+const markdownRenameName = (title: string, currentName: string): string => {
+  const next = title.trim()
+  const ext = currentName.match(MARKDOWN_EXT_RE)?.[0]
+  if (!next || !ext || MARKDOWN_EXT_RE.test(next) || FILE_EXT_RE.test(next)) return next
+  return `${next}${ext}`
+}
+
 const docKindForPath = (path: string): DocTab['kind'] => {
   const lower = path.toLowerCase()
   if (lower.endsWith('.pdf')) return 'pdf'
@@ -2242,6 +2252,43 @@ export default function App(): JSX.Element {
     })
   }
 
+  const renameDocTab = (id: string, title: string): void => {
+    const tab = docTabs.find((t) => t.id === id)
+    if (!tab) return
+    const nextTitle = title.trim() || tab.title
+    if (!tab.path || tab.kind !== 'mdview') {
+      const displayTitle =
+        tab.kind === 'mdview' ? markdownRenameName(nextTitle, tab.title) || nextTitle : nextTitle
+      setDocTabs((tabs) => tabs.map((t) => (t.id === id ? { ...t, title: displayTitle } : t)))
+      return
+    }
+
+    const currentName = fileNameFromPath(tab.path)
+    const nextName = markdownRenameName(nextTitle, currentName)
+    if (!nextName || nextName === currentName) return
+    window.lt.fs.rename(tab.path, nextName).then((r) => {
+      if (!r.ok || !r.path) {
+        if (r.error) window.alert('이름 변경 실패: ' + r.error)
+        return
+      }
+      const previousPath = tab.path as string
+      const nextPath = r.path
+      setTreeRefresh((n) => n + 1)
+      setDocTabs((tabs) =>
+        tabs.map((t) => {
+          const replaced = replacePathPrefix(t.path, previousPath, nextPath)
+          if (!replaced || replaced === t.path) return t
+          return {
+            ...t,
+            path: replaced,
+            title: t.path === previousPath ? fileNameFromPath(replaced) : t.title,
+            kind: t.path === previousPath ? docKindForPath(replaced) : t.kind
+          }
+        })
+      )
+    })
+  }
+
   // 파일/폴더 삭제 (확인은 FileTree에서 받음) — 삭제 후 트리 새로고침 + 해당 문서 탭 닫기
   const deleteEntry = (path: string): void => {
     window.lt.fs.delete(path).then((r) => {
@@ -2795,6 +2842,7 @@ export default function App(): JSX.Element {
       {tab?.kind === 'mdview' && (
         <MarkdownEditor
           key={tab.id}
+          title={tab.title}
           path={tab.path}
           defaultDir={draftsRoot}
           onPath={(p) => setDocPath(tab.id, p)}
@@ -2855,6 +2903,7 @@ export default function App(): JSX.Element {
         title: t.title,
         tooltip: t.path,
         path: t.path,
+        renamable: t.kind === 'mdview',
         dragPayload: t.path
           ? ({ kind: 'doc', path: t.path, title: t.title, side: docSide(t) } as TabPayload)
           : undefined
@@ -2868,6 +2917,7 @@ export default function App(): JSX.Element {
       onReorder={reorderDocs}
       onTearOut={closeDoc}
       onDragActive={setTabDragging}
+      onRename={renameDocTab}
     />
   )
 
@@ -3087,6 +3137,7 @@ export default function App(): JSX.Element {
         title: t.title,
         tooltip: t.path,
         path: t.path,
+        renamable: t.kind === 'mdview',
         dragPayload: t.path
           ? ({ kind: 'doc', path: t.path, title: t.title, side } as TabPayload)
           : undefined
@@ -3166,7 +3217,11 @@ export default function App(): JSX.Element {
           onDragActive={setTabDragging}
           onRename={(key, title) => {
             const parsed = parseWorkKey(key)
-            if (parsed?.kind !== 'terminal') return
+            if (!parsed) return
+            if (parsed.kind === 'doc') {
+              renameDocTab(parsed.id, title)
+              return
+            }
             setTermTabs((tabs) =>
               tabs.map((t) => (t.id === parsed.id ? { ...t, title, renamed: true } : t))
             )

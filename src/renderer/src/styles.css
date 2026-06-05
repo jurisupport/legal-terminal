@@ -712,11 +712,17 @@ body {
 .cm-md-bullet {
   color: var(--fg-muted);
 }
-.cm-md-hr {
-  width: 100%;
-  height: 0;
-  margin: 0.8em 0;
+.cm-md-hr-line {
+  line-height: 0;
+  padding: 0.8em 0 !important;
+}
+.cm-md-hr-line::after {
+  content: '';
+  display: block;
   border-top: 1px solid color-mix(in srgb, var(--fg-muted) 62%, transparent);
+  pointer-events: none;
+  -webkit-user-select: none;
+  user-select: none;
 }
 .cm-md-quote {
   border-left: 3px solid var(--accent);
