@@ -3,7 +3,7 @@ import { spawn } from 'child_process'
 import { request } from 'https'
 import { join, basename, dirname, extname, resolve, sep, posix } from 'path'
 import { readdir, readFile, stat, writeFile, copyFile, rm, mkdir, rename, cp } from 'fs/promises'
-import { existsSync } from 'fs'
+import { existsSync, type Dirent } from 'fs'
 import { fileURLToPath } from 'url'
 import { getSettings, setSettings, type Settings } from './settings'
 import {
@@ -625,6 +625,8 @@ const TEXT_EXT = new Set([
 const MAX_TEXT_BYTES = 2 * 1024 * 1024 // 2MB 초과 텍스트는 잘라서 안내
 const LOCAL_CLOUD_READ_TIMEOUT_MS = 45_000
 const LOCAL_CLOUD_HYDRATE_TIMEOUT_MS = 180_000
+const LOCAL_CLOUD_FOLDER_HYDRATE_TIMEOUT_MS = 8_000
+const LOCAL_CLOUD_FOLDER_HYDRATE_KICK_MS = 2_000
 const localPrefetching = new Set<string>()
 const localPrefetchedAt = new Map<string, number>()
 
@@ -730,6 +732,49 @@ async function hydrateLocalCloudFile(filePath: string, timeoutMs = LOCAL_CLOUD_H
   throw new Error(
     `OneDrive 파일 자동 다운로드가 시간 내 완료되지 않았습니다: ${filePath}\n맥 OneDrive 로그인/네트워크 상태를 확인한 뒤 다시 여세요. (${msg})`
   )
+}
+
+function hasVisibleDirEntry(entries: Dirent[]): boolean {
+  return entries.some((entry) => !entry.name.startsWith('.'))
+}
+
+async function hydrateLocalCloudFolder(dirPath: string): Promise<void> {
+  if (!isLikelyLocalOneDrivePath(dirPath)) return
+
+  const oneDrive = oneDriveCliPath()
+  const kicks: Promise<void>[] = []
+  if (oneDrive) {
+    void runQuiet('open', ['-ga', 'OneDrive'], 10_000).catch(() => {})
+    kicks.push(runQuiet(oneDrive, ['/pin', dirPath], 15_000).catch(() => {}))
+  }
+  kicks.push(runQuiet('fileproviderctl', ['materialize', dirPath], 15_000).catch(() => {}))
+  kicks.push(runQuiet('brctl', ['download', dirPath], 15_000).catch(() => {}))
+
+  await Promise.race([Promise.allSettled(kicks), delay(LOCAL_CLOUD_FOLDER_HYDRATE_KICK_MS)])
+
+  const deadline = Date.now() + LOCAL_CLOUD_FOLDER_HYDRATE_TIMEOUT_MS
+  while (Date.now() < deadline) {
+    try {
+      const entries = await readdir(dirPath, { withFileTypes: true })
+      if (hasVisibleDirEntry(entries)) return
+    } catch {
+      return
+    }
+    await delay(750)
+  }
+}
+
+async function readLocalDirEntries(dirPath: string): Promise<Dirent[]> {
+  const entries = await readdir(dirPath, { withFileTypes: true })
+  if (!isLikelyLocalOneDrivePath(dirPath) || hasVisibleDirEntry(entries)) return entries
+
+  await hydrateLocalCloudFolder(dirPath)
+  try {
+    const hydrated = await readdir(dirPath, { withFileTypes: true })
+    return hydrated.length >= entries.length ? hydrated : entries
+  } catch {
+    return entries
+  }
 }
 
 async function readLocalBytes(filePath: string): Promise<Buffer> {
@@ -1089,7 +1134,7 @@ ipcMain.handle('fs:rename', async (_e, p: { path: string; name: string }) => {
 
 ipcMain.handle('fs:list', async (_e, dirPath: string) => {
   if (isRemote(dirPath)) return rfsList(dirPath)
-  const entries = await readdir(dirPath, { withFileTypes: true })
+  const entries = await readLocalDirEntries(dirPath)
   const visible = entries.filter((e) => !e.name.startsWith('.'))
   const out = await Promise.all(
     visible.map(async (e) => {
@@ -1106,7 +1151,7 @@ ipcMain.handle('fs:list', async (_e, dirPath: string) => {
 
 // 폴더(하위 포함)의 모든 PDF 수집 — 전자소송기록 폴더 분류용
 async function walkPdfs(dir: string, out: { name: string; path: string }[]): Promise<void> {
-  const entries = await readdir(dir, { withFileTypes: true })
+  const entries = await readLocalDirEntries(dir)
   for (const e of entries) {
     if (e.name.startsWith('.')) continue
     const full = join(dir, e.name)

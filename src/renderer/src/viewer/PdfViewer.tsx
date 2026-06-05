@@ -1,10 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import * as pdfjs from 'pdfjs-dist'
 import type { PDFDocumentProxy, RenderTask } from 'pdfjs-dist'
-import workerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url'
+import PdfJsWorker from 'pdfjs-dist/build/pdf.worker.min.mjs?worker&inline'
 import { parseRecordOutline, type ParsedRecord } from './recordOutline'
-
-pdfjs.GlobalWorkerOptions.workerSrc = workerUrl
 
 export type PdfZoomMode = 'fit_page' | 'fit_width' | 'custom'
 export interface PdfViewStatus {
@@ -33,6 +31,13 @@ function resolveDefault(pdfZoom?: string): { mode: PdfZoomMode; scale: number } 
   const n = parseInt(pdfZoom, 10)
   if (!Number.isNaN(n)) return { mode: 'custom', scale: n / 100 }
   return { mode: 'fit_page', scale: 1 }
+}
+
+function createPdfWorker(): pdfjs.PDFWorker {
+  const port = new PdfJsWorker({ name: 'pdfjs-worker' })
+  return new pdfjs.PDFWorker({
+    port
+  } as unknown as ConstructorParameters<typeof pdfjs.PDFWorker>[0])
 }
 
 /**
@@ -170,7 +175,7 @@ export default function PdfViewer({
     window.lt.fs
       .readBytes(path)
       .then(async (ab) => {
-        loadingTask = pdfjs.getDocument({ data: new Uint8Array(ab) })
+        loadingTask = pdfjs.getDocument({ data: new Uint8Array(ab), worker: createPdfWorker() })
         loadingTask.onPassword = (updatePassword: (password: string) => void, reason: number) => {
           if (cancelled) return
           passwordCallbackRef.current = (password: string): void => {
