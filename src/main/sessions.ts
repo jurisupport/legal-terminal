@@ -58,6 +58,19 @@ export interface SessionMetaInput extends SessionSearchContext {
   ssh?: SshConn
 }
 
+export interface SessionTranscriptMessage {
+  id: string
+  role: 'user' | 'assistant'
+  text: string
+}
+
+export interface SessionTranscript {
+  sessionId: string
+  messages: SessionTranscriptMessage[]
+  mtime: number
+  truncated?: boolean
+}
+
 interface SessionMeta extends SessionMetaInput {
   key: string
   sourceKey: string
@@ -73,6 +86,10 @@ interface SessionIndex {
 const SESSION_INDEX_VERSION = 1
 const MAX_SESSION_INDEX_ENTRIES = 600
 const REMOTE_TRANSCRIPT_SCAN_LIMIT = 1000
+const MAX_SESSION_TRANSCRIPT_BYTES = 6 * 1024 * 1024
+const MAX_REMOTE_TRANSCRIPT_BUFFER = Math.ceil(MAX_SESSION_TRANSCRIPT_BYTES * 1.5) + 1024 * 1024
+const MAX_SESSION_HISTORY_MESSAGES = 100
+const MAX_SESSION_MESSAGE_CHARS = 20000
 
 function shq(s: string): string {
   return `'${s.replace(/'/g, "'\\''")}'`
@@ -129,6 +146,19 @@ function searchText(parts: (string | number | undefined)[]): string {
     .filter((part): part is string | number => part !== undefined && String(part).trim().length > 0)
     .map((part) => String(part).normalize('NFKC').toLowerCase())
     .join(' ')
+}
+
+function recordValue(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === 'object' ? (value as Record<string, unknown>) : undefined
+}
+
+function safeSessionId(sessionId: string): boolean {
+  return /^[A-Za-z0-9._-]{8,200}$/.test(sessionId)
+}
+
+function clipTranscriptText(text: string): string {
+  if (text.length <= MAX_SESSION_MESSAGE_CHARS) return text
+  return `${text.slice(0, MAX_SESSION_MESSAGE_CHARS)}\n\n[이전 세션 메시지가 길어 일부만 표시됩니다.]`
 }
 
 function sessionKey(sessionId: string, ssh?: SshConn): string {
@@ -355,6 +385,30 @@ async function readHead(file: string, bytes = 65536): Promise<string> {
   }
 }
 
+interface TranscriptRead {
+  content: string
+  mtime: number
+  truncated: boolean
+}
+
+async function readTail(file: string, bytes = MAX_SESSION_TRANSCRIPT_BYTES): Promise<TranscriptRead> {
+  const s = await stat(file)
+  const length = Math.min(s.size, bytes)
+  const start = Math.max(0, s.size - length)
+  const fh = await open(file, 'r')
+  try {
+    const buf = Buffer.alloc(length)
+    const { bytesRead } = await fh.read(buf, 0, length, start)
+    return {
+      content: buf.subarray(0, bytesRead).toString('utf8'),
+      mtime: s.mtimeMs,
+      truncated: start > 0
+    }
+  } finally {
+    await fh.close()
+  }
+}
+
 async function listRemoteTranscriptHeads(ssh: SshConn, bytes = 32768): Promise<TranscriptHead[]> {
   const script = `
 root="$HOME/.claude/projects"
@@ -399,6 +453,119 @@ done
       }
     )
   })
+}
+
+async function readRemoteTranscript(ssh: SshConn, sessionId: string): Promise<TranscriptRead | null> {
+  if (!safeSessionId(sessionId)) return null
+  const script = `
+sid=${shq(sessionId)}
+root="$HOME/.claude/projects"
+[ -d "$root" ] || exit 0
+f=$(find "$root" -type f -name "$sid.jsonl" -print -quit 2>/dev/null)
+[ -n "$f" ] || exit 0
+size=$(wc -c < "$f" 2>/dev/null || echo 0)
+m=$(stat -f %m "$f" 2>/dev/null || stat -c %Y "$f" 2>/dev/null || echo 0)
+if [ "$size" -gt ${MAX_SESSION_TRANSCRIPT_BYTES} ]; then
+  printf '1\\t%s\\t' "$m"
+  tail -c ${MAX_SESSION_TRANSCRIPT_BYTES} "$f" | base64 | tr -d '\\n\\r'
+else
+  printf '0\\t%s\\t' "$m"
+  cat "$f" | base64 | tr -d '\\n\\r'
+fi
+printf '\\n'
+`.trim()
+  return new Promise((resolve) => {
+    execFile(
+      sshBin,
+      [...sshBaseArgs(ssh), script],
+      { timeout: 20000, windowsHide: true, maxBuffer: MAX_REMOTE_TRANSCRIPT_BUFFER },
+      (err, stdout) => {
+        if (err || !stdout.trim()) {
+          resolve(null)
+          return
+        }
+        const [truncatedRaw, mtimeRaw, b64] = stdout.trim().split('\t')
+        if (!b64) {
+          resolve(null)
+          return
+        }
+        const mtime = Number(mtimeRaw) * 1000
+        try {
+          resolve({
+            content: Buffer.from(b64, 'base64').toString('utf8'),
+            mtime: Number.isFinite(mtime) ? mtime : 0,
+            truncated: truncatedRaw === '1'
+          })
+        } catch {
+          resolve(null)
+        }
+      }
+    )
+  })
+}
+
+function extractTranscriptText(content: unknown): string {
+  if (typeof content === 'string') return content
+  if (!Array.isArray(content)) return ''
+  return content
+    .map((block) => {
+      const record = recordValue(block)
+      if (!record) return ''
+      const type = typeof record.type === 'string' ? record.type : ''
+      if (type !== 'text') return ''
+      return typeof record.text === 'string' ? record.text : ''
+    })
+    .filter((text) => text.trim().length > 0)
+    .join('\n')
+}
+
+function parseTranscriptMessages(content: string, sessionId: string): SessionTranscriptMessage[] {
+  const messages: SessionTranscriptMessage[] = []
+  let lineIndex = 0
+  for (const line of content.split('\n')) {
+    lineIndex += 1
+    if (!line.trim() || !line.includes('{')) continue
+    let entry: Record<string, unknown>
+    try {
+      entry = JSON.parse(line) as Record<string, unknown>
+    } catch {
+      continue
+    }
+    if (entry.isMeta === true) continue
+    const message = recordValue(entry.message)
+    const roleValue = typeof message?.role === 'string' ? message.role : entry.type
+    const role = roleValue === 'user' || roleValue === 'assistant' ? roleValue : undefined
+    if (!role || !message) continue
+    const text = extractTranscriptText(message.content).trim()
+    if (!text) continue
+    messages.push({
+      id: `${sessionId}-history-${lineIndex}`,
+      role,
+      text: clipTranscriptText(text)
+    })
+  }
+  return messages.slice(-MAX_SESSION_HISTORY_MESSAGES)
+}
+
+export async function readSessionTranscript(
+  sessionId: string,
+  ssh?: SshConn
+): Promise<SessionTranscript | null> {
+  if (!sessionId || !safeSessionId(sessionId)) return null
+  const transcript = ssh
+    ? await readRemoteTranscript(ssh, sessionId)
+    : await (async (): Promise<TranscriptRead | null> => {
+        const ref = (await listTranscripts()).find((item) => item.sessionId === sessionId)
+        if (!ref) return null
+        return readTail(ref.file)
+      })()
+  if (!transcript) return null
+  return {
+    sessionId,
+    messages: parseTranscriptMessages(transcript.content, sessionId),
+    mtime: transcript.mtime,
+    truncated: transcript.truncated
+  }
 }
 
 function parseHead(content: string): { cwd?: string; title?: string } {

@@ -175,6 +175,19 @@ interface SessionRememberInput extends SessionSearchContext {
   ssh?: SshConn
 }
 
+interface SessionTranscriptMessage {
+  id: string
+  role: 'user' | 'assistant'
+  text: string
+}
+
+interface SessionTranscript {
+  sessionId: string
+  messages: SessionTranscriptMessage[]
+  mtime: number
+  truncated?: boolean
+}
+
 interface AppSettings {
   draftsRoot?: string
   recordsRoot?: string
@@ -421,6 +434,8 @@ const api = {
       context?: SessionSearchContext
     ): Promise<SessionListEntry[]> =>
       ipcRenderer.invoke('sessions:list', { cwd, ssh, context }),
+    transcript: (sessionId: string, ssh?: SshConn): Promise<SessionTranscript | null> =>
+      ipcRenderer.invoke('sessions:transcript', { sessionId, ssh }),
     remember: (input: SessionRememberInput): Promise<{ ok: boolean; error?: string }> =>
       ipcRenderer.invoke('sessions:remember', input)
   },

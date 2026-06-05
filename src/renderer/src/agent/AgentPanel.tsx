@@ -9,7 +9,7 @@ import {
 } from 'react'
 import DOMPurify from 'dompurify'
 import { marked } from 'marked'
-import type { AgentEvent, AgentPermissionMode, AppSettings, SshConn } from '../env'
+import type { AgentEvent, AgentPermissionMode, AppSettings, SessionTranscript, SshConn } from '../env'
 
 type AgentRunStatus = 'working' | 'done' | 'question'
 type AgentSendDelivery = 'normal' | 'queue' | 'steer'
@@ -530,6 +530,15 @@ function reduceTimeline(items: TimelineItem[], event: AgentEvent): TimelineItem[
   return items
 }
 
+function transcriptToTimeline(transcript: SessionTranscript): TimelineItem[] {
+  return transcript.messages.map((message, index) => ({
+    id: `history-${message.id || `${transcript.sessionId}-${index}`}`,
+    kind: message.role === 'assistant' ? 'assistant' : 'user',
+    title: message.role === 'assistant' ? 'Claude' : '나',
+    text: message.text
+  }))
+}
+
 function renderMarkdown(text: string): string {
   const html = marked.parse(text, { gfm: true, breaks: true }) as string
   return DOMPurify.sanitize(html, {
@@ -686,25 +695,7 @@ export default function AgentPanel({
   const modeMenuRef = useRef<HTMLDivElement>(null)
   const openedAuthUrlsRef = useRef<Set<string>>(new Set())
   const copyFeedbackTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-
-  useEffect(() => {
-    if (createdRef.current) return
-    createdRef.current = true
-    void window.lt.agent
-      .create({
-        id,
-        cwd,
-        title,
-        resumeSessionId,
-        permissionMode: mode,
-        source: ssh ? 'ssh' : 'local',
-        ssh
-      })
-      .then((result) => {
-        if (!result.ok) setError(result.error ?? 'Agent 세션을 만들 수 없습니다.')
-      })
-      .catch((e) => setError(String(e instanceof Error ? e.message : e)))
-  }, [cwd, id, mode, resumeSessionId, ssh, title])
+  const loadedHistoryKeyRef = useRef<string | null>(null)
 
   useEffect(() => {
     const off = window.lt.agent.onEvent((event) => {
@@ -753,6 +744,52 @@ export default function AgentPanel({
     })
     return off
   }, [id, onStatus])
+
+  useEffect(() => {
+    if (createdRef.current) return
+    createdRef.current = true
+    void window.lt.agent
+      .create({
+        id,
+        cwd,
+        title,
+        resumeSessionId,
+        permissionMode: mode,
+        source: ssh ? 'ssh' : 'local',
+        ssh
+      })
+      .then((result) => {
+        if (!result.ok) setError(result.error ?? 'Agent 세션을 만들 수 없습니다.')
+      })
+      .catch((e) => setError(String(e instanceof Error ? e.message : e)))
+  }, [cwd, id, mode, resumeSessionId, ssh, title])
+
+  useEffect(() => {
+    if (!resumeSessionId) return
+    const sourceKey = ssh ? `ssh:${ssh.user}@${ssh.host}:${ssh.port ?? 22}:${ssh.identityFile ?? ''}` : 'local'
+    const historyKey = `${sourceKey}:${resumeSessionId}`
+    if (loadedHistoryKeyRef.current === historyKey) return
+    loadedHistoryKeyRef.current = historyKey
+    let alive = true
+    void window.lt.sessions
+      .transcript(resumeSessionId, ssh)
+      .then((transcript) => {
+        if (!alive || !transcript || transcript.messages.length === 0) return
+        const historyItems = transcriptToTimeline(transcript)
+        setItems((current) => {
+          const existing = new Set(current.map((item) => item.id))
+          const missing = historyItems.filter((item) => !existing.has(item.id))
+          if (missing.length === 0) return current
+          return [...missing, ...current]
+        })
+      })
+      .catch(() => {
+        /* Resume context still works even when the transcript cannot be displayed. */
+      })
+    return () => {
+      alive = false
+    }
+  }, [resumeSessionId, ssh])
 
   useEffect(() => {
     if (!modeMenuOpen) return

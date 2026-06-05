@@ -35,7 +35,13 @@ import {
   disposeRemote
 } from './remoteFs'
 import type { SshProfile } from './settings'
-import { currentSession, listSessions, rememberSessionMeta, type SessionSearchContext } from './sessions'
+import {
+  currentSession,
+  listSessions,
+  readSessionTranscript,
+  rememberSessionMeta,
+  type SessionSearchContext
+} from './sessions'
 import { extractHwpText } from './hwpText'
 import {
   createPty,
@@ -546,6 +552,9 @@ ipcMain.handle('sessions:current', (_e, p: { cwd: string; since?: number; ssh?: 
 )
 ipcMain.handle('sessions:list', (_e, p: { cwd: string; ssh?: SshProfile; context?: SessionSearchContext }) =>
   listSessions(p.cwd, 40, p.ssh, p.context)
+)
+ipcMain.handle('sessions:transcript', (_e, p: { sessionId: string; ssh?: SshProfile }) =>
+  readSessionTranscript(p.sessionId, p.ssh)
 )
 ipcMain.handle('sessions:remember', (_e, p: Parameters<typeof rememberSessionMeta>[0]) =>
   rememberSessionMeta(p)

@@ -173,6 +173,19 @@ export interface SessionRememberInput extends SessionSearchContext {
   ssh?: SshConn
 }
 
+export interface SessionTranscriptMessage {
+  id: string
+  role: 'user' | 'assistant'
+  text: string
+}
+
+export interface SessionTranscript {
+  sessionId: string
+  messages: SessionTranscriptMessage[]
+  mtime: number
+  truncated?: boolean
+}
+
 export interface AppSettings {
   draftsRoot?: string
   recordsRoot?: string
@@ -397,6 +410,7 @@ export interface LtApi {
       ssh?: SshConn,
       context?: SessionSearchContext
     ) => Promise<SessionListEntry[]>
+    transcript: (sessionId: string, ssh?: SshConn) => Promise<SessionTranscript | null>
     remember: (input: SessionRememberInput) => Promise<{ ok: boolean; error?: string }>
   }
   agent: {
