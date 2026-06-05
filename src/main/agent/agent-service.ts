@@ -1349,6 +1349,17 @@ export function sendAgentMessage(sessionId: string, input: AgentSendInput): Agen
   const session = sessions.get(sessionId)
   if (!session) return { ok: false, error: 'Agent 세션을 찾을 수 없습니다.' }
   if (session.authProcess) return { ok: false, error: 'Claude 로그인 절차가 진행 중입니다.' }
+  if (session.source === 'ssh') {
+    if (session.authStatus === 'checking') {
+      return { ok: false, error: '원격 Claude Code 설치와 로그인 상태를 확인 중입니다.' }
+    }
+    if (session.authStatus === 'unavailable') {
+      return { ok: false, error: '원격에서 Claude Code CLI를 찾을 수 없습니다. 원격 터미널에서 Claude Code를 설치한 뒤 다시 시도하세요.' }
+    }
+    if (session.authStatus === 'unauthenticated') {
+      return { ok: false, error: '원격 Claude 로그인이 필요합니다. 로그인 버튼으로 인증을 먼저 진행하세요.' }
+    }
+  }
   if (isEmptyAgentInput(input)) {
     return { ok: false, error: '전송할 프롬프트나 첨부가 필요합니다.' }
   }

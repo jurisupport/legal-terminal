@@ -806,7 +806,6 @@ export default function AgentPanel({
   }, [])
 
   const hasPrompt = useMemo(() => input.trim().length > 0, [input])
-  const canSubmit = useMemo(() => hasPrompt && !authActive, [authActive, hasPrompt])
   const queuedCount = useMemo(
     () =>
       items.filter(
@@ -820,6 +819,26 @@ export default function AgentPanel({
   const needsAuth = useMemo(
     () => Boolean(ssh) && items.some((item) => isAuthFailureText(item.text)),
     [items, ssh]
+  )
+  const remoteCliUnavailable = Boolean(ssh) && authStatus === 'unavailable'
+  const remoteAuthChecking = Boolean(ssh) && authStatus === 'checking'
+  const remoteNeedsLogin =
+    Boolean(ssh) &&
+    authStatus !== 'authenticated' &&
+    (authStatus === 'unauthenticated' || needsAuth)
+  const sendBlockedReason =
+    authActive
+      ? 'Claude 로그인 진행 중'
+      : remoteAuthChecking
+        ? '원격 Claude Code 상태 확인 중'
+        : remoteCliUnavailable
+          ? '원격 Claude Code CLI 없음'
+          : remoteNeedsLogin
+            ? '원격 Claude 로그인 필요'
+            : ''
+  const canSubmit = useMemo(
+    () => hasPrompt && !sendBlockedReason,
+    [hasPrompt, sendBlockedReason]
   )
   const slashToken = useMemo(() => {
     const trimmed = input.trimStart()
@@ -854,7 +873,10 @@ export default function AgentPanel({
     const rawText = input.trim()
     const expanded = expandSlashInput(rawText)
     const text = expanded.text
-    if (!text || authActive) return
+    if (!text || sendBlockedReason) {
+      if (sendBlockedReason) setError(sendBlockedReason)
+      return
+    }
     const nextMode = expanded.mode ?? mode
     if (expanded.mode) setMode(expanded.mode)
     setInput('')
@@ -1293,9 +1315,23 @@ export default function AgentPanel({
         })}
       </div>
 
-      {needsAuth && authStatus !== 'authenticated' && (
+      {remoteCliUnavailable && (
+        <div className="agent-auth-banner unavailable">
+          <span>
+            원격 서버에서 Claude Code CLI를 찾을 수 없습니다. 원격 터미널에서 설치한 뒤 Agent를 다시 여세요.
+          </span>
+          {onOpenTerminal && (
+            <button onClick={onOpenTerminal}>
+              터미널 열기
+            </button>
+          )}
+        </div>
+      )}
+      {!remoteCliUnavailable && (needsAuth || remoteNeedsLogin || remoteAuthChecking) && authStatus !== 'authenticated' && (
         <div className="agent-auth-banner">
-          <span>원격 Claude 로그인이 필요합니다.</span>
+          <span>
+            {remoteAuthChecking ? '원격 Claude 상태를 확인하고 있습니다.' : '원격 Claude 로그인이 필요합니다.'}
+          </span>
           <button disabled={authButtonDisabled} onClick={() => void startAuthLogin()}>
             {authButtonLabel === '로그인' ? '로그인 시작' : authButtonLabel}
           </button>

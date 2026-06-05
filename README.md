@@ -21,11 +21,12 @@
 
 > 따로 떠 있던 터미널의 `claude`, 별도 에디터, 전자소송기록 뷰어를 **한 화면에 통합**했습니다. 기존 `jurisupport-plugins` 생태계(songmu-legal 플러그인, korean-law MCP, 법령·판례·사건기록 검색 도구, PII 보호 훅)는 **교체가 아니라 그대로 살려** 동작합니다.
 
-## 이번 업데이트 (v0.1.32) — Agent Panel 기본화·원격 Claude 세션 복원·설치 안정화
+## 이번 업데이트 (v0.1.33) — Agent Panel 기본화·Claude CLI 폴백·원격 세션 복원
 
-2026년 6월 5일 릴리스는 "기존 터미널형 Claude를 필요할 때만 쓰고, 평소에는 VS Code의 Claude Code처럼 구조화된 Agent Panel에서 사건 작업을 진행하는 것"에 초점을 맞췄습니다.
+2026년 6월 5일 릴리스는 "기존 터미널형 Claude를 필요할 때만 쓰고, 평소에는 VS Code의 Claude Code처럼 구조화된 Agent Panel에서 사건 작업을 진행하는 것"에 초점을 맞췄습니다. v0.1.33 패치에서는 원격 서버에 Claude Code CLI가 없을 때 전송을 막고 설치 안내와 터미널 fallback을 보여주도록 보강했습니다.
 
 - **Agent Panel 기본화** — 사건을 열면 터미널 대신 Claude Agent 패널이 기본으로 열립니다. 터미널은 탭 메뉴의 **터미널로 실행**에서 그대로 사용할 수 있습니다.
+- **Claude CLI 미설치 폴백** — 원격 서버에서 `claude` 명령을 찾지 못하면 Agent 전송을 막고, 설치 안내와 터미널 열기 버튼을 표시합니다.
 - **Claude 로그인·권한 UI** — 원격 Mac의 Claude Code 로그인 절차를 패널 안에서 진행하고, 로그인됨/미인증 상태를 표시합니다. 권한은 확인·계획·편집 자동·자동 허용·거절 모드로 선택할 수 있습니다.
 - **출력 파싱 개선** — Claude의 스트리밍 답변을 하나의 메시지로 이어 붙이고, Hook/Tool 같은 진행 과정은 한 줄 요약과 펼쳐보기로 분리했습니다.
 - **Markdown 답변·복사 개선** — Agent 답변은 Markdown 양식으로 렌더링되며, 드래그 복사와 리치 텍스트/Markdown 원문/일반 텍스트 복사를 지원합니다.
@@ -33,7 +34,7 @@
 - **선택 질문 처리** — Claude가 선택지를 묻는 경우 패널에서 그래픽 UI로 답할 수 있습니다.
 - **원격 과거 세션 복원** — macmini처럼 `~/OneDrive`가 `~/Library/CloudStorage/OneDrive-개인`으로 해석되는 환경에서도 같은 사건 폴더의 Claude 과거 세션을 찾아 이어서 열 수 있습니다.
 - **파일·원격 작업 보강** — 원격 폴더 검색/생성, 파일 이름 변경, 빠른 시작 경로, Windows 설치 스크립트의 한국어 안내와 다운로드 진행률을 보강했습니다.
-- **macOS/Windows 배포 반영** — [v0.1.32 릴리스](https://github.com/jurisupport/legal-terminal/releases/tag/v0.1.32)는 macOS arm64/x64, Windows x64 빌드와 업데이트 메타데이터를 포함합니다.
+- **macOS/Windows 배포 반영** — [v0.1.33 릴리스](https://github.com/jurisupport/legal-terminal/releases/tag/v0.1.33)는 macOS arm64/x64, Windows x64 빌드와 업데이트 메타데이터를 포함합니다.
 
 ## 다운로드 (Windows)
 
