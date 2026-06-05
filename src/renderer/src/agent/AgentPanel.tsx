@@ -46,8 +46,16 @@ interface AgentPanelProps {
   ssh?: SshConn
   profileId?: string
   visible: boolean
+  attachmentRequests?: AgentAttachmentRequest[]
+  onAttachmentRequestsHandled?: (requestIds: string[]) => void
   onStatus?: (status: AgentRunStatus) => void
   onOpenTerminal?: () => void
+}
+
+export interface AgentAttachmentRequest {
+  id: string
+  attachment: AgentAttachment
+  focusPrompt?: boolean
 }
 
 interface TimelineItem {
@@ -318,6 +326,48 @@ function dataTransferPaths(dataTransfer: DataTransfer): string[] {
       .map((file) => window.lt.fs.pathForFile(file))
       .filter(Boolean)
   )
+}
+
+function attachmentKindLabel(kind: AgentAttachment['kind']): string {
+  if (kind === 'folder') return '폴더'
+  if (kind === 'selection') return '선택'
+  if (kind === 'pdf-page-range') return 'PDF'
+  if (kind === 'terminal-snippet') return '터미널'
+  return '파일'
+}
+
+function attachmentIdentity(attachment: AgentAttachment): string {
+  if (attachment.kind === 'selection') return `${attachment.kind}:${attachment.label}:${attachment.text ?? ''}`
+  return `${attachment.kind}:${attachment.path ?? attachment.label}`
+}
+
+function appendUniqueAttachments(current: AgentAttachment[], additions: AgentAttachment[]): AgentAttachment[] {
+  const seen = new Set(current.map(attachmentIdentity))
+  const merged = [...current]
+  for (const attachment of additions) {
+    const key = attachmentIdentity(attachment)
+    if (seen.has(key)) continue
+    seen.add(key)
+    merged.push(attachment)
+  }
+  return merged
+}
+
+function attachmentReferenceText(attachment: AgentAttachment): string {
+  if (attachment.kind === 'selection') return `「${attachment.label}」 선택 부분에 대해 `
+  if (attachment.kind === 'folder') return `「${attachment.label}」 폴더에 대해 `
+  if (attachment.kind === 'pdf-page-range') return `「${attachment.label}」 PDF 범위에 대해 `
+  if (attachment.kind === 'terminal-snippet') return `「${attachment.label}」 터미널 출력에 대해 `
+  return `「${attachment.label}」 파일에 대해 `
+}
+
+function attachmentTitle(attachment: AgentAttachment): string {
+  const detail = attachment.text
+    ? attachment.text.length > 500
+      ? `${attachment.text.slice(0, 500)}...`
+      : attachment.text
+    : undefined
+  return [attachment.path, detail].filter(Boolean).join('\n\n') || attachment.label
 }
 
 function normalizeAgentAttachments(value: unknown): AgentAttachment[] {
@@ -840,6 +890,8 @@ export default function AgentPanel({
   ssh,
   profileId,
   visible,
+  attachmentRequests = [],
+  onAttachmentRequestsHandled,
   onStatus,
   onOpenTerminal
 }: AgentPanelProps): JSX.Element {
@@ -868,6 +920,7 @@ export default function AgentPanel({
   const openedAuthUrlsRef = useRef<Set<string>>(new Set())
   const copyFeedbackTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const loadedHistoryKeyRef = useRef<string | null>(null)
+  const handledAttachmentRequestIdsRef = useRef<Set<string>>(new Set())
   const promptHistoryRef = useRef<string[]>([])
   const promptHistoryIndexRef = useRef<number | null>(null)
   const promptHistoryDraftRef = useRef('')
@@ -1177,15 +1230,7 @@ export default function AgentPanel({
       void Promise.all(unique.map(attachmentForPath))
         .then((nextAttachments) => {
           setAttachments((current) => {
-            const seen = new Set(current.map((attachment) => `${attachment.kind}:${attachment.path ?? attachment.label}`))
-            const merged = [...current]
-            for (const attachment of nextAttachments) {
-              const key = `${attachment.kind}:${attachment.path ?? attachment.label}`
-              if (seen.has(key)) continue
-              seen.add(key)
-              merged.push(attachment)
-            }
-            return merged
+            return appendUniqueAttachments(current, nextAttachments)
           })
           showTransientFeedback(`${source === 'drop' ? '드롭' : '붙여넣기'} 파일 ${nextAttachments.length}개 첨부됨`)
         })
@@ -1194,8 +1239,47 @@ export default function AgentPanel({
     [attachmentForPath, authActive, showTransientFeedback]
   )
 
+  useEffect(() => {
+    const pending = attachmentRequests.filter(
+      (request) => !handledAttachmentRequestIdsRef.current.has(request.id)
+    )
+    if (pending.length === 0) return
+
+    for (const request of pending) handledAttachmentRequestIdsRef.current.add(request.id)
+    setAttachments((current) => appendUniqueAttachments(current, pending.map((request) => request.attachment)))
+
+    const selectionCount = pending.filter((request) => request.attachment.kind === 'selection').length
+    const fileCount = pending.length - selectionCount
+    const parts = [
+      selectionCount > 0 ? `선택 영역 ${selectionCount}개` : undefined,
+      fileCount > 0 ? `첨부 ${fileCount}개` : undefined
+    ].filter((part): part is string => Boolean(part))
+    showTransientFeedback(`${parts.join(', ')} 추가됨`)
+
+    if (pending.some((request) => request.focusPrompt)) {
+      window.requestAnimationFrame(() => textareaRef.current?.focus())
+    }
+    onAttachmentRequestsHandled?.(pending.map((request) => request.id))
+  }, [attachmentRequests, onAttachmentRequestsHandled, showTransientFeedback])
+
   const removeAttachment = (index: number): void => {
     setAttachments((current) => current.filter((_, itemIndex) => itemIndex !== index))
+  }
+
+  const insertAttachmentReference = (attachment: AgentAttachment): void => {
+    const reference = attachmentReferenceText(attachment)
+    resetPromptHistoryCursor()
+    setInput((current) => {
+      const separator = current.length === 0 || /\s$/.test(current) ? '' : ' '
+      return `${current}${separator}${reference}`
+    })
+    window.requestAnimationFrame(() => {
+      const textarea = textareaRef.current
+      if (!textarea) return
+      textarea.focus()
+      const end = textarea.value.length
+      textarea.setSelectionRange(end, end)
+    })
   }
 
   const send = async (delivery?: AgentSendDelivery): Promise<void> => {
@@ -1726,9 +1810,13 @@ export default function AgentPanel({
               {item.attachments && item.attachments.length > 0 && (
                 <div className="agent-attachments sent" aria-label="전송된 첨부">
                   {item.attachments.map((attachment, index) => (
-                    <span key={`${attachment.path ?? attachment.label}-${index}`} className="agent-attachment-chip">
-                      <span className="agent-attachment-kind">{attachment.kind === 'folder' ? '폴더' : '파일'}</span>
-                      <span className="agent-attachment-label" title={attachment.path}>
+                    <span
+                      key={`${attachment.path ?? attachment.label}-${index}`}
+                      className="agent-attachment-chip"
+                      title={attachmentTitle(attachment)}
+                    >
+                      <span className="agent-attachment-kind">{attachmentKindLabel(attachment.kind)}</span>
+                      <span className="agent-attachment-label">
                         {attachment.label}
                       </span>
                     </span>
@@ -1876,17 +1964,29 @@ export default function AgentPanel({
         {attachments.length > 0 && (
           <div className="agent-attachments pending" aria-label="첨부 파일">
             {attachments.map((attachment, index) => (
-              <button
+              <span
                 key={`${attachment.path ?? attachment.label}-${index}`}
-                type="button"
-                className="agent-attachment-chip removable"
-                title={attachment.path}
-                onClick={() => removeAttachment(index)}
+                className="agent-attachment-pending"
               >
-                <span className="agent-attachment-kind">{attachment.kind === 'folder' ? '폴더' : '파일'}</span>
-                <span className="agent-attachment-label">{attachment.label}</span>
-                <span className="agent-attachment-remove" aria-hidden="true">×</span>
-              </button>
+                <button
+                  type="button"
+                  className="agent-attachment-chip insertable"
+                  title={`${attachmentTitle(attachment)}\n\n클릭하면 프롬프트에 넣습니다`}
+                  onClick={() => insertAttachmentReference(attachment)}
+                >
+                  <span className="agent-attachment-kind">{attachmentKindLabel(attachment.kind)}</span>
+                  <span className="agent-attachment-label">{attachment.label}</span>
+                </button>
+                <button
+                  type="button"
+                  className="agent-attachment-remove-button"
+                  title="첨부 제거"
+                  aria-label={`${attachment.label} 첨부 제거`}
+                  onClick={() => removeAttachment(index)}
+                >
+                  ×
+                </button>
+              </span>
             ))}
           </div>
         )}

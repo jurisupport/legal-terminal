@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react'
 import Terminal from './terminal/Terminal'
-import AgentPanel from './agent/AgentPanel'
+import AgentPanel, { type AgentAttachmentRequest } from './agent/AgentPanel'
 import FileTree, { LT_PATH, sortEntries, type PendingCreateRequest, type SortMode } from './filetree/FileTree'
 import PdfViewer, { type PdfViewStatus } from './viewer/PdfViewer'
 import RecordViewer from './viewer/RecordViewer'
@@ -23,6 +23,7 @@ import CasesDashboard from './dashboard/CasesDashboard'
 import UpcomingHearings from './dashboard/UpcomingHearings'
 import type {
   AppSettings,
+  AgentAttachment,
   JsCase,
   SessionListEntry,
   SessionRememberInput,
@@ -874,11 +875,13 @@ export default function App(): JSX.Element {
 
   const [termTabs, setTermTabs] = useState<TermTab[]>([])
   const [activeTerm, setActiveTerm] = useState<string>('')
+  const [agentAttachmentRequests, setAgentAttachmentRequests] = useState<Record<string, AgentAttachmentRequest[]>>({})
   const [termFocusNonce, setTermFocusNonce] = useState<Record<string, number>>({})
   const [termBracketedPasteMode, setTermBracketedPasteMode] = useState<Record<string, boolean>>({})
   const termBracketedPasteModeRef = useRef<Record<string, boolean>>({})
   termBracketedPasteModeRef.current = termBracketedPasteMode
   const termTabsRef = useRef<TermTab[]>([])
+  const selectionAttachmentSeqRef = useRef(0)
   const rememberedSessionsRef = useRef<Set<string>>(new Set())
   const [activeWork, setActiveWork] = useState<Record<DockSide, string>>({
     left: docOnly ? '' : docKey('doc-welcome'),
@@ -1953,6 +1956,69 @@ export default function App(): JSX.Element {
   const isViewer = mode === 'viewer'
   const sessionCaseSource = currentCaseSessionSource(currentCase, sshProfiles)
 
+  const handleAgentAttachmentRequestsHandled = (
+    termId: string,
+    requestIds: string[]
+  ): void => {
+    if (requestIds.length === 0) return
+    setAgentAttachmentRequests((current) => {
+      const requests = current[termId] ?? []
+      if (requests.length === 0) return current
+      const handled = new Set(requestIds)
+      const remaining = requests.filter((request) => !handled.has(request.id))
+      if (remaining.length === requests.length) return current
+      const next = { ...current }
+      if (remaining.length > 0) next[termId] = remaining
+      else delete next[termId]
+      return next
+    })
+  }
+
+  const queueAgentAttachment = (term: TermTab, attachment: AgentAttachment): void => {
+    const request: AgentAttachmentRequest = {
+      id: newId(),
+      attachment,
+      focusPrompt: true
+    }
+    setAgentAttachmentRequests((current) => ({
+      ...current,
+      [term.id]: [...(current[term.id] ?? []), request]
+    }))
+    setActiveTerm(term.id)
+    setWorkActive(termSide(term), termKeyOf(term.id))
+    setTermFocusNonce((current) => ({ ...current, [term.id]: (current[term.id] ?? 0) + 1 }))
+  }
+
+  const selectionAttachmentLabel = (docName?: string): string => {
+    const source = docName?.trim() || '선택 영역'
+    selectionAttachmentSeqRef.current += 1
+    return `${source} 선택 ${selectionAttachmentSeqRef.current}`
+  }
+
+  const selectionAttachmentForAgent = (
+    text: string,
+    opts: { docPath?: string; docName?: string },
+    term: TermTab
+  ): AgentAttachment => {
+    const trimmed = text.trim()
+    const readablePath = opts.docPath ? claudeReadablePath(opts.docPath, term) : undefined
+    const body = [
+      opts.docName ? `문서: ${opts.docName}` : undefined,
+      readablePath ? `문서 경로: ${readablePath}` : undefined,
+      `선택 길이: ${formatCharCount(trimmed.length)}자`,
+      '',
+      trimmed
+    ]
+      .filter((line): line is string => line !== undefined)
+      .join('\n')
+    return {
+      kind: 'selection',
+      label: selectionAttachmentLabel(opts.docName),
+      path: readablePath,
+      text: body
+    }
+  }
+
   const buildWorkspaceSnapshot = async (): Promise<WorkspaceSnapshot> => {
     const docs = docTabs.map(toWorkspaceDoc).filter((t): t is WorkspaceDocTabPayload => !!t)
     const terminals = await Promise.all(
@@ -2520,6 +2586,10 @@ export default function App(): JSX.Element {
       const docName = opts?.docPath ? (opts.docPath.split(/[\\/]/).pop() ?? d?.title) : d?.title
       const ref = docName ? `「${docName}」${docPath ? `(${docPath})` : ''}` : ''
       const t = text.trim()
+      if (t && activeTermTab && isAgentTab(activeTermTab)) {
+        queueAgentAttachment(activeTermTab, selectionAttachmentForAgent(t, { docPath, docName }, activeTermTab))
+        return
+      }
       const filePrompt =
         docPath && docName ? await buildFreshFilePrompt(docPath, docName, activeTermTab) : ''
       let payload: string
@@ -3086,6 +3156,10 @@ export default function App(): JSX.Element {
                 ssh={t.ssh}
                 profileId={t.profileId}
                 visible={t.id === activeTerm}
+                attachmentRequests={agentAttachmentRequests[t.id] ?? []}
+                onAttachmentRequestsHandled={(requestIds) =>
+                  handleAgentAttachmentRequestsHandled(t.id, requestIds)
+                }
                 onStatus={(s) => onTermStatus(t.id, s)}
                 onOpenTerminal={() => addTermSame(termSide(t), t.id)}
               />
@@ -3376,6 +3450,10 @@ export default function App(): JSX.Element {
                   ssh={t.ssh}
                   profileId={t.profileId}
                   visible={t.id === visibleTermId}
+                  attachmentRequests={agentAttachmentRequests[t.id] ?? []}
+                  onAttachmentRequestsHandled={(requestIds) =>
+                    handleAgentAttachmentRequestsHandled(t.id, requestIds)
+                  }
                   onStatus={(s) => onTermStatus(t.id, s)}
                   onOpenTerminal={() => addTermSame(side, t.id)}
                 />
