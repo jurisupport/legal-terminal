@@ -449,10 +449,31 @@ body {
 .tree-row:hover {
   background: rgba(255, 255, 255, 0.06);
 }
+.tree-row.selected {
+  background: rgba(14, 99, 156, 0.38);
+  color: #fff;
+}
+.tree-row.selected:hover {
+  background: rgba(14, 99, 156, 0.5);
+}
 .tree-row:focus-visible {
   outline: 1px solid var(--accent);
   outline-offset: -1px;
   background: rgba(14, 99, 156, 0.2);
+}
+.tree-row.selected:focus-visible {
+  background: rgba(14, 99, 156, 0.58);
+}
+.tree.selection-dragging {
+  cursor: crosshair;
+}
+.tree-select-marquee {
+  position: fixed;
+  z-index: 35;
+  pointer-events: none;
+  border: 1px solid color-mix(in srgb, var(--accent) 84%, #fff 16%);
+  background: rgba(14, 99, 156, 0.18);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.08);
 }
 .tree-icon {
   flex-shrink: 0;
@@ -2020,6 +2041,109 @@ body {
   border-color: #54745e;
   background: #18231b;
 }
+.agent-diff-view {
+  margin-top: 8px;
+  min-width: 0;
+  overflow-x: auto;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 4px;
+  background: rgba(0, 0, 0, 0.18);
+}
+.agent-diff-summary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 7px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+  color: var(--fg-muted);
+  font: var(--agent-micro-font-size)/1.2 var(--font-mono);
+}
+.agent-diff-count {
+  min-width: 34px;
+  padding: 2px 5px;
+  border-radius: 4px;
+  text-align: center;
+  background: rgba(255, 255, 255, 0.045);
+}
+.agent-diff-count.add {
+  color: #8bd49c;
+}
+.agent-diff-count.remove {
+  color: #ef9a9a;
+}
+.agent-diff-labels,
+.agent-diff-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+}
+.agent-diff-labels {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+  color: #b8c4d0;
+  background: #1b241e;
+  font-size: var(--agent-small-font-size);
+  font-weight: 600;
+}
+.agent-diff-labels span {
+  min-width: 0;
+  padding: 5px 8px;
+}
+.agent-diff-labels span + span {
+  border-left: 1px solid rgba(255, 255, 255, 0.08);
+}
+.agent-diff-hunk + .agent-diff-hunk {
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+.agent-diff-hunk-title {
+  padding: 4px 8px;
+  color: var(--fg-muted);
+  background: rgba(255, 255, 255, 0.035);
+  font: var(--agent-micro-font-size)/1.35 var(--font-mono);
+}
+.agent-diff-line {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 38px minmax(0, 1fr);
+  align-items: stretch;
+  border-top: 1px solid rgba(255, 255, 255, 0.035);
+  color: #d6d6d6;
+  font: var(--agent-small-font-size)/1.45 var(--font-mono);
+}
+.agent-diff-line:nth-child(1),
+.agent-diff-line:nth-child(2) {
+  border-top: 0;
+}
+.agent-diff-line.before {
+  border-right: 1px solid rgba(255, 255, 255, 0.08);
+}
+.agent-diff-line-no {
+  padding: 2px 6px;
+  color: rgba(214, 214, 214, 0.42);
+  background: rgba(255, 255, 255, 0.025);
+  text-align: right;
+  -webkit-user-select: none;
+  user-select: none;
+}
+.agent-diff-line-text {
+  min-width: 0;
+  padding: 2px 7px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.agent-diff-line.before.change,
+.agent-diff-line.before.remove {
+  background: rgba(140, 63, 63, 0.22);
+}
+.agent-diff-line.after.change,
+.agent-diff-line.after.add {
+  background: rgba(67, 118, 76, 0.22);
+}
+.agent-diff-line.before.add .agent-diff-line-text,
+.agent-diff-line.after.remove .agent-diff-line-text {
+  color: transparent;
+}
 .agent-card.process,
 .agent-card.tool {
   border-color: transparent;
@@ -2764,6 +2888,24 @@ body {
 }
 .terminal-copy-feedback.error {
   border-color: rgba(224, 120, 92, 0.72);
+}
+.terminal-selection-ask {
+  position: absolute;
+  z-index: 35;
+  transform: translate(-50%, -100%);
+  padding: 6px 12px;
+  border: 0;
+  border-radius: 6px;
+  background: var(--accent);
+  color: var(--accent-fg);
+  font-size: 12px;
+  line-height: 1.2;
+  white-space: nowrap;
+  cursor: pointer;
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.55);
+}
+.terminal-selection-ask:hover {
+  filter: brightness(1.12);
 }
 @keyframes terminal-copy-feedback-in {
   from {

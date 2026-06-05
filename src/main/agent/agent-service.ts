@@ -156,6 +156,7 @@ function remoteClaudeCommand(session: AgentSession): string {
   const inner = [
     'PATH="/opt/homebrew/bin:/usr/local/bin:/opt/local/bin:$PATH"',
     unsetClaudeAuthEnvCommand(),
+    'export CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING=true',
     `cd ${shq(session.cwd)} || exit`,
     'claude_bin=$(command -v claude 2>/dev/null || true)',
     'if [ -z "$claude_bin" ]; then echo "claude command not found on remote PATH" >&2; exit 127; fi',
@@ -323,6 +324,22 @@ function stringValue(value: unknown): string | undefined {
 
 function unknownArray(value: unknown): unknown[] {
   return Array.isArray(value) ? value : []
+}
+
+function diffEditsFromInput(input: Record<string, unknown>): { oldString?: string; newString?: string }[] {
+  const edits: { oldString?: string; newString?: string }[] = []
+  for (const value of unknownArray(input.edits)) {
+    const edit = asRecord(value)
+    if (!edit) continue
+    const oldString = stringValue(edit.old_string)
+    const newString = stringValue(edit.new_string)
+    if (oldString !== undefined || newString !== undefined) edits.push({ oldString, newString })
+  }
+  if (edits.length > 0) return edits
+
+  const oldString = stringValue(input.old_string)
+  const newString = stringValue(input.new_string) ?? stringValue(input.content)
+  return oldString !== undefined || newString !== undefined ? [{ oldString, newString }] : []
 }
 
 function isAskUserQuestionTool(name: string): boolean {
@@ -600,16 +617,20 @@ function emitProcessEvent(
 }
 
 function makeDiffProposal(session: AgentSession, toolId: string, input: Record<string, unknown>): void {
-  if (!('old_string' in input) && !('new_string' in input) && !('file_path' in input)) return
+  const edits = diffEditsFromInput(input)
+  const filePath = stringValue(input.file_path)
+  if (!filePath && edits.length === 0) return
+  const singleEdit = edits.length === 1 ? edits[0] : undefined
   emit(session, {
     type: 'diff:proposed',
     proposal: {
       proposalId: toolId,
       sessionId: session.id,
       toolUseId: toolId,
-      filePath: stringValue(input.file_path),
-      oldString: stringValue(input.old_string),
-      newString: stringValue(input.new_string)
+      filePath,
+      oldString: singleEdit?.oldString,
+      newString: singleEdit?.newString,
+      edits: edits.length > 1 ? edits : undefined
     }
   })
 }
@@ -681,11 +702,23 @@ function handleUserMessage(session: AgentSession, message: Record<string, unknow
     })
 
     const result = asRecord(message.tool_use_result)
-    if (result?.structuredPatch) {
+    if (result?.structuredPatch || result?.gitDiff) {
+      const gitDiff = asRecord(result.gitDiff)
       emit(session, {
         type: 'diff:applied',
         sessionId: session.id,
-        proposalId: toolId
+        proposalId: toolId,
+        filePath:
+          stringValue(result.filePath) ??
+          stringValue(result.file_path) ??
+          stringValue(gitDiff?.filename),
+        oldString: stringValue(result.oldString) ?? stringValue(result.old_string),
+        newString:
+          stringValue(result.newString) ??
+          stringValue(result.new_string) ??
+          stringValue(result.content),
+        structuredPatch: result.structuredPatch,
+        gitDiff: result.gitDiff
       })
     }
   }

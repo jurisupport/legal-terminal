@@ -181,7 +181,7 @@ legal-terminal은 **실제 `claude` CLI를 그대로 실행**하므로, [`jurisu
 - **터미널 fallback** — 기존 PTY 터미널은 탭 메뉴의 **터미널로 실행**에서 열 수 있고, `claude --resume` 흐름도 그대로 유지됩니다.
 - **세션 목록(☰)** — 열린 세션 + **과거 세션(`claude --resume`로 이어서 열기)**, 사건별 필터. 원격 사건도 transcript를 찾아 이어서 열기 가능
 - 탭 상태 표시: **작업 중(⟳) / 완료(●) / 질문 대기(❓)**, 완료 시 알림음, 질문 시 팝업, 백그라운드 창 주의 요청(도크 바운스/플래시)
-- 복사/붙여넣기, Cmd/Ctrl+T 새 터미널, **Cmd/Ctrl+W 터미널 닫기(작업 중이면 확인)**, Cmd/Ctrl+Tab·Cmd/Ctrl+PageUp/Down 탭 이동
+- 복사/붙여넣기, Cmd/Ctrl+T 새 Agent, Cmd/Ctrl+Shift+T 새 터미널, **Cmd/Ctrl+W 터미널 닫기(작업 중이면 확인)**, Cmd/Ctrl+Tab·Cmd/Ctrl+PageUp/Down 탭 이동
 - 탐색기·기록뷰어의 문서를 **터미널로 드래그**하면 드롭 안내와 함께 그 파일을 Claude에 질문
 - 터미널을 모두 닫아도 사건 컨텍스트 유지 → **사건 지정 해제** 버튼으로 비우기
 - Mac/Windows IME 조합 위치, 좁은 패널 가독성, 텍스트 인코딩이 섞인 파일 복사/열기 보강

@@ -4,9 +4,10 @@ import { FitAddon } from '@xterm/addon-fit'
 import { CanvasAddon } from '@xterm/addon-canvas'
 import { WebglAddon } from '@xterm/addon-webgl'
 import '@xterm/xterm/css/xterm.css'
-import { LT_PATH } from '../filetree/FileTree'
+import { LT_PATH, LT_PATHS, readLtPaths } from '../filetree/FileTree'
 import type { SshConn } from '../env'
 import FindBar from '../search/FindBar'
+import { installTerminalPointerDragGuard } from '../dragGuard'
 
 // D2Coding(번들, 한글:영문=2:1 고정폭)을 우선 — 한글/영문 폭이 한 폰트로 통일되어 정렬이 맞는다.
 const DEFAULT_FONT = "'D2Coding', 'Cascadia Mono', Consolas, monospace"
@@ -38,6 +39,12 @@ interface TerminalCopyFeedback {
   key: number
   kind: 'success' | 'error'
   text: string
+}
+
+interface TerminalSelectionAction {
+  text: string
+  left: number
+  top: number
 }
 
 const charCellWidth = (ch: string): number => (ch.charCodeAt(0) <= 0x7f ? 1 : 2)
@@ -232,6 +239,8 @@ export default function Terminal({
   ssh,
   focusNonce = 0,
   onDropPaths,
+  onAskSelection,
+  onNewAgent,
   onNewTerminal,
   onRequestClose,
   onStatus,
@@ -246,6 +255,8 @@ export default function Terminal({
   ssh?: SshConn
   focusNonce?: number
   onDropPaths?: (paths: string[]) => void
+  onAskSelection?: (text: string) => void
+  onNewAgent?: () => void
   onNewTerminal?: () => void
   onRequestClose?: () => void
   onStatus?: (status: 'working' | 'done' | 'question') => void
@@ -257,6 +268,10 @@ export default function Terminal({
   const fitRef = useRef<FitAddon | null>(null)
   const onDropRef = useRef(onDropPaths)
   onDropRef.current = onDropPaths
+  const onAskSelectionRef = useRef(onAskSelection)
+  onAskSelectionRef.current = onAskSelection
+  const onNewAgentRef = useRef(onNewAgent)
+  onNewAgentRef.current = onNewAgent
   const onNewTermRef = useRef(onNewTerminal)
   onNewTermRef.current = onNewTerminal
   const onCloseRef = useRef(onRequestClose)
@@ -280,6 +295,7 @@ export default function Terminal({
   const [findIndex, setFindIndex] = useState(-1)
   const [copyFeedback, setCopyFeedback] = useState<TerminalCopyFeedback | null>(null)
   const [fileDropHint, setFileDropHint] = useState(false)
+  const [selectionAction, setSelectionAction] = useState<TerminalSelectionAction | null>(null)
 
   useEffect(() => {
     mountedRef.current = true
@@ -361,8 +377,9 @@ export default function Terminal({
   useEffect(() => {
     const host = hostRef.current
     if (!host) return
+    const uninstallPointerDragGuard = installTerminalPointerDragGuard(host)
     const wanted = (dt: DataTransfer | null): boolean =>
-      !!dt && (dt.types.includes(LT_PATH) || dt.types.includes('Files'))
+      !!dt && (dt.types.includes(LT_PATH) || dt.types.includes(LT_PATHS) || dt.types.includes('Files'))
     const allow = (e: DragEvent): void => {
       if (!wanted(e.dataTransfer)) return
       e.preventDefault()
@@ -376,9 +393,9 @@ export default function Terminal({
       e.preventDefault()
       e.stopPropagation()
       clearFileDropHint()
-      const internal = dt!.getData(LT_PATH)
-      const paths = internal
-        ? [internal]
+      const internal = readLtPaths(dt!)
+      const paths = internal.length
+        ? internal
         : Array.from(dt!.files)
             .map((f) => window.lt.fs.pathForFile(f))
             .filter(Boolean)
@@ -393,6 +410,7 @@ export default function Terminal({
     host.addEventListener('dragleave', onLeave, true)
     host.addEventListener('drop', onDrop, true)
     return () => {
+      uninstallPointerDragGuard()
       host.removeEventListener('dragenter', allow, true)
       host.removeEventListener('dragover', allow, true)
       host.removeEventListener('dragleave', onLeave, true)
@@ -509,11 +527,17 @@ export default function Terminal({
           return false
         }
         const primary = isMac ? e.metaKey && !e.ctrlKey : e.ctrlKey
-        if (!primary) return true
-        if (k === 't' && !e.shiftKey && !e.altKey) {
-          // Ctrl/Cmd+T: 새 터미널 (같은 사건, claude 실행)
+        const macCtrlT = isMac && e.ctrlKey && !e.metaKey && k === 't'
+        if (!primary && !macCtrlT) return true
+        if (k === 't' && !e.altKey) {
           e.stopPropagation()
-          onNewTermRef.current?.()
+          if (e.shiftKey) {
+            // Ctrl/Cmd+Shift+T: 새 터미널 (같은 사건, claude 실행)
+            onNewTermRef.current?.()
+          } else {
+            // Ctrl/Cmd+T: 새 Agent Panel
+            onNewAgentRef.current?.()
+          }
           return false
         }
         if (k === 'w' && !e.shiftKey && !e.altKey) {
@@ -651,6 +675,28 @@ export default function Terminal({
       const onBellDisp = term.onBell(() => {
         if (working) scheduleIdle(QUESTION_RE.test(stripAnsi(recent)) ? 500 : idleMs)
       })
+      const updateSelectionAction = (): void => {
+        if (findOpenRef.current || !term.hasSelection()) {
+          setSelectionAction(null)
+          return
+        }
+        const selected = term.getSelection().trim()
+        const position = term.getSelectionPosition()
+        const metrics = measureCellMetrics(term)
+        if (!selected || !position || !metrics) {
+          setSelectionAction(null)
+          return
+        }
+        const row = clamp(position.start.y - term.buffer.active.viewportY - 1, 0, Math.max(0, term.rows - 1))
+        const col = clamp(position.start.x - 1, 0, Math.max(0, term.cols - 1))
+        setSelectionAction({
+          text: selected,
+          left: clamp((col + 0.5) * metrics.width, 72, Math.max(72, term.cols * metrics.width - 72)),
+          top: Math.max(30, row * metrics.height - 6)
+        })
+      }
+      const onSelectionDisp = term.onSelectionChange(() => updateSelectionAction())
+      const onScrollDisp = term.onScroll(() => updateSelectionAction())
 
       window.lt.pty.create({
         id,
@@ -668,6 +714,7 @@ export default function Terminal({
         try {
           fit.fit()
           window.lt.pty.resize(id, term.cols, term.rows)
+          updateSelectionAction()
         } catch {
           /* 무시 */
         }
@@ -680,6 +727,8 @@ export default function Terminal({
         offExit()
         onInput.dispose()
         onBellDisp.dispose()
+        onSelectionDisp.dispose()
+        onScrollDisp.dispose()
         onWriteParsedDisp.dispose()
         if (idleTimer) clearTimeout(idleTimer)
         if (suppressNativePasteTimer) clearTimeout(suppressNativePasteTimer)
@@ -692,6 +741,7 @@ export default function Terminal({
         term.dispose()
         termRef.current = null
         fitRef.current = null
+        setSelectionAction(null)
       }
     })
 
@@ -729,13 +779,33 @@ export default function Terminal({
 
   useEffect(() => {
     if (findOpen) applyFind(findQuery, 0)
-    else termRef.current?.clearSelection()
+    else {
+      termRef.current?.clearSelection()
+      setSelectionAction(null)
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [findOpen, findQuery])
 
   return (
     <div className={`terminal-surface ${fileDropHint ? 'file-drop-target' : ''}`}>
       <div className="xterm-host" ref={hostRef} />
+      {selectionAction && (
+        <button
+          className="terminal-selection-ask"
+          style={{ left: selectionAction.left, top: selectionAction.top }}
+          onMouseDown={(e) => {
+            e.preventDefault()
+            e.stopPropagation()
+          }}
+          onClick={() => {
+            onAskSelectionRef.current?.(selectionAction.text)
+            termRef.current?.clearSelection()
+            setSelectionAction(null)
+          }}
+        >
+          ✳ Claude에 묻기
+        </button>
+      )}
       {fileDropHint && (
         <div className="drop-guide terminal-drop-guide" role="status" aria-live="polite">
           <strong>Claude에 파일 전달</strong>

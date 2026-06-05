@@ -107,7 +107,9 @@ export interface AgentDiffProposal {
   filePath?: string
   oldString?: string
   newString?: string
+  edits?: { oldString?: string; newString?: string }[]
   structuredPatch?: unknown
+  gitDiff?: unknown
 }
 
 export type AgentStatus =
@@ -152,7 +154,18 @@ export type AgentEvent =
       cancelled?: boolean
     }
   | { type: 'diff:proposed'; proposal: AgentDiffProposal }
-  | { type: 'diff:applied'; sessionId: string; proposalId: string; checkpointId?: string }
+  | {
+      type: 'diff:applied'
+      sessionId: string
+      proposalId: string
+      checkpointId?: string
+      filePath?: string
+      oldString?: string
+      newString?: string
+      edits?: { oldString?: string; newString?: string }[]
+      structuredPatch?: unknown
+      gitDiff?: unknown
+    }
   | { type: 'plan:proposed'; sessionId: string; planId: string; markdown: string }
   | { type: 'auth:started'; sessionId: string; source: AgentSource }
   | { type: 'auth:output'; sessionId: string; text: string; urls?: string[]; codes?: string[] }

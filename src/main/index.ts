@@ -319,6 +319,11 @@ ipcMain.handle('window:new', () => {
   createWindow(false)
 })
 
+ipcMain.handle('window:close', (e) => {
+  const win = BrowserWindow.fromWebContents(e.sender)
+  if (win && !win.isDestroyed()) win.close()
+})
+
 ipcMain.on('app:requestAttention', (e, payload?: { reason?: 'done' | 'question' }) => {
   const win = BrowserWindow.fromWebContents(e.sender)
   if (win) requestWindowAttention(win, payload?.reason)
@@ -425,6 +430,10 @@ const payloadSide = (payload: TabPayload): 'left' | 'right' | undefined => {
     const side = (payload.tab as { side?: unknown }).side
     return side === 'left' || side === 'right' ? side : undefined
   }
+  if (payload.kind === 'doc' && payload.tab && typeof payload.tab === 'object') {
+    const side = (payload.tab as { side?: unknown }).side
+    if (side === 'left' || side === 'right') return side
+  }
   return payload.side
 }
 
@@ -432,6 +441,9 @@ const withPayloadSide = (payload: TabPayload, side?: 'left' | 'right'): TabPaylo
   if (!side) return payload
   if (payload.kind === 'terminal' && payload.tab && typeof payload.tab === 'object') {
     return { ...payload, tab: { ...(payload.tab as Record<string, unknown>), side } }
+  }
+  if (payload.kind === 'doc' && payload.tab && typeof payload.tab === 'object') {
+    return { ...payload, side, tab: { ...(payload.tab as Record<string, unknown>), side } }
   }
   return { ...payload, side }
 }

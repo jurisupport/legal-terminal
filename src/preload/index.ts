@@ -65,8 +65,22 @@ interface TerminalTabPayload {
   side?: 'left' | 'right'
 }
 
+interface DocumentTabPayload {
+  id?: string
+  title: string
+  kind?: 'markdown' | 'mdview' | 'file' | 'pdf' | 'image' | 'hwp' | 'csv' | 'settings'
+  path?: string
+  side?: 'left' | 'right'
+}
+
 type TabPayload =
-  | { kind: 'doc'; path: string; title: string; side?: 'left' | 'right' }
+  | {
+      kind: 'doc'
+      tab?: DocumentTabPayload
+      path?: string
+      title?: string
+      side?: 'left' | 'right'
+    }
   | { kind: 'terminal'; tab: TerminalTabPayload }
 
 interface TabMoveResult {
@@ -267,6 +281,7 @@ const api = {
     }> => ipcRenderer.invoke('app:info'),
     openExternal: (url: string): Promise<void> => ipcRenderer.invoke('app:openExternal', url),
     newWindow: (): Promise<void> => ipcRenderer.invoke('window:new'),
+    closeWindow: (): Promise<void> => ipcRenderer.invoke('window:close'),
     requestAttention: (reason?: 'done' | 'question'): void =>
       ipcRenderer.send('app:requestAttention', { reason }),
     onCloseActiveTab: (cb: () => void): (() => void) => {

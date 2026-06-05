@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { cancelIfTerminalPointerDrag } from '../dragGuard'
 
 export interface Entry {
   name: string
@@ -17,6 +18,43 @@ export interface PendingCreateRequest {
 
 // 트리 내부 드래그 식별용 MIME (외부 OS 파일 드롭과 구분)
 export const LT_PATH = 'application/x-lt-path'
+export const LT_PATHS = 'application/x-lt-paths'
+
+function uniqueStrings(values: string[]): string[] {
+  const seen = new Set<string>()
+  const out: string[] = []
+  for (const value of values) {
+    if (!value || seen.has(value)) continue
+    seen.add(value)
+    out.push(value)
+  }
+  return out
+}
+
+export function readLtPaths(dataTransfer: Pick<DataTransfer, 'getData'>): string[] {
+  const packed = dataTransfer.getData(LT_PATHS)
+  if (packed) {
+    try {
+      const parsed = JSON.parse(packed)
+      if (Array.isArray(parsed)) {
+        const paths = parsed.filter((value): value is string => typeof value === 'string')
+        if (paths.length) return uniqueStrings(paths)
+      }
+    } catch {
+      // Fall through to the single-path payload for older drag sources.
+    }
+  }
+  const single = dataTransfer.getData(LT_PATH)
+  return single ? [single] : []
+}
+
+function writeLtPaths(dataTransfer: DataTransfer, paths: string[]): void {
+  const unique = uniqueStrings(paths)
+  if (!unique.length) return
+  dataTransfer.setData(LT_PATH, unique[0])
+  if (unique.length > 1) dataTransfer.setData(LT_PATHS, JSON.stringify(unique))
+  dataTransfer.setData('text/plain', unique.join('\n'))
+}
 
 const koCollator = new Intl.Collator('ko', { numeric: true, sensitivity: 'base' })
 const SEARCH_DEPTH_LIMIT = 8
@@ -72,6 +110,37 @@ function createTargetDir(pendingCreate: PendingCreateRequest | null, fallback: s
   return pendingCreate?.dir ?? fallback
 }
 
+interface VisibleEntry extends Entry {
+  element: HTMLElement
+}
+
+interface SelectRect {
+  left: number
+  top: number
+  width: number
+  height: number
+}
+
+type DragSelectMode = 'replace' | 'add'
+
+function entryFromRow(element: HTMLElement): VisibleEntry | null {
+  const path = element.dataset.entryPath
+  const name = element.dataset.entryName
+  if (!path || !name) return null
+  return {
+    path,
+    name,
+    isDir: element.dataset.entryDir === 'true',
+    element
+  }
+}
+
+function intersects(a: DOMRect, b: SelectRect): boolean {
+  const right = b.left + b.width
+  const bottom = b.top + b.height
+  return a.left < right && a.right > b.left && a.top < bottom && a.bottom > b.top
+}
+
 /** 활성 사건 폴더(root)의 파일트리. 폴더는 펼칠 때 지연 로딩. */
 export default function FileTree({
   root,
@@ -113,8 +182,13 @@ export default function FileTree({
   const [rootOver, setRootOver] = useState(false)
   const [rootDropLabel, setRootDropLabel] = useState('')
   const [editingPath, setEditingPath] = useState<string | null>(null)
+  const [selectedPaths, setSelectedPaths] = useState<Set<string>>(() => new Set())
+  const [selectRect, setSelectRect] = useState<SelectRect | null>(null)
+  const treeRef = useRef<HTMLUListElement>(null)
   const lastRoot = useRef<string | null>(null)
   const entriesRef = useRef<Entry[] | null>(null)
+  const selectedPathsRef = useRef(selectedPaths)
+  const anchorPathRef = useRef<string | null>(null)
   const query = filter.trim()
   const rootCreate =
     pendingCreate && pathKey(createTargetDir(pendingCreate, root)) === pathKey(root)
@@ -124,16 +198,125 @@ export default function FileTree({
     y: number
     entry?: Entry
     pasteDir: string
+    entries?: Entry[]
   } | null>(null)
-  const onContext = (e: React.MouseEvent, entry: Entry): void => {
+  selectedPathsRef.current = selectedPaths
+
+  const visibleEntries = (): VisibleEntry[] =>
+    Array.from(treeRef.current?.querySelectorAll<HTMLElement>('.tree-row[data-entry-path]') ?? [])
+      .map(entryFromRow)
+      .filter((entry): entry is VisibleEntry => entry !== null)
+
+  const visiblePaths = (): string[] => visibleEntries().map((entry) => entry.path)
+
+  const selectedVisibleEntries = (): Entry[] =>
+    visibleEntries()
+      .filter((entry) => selectedPathsRef.current.has(entry.path))
+      .map(({ element, ...entry }) => entry)
+
+  const clearSelection = (): void => {
+    anchorPathRef.current = null
+    setSelectedPaths(new Set())
+  }
+
+  const selectOnly = (path: string): void => {
+    anchorPathRef.current = path
+    setSelectedPaths(new Set([path]))
+  }
+
+  const selectAllVisible = (): void => {
+    const paths = visiblePaths()
+    if (!paths.length) return
+    anchorPathRef.current = paths[0]
+    setSelectedPaths(new Set(paths))
+  }
+
+  const selectRangeTo = (path: string, additive: boolean): void => {
+    const paths = visiblePaths()
+    const currentIndex = paths.indexOf(path)
+    if (currentIndex < 0) {
+      selectOnly(path)
+      return
+    }
+    const anchor = anchorPathRef.current && paths.includes(anchorPathRef.current)
+      ? anchorPathRef.current
+      : path
+    const anchorIndex = paths.indexOf(anchor)
+    const [start, end] =
+      anchorIndex <= currentIndex ? [anchorIndex, currentIndex] : [currentIndex, anchorIndex]
+    const range = paths.slice(start, end + 1)
+    setSelectedPaths((current) => {
+      if (!additive) return new Set(range)
+      const next = new Set(current)
+      for (const item of range) next.add(item)
+      return next
+    })
+    anchorPathRef.current = anchor
+  }
+
+  const toggleSelected = (path: string): void => {
+    anchorPathRef.current = path
+    setSelectedPaths((current) => {
+      const next = new Set(current)
+      if (next.has(path)) next.delete(path)
+      else next.add(path)
+      return next
+    })
+  }
+
+  const selectForClick = (event: React.MouseEvent, entry: Entry): boolean => {
+    const additive = event.ctrlKey || event.metaKey
+    if (event.shiftKey) {
+      selectRangeTo(entry.path, additive)
+      return true
+    }
+    if (additive) {
+      toggleSelected(entry.path)
+      return true
+    }
+    selectOnly(entry.path)
+    return false
+  }
+
+  const selectedDragPaths = (entry: Entry): string[] => {
+    if (!selectedPathsRef.current.has(entry.path)) return [entry.path]
+    const paths = visibleEntries()
+      .map((item) => item.path)
+      .filter((path) => selectedPathsRef.current.has(path))
+    return paths.length ? paths : [entry.path]
+  }
+
+  const deleteEntries = (targets: Entry[]): void => {
+    if (!onDelete || !targets.length) return
+    const unique = uniqueStrings(targets.map((entry) => entry.path))
+      .map((path) => targets.find((entry) => entry.path === path))
+      .filter((entry): entry is Entry => !!entry)
+    if (!unique.length) return
+    const label =
+      unique.length === 1
+        ? `'${unique[0].name}'${unique[0].isDir ? ' 폴더' : ''}을(를) 삭제할까요?`
+        : `선택한 ${unique.length}개 항목을 삭제할까요?`
+    if (!window.confirm(label)) return
+    for (const entry of unique) onDelete(entry.path, entry.name, entry.isDir)
+    clearSelection()
+  }
+
+  const openContextForEntry = (e: React.MouseEvent, entry: Entry): void => {
     e.preventDefault()
     e.stopPropagation()
+    const selected = selectedPathsRef.current
+    const entries = selected.has(entry.path) ? selectedVisibleEntries() : [entry]
+    if (!selected.has(entry.path)) selectOnly(entry.path)
     setMenu({
       x: e.clientX,
       y: e.clientY,
       entry,
+      entries: entries.length ? entries : [entry],
       pasteDir: entry.isDir ? entry.path : parentPath(entry.path, root)
     })
+  }
+  const onContext = (e: React.MouseEvent, entry: Entry): void => {
+    openContextForEntry(e, entry)
   }
   const onRootContext = (e: React.MouseEvent): void => {
     e.preventDefault()
@@ -150,6 +333,12 @@ export default function FileTree({
       document.removeEventListener('scroll', close, true)
     }
   }, [menu])
+
+  useEffect(() => {
+    clearSelection()
+    setSelectRect(null)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [root, query])
 
   useEffect(() => {
     setEditingPath(null)
@@ -185,6 +374,89 @@ export default function FileTree({
       alive = false
     }
   }, [root, refreshNonce])
+
+  const startMarqueeSelection = (e: React.PointerEvent<HTMLUListElement>): void => {
+    if (!e.isPrimary || e.button !== 0) return
+    const target = e.target as HTMLElement
+    if (target.closest('.tree-row, .ctx-menu, input, button, select, textarea')) return
+    const mode: DragSelectMode = e.ctrlKey || e.metaKey ? 'add' : 'replace'
+    const startX = e.clientX
+    const startY = e.clientY
+    const base = new Set(selectedPathsRef.current)
+    let moved = false
+    let latestRect: SelectRect | null = null
+
+    const buildRect = (clientX: number, clientY: number): SelectRect => ({
+      left: Math.min(startX, clientX),
+      top: Math.min(startY, clientY),
+      width: Math.abs(clientX - startX),
+      height: Math.abs(clientY - startY)
+    })
+
+    const applyRect = (rect: SelectRect): void => {
+      const hits = visibleEntries()
+        .filter((entry) => intersects(entry.element.getBoundingClientRect(), rect))
+        .map((entry) => entry.path)
+      setSelectedPaths(() => {
+        if (mode === 'replace') return new Set(hits)
+        const next = new Set(base)
+        for (const path of hits) next.add(path)
+        return next
+      })
+      const lastHit = hits[hits.length - 1]
+      if (lastHit) anchorPathRef.current = lastHit
+    }
+
+    const cleanup = (): void => {
+      window.removeEventListener('pointermove', onMove)
+      window.removeEventListener('pointerup', onDone)
+      window.removeEventListener('pointercancel', onDone)
+      window.removeEventListener('blur', onDone)
+      setSelectRect(null)
+    }
+
+    const onMove = (event: PointerEvent): void => {
+      if (Math.abs(event.clientX - startX) < 4 && Math.abs(event.clientY - startY) < 4) return
+      moved = true
+      latestRect = buildRect(event.clientX, event.clientY)
+      setSelectRect(latestRect)
+      applyRect(latestRect)
+      event.preventDefault()
+    }
+
+    const onDone = (): void => {
+      if (!moved && mode === 'replace') clearSelection()
+      if (latestRect) applyRect(latestRect)
+      cleanup()
+    }
+
+    window.addEventListener('pointermove', onMove)
+    window.addEventListener('pointerup', onDone)
+    window.addEventListener('pointercancel', onDone)
+    window.addEventListener('blur', onDone)
+    e.preventDefault()
+  }
+
+  const handleTreeKeyDown = (e: React.KeyboardEvent<HTMLUListElement>): void => {
+    const primary = e.ctrlKey || e.metaKey
+    if (primary && !e.shiftKey && !e.altKey && e.key.toLowerCase() === 'a') {
+      e.preventDefault()
+      e.stopPropagation()
+      selectAllVisible()
+      return
+    }
+    if (e.key === 'Escape' && selectedPaths.size > 0) {
+      e.preventDefault()
+      e.stopPropagation()
+      clearSelection()
+      return
+    }
+    if (e.key === 'Delete' && onDelete && selectedPaths.size > 0) {
+      e.preventDefault()
+      e.stopPropagation()
+      deleteEntries(selectedVisibleEntries())
+    }
+  }
 
   useEffect(() => {
     if (!query) {
@@ -233,21 +505,35 @@ export default function FileTree({
     e.preventDefault()
     setRootOver(false)
     setRootDropLabel('')
-    const src = e.dataTransfer.getData(LT_PATH)
-    if (src) onMove?.(src, root)
-    else if (e.dataTransfer.files.length) onDropTo?.(root, e.dataTransfer.files)
+    const paths = readLtPaths(e.dataTransfer)
+    if (paths.length) {
+      for (const src of paths) {
+        if (pathKey(src) !== pathKey(root)) onMove?.(src, root)
+      }
+    } else if (e.dataTransfer.files.length) onDropTo?.(root, e.dataTransfer.files)
   }
+  const menuEntries = menu?.entries ?? (menu?.entry ? [menu.entry] : [])
+  const singleMenuEntry = menuEntries.length === 1 ? menuEntries[0] : null
 
   return (
     <ul
-      className={`tree ${rootOver ? 'drop-target-root' : ''}`}
+      ref={treeRef}
+      className={`tree ${rootOver ? 'drop-target-root' : ''} ${selectRect ? 'selection-dragging' : ''}`}
       data-drop-label={rootDropLabel}
       onContextMenu={onRootContext}
+      onPointerDown={startMarqueeSelection}
+      onKeyDown={handleTreeKeyDown}
       onDragOver={(e) => {
         // 내부 경로 또는 외부 파일일 때만 드롭 허용
-        if (!e.dataTransfer.types.includes(LT_PATH) && !e.dataTransfer.types.includes('Files')) return
+        if (
+          !e.dataTransfer.types.includes(LT_PATH) &&
+          !e.dataTransfer.types.includes(LT_PATHS) &&
+          !e.dataTransfer.types.includes('Files')
+        )
+          return
         e.preventDefault()
-        const internal = e.dataTransfer.types.includes(LT_PATH)
+        const internal =
+          e.dataTransfer.types.includes(LT_PATH) || e.dataTransfer.types.includes(LT_PATHS)
         e.dataTransfer.dropEffect = internal ? 'move' : 'copy'
         setRootDropLabel(internal ? '작성서류 루트로 이동' : '작성서류 루트에 복사')
         setRootOver(true)
@@ -261,6 +547,17 @@ export default function FileTree({
       }}
       onDrop={rootDrop}
     >
+      {selectRect && (
+        <div
+          className="tree-select-marquee"
+          style={{
+            left: selectRect.left,
+            top: selectRect.top,
+            width: selectRect.width,
+            height: selectRect.height
+          }}
+        />
+      )}
       {query ? (
         <>
           {searchErr && <li className="tree-node muted pad">검색 실패: {searchErr}</li>}
@@ -281,7 +578,11 @@ export default function FileTree({
                   />
                 ) : (
                   <div
-                    className="tree-row tree-search-row"
+                    className={`tree-row tree-search-row ${selectedPaths.has(e.path) ? 'selected' : ''}`}
+                    data-entry-path={e.path}
+                    data-entry-name={e.name}
+                    data-entry-dir={String(e.isDir)}
+                    aria-selected={selectedPaths.has(e.path)}
                     style={{ paddingLeft: 8 }}
                     title={e.path}
                     tabIndex={0}
@@ -290,7 +591,10 @@ export default function FileTree({
                       ev.stopPropagation()
                       ev.currentTarget.focus()
                     }}
-                    onClick={() => onOpenFile(e.path, e.name)}
+                    onClick={(ev) => {
+                      const selectionOnly = selectForClick(ev, e)
+                      if (!selectionOnly) onOpenFile(e.path, e.name)
+                    }}
                     onContextMenu={(ev) => onContext(ev, e)}
                     onKeyDown={(ev) => {
                       if (ev.key === 'F2' && onRename) {
@@ -303,8 +607,9 @@ export default function FileTree({
                       }
                     }}
                     onDragStart={(ev) => {
+                      if (cancelIfTerminalPointerDrag(ev)) return
                       ev.stopPropagation()
-                      ev.dataTransfer.setData(LT_PATH, e.path)
+                      writeLtPaths(ev.dataTransfer, selectedDragPaths(e))
                       ev.dataTransfer.effectAllowed = 'copyMove'
                     }}
                   >
@@ -344,6 +649,10 @@ export default function FileTree({
                 onDropTo={onDropTo}
                 onMove={onMove}
                 onRename={onRename ? (path, name) => commitRename(path, name) : undefined}
+                selected={selectedPaths.has(e.path)}
+                isSelected={(path) => selectedPaths.has(path)}
+                onSelectForClick={selectForClick}
+                selectedDragPaths={selectedDragPaths}
                 editingPath={editingPath}
                 onStartRename={setEditingPath}
                 onCancelRename={() => setEditingPath(null)}
@@ -401,11 +710,11 @@ export default function FileTree({
             </li>
           )}
           {onDownload &&
-            ((menu.entry && isRemotePath(menu.entry.path)) || (!menu.entry && isRemotePath(root))) && (
+            ((singleMenuEntry && isRemotePath(singleMenuEntry.path)) || (!menu.entry && isRemotePath(root))) && (
             <li
               className="ctx-item"
               onClick={() => {
-                const entry = menu.entry
+                const entry = singleMenuEntry
                 const path = entry?.path ?? root
                 const name = entry?.name ?? '현재 폴더'
                 const isDir = entry?.isDir ?? true
@@ -416,11 +725,11 @@ export default function FileTree({
               다운로드
             </li>
           )}
-          {menu.entry && onRename && (
+          {singleMenuEntry && onRename && (
             <li
               className="ctx-item"
               onClick={() => {
-                const { path } = menu.entry as Entry
+                const { path } = singleMenuEntry
                 setMenu(null)
                 setEditingPath(path)
               }}
@@ -428,17 +737,15 @@ export default function FileTree({
               이름 변경
             </li>
           )}
-          {menu.entry && onDelete && (
+          {menuEntries.length > 0 && onDelete && (
             <li
               className="ctx-item"
               onClick={() => {
-                const { path, name, isDir } = menu.entry as Entry
                 setMenu(null)
-                if (window.confirm(`'${name}'${isDir ? ' 폴더' : ''}을(를) 삭제할까요?`))
-                  onDelete(path, name, isDir)
+                deleteEntries(menuEntries)
               }}
             >
-              삭제
+              {menuEntries.length > 1 ? `삭제 (${menuEntries.length}개)` : '삭제'}
             </li>
           )}
         </ul>
@@ -456,6 +763,10 @@ function TreeNode({
   onDropTo,
   onMove,
   onRename,
+  selected,
+  isSelected,
+  onSelectForClick,
+  selectedDragPaths,
   editingPath,
   onStartRename,
   onCancelRename,
@@ -472,6 +783,10 @@ function TreeNode({
   onDropTo?: (dir: string, files: FileList) => void
   onMove?: (src: string, destDir: string) => void
   onRename?: (path: string, name: string) => void
+  selected: boolean
+  isSelected: (path: string) => boolean
+  onSelectForClick: (event: React.MouseEvent, entry: Entry) => boolean
+  selectedDragPaths: (entry: Entry) => string[]
   editingPath?: string | null
   onStartRename?: (path: string) => void
   onCancelRename?: () => void
@@ -535,10 +850,21 @@ function TreeNode({
   return (
     <li>
       <div
-        className={`tree-row ${over ? 'drop-target' : ''}`}
+        className={`tree-row ${over ? 'drop-target' : ''} ${selected ? 'selected' : ''}`}
+        data-entry-path={entry.path}
+        data-entry-name={entry.name}
+        data-entry-dir={String(entry.isDir)}
+        aria-selected={selected}
         data-drop-label={dropLabel}
         style={{ paddingLeft: 8 + depth * 14 }}
-        onClick={renaming ? undefined : onClick}
+        onClick={
+          renaming
+            ? undefined
+            : (e) => {
+                const selectionOnly = onSelectForClick(e, entry)
+                if (!selectionOnly) onClick()
+              }
+        }
         onContextMenu={(e) => onContext?.(e, entry)}
         title={entry.name}
         tabIndex={0}
@@ -558,9 +884,10 @@ function TreeNode({
           }
         }}
         onDragStart={(e) => {
+          if (cancelIfTerminalPointerDrag(e)) return
           if (renaming) return
           e.stopPropagation()
-          e.dataTransfer.setData(LT_PATH, entry.path)
+          writeLtPaths(e.dataTransfer, selectedDragPaths(entry))
           // 폴더로 '이동'과 터미널로 '복사'를 모두 허용 (copy만/move만이면 다른 드롭존에서 '금지' 표시됨)
           e.dataTransfer.effectAllowed = 'copyMove'
         }}
@@ -570,12 +897,14 @@ function TreeNode({
                 // 주의: dragover 중에는 보안상 getData()가 ''를 반환하므로 types로 판별
                 if (
                   !e.dataTransfer.types.includes(LT_PATH) &&
+                  !e.dataTransfer.types.includes(LT_PATHS) &&
                   !e.dataTransfer.types.includes('Files')
                 )
                   return
                 e.preventDefault()
                 e.stopPropagation()
-                const internal = e.dataTransfer.types.includes(LT_PATH)
+                const internal =
+                  e.dataTransfer.types.includes(LT_PATH) || e.dataTransfer.types.includes(LT_PATHS)
                 e.dataTransfer.dropEffect = internal ? 'move' : 'copy'
                 setDropLabel(internal ? `${entry.name} 폴더로 이동` : `${entry.name} 폴더에 복사`)
                 setOver(true)
@@ -606,9 +935,11 @@ function TreeNode({
                 setOver(false)
                 setDropLabel('')
                 clearSpring()
-                const src = e.dataTransfer.getData(LT_PATH)
-                if (src) {
-                  if (src !== entry.path) onMove?.(src, entry.path)
+                const paths = readLtPaths(e.dataTransfer)
+                if (paths.length) {
+                  for (const src of paths) {
+                    if (pathKey(src) !== pathKey(entry.path)) onMove?.(src, entry.path)
+                  }
                 } else if (e.dataTransfer.files.length) {
                   onDropTo?.(entry.path, e.dataTransfer.files)
                 }
@@ -657,6 +988,10 @@ function TreeNode({
                   onDropTo={onDropTo}
                   onMove={onMove}
                   onRename={onRename}
+                  selected={isSelected(c.path)}
+                  isSelected={isSelected}
+                  onSelectForClick={onSelectForClick}
+                  selectedDragPaths={selectedDragPaths}
                   editingPath={editingPath}
                   onStartRename={onStartRename}
                   onCancelRename={onCancelRename}

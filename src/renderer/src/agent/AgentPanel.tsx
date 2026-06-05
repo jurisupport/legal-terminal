@@ -4,6 +4,7 @@ import {
   useMemo,
   useRef,
   useState,
+  Fragment,
   type CSSProperties,
   type ClipboardEvent,
   type DragEvent,
@@ -11,7 +12,7 @@ import {
 } from 'react'
 import DOMPurify from 'dompurify'
 import { marked } from 'marked'
-import { LT_PATH } from '../filetree/FileTree'
+import { LT_PATH, LT_PATHS, readLtPaths } from '../filetree/FileTree'
 import type {
   AgentAttachment,
   AgentEvent,
@@ -50,6 +51,7 @@ interface AgentPanelProps {
   onAttachmentRequestsHandled?: (requestIds: string[]) => void
   onStatus?: (status: AgentRunStatus) => void
   onOpenTerminal?: () => void
+  onOpenDiff?: (request: AgentDiffOpenRequest) => void
 }
 
 export interface AgentAttachmentRequest {
@@ -63,6 +65,7 @@ interface TimelineItem {
   kind: 'user' | 'assistant' | 'tool' | 'permission' | 'diff' | 'error' | 'auth' | 'process' | 'queue' | 'dialog'
   title?: string
   text?: string
+  diff?: DiffView
   attachments?: AgentAttachment[]
   status?: string
   requestId?: string
@@ -97,6 +100,47 @@ interface ProcessStep {
   title: string
   text?: string
   status?: string
+}
+
+interface DiffEdit {
+  oldString?: string
+  newString?: string
+}
+
+interface DiffPatchHunk {
+  oldStart: number
+  oldLines: number
+  newStart: number
+  newLines: number
+  lines: string[]
+}
+
+interface DiffRow {
+  kind: 'context' | 'change' | 'remove' | 'add'
+  beforeNo?: number
+  afterNo?: number
+  before?: string
+  after?: string
+}
+
+interface DiffHunkView {
+  label?: string
+  oldStart?: number
+  newStart?: number
+  rows: DiffRow[]
+}
+
+export interface DiffView {
+  filePath?: string
+  hunks: DiffHunkView[]
+  additions: number
+  deletions: number
+}
+
+export interface AgentDiffOpenRequest {
+  id: string
+  title: string
+  diff: DiffView
 }
 
 interface SlashCommand {
@@ -183,6 +227,7 @@ const agentStatusLabels: Record<AgentPanelStatus, string> = {
 }
 
 function timelineStatusLabel(item: TimelineItem): string | undefined {
+  if (item.kind === 'diff' && item.status === 'applied') return '적용됨'
   if (item.kind !== 'queue') return item.status
   if (item.status === 'queued') return '대기'
   if (item.status === 'priority') return '바로 지시 대기'
@@ -211,6 +256,8 @@ const asRecord = (value: unknown): Record<string, unknown> | null =>
   value && typeof value === 'object' ? (value as Record<string, unknown>) : null
 
 const stringValue = (value: unknown): string | undefined => (typeof value === 'string' ? value : undefined)
+const numberValue = (value: unknown): number | undefined =>
+  typeof value === 'number' && Number.isFinite(value) ? value : undefined
 
 const stringArray = (value: unknown): string[] =>
   Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : []
@@ -319,8 +366,8 @@ function caretOnLastLine(textarea: HTMLTextAreaElement): boolean {
 }
 
 function dataTransferPaths(dataTransfer: DataTransfer): string[] {
-  const internal = dataTransfer.getData(LT_PATH)
-  if (internal) return [internal]
+  const internal = readLtPaths(dataTransfer)
+  if (internal.length) return internal
   return uniqueStrings(
     Array.from(dataTransfer.files)
       .map((file) => window.lt.fs.pathForFile(file))
@@ -406,6 +453,181 @@ const preview = (value: unknown, max = 260): string => {
   const text = typeof value === 'string' ? value : JSON.stringify(value, null, 2)
   if (!text) return ''
   return text.length > max ? `${text.slice(0, max)}...` : text
+}
+
+const splitDiffText = (value: string | undefined): string[] => {
+  if (value === undefined) return []
+  return value.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n')
+}
+
+function diffLineStats(hunks: DiffHunkView[]): { additions: number; deletions: number } {
+  let additions = 0
+  let deletions = 0
+  for (const hunk of hunks) {
+    for (const row of hunk.rows) {
+      if (row.kind === 'add' || row.kind === 'change') additions += row.after === undefined ? 0 : 1
+      if (row.kind === 'remove' || row.kind === 'change') deletions += row.before === undefined ? 0 : 1
+    }
+  }
+  return { additions, deletions }
+}
+
+function normalizePatchHunks(value: unknown): DiffPatchHunk[] {
+  return recordArray(value)
+    .map((hunk) => {
+      const oldStart = numberValue(hunk.oldStart)
+      const oldLines = numberValue(hunk.oldLines)
+      const newStart = numberValue(hunk.newStart)
+      const newLines = numberValue(hunk.newLines)
+      const lines = stringArray(hunk.lines)
+      if (
+        oldStart === undefined ||
+        oldLines === undefined ||
+        newStart === undefined ||
+        newLines === undefined ||
+        lines.length === 0
+      ) {
+        return null
+      }
+      return { oldStart, oldLines, newStart, newLines, lines }
+    })
+    .filter((hunk): hunk is DiffPatchHunk => Boolean(hunk))
+}
+
+function normalizeDiffEdits(value: unknown): DiffEdit[] {
+  const edits: DiffEdit[] = []
+  for (const edit of recordArray(value)) {
+    const oldString = stringValue(edit.oldString)
+    const newString = stringValue(edit.newString)
+    if (oldString !== undefined || newString !== undefined) edits.push({ oldString, newString })
+  }
+  return edits
+}
+
+function rowsFromPatchHunk(hunk: DiffPatchHunk): DiffRow[] {
+  const rows: DiffRow[] = []
+  const removals: { lineNo: number; text: string }[] = []
+  let beforeNo = hunk.oldStart
+  let afterNo = hunk.newStart
+
+  const flushRemovals = (): void => {
+    while (removals.length > 0) {
+      const removed = removals.shift()!
+      rows.push({ kind: 'remove', beforeNo: removed.lineNo, before: removed.text })
+    }
+  }
+
+  for (const rawLine of hunk.lines) {
+    if (rawLine.startsWith('\\')) continue
+    const marker = rawLine[0]
+    const text = marker === '+' || marker === '-' || marker === ' ' ? rawLine.slice(1) : rawLine
+    if (marker === '-') {
+      removals.push({ lineNo: beforeNo, text })
+      beforeNo += 1
+      continue
+    }
+    if (marker === '+') {
+      const removed = removals.shift()
+      rows.push(
+        removed
+          ? { kind: 'change', beforeNo: removed.lineNo, afterNo, before: removed.text, after: text }
+          : { kind: 'add', afterNo, after: text }
+      )
+      afterNo += 1
+      continue
+    }
+    flushRemovals()
+    rows.push({ kind: 'context', beforeNo, afterNo, before: text, after: text })
+    beforeNo += 1
+    afterNo += 1
+  }
+
+  flushRemovals()
+  return rows
+}
+
+function rowsFromStrings(oldString: string | undefined, newString: string | undefined): DiffRow[] {
+  const beforeLines = splitDiffText(oldString)
+  const afterLines = splitDiffText(newString)
+  const max = Math.max(beforeLines.length, afterLines.length)
+  const rows: DiffRow[] = []
+  for (let index = 0; index < max; index += 1) {
+    const before = beforeLines[index]
+    const after = afterLines[index]
+    if (before === after) {
+      rows.push({ kind: 'context', beforeNo: index + 1, afterNo: index + 1, before, after })
+    } else if (before === undefined) {
+      rows.push({ kind: 'add', afterNo: index + 1, after })
+    } else if (after === undefined) {
+      rows.push({ kind: 'remove', beforeNo: index + 1, before })
+    } else {
+      rows.push({ kind: 'change', beforeNo: index + 1, afterNo: index + 1, before, after })
+    }
+  }
+  return rows
+}
+
+function diffViewFromParts(args: {
+  filePath?: string
+  structuredPatch?: unknown
+  oldString?: string
+  newString?: string
+  edits?: DiffEdit[]
+}): DiffView | undefined {
+  const patchHunks = normalizePatchHunks(args.structuredPatch)
+  if (patchHunks.length > 0) {
+    const hunks = patchHunks.map((hunk, index) => ({
+      label: `Hunk ${index + 1}`,
+      oldStart: hunk.oldStart,
+      newStart: hunk.newStart,
+      rows: rowsFromPatchHunk(hunk)
+    }))
+    const stats = diffLineStats(hunks)
+    return { filePath: args.filePath, hunks, ...stats }
+  }
+
+  const edits = args.edits?.length ? args.edits : [{ oldString: args.oldString, newString: args.newString }]
+  const hunks = edits
+    .map((edit, index) => ({
+      label: edits.length > 1 ? `Edit ${index + 1}` : undefined,
+      rows: rowsFromStrings(edit.oldString, edit.newString)
+    }))
+    .filter((hunk) => hunk.rows.length > 0)
+  if (hunks.length === 0) return undefined
+  const stats = diffLineStats(hunks)
+  return { filePath: args.filePath, hunks, ...stats }
+}
+
+function diffViewFromRecord(record: Record<string, unknown> | null): DiffView | undefined {
+  if (!record) return undefined
+  return diffViewFromParts({
+    filePath: stringValue(record.filePath),
+    structuredPatch: record.structuredPatch,
+    oldString: stringValue(record.oldString),
+    newString: stringValue(record.newString),
+    edits: normalizeDiffEdits(record.edits)
+  })
+}
+
+function diffTitle(prefix: string, filePath?: string): string {
+  return filePath ? `${prefix} · ${filePath.split(/[\\/]/).pop()}` : prefix
+}
+
+function diffOpenRequestFromEvent(event: AgentEvent): AgentDiffOpenRequest | null {
+  if (event.type === 'diff:proposed') {
+    const proposal = asRecord(event.proposal)
+    const id = stringValue(proposal?.proposalId)
+    const diff = diffViewFromRecord(proposal)
+    if (!id || !diff) return null
+    return { id, title: diffTitle('변경 제안', diff.filePath), diff }
+  }
+  if (event.type === 'diff:applied') {
+    const id = stringValue(event.proposalId)
+    const diff = diffViewFromRecord(event)
+    if (!id || !diff) return null
+    return { id, title: diffTitle('변경 적용', diff.filePath), diff }
+  }
+  return null
 }
 
 const upsertItem = (
@@ -663,20 +885,36 @@ function reduceTimeline(items: TimelineItem[], event: AgentEvent): TimelineItem[
     const filePath = stringValue(proposal?.filePath)
     const oldString = stringValue(proposal?.oldString)
     const newString = stringValue(proposal?.newString)
+    const diff = diffViewFromRecord(proposal)
     return [
       ...items,
       {
         id,
         kind: 'diff',
-        title: filePath ? `변경 제안 · ${filePath.split(/[\\/]/).pop()}` : '변경 제안',
-        text: [oldString && `- ${oldString}`, newString && `+ ${newString}`].filter(Boolean).join('\n')
+        title: diffTitle('변경 제안', filePath),
+        text: diff
+          ? undefined
+          : [oldString && `- ${oldString}`, newString && `+ ${newString}`].filter(Boolean).join('\n'),
+        diff
       }
     ]
   }
   if (event.type === 'diff:applied') {
     const id = stringValue(event.proposalId)
     if (!id) return items
-    return items.map((item) => (item.id === id ? { ...item, status: 'applied' } : item))
+    const filePath = stringValue(event.filePath)
+    const diff = diffViewFromRecord(event)
+    return items.map((item) =>
+      item.id === id
+        ? {
+            ...item,
+            title: filePath ? diffTitle('변경 적용', filePath) : item.title,
+            status: 'applied',
+            text: diff ? undefined : item.text,
+            diff: diff ?? item.diff
+          }
+        : item
+    )
   }
   if (event.type === 'error') {
     return [
@@ -756,6 +994,45 @@ function transcriptToTimeline(transcript: SessionTranscript): TimelineItem[] {
     title: message.role === 'assistant' ? 'Claude' : '나',
     text: message.text
   }))
+}
+
+export function DiffPreview({ diff, fallbackText }: { diff?: DiffView; fallbackText?: string }): JSX.Element | null {
+  if (!diff || diff.hunks.length === 0) {
+    return fallbackText ? <pre className="agent-card-text">{fallbackText}</pre> : null
+  }
+  return (
+    <div className="agent-diff-view">
+      <div className="agent-diff-summary">
+        <span className="agent-diff-count add">+{diff.additions}</span>
+        <span className="agent-diff-count remove">-{diff.deletions}</span>
+      </div>
+      <div className="agent-diff-labels" aria-hidden="true">
+        <span>변경 전</span>
+        <span>변경 후</span>
+      </div>
+      {diff.hunks.map((hunk, hunkIndex) => (
+        <div key={`${hunk.label ?? 'hunk'}-${hunkIndex}`} className="agent-diff-hunk">
+          {(hunk.label || diff.hunks.length > 1) && (
+            <div className="agent-diff-hunk-title">{hunk.label ?? `Hunk ${hunkIndex + 1}`}</div>
+          )}
+          <div className="agent-diff-grid">
+            {hunk.rows.map((row, rowIndex) => (
+              <Fragment key={`${hunkIndex}-${rowIndex}`}>
+                <div className={`agent-diff-line before ${row.kind}`}>
+                  <span className="agent-diff-line-no">{row.beforeNo ?? ''}</span>
+                  <span className="agent-diff-line-text">{row.before ?? ''}</span>
+                </div>
+                <div className={`agent-diff-line after ${row.kind}`}>
+                  <span className="agent-diff-line-no">{row.afterNo ?? ''}</span>
+                  <span className="agent-diff-line-text">{row.after ?? ''}</span>
+                </div>
+              </Fragment>
+            ))}
+          </div>
+        </div>
+      ))}
+    </div>
+  )
 }
 
 function renderMarkdown(text: string): string {
@@ -893,7 +1170,8 @@ export default function AgentPanel({
   attachmentRequests = [],
   onAttachmentRequestsHandled,
   onStatus,
-  onOpenTerminal
+  onOpenTerminal,
+  onOpenDiff
 }: AgentPanelProps): JSX.Element {
   const [items, setItems] = useState<TimelineItem[]>([])
   const [input, setInput] = useState('')
@@ -1006,6 +1284,8 @@ export default function AgentPanel({
           void window.lt.app.openExternal(url)
         }
       }
+      const diffRequest = diffOpenRequestFromEvent(event)
+      if (diffRequest) onOpenDiff?.(diffRequest)
       if (event.type !== 'raw') setItems((prev) => reduceTimeline(prev, event))
       if (event.type === 'status') {
         const next = stringValue(event.status)
@@ -1027,7 +1307,7 @@ export default function AgentPanel({
       }
     })
     return off
-  }, [id, onStatus])
+  }, [id, onOpenDiff, onStatus])
 
   useEffect(() => {
     if (createdRef.current) return
@@ -1468,7 +1748,12 @@ export default function AgentPanel({
   }
 
   const attachableTransfer = (dataTransfer: DataTransfer | null): dataTransfer is DataTransfer =>
-    Boolean(dataTransfer && (dataTransfer.types.includes(LT_PATH) || dataTransfer.types.includes('Files')))
+    Boolean(
+      dataTransfer &&
+        (dataTransfer.types.includes(LT_PATH) ||
+          dataTransfer.types.includes(LT_PATHS) ||
+          dataTransfer.types.includes('Files'))
+    )
 
   const onAttachmentDrag = (event: DragEvent<HTMLDivElement>): void => {
     if (!attachableTransfer(event.dataTransfer) || authActive) return
@@ -1800,7 +2085,9 @@ export default function AgentPanel({
                   {cardStatus && <span className="agent-card-status">{cardStatus}</span>}
                 </span>
               </div>
-              {item.text &&
+              {item.kind === 'diff' && <DiffPreview diff={item.diff} fallbackText={item.text} />}
+              {item.kind !== 'diff' &&
+                item.text &&
                 (item.kind === 'assistant' ? (
                   <MarkdownMessage text={item.text} streaming={item.status === 'streaming'} />
                 ) : (

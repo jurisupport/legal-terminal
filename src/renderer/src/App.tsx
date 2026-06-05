@@ -1,6 +1,10 @@
-import { useEffect, useRef, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import Terminal from './terminal/Terminal'
-import AgentPanel, { type AgentAttachmentRequest } from './agent/AgentPanel'
+import AgentPanel, {
+  DiffPreview,
+  type AgentAttachmentRequest,
+  type AgentDiffOpenRequest
+} from './agent/AgentPanel'
 import FileTree, { LT_PATH, sortEntries, type PendingCreateRequest, type SortMode } from './filetree/FileTree'
 import PdfViewer, { type PdfViewStatus } from './viewer/PdfViewer'
 import RecordViewer from './viewer/RecordViewer'
@@ -22,9 +26,11 @@ import MarkdownEditor, {
   type MarkdownDocumentPayload,
   type TextSelectionOverlayDetail
 } from './editor/MarkdownEditor'
+import { markdownToPlainText, writeMarkdownClipboard } from './markdownClipboard'
 import FindBar from './search/FindBar'
 import CasesDashboard from './dashboard/CasesDashboard'
 import UpcomingHearings from './dashboard/UpcomingHearings'
+import { cancelIfTerminalPointerDrag } from './dragGuard'
 import type {
   AppSettings,
   AgentAttachment,
@@ -35,6 +41,7 @@ import type {
   SshConn,
   SshProfile,
   RemoteEntry,
+  DocumentTabPayload,
   TabPayload,
   WorkspaceDocTabPayload,
   WorkspaceEntry,
@@ -172,8 +179,9 @@ const sshConnFromProfile = (profile: SshProfile): SshConn => ({
 interface DocTab {
   id: string
   title: string
-  kind: 'welcome' | 'markdown' | 'mdview' | 'file' | 'pdf' | 'image' | 'hwp' | 'csv' | 'settings'
+  kind: 'welcome' | 'markdown' | 'mdview' | 'file' | 'pdf' | 'image' | 'hwp' | 'csv' | 'settings' | 'diff'
   path?: string
+  diffId?: string
   side?: DockSide
 }
 /**
@@ -337,6 +345,12 @@ const RESTORABLE_DOC_KINDS = new Set<DocTab['kind']>([
   'settings'
 ])
 
+const isRestorableDocKind = (value: unknown): value is DocTab['kind'] =>
+  typeof value === 'string' && RESTORABLE_DOC_KINDS.has(value as DocTab['kind'])
+
+const normalizeDocKind = (kind: DocTab['kind'], path?: string): DocTab['kind'] =>
+  kind === 'markdown' && path && MARKDOWN_EXT_RE.test(path) ? 'mdview' : kind
+
 const isWorkspaceMode = (value: unknown): value is Mode =>
   value === 'explorer' || value === 'cases' || value === 'viewer'
 
@@ -402,6 +416,8 @@ const docKindStatus = (kind: DocTab['kind']): string | undefined => {
       return 'HWP'
     case 'csv':
       return 'CSV'
+    case 'diff':
+      return '변경 비교'
     case 'file':
       return '파일'
   }
@@ -709,10 +725,22 @@ const toDocTab = (tab: WorkspaceDocTabPayload): DocTab | null => {
   return {
     id: tab.id || `file-${++docSeq}`,
     title: tab.title || tab.path?.split(/[\\/]/).pop() || '문서',
-    kind: tab.kind,
+    kind: normalizeDocKind(tab.kind, tab.path),
     path: tab.path,
     side: tab.side ?? 'left'
   }
+}
+
+const docTabDragPayload = (tab: DocTab, side: DockSide = docSide(tab)): TabPayload | undefined => {
+  if (!tab.path || !RESTORABLE_DOC_KINDS.has(tab.kind) || tab.kind === 'settings') return undefined
+  const doc: DocumentTabPayload = {
+    id: tab.id,
+    title: tab.title,
+    kind: normalizeDocKind(tab.kind, tab.path) as DocumentTabPayload['kind'],
+    path: tab.path,
+    side
+  }
+  return { kind: 'doc', tab: doc, path: doc.path, title: doc.title, side }
 }
 
 const sanitizeCurrentCase = (value: unknown): CurrentCase | null => {
@@ -874,6 +902,7 @@ export default function App(): JSX.Element {
   const [docTabs, setDocTabs] = useState<DocTab[]>(() =>
     docOnly ? [] : [{ id: 'doc-welcome', title: '시작하기.md', kind: 'welcome', side: 'left' }]
   )
+  const [agentDiffs, setAgentDiffs] = useState<Record<string, AgentDiffOpenRequest>>({})
   const [activeDoc, setActiveDoc] = useState<string>(() => (docOnly ? '' : 'doc-welcome'))
   // 닫으면 내용이 사라지는 문서(저장 안 된 새 문서) id 집합 — 닫기 전 확인용
   const [dirtyDocs, setDirtyDocs] = useState<Set<string>>(new Set())
@@ -985,9 +1014,9 @@ export default function App(): JSX.Element {
 
   useEffect(() => window.lt.app.onCloseActiveTab(() => closeActiveTabRef.current()), [])
 
-  const setWorkActive = (side: DockSide, key: WorkTabKey): void => {
+  const setWorkActive = useCallback((side: DockSide, key: WorkTabKey): void => {
     setActiveWork((active) => ({ ...active, [side]: key }))
-  }
+  }, [])
   const focusedWorkSide = (element = document.activeElement as HTMLElement | null): DockSide | undefined =>
     datasetSide(closestHTMLElement(element, '[data-work-side]')?.dataset.workSide)
   const focusedTermId = (element = document.activeElement as HTMLElement | null): string | undefined =>
@@ -999,6 +1028,25 @@ export default function App(): JSX.Element {
     setActiveDoc(id)
     setWorkActive(docSide(tab), docKey(id))
   }
+  const openAgentDiff = useCallback(
+    (request: AgentDiffOpenRequest): void => {
+      const id = `agent-diff-${request.id}`
+      setAgentDiffs((diffs) => ({ ...diffs, [request.id]: request }))
+      setDocTabs((tabs) => {
+        const existing = tabs.find((tab) => tab.kind === 'diff' && tab.diffId === request.id)
+        if (existing) {
+          return tabs.map((tab) =>
+            tab.id === existing.id ? { ...tab, title: request.title, side: 'left' } : tab
+          )
+        }
+        return [...tabs, { id, title: request.title, kind: 'diff', diffId: request.id, side: 'left' }]
+      })
+      setMode('explorer')
+      setActiveDoc(id)
+      setWorkActive('left', docKey(id))
+    },
+    [setWorkActive]
+  )
   const activateTermTab = (id: string): void => {
     const tab = termTabs.find((t) => t.id === id)
     setActiveTerm(id)
@@ -1044,13 +1092,13 @@ export default function App(): JSX.Element {
         t.id === id ? { ...t, path, title: path.split(/[\\/]/).pop() ?? t.title } : t
       )
     )
-  const closeDoc = (id: string): void => {
+  const closeDoc = (id: string): boolean => {
     // 저장 안 된 새 문서면 확인 (경로 있는 문서는 자동저장되므로 그냥 닫음)
     if (
       dirtyDocs.has(id) &&
       !window.confirm('저장하지 않은 새 문서입니다. 닫으면 내용이 사라집니다. 닫을까요?')
     )
-      return
+      return false
     setDirtyDocs((s) => {
       if (!s.has(id)) return s
       const n = new Set(s)
@@ -1064,13 +1112,14 @@ export default function App(): JSX.Element {
       return n
     })
     setDocTabs((tabs) => closeTab(tabs, id, activeDoc, setActiveDoc))
+    return true
   }
 
   const openNewWorkspaceWindow = (): void => {
     void window.lt.app.newWindow()
   }
 
-  // 단축키: Ctrl/Cmd+T 새 터미널 / Ctrl/Cmd+W 탭 닫기 / Ctrl/Cmd+N 새 문서 / Ctrl/Cmd+Shift+N 새 작업환경
+  // 단축키: Ctrl/Cmd+T 새 Agent / Ctrl/Cmd+Shift+T 새 터미널 / Ctrl/Cmd+W 탭 닫기 / Ctrl/Cmd+N 새 문서 / Ctrl/Cmd+Shift+N 새 작업환경
   useEffect(() => {
     const onKey = (e: KeyboardEvent): void => {
       const activeEl = document.activeElement as HTMLElement | null
@@ -1080,12 +1129,13 @@ export default function App(): JSX.Element {
       const termId = focusedTermId(activeEl)
       const termSideForShortcut = focusedWorkSide(activeEl) ?? termSide(termTabs.find((t) => t.id === termId))
       const primary = platform === 'darwin' ? e.metaKey && !e.ctrlKey : e.ctrlKey
-      const macCtrlTInAgent = platform === 'darwin' && !!termId && e.ctrlKey && !e.metaKey && isT
-      if ((!primary && !macCtrlTInAgent) || e.altKey) return
-      if (termId && isT && !e.shiftKey) {
+      const macCtrlTInWorkTab = platform === 'darwin' && !!termId && e.ctrlKey && !e.metaKey && isT
+      if ((!primary && !macCtrlTInWorkTab) || e.altKey) return
+      if (termId && isT) {
         e.preventDefault()
         e.stopPropagation()
-        addTermSame(termSideForShortcut, termId)
+        if (e.shiftKey) addTermSame(termSideForShortcut, termId)
+        else addAgentSame(termSideForShortcut, termId)
         return
       }
       if (isKey('w', 'KeyW') && !e.shiftKey) {
@@ -1186,8 +1236,6 @@ export default function App(): JSX.Element {
   }
 
   // 다른 창에서 찢겨/이동돼 온 탭 수신 → 문서 또는 터미널 열기.
-  const openFileRef = useRef(openFile)
-  openFileRef.current = openFile
   const receiveTabRef = useRef<(p: TabPayload) => void>(() => {})
   receiveTabRef.current = (p) => {
     if (p.kind === 'terminal') {
@@ -1202,15 +1250,33 @@ export default function App(): JSX.Element {
       setWorkActive(termSide(tab), termKeyOf(tab.id))
       return
     }
-    const side = p.side ?? 'left'
-    const existing = docTabs.find((t) => t.path === p.path)
+    const payload = p.tab
+    const path = payload?.path ?? p.path
+    const side = payload?.side ?? p.side ?? 'left'
+    const rawKind = isRestorableDocKind(payload?.kind)
+      ? payload.kind
+      : path
+        ? docKindForPath(path)
+        : 'mdview'
+    const kind = normalizeDocKind(rawKind, path)
+    if (!path && kind !== 'settings') return
+    const title = payload?.title ?? p.title ?? pathLeaf(path) ?? '문서'
+    const existing = path
+      ? docTabs.find((t) => t.path === path)
+      : payload?.id
+        ? docTabs.find((t) => t.id === payload.id)
+        : undefined
     if (existing) {
       setDocTabs((tabs) => tabs.map((t) => (t.id === existing.id ? { ...t, side } : t)))
       setActiveDoc(existing.id)
       setWorkActive(side, docKey(existing.id))
       return
     }
-    openFileRef.current(p.path, p.title, side)
+    const id = payload?.id && !docTabs.some((t) => t.id === payload.id) ? payload.id : `file-${++docSeq}`
+    const tab: DocTab = { id, title, kind, path, side }
+    setDocTabs((tabs) => [...tabs, tab])
+    setActiveDoc(tab.id)
+    setWorkActive(side, docKey(tab.id))
   }
   useEffect(() => {
     const off = window.lt.tabs.onReceive((p) => receiveTabRef.current(p))
@@ -1672,7 +1738,11 @@ export default function App(): JSX.Element {
 
   // ＋T / 터미널로 실행: 같은 사건에서 PTY 터미널(claude 자동 실행)을 연다.
   // 활성 탭이 없으면 마지막 사건에서, 그것도 없으면 폴더 선택.
-  const addTermSame = (preferredSide?: DockSide, sourceTermId = activeTerm): void => {
+  const addTermSame = (
+    preferredSide?: DockSide,
+    sourceTermId = activeTerm,
+    options?: { reuseAgentTab?: boolean }
+  ): void => {
     const cur = termTabs.find((t) => t.id === sourceTermId)
     const side = preferredSide ?? termSide(cur)
     if (!cur) {
@@ -1705,6 +1775,44 @@ export default function App(): JSX.Element {
       }
       return
     }
+    if (options?.reuseAgentTab && isAgentTab(cur)) {
+      void window.lt.agent.close(cur.id)
+      setAgentAttachmentRequests((requests) => {
+        if (!requests[cur.id]) return requests
+        const next = { ...requests }
+        delete next[cur.id]
+        return next
+      })
+      setTermAttention((current) => {
+        if (!current.has(cur.id)) return current
+        const next = new Set(current)
+        next.delete(cur.id)
+        return next
+      })
+      setTermStatus((current) => {
+        if (!current.has(cur.id)) return current
+        const next = new Map(current)
+        next.delete(cur.id)
+        return next
+      })
+      setTermTabs((tabs) =>
+        tabs.map((t) =>
+          t.id === cur.id
+            ? {
+                ...t,
+                kind: 'terminal',
+                autoClaude: true,
+                createdAt: Date.now(),
+                sessionTitle: undefined,
+                side
+              }
+            : t
+        )
+      )
+      setActiveTerm(cur.id)
+      setWorkActive(side, termKeyOf(cur.id))
+      return
+    }
     const tab: TermTab = {
       id: newId(),
       title: cur.title,
@@ -1729,8 +1837,8 @@ export default function App(): JSX.Element {
     setWorkActive(side, termKeyOf(tab.id))
   }
 
-  const addAgentSame = (preferredSide?: DockSide): void => {
-    const cur = termTabs.find((t) => t.id === activeTerm)
+  const addAgentSame = (preferredSide?: DockSide, sourceTermId = activeTerm): void => {
+    const cur = termTabs.find((t) => t.id === sourceTermId)
     const side = preferredSide ?? termSide(cur)
     const ssh = cur?.ssh ?? currentCase?.ssh
     const cwd = cur?.cwd ?? (ssh ? currentCase?.remotePath : currentCase?.drafts)
@@ -1812,13 +1920,17 @@ export default function App(): JSX.Element {
       return n
     })
   }
-  const closeTerm = (id: string): void => {
+  const closeTerm = (id: string): boolean => {
     const tab = termTabs.find((t) => t.id === id)
     if (isAgentTab(tab)) window.lt.agent.close(id)
     else window.lt.pty.kill(id)
     removeTermTab(id)
+    return true
   }
-  const detachTerm = (id: string): void => removeTermTab(id)
+  const detachTerm = (id: string): boolean => {
+    removeTermTab(id)
+    return true
+  }
 
   // 터미널 선택 → 활성화 + 완료(주목) 표시 해제
   const selectTerm = (id: string): void => {
@@ -2422,9 +2534,11 @@ export default function App(): JSX.Element {
     const tab = docTabs.find((t) => t.id === id)
     if (!tab) return
     const nextTitle = title.trim() || tab.title
-    if (!tab.path || tab.kind !== 'mdview') {
+    if (!tab.path || (tab.kind !== 'mdview' && tab.kind !== 'markdown')) {
       const displayTitle =
-        tab.kind === 'mdview' ? markdownRenameName(nextTitle, tab.title) || nextTitle : nextTitle
+        tab.kind === 'mdview' || tab.kind === 'markdown'
+          ? markdownRenameName(nextTitle, tab.title) || nextTitle
+          : nextTitle
       setDocTabs((tabs) => tabs.map((t) => (t.id === id ? { ...t, title: displayTitle } : t)))
       return
     }
@@ -2667,6 +2781,20 @@ export default function App(): JSX.Element {
     })
   }
 
+  const terminalSnippetPrompt = (text: string): string =>
+    [
+      '다음 JSON의 text 값을 사용자가 선택한 터미널 출력 원문으로 보고 답해줘.',
+      '문서 본문 선택이나 파일 인용이 아니라, 터미널 로그/응답 출력 스니펫으로만 취급해줘.',
+      JSON.stringify({ kind: 'terminal-output', text }),
+      ''
+    ].join('\n')
+
+  const askAboutTerminalSelection = (termId: string, text: string): void => {
+    const selected = text.trim()
+    if (!selected) return
+    pasteToTerm(termId, terminalSnippetPrompt(selected))
+  }
+
   // 활성 문서명+경로 + (있으면) 선택 텍스트로 claude 프롬프트 주입. 텍스트 없으면 문서 전체에 대해 묻기.
   const askClaude = (text: string, opts?: { docPath?: string }): void => {
     void (async () => {
@@ -2747,42 +2875,64 @@ export default function App(): JSX.Element {
     ]) || '작업환경 준비'
 
   // Ctrl+W 등으로 터미널 닫기 — claude가 작업 중이면 확인 후 닫는다.
-  const closeTermWithConfirm = (id: string): void => {
+  const closeTermWithConfirm = (id: string): boolean => {
     if (termStatus.get(id) === 'working') {
-      if (!window.confirm('claude가 아직 작업 중입니다. 이 터미널을 닫을까요?')) return
+      if (!window.confirm('claude가 아직 작업 중입니다. 이 터미널을 닫을까요?')) return false
     }
-    closeTerm(id)
+    return closeTerm(id)
+  }
+  const closeCurrentWindowSoon = (): void => {
+    window.setTimeout(() => void window.lt.app.closeWindow(), 0)
+  }
+  const closeDetachedDoc = (id: string): void => {
+    const shouldCloseWindow = docOnly && docTabs.length <= 1
+    if (closeDoc(id) && shouldCloseWindow) closeCurrentWindowSoon()
+  }
+  const closeDetachedTerm = (id: string): void => {
+    const shouldCloseWindow = termOnly && termTabs.length <= 1
+    if (closeTermWithConfirm(id) && shouldCloseWindow) closeCurrentWindowSoon()
+  }
+  const detachDocAfterMove = (id: string): void => {
+    const shouldCloseWindow = docOnly && docTabs.length <= 1
+    if (closeDoc(id) && shouldCloseWindow) closeCurrentWindowSoon()
+  }
+  const detachTermAfterMove = (id: string): void => {
+    const shouldCloseWindow = termOnly && termTabs.length <= 1
+    if (detachTerm(id) && shouldCloseWindow) closeCurrentWindowSoon()
   }
   closeActiveTermRef.current = (): void => {
-    if (activeTerm) closeTermWithConfirm(activeTerm)
+    if (activeTerm) closeDetachedTerm(activeTerm)
   }
   closeActiveTabRef.current = (): void => {
     const activeEl = document.activeElement as HTMLElement | null
     const termId = focusedTermId(activeEl)
     const docId = focusedDocId(activeEl)
     if (termId && termTabs.some((t) => t.id === termId)) {
-      closeTermWithConfirm(termId)
+      closeDetachedTerm(termId)
       return
     }
     if (docId && docTabs.some((d) => d.id === docId)) {
-      closeDoc(docId)
+      closeDetachedDoc(docId)
       return
     }
     const side = focusedWorkSide(activeEl)
     const parsed = side ? parseWorkKey(activeWork[side]) : null
     if (parsed?.kind === 'terminal') {
-      closeTermWithConfirm(parsed.id)
+      closeDetachedTerm(parsed.id)
       return
     }
     if (parsed?.kind === 'doc') {
-      closeDoc(parsed.id)
+      closeDetachedDoc(parsed.id)
       return
     }
     if (activeTerm) {
-      closeTermWithConfirm(activeTerm)
+      closeDetachedTerm(activeTerm)
       return
     }
-    if (activeDoc) closeDoc(activeDoc)
+    if (activeDoc) closeDetachedDoc(activeDoc)
+    else if ((docOnly && docTabs.length === 0) || (termOnly && termTabs.length === 0)) {
+      closeCurrentWindowSoon()
+    }
   }
 
   const caseRef = (c: JsCase): string => `${c.caseNumber ?? ''} ${c.caseName ?? ''}`.trim() || c.id
@@ -2989,7 +3139,6 @@ export default function App(): JSX.Element {
     <>
       {!tab && <Empty label="열린 문서가 없습니다" actionLabel="새 문서" onAction={() => addDoc('left')} />}
       {tab?.kind === 'welcome' && <Welcome recent={recent} onOpen={openRecent} />}
-      {tab?.kind === 'markdown' && <DocPlaceholder title={tab.title} />}
       {tab?.kind === 'file' && <FileView key={tab.path} path={tab.path as string} />}
       {tab?.kind === 'image' && (
         <ImageViewer
@@ -3000,7 +3149,7 @@ export default function App(): JSX.Element {
       )}
       {tab?.kind === 'hwp' && <HwpView key={tab.path} path={tab.path as string} />}
       {tab?.kind === 'csv' && <CsvView key={tab.path} path={tab.path as string} />}
-      {tab?.kind === 'mdview' && (
+      {(tab?.kind === 'mdview' || tab?.kind === 'markdown') && (
         <MarkdownEditor
           key={tab.id}
           title={tab.title}
@@ -3053,6 +3202,7 @@ export default function App(): JSX.Element {
             onStatus={(status) => updatePdfStatus(tab.id, status)}
           />
         ))}
+      {tab?.kind === 'diff' && <DiffPreview diff={agentDiffs[tab.diffId ?? '']?.diff} />}
       {tab?.kind === 'settings' && <SettingsView />}
     </>
   )
@@ -3064,19 +3214,17 @@ export default function App(): JSX.Element {
         title: t.title,
         tooltip: t.path,
         path: t.path,
-        renamable: t.kind === 'mdview',
-        dragPayload: t.path
-          ? ({ kind: 'doc', path: t.path, title: t.title, side: docSide(t) } as TabPayload)
-          : undefined
+        renamable: t.kind === 'mdview' || t.kind === 'markdown',
+        dragPayload: docTabDragPayload(t, docSide(t))
       }))}
       activeId={activeDoc}
       onSelect={activateDocTab}
-      onClose={closeDoc}
+      onClose={closeDetachedDoc}
       onAdd={() => addDoc('left')}
       addTitle="새 문서"
       dropSide="left"
       onReorder={reorderDocs}
-      onTearOut={closeDoc}
+      onTearOut={detachDocAfterMove}
       onDragActive={setTabDragging}
       onRename={renameDocTab}
     />
@@ -3148,12 +3296,12 @@ export default function App(): JSX.Element {
         }))}
         activeId={activeTerm}
         onSelect={selectTerm}
-        onClose={closeTerm}
+        onClose={closeDetachedTerm}
         onAdd={() => addAgentSame(termSide(activeTermTab))}
         addTitle="새 Agent"
         dropSide="right"
         onReorder={reorderTerms}
-        onTearOut={detachTerm}
+        onTearOut={detachTermAfterMove}
         onDragActive={setTabDragging}
         onRename={(id, title) =>
           setTermTabs((tabs) =>
@@ -3179,7 +3327,7 @@ export default function App(): JSX.Element {
             {
               label: '터미널로 실행',
               title: '현재 사건을 터미널로 실행',
-              onClick: () => addTermSame(termSide(activeTermTab))
+              onClick: () => addTermSame(termSide(activeTermTab), activeTerm, { reuseAgentTab: true })
             }
           ]
         }}
@@ -3252,7 +3400,8 @@ export default function App(): JSX.Element {
                   handleAgentAttachmentRequestsHandled(t.id, requestIds)
                 }
                 onStatus={(s) => onTermStatus(t.id, s)}
-                onOpenTerminal={() => addTermSame(termSide(t), t.id)}
+                onOpenTerminal={() => addTermSame(termSide(t), t.id, { reuseAgentTab: true })}
+                onOpenDiff={openAgentDiff}
               />
             ) : (
               <Terminal
@@ -3264,10 +3413,12 @@ export default function App(): JSX.Element {
                 visible={t.id === activeTerm}
                 focusNonce={termFocusNonce[t.id] ?? 0}
                 onDropPaths={(paths) => dropFilesToTerm(t.id, paths)}
+                onAskSelection={(text) => askAboutTerminalSelection(t.id, text)}
                 onNewTerminal={() => addTermSame(termSide(t), t.id)}
                 onRequestClose={() => closeTermWithConfirm(t.id)}
                 onStatus={(s) => onTermStatus(t.id, s)}
                 onBracketedPasteModeChange={(enabled) => onTermBracketedPasteMode(t.id, enabled)}
+                onNewAgent={() => addAgentSame(termSide(t), t.id)}
                 onCycleTab={(dir) => cycleTerm(dir, t.id)}
               />
             )}
@@ -3302,10 +3453,8 @@ export default function App(): JSX.Element {
         title: t.title,
         tooltip: t.path,
         path: t.path,
-        renamable: t.kind === 'mdview',
-        dragPayload: t.path
-          ? ({ kind: 'doc', path: t.path, title: t.title, side } as TabPayload)
-          : undefined
+        renamable: t.kind === 'mdview' || t.kind === 'markdown',
+        dragPayload: docTabDragPayload(t, side)
       })),
       ...terms.map((t) => ({
         id: termKeyOf(t.id),
@@ -3449,7 +3598,7 @@ export default function App(): JSX.Element {
                     {
                       label: '터미널로 실행',
                       title: '현재 사건을 터미널로 실행',
-                      onClick: () => addTermSame(side)
+                      onClick: () => addTermSame(side, activeTerm, { reuseAgentTab: true })
                     }
                   ]
                 }
@@ -3546,7 +3695,8 @@ export default function App(): JSX.Element {
                     handleAgentAttachmentRequestsHandled(t.id, requestIds)
                   }
                   onStatus={(s) => onTermStatus(t.id, s)}
-                  onOpenTerminal={() => addTermSame(side, t.id)}
+                  onOpenTerminal={() => addTermSame(side, t.id, { reuseAgentTab: true })}
+                  onOpenDiff={openAgentDiff}
                 />
               ) : (
                 <Terminal
@@ -3558,10 +3708,12 @@ export default function App(): JSX.Element {
                   visible={t.id === visibleTermId}
                   focusNonce={termFocusNonce[t.id] ?? 0}
                   onDropPaths={(paths) => dropFilesToTerm(t.id, paths)}
+                  onAskSelection={(text) => askAboutTerminalSelection(t.id, text)}
                   onNewTerminal={() => addTermSame(side, t.id)}
                   onRequestClose={() => closeTermWithConfirm(t.id)}
                   onStatus={(s) => onTermStatus(t.id, s)}
                   onBracketedPasteModeChange={(enabled) => onTermBracketedPasteMode(t.id, enabled)}
+                  onNewAgent={() => addAgentSame(side, t.id)}
                   onCycleTab={(dir) => cycleTerm(dir, t.id)}
                 />
               )}
@@ -3578,7 +3730,9 @@ export default function App(): JSX.Element {
       <div className="shell-doconly" {...shellDragProps}>
         <div className="body-col">
           {docTabBar}
-          <div className="doc-content" data-doc-id={activeDocTab?.id}>{renderDocContent(activeDocTab)}</div>
+          <div className="doc-content" data-doc-id={activeDocTab?.id} data-work-side="left">
+            {renderDocContent(activeDocTab)}
+          </div>
         </div>
         <div className="statusbar">
           <span className="status-left">legal-terminal · 문서</span>
@@ -3806,35 +3960,93 @@ export default function App(): JSX.Element {
   )
 }
 
+const SELECTION_ACTION_TARGET_SELECTOR = '.text-doc, .file-view, .pdf-viewer, .textLayer, .csv-wrap'
+const SELECTION_ACTION_EXCLUDE_SELECTOR =
+  '.terminal-surface, .xterm, .agent-panel, .tabs, .sidebar, .activitybar, .statusbar, button, input, textarea, select'
+
+const elementFromSelectionNode = (node: Node | null | undefined): Element | null =>
+  node instanceof Element ? node : (node?.parentElement ?? null)
+
+const canShowSelectionActions = (element: Element | null): boolean => {
+  if (!element) return false
+  if (element.closest(SELECTION_ACTION_EXCLUDE_SELECTOR)) return false
+  return !!element.closest(SELECTION_ACTION_TARGET_SELECTOR)
+}
+
 // 본문에서 텍스트 선택 후 우클릭 → 컨텍스트 메뉴 (Claude/법제처/법고을/엘박스)
 function SelectionMenu({ onAsk }: { onAsk: (text: string) => void }): JSX.Element | null {
-  const [menu, setMenu] = useState<{ x: number; y: number; text: string } | null>(null)
+  const [menu, setMenu] = useState<{
+    x: number
+    y: number
+    text: string
+    queryText: string
+    markdown?: string
+  } | null>(null)
+  const editorSelectionRef = useRef<TextSelectionOverlayDetail | null>(null)
 
   useEffect(() => {
     const onCtx = (e: MouseEvent): void => {
       const sel = window.getSelection()
-      const text = sel?.toString().trim() ?? ''
-      const node = sel?.anchorNode
-      const el = node instanceof Element ? node : node?.parentElement
-      if (!text || !el?.closest?.('.work-pane, .body-col')) return // 선택 없으면 기본 메뉴
+      const target = e.target instanceof Element ? e.target : null
+      const anchor = elementFromSelectionNode(sel?.anchorNode)
+      const el = anchor ?? target
+      const editorDetail = editorSelectionRef.current
+      const targetEditor = target?.closest('.cm-editor') ?? null
+      const anchorEditor = anchor?.closest('.cm-editor') ?? null
+      const activeEditor =
+        document.activeElement instanceof Element ? document.activeElement.closest('.cm-editor') : null
+      const contextEditor = targetEditor ?? anchorEditor
+      const isEditorContext =
+        !!contextEditor && (anchorEditor === contextEditor || activeEditor === contextEditor)
+      const markdown = isEditorContext && editorDetail?.markdown?.trim() ? editorDetail.markdown : undefined
+      const text = (markdown ?? sel?.toString() ?? '').trim()
+      if (!text || !canShowSelectionActions(el)) return // 선택 없으면 기본 메뉴
       e.preventDefault()
-      setMenu({ x: e.clientX, y: e.clientY, text })
+      setMenu({
+        x: e.clientX,
+        y: e.clientY,
+        text,
+        queryText: markdown ? markdownToPlainText(markdown) || text : text,
+        markdown
+      })
+    }
+    const onEditorSelection = (event: Event): void => {
+      const detail = (event as CustomEvent<TextSelectionOverlayDetail | null>).detail
+      editorSelectionRef.current = detail?.markdown?.trim() ? detail : null
     }
     const close = (): void => setMenu(null)
     document.addEventListener('contextmenu', onCtx)
     document.addEventListener('click', close)
     document.addEventListener('scroll', close, true)
+    window.addEventListener(TEXT_SELECTION_OVERLAY_EVENT, onEditorSelection)
     return () => {
       document.removeEventListener('contextmenu', onCtx)
       document.removeEventListener('click', close)
       document.removeEventListener('scroll', close, true)
+      window.removeEventListener(TEXT_SELECTION_OVERLAY_EVENT, onEditorSelection)
     }
   }, [])
 
   if (!menu) return null
-  const q = encodeURIComponent(menu.text)
+  const q = encodeURIComponent(menu.queryText)
   const open = (url: string): void => void window.lt.app.openExternal(url)
   const items: { label: string; act: () => void }[] = [
+    ...(menu.markdown
+      ? [
+          {
+            label: 'MD로 복사하기',
+            act: () => {
+              void writeMarkdownClipboard(menu.markdown!, 'markdown')
+            }
+          },
+          {
+            label: '텍스트로 복사하기',
+            act: () => {
+              void writeMarkdownClipboard(menu.markdown!, 'text')
+            }
+          }
+        ]
+      : []),
     { label: '✳ Claude에 물어보기', act: () => onAsk(menu.text) },
     { label: '법제처 검색', act: () => open(`https://www.law.go.kr/LSW/lsSc.do?menuId=1&query=${q}`) },
     {
@@ -3871,6 +4083,8 @@ function SelectionAsk({ onAsk }: { onAsk: (text: string) => void }): JSX.Element
 
   useEffect(() => {
     let frame = 0
+    let pointerSelecting = false
+    let pendingEditorDetail: TextSelectionOverlayDetail | null = null
 
     const updateFromSelection = (): void => {
       const sel = window.getSelection()
@@ -3882,9 +4096,8 @@ function SelectionAsk({ onAsk }: { onAsk: (text: string) => void }): JSX.Element
         }
         return
       }
-      const node = sel.anchorNode
-      const el = node instanceof Element ? node : node?.parentElement
-      if (!el?.closest?.('.work-pane, .body-col')) {
+      const el = elementFromSelectionNode(sel.anchorNode)
+      if (!canShowSelectionActions(el)) {
         setBox(null)
         return
       }
@@ -3897,6 +4110,7 @@ function SelectionAsk({ onAsk }: { onAsk: (text: string) => void }): JSX.Element
     }
 
     const scheduleUpdate = (): void => {
+      if (pointerSelecting) return
       if (frame) cancelAnimationFrame(frame)
       frame = requestAnimationFrame(() => {
         frame = 0
@@ -3904,27 +4118,59 @@ function SelectionAsk({ onAsk }: { onAsk: (text: string) => void }): JSX.Element
       })
     }
 
-    const onDown = (): void => setBox(null)
-    const onEditorSelection = (event: Event): void => {
-      const detail = (event as CustomEvent<TextSelectionOverlayDetail | null>).detail
+    const applyEditorDetail = (detail: TextSelectionOverlayDetail | null): void => {
       if (!detail?.text.trim()) {
         setBox(null)
         return
       }
       setBox(detail)
     }
+    const onPointerDown = (event: PointerEvent): void => {
+      if (!event.isPrimary || event.button !== 0) return
+      pointerSelecting = true
+      pendingEditorDetail = null
+      setBox(null)
+    }
+    const onPointerUp = (): void => {
+      if (!pointerSelecting) return
+      pointerSelecting = false
+      const detail = pendingEditorDetail
+      pendingEditorDetail = null
+      if (detail) applyEditorDetail(detail)
+      else scheduleUpdate()
+    }
+    const onPointerCancel = (): void => {
+      pointerSelecting = false
+      pendingEditorDetail = null
+      setBox(null)
+    }
+    const onEditorSelection = (event: Event): void => {
+      const detail = (event as CustomEvent<TextSelectionOverlayDetail | null>).detail
+      if (pointerSelecting) {
+        pendingEditorDetail = detail
+        setBox(null)
+        return
+      }
+      applyEditorDetail(detail)
+    }
 
-    document.addEventListener('mouseup', scheduleUpdate)
-    document.addEventListener('mousedown', onDown)
+    document.addEventListener('pointerup', onPointerUp)
+    document.addEventListener('pointerdown', onPointerDown)
+    document.addEventListener('pointercancel', onPointerCancel)
+    document.addEventListener('dragstart', onPointerCancel, true)
     document.addEventListener('selectionchange', scheduleUpdate)
     document.addEventListener('keyup', scheduleUpdate)
+    window.addEventListener('blur', onPointerCancel)
     window.addEventListener(TEXT_SELECTION_OVERLAY_EVENT, onEditorSelection)
     return () => {
       if (frame) cancelAnimationFrame(frame)
-      document.removeEventListener('mouseup', scheduleUpdate)
-      document.removeEventListener('mousedown', onDown)
+      document.removeEventListener('pointerup', onPointerUp)
+      document.removeEventListener('pointerdown', onPointerDown)
+      document.removeEventListener('pointercancel', onPointerCancel)
+      document.removeEventListener('dragstart', onPointerCancel, true)
       document.removeEventListener('selectionchange', scheduleUpdate)
       document.removeEventListener('keyup', scheduleUpdate)
+      window.removeEventListener('blur', onPointerCancel)
       window.removeEventListener(TEXT_SELECTION_OVERLAY_EVENT, onEditorSelection)
     }
   }, [])
@@ -4310,6 +4556,7 @@ function OutlineList({
           onDragStart={
             it.path
               ? (e) => {
+                  if (cancelIfTerminalPointerDrag(e)) return
                   e.dataTransfer.setData(LT_PATH, it.path as string)
                   e.dataTransfer.effectAllowed = 'copyMove'
                 }
@@ -4501,11 +4748,32 @@ function TabBar({
     dropHintTimer.current = null
     setDropHint(false)
   }
+  const isMiddleButton = (e: React.MouseEvent): boolean => e.button === 1
+  const onMiddleMouseDown = (e: React.MouseEvent): void => {
+    if (!isMiddleButton(e)) return
+    e.preventDefault()
+  }
+  const addOnMiddleClick = (e: React.MouseEvent): void => {
+    if (!isMiddleButton(e) || !onAdd) return
+    const target = e.target instanceof Element ? e.target : null
+    if (target?.closest('.tab, button, .tab-menu-wrap')) return
+    e.preventDefault()
+    e.stopPropagation()
+    onAdd()
+  }
+  const closeOnMiddleClick = (e: React.MouseEvent, id: string): void => {
+    if (!isMiddleButton(e)) return
+    e.preventDefault()
+    e.stopPropagation()
+    onClose(id)
+  }
 
   return (
     <div
       className={`tabs ${dropHint ? 'drop-target' : ''}`}
       data-drop-side={dropSide}
+      onMouseDown={onMiddleMouseDown}
+      onAuxClick={addOnMiddleClick}
       onDragOver={(e) => {
         if (!draggable || !isTabDrop(e)) return
         e.preventDefault()
@@ -4545,6 +4813,7 @@ function TabBar({
             key={t.id}
             className={`tab ${t.id === activeId ? 'active' : ''} ${t.attention ? 'attention' : ''} ${t.working ? 'working' : ''} ${t.question ? 'question' : ''}`}
             onClick={() => onSelect(t.id)}
+            onAuxClick={(e) => closeOnMiddleClick(e, t.id)}
             title={
               t.working
                 ? `${t.tooltip ?? t.title}\n⟳ 작업 중`
@@ -4558,6 +4827,7 @@ function TabBar({
             onDragStart={
               draggable
                 ? (e) => {
+                    if (cancelIfTerminalPointerDrag(e)) return
                     dragId.current = t.id
                     e.dataTransfer.effectAllowed = 'move'
                     e.dataTransfer.setData(TAB_DND_TYPE, t.id)

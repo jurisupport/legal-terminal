@@ -17,6 +17,7 @@ import { livePreview } from './livePreview'
 import { mdToPrintHtml, type PrintLayoutProfile } from './mdExport'
 import FindBar from '../search/FindBar'
 import { IconSave, IconSaveAs, IconSearch } from '../icons/Icons'
+import { writeMarkdownDataTransfer } from '../markdownClipboard'
 
 const DEFAULT_MD_FONT = "'D2Coding', 'Cascadia Mono', Consolas, monospace"
 const DEFAULT_UNTITLED_NAME = '무제.md'
@@ -26,6 +27,7 @@ export interface TextSelectionOverlayDetail {
   x: number
   y: number
   text: string
+  markdown?: string
   count: number
 }
 
@@ -195,9 +197,7 @@ function changeCoversSelection(changes: ChangeDesc, selection: EditorSelection):
 }
 
 function editorSelectionOverlay(view: EditorView): TextSelectionOverlayDetail | null {
-  const ranges = view.state.selection.ranges.filter((range) => !range.empty)
-  if (ranges.length === 0) return null
-  const text = ranges.map((range) => view.state.sliceDoc(range.from, range.to)).join('\n')
+  const text = selectedMarkdown(view)
   const visibleText = text.trim()
   if (!visibleText) return null
 
@@ -216,8 +216,14 @@ function editorSelectionOverlay(view: EditorView): TextSelectionOverlayDetail | 
     x: Math.min(Math.max(rawX, editorRect.left + 8), editorRect.right - 8),
     y: first.top - 6,
     text,
+    markdown: text,
     count: Array.from(visibleText).length
   }
+}
+
+function selectedMarkdown(view: EditorView): string {
+  const ranges = view.state.selection.ranges.filter((range) => !range.empty)
+  return ranges.map((range) => view.state.sliceDoc(range.from, range.to)).join('\n')
 }
 
 function emitEditorSelectionOverlay(view: EditorView): void {
@@ -480,6 +486,15 @@ export default function MarkdownEditor({
             findHighlightField,
             makeTheme(family, size),
             previewComp.current.of(preview ? livePreview : []),
+            EditorView.domEventHandlers({
+              copy(event, view) {
+                if (!event.clipboardData) return false
+                const markdownText = selectedMarkdown(view)
+                if (!writeMarkdownDataTransfer(event.clipboardData, markdownText, 'rich')) return false
+                event.preventDefault()
+                return true
+              }
+            }),
             EditorView.updateListener.of((u) => {
               if (u.selectionSet || u.docChanged || u.viewportChanged) emitEditorSelectionOverlay(u.view)
               if (u.docChanged) {
@@ -519,7 +534,7 @@ export default function MarkdownEditor({
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
-    if (!pathRef.current?.startsWith('ssh://')) return
+    if (!pathRef.current) return
     let alive = true
     const tick = (): void => {
       const currentPath = pathRef.current

@@ -63,8 +63,22 @@ export interface TerminalTabPayload {
   side?: 'left' | 'right'
 }
 
+export interface DocumentTabPayload {
+  id?: string
+  title: string
+  kind?: 'markdown' | 'mdview' | 'file' | 'pdf' | 'image' | 'hwp' | 'csv' | 'settings'
+  path?: string
+  side?: 'left' | 'right'
+}
+
 export type TabPayload =
-  | { kind: 'doc'; path: string; title: string; side?: 'left' | 'right' }
+  | {
+      kind: 'doc'
+      tab?: DocumentTabPayload
+      path?: string
+      title?: string
+      side?: 'left' | 'right'
+    }
   | { kind: 'terminal'; tab: TerminalTabPayload }
 
 export interface TabMoveResult {
@@ -301,6 +315,7 @@ export interface LtApi {
     }>
     openExternal: (url: string) => Promise<void>
     newWindow: () => Promise<void>
+    closeWindow: () => Promise<void>
     requestAttention: (reason?: 'done' | 'question') => void
     onCloseActiveTab: (cb: () => void) => () => void
   }
