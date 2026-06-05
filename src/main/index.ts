@@ -1024,9 +1024,13 @@ async function downloadRemoteToLocal(srcUri: string, destPath: string): Promise<
 
 ipcMain.handle('fs:mkdir', async (_e, p: { dir: string; name: string }) => {
   try {
-    if (isRemote(p.dir)) await rfsMkdir(p.dir, p.name)
-    else await mkdir(join(p.dir, p.name))
-    return { ok: true }
+    if (isRemote(p.dir)) {
+      await rfsMkdir(p.dir, p.name)
+      return { ok: true, path: remoteChild(p.dir, p.name) }
+    }
+    const path = join(p.dir, p.name)
+    await mkdir(path)
+    return { ok: true, path }
   } catch (e) {
     return { ok: false, error: String(e) }
   }

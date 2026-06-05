@@ -12,6 +12,7 @@ export type SortMode = 'name-asc' | 'name-desc' | 'mtime-desc' | 'mtime-asc'
 export interface PendingCreateRequest {
   type: 'file' | 'folder'
   dir?: string
+  side?: 'left' | 'right'
 }
 
 // 트리 내부 드래그 식별용 MIME (외부 OS 파일 드롭과 구분)
@@ -628,7 +629,7 @@ function TreeNode({
           <span className="tree-name">{entry.name}</span>
         )}
       </div>
-      {entry.isDir && open && children && (
+      {entry.isDir && open && (
         <ul className="tree">
           {isCreateTarget && pendingCreate && (
             <CreateEntryRow
@@ -638,26 +639,35 @@ function TreeNode({
               onCancel={onCancelCreate}
             />
           )}
-          {sortEntries(children, sortMode).map((c) => (
-            <TreeNode
-              key={c.path}
-              entry={c}
-              depth={depth + 1}
-              refreshNonce={refreshNonce}
-              sortMode={sortMode}
-              onOpenFile={onOpenFile}
-              onDropTo={onDropTo}
-              onMove={onMove}
-              onRename={onRename}
-              editingPath={editingPath}
-              onStartRename={onStartRename}
-              onCancelRename={onCancelRename}
-              onContext={onContext}
-              pendingCreate={pendingCreate}
-              onCreate={onCreate}
-              onCancelCreate={onCancelCreate}
-            />
-          ))}
+          {children === null ? (
+            <li className="tree-node muted pad small">불러오는 중…</li>
+          ) : (
+            <>
+              {children.length === 0 && !isCreateTarget && (
+                <li className="tree-node muted pad small">빈 폴더</li>
+              )}
+              {sortEntries(children, sortMode).map((c) => (
+                <TreeNode
+                  key={c.path}
+                  entry={c}
+                  depth={depth + 1}
+                  refreshNonce={refreshNonce}
+                  sortMode={sortMode}
+                  onOpenFile={onOpenFile}
+                  onDropTo={onDropTo}
+                  onMove={onMove}
+                  onRename={onRename}
+                  editingPath={editingPath}
+                  onStartRename={onStartRename}
+                  onCancelRename={onCancelRename}
+                  onContext={onContext}
+                  pendingCreate={pendingCreate}
+                  onCreate={onCreate}
+                  onCancelCreate={onCancelCreate}
+                />
+              ))}
+            </>
+          )}
         </ul>
       )}
     </li>
@@ -753,21 +763,57 @@ function CreateEntryRow({
   onCreate: (name: string) => void
   onCancel?: () => void
 }): JSX.Element {
+  const initialName = type === 'folder' ? '새 폴더' : '새 문서.md'
+  const [value, setValue] = useState(initialName)
+  const inputRef = useRef<HTMLInputElement>(null)
+  const done = useRef(false)
+
+  useEffect(() => {
+    const input = inputRef.current
+    if (!input) return
+    if (type === 'folder') {
+      input.select()
+      return
+    }
+    const dot = initialName.lastIndexOf('.')
+    input.setSelectionRange(0, dot > 0 ? dot : initialName.length)
+  }, [initialName, type])
+
+  const cancel = (): void => {
+    if (done.current) return
+    done.current = true
+    onCancel?.()
+  }
+  const commit = (): void => {
+    if (done.current) return
+    const next = value.trim()
+    if (!next) {
+      cancel()
+      return
+    }
+    done.current = true
+    onCreate(next)
+  }
+
   return (
     <li>
       <div className="tree-row" style={{ paddingLeft: 8 + depth * 14 }}>
         <span className="tree-icon">{type === 'folder' ? '📁' : '📄'}</span>
         <input
+          ref={inputRef}
           className="tree-input"
           autoFocus
           placeholder={type === 'folder' ? '폴더 이름' : '파일 이름 (비우면 무제)'}
+          value={value}
+          onMouseDown={(e) => e.stopPropagation()}
+          onClick={(e) => e.stopPropagation()}
+          onChange={(e) => setValue(e.target.value)}
           onKeyDown={(e) => {
-            if (e.key === 'Enter') onCreate((e.target as HTMLInputElement).value)
-            else if (e.key === 'Escape') onCancel?.()
+            e.stopPropagation()
+            if (e.key === 'Enter') commit()
+            else if (e.key === 'Escape') cancel()
           }}
-          onBlur={(e) =>
-            e.target.value.trim() ? onCreate(e.target.value) : onCancel?.()
-          }
+          onBlur={commit}
         />
       </div>
     </li>

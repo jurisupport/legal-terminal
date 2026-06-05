@@ -338,6 +338,11 @@ const isWorkspaceMode = (value: unknown): value is Mode =>
 const isWorkKey = (value: unknown): value is WorkTabKey =>
   typeof value === 'string' && parseWorkKey(value) !== null
 
+const closestHTMLElement = (element: HTMLElement | null, selector: string): HTMLElement | null =>
+  (element?.closest(selector) as HTMLElement | null) ?? null
+const datasetSide = (value?: string): DockSide | undefined =>
+  value === 'left' || value === 'right' ? value : undefined
+
 const formatWorkspaceSavedAt = (savedAt: string): string => {
   const date = new Date(savedAt)
   return Number.isNaN(date.getTime()) ? savedAt : date.toLocaleString('ko-KR')
@@ -965,6 +970,12 @@ export default function App(): JSX.Element {
   const setWorkActive = (side: DockSide, key: WorkTabKey): void => {
     setActiveWork((active) => ({ ...active, [side]: key }))
   }
+  const focusedWorkSide = (element = document.activeElement as HTMLElement | null): DockSide | undefined =>
+    datasetSide(closestHTMLElement(element, '[data-work-side]')?.dataset.workSide)
+  const focusedTermId = (element = document.activeElement as HTMLElement | null): string | undefined =>
+    closestHTMLElement(element, '[data-term-id]')?.dataset.termId
+  const focusedDocId = (element = document.activeElement as HTMLElement | null): string | undefined =>
+    closestHTMLElement(element, '[data-doc-id]')?.dataset.docId
   const activateDocTab = (id: string): void => {
     const tab = docTabs.find((t) => t.id === id)
     setActiveDoc(id)
@@ -999,12 +1010,8 @@ export default function App(): JSX.Element {
     // 원격 사건이면 ssh:// URI로 만들어 원격에 생성 (plain cwd면 로컬에 잘못 생성됨)
     const dir = t ? (t.ssh && t.profileId ? remoteUri(t.profileId, t.cwd) : t.cwd) : undefined
     if (dir) {
-      window.lt.fs.createFile(dir, '새 문서.md').then((r) => {
-        if (r.ok && r.path) {
-          setTreeRefresh((x) => x + 1)
-          openFile(r.path, r.path.split(/[\\/]/).pop() ?? '새 문서.md', side)
-        }
-      })
+      setMode('explorer')
+      setPendingCreate({ type: 'file', dir, side })
       return
     }
     const n = ++docSeq
@@ -1045,44 +1052,53 @@ export default function App(): JSX.Element {
     void window.lt.app.newWindow()
   }
 
-  // 단축키: Ctrl/Cmd+W 탭 닫기 / Ctrl/Cmd+N 새 문서 / Ctrl/Cmd+Shift+N 새 작업환경
+  // 단축키: Ctrl/Cmd+T 새 터미널 / Ctrl/Cmd+W 탭 닫기 / Ctrl/Cmd+N 새 문서 / Ctrl/Cmd+Shift+N 새 작업환경
   useEffect(() => {
     const onKey = (e: KeyboardEvent): void => {
-      const primary = platform === 'darwin' ? e.metaKey && !e.ctrlKey : e.ctrlKey
-      if (!primary || e.altKey) return
+      const activeEl = document.activeElement as HTMLElement | null
       const k = e.key.toLowerCase()
-      const inTerm = (document.activeElement as HTMLElement | null)?.closest?.('.term-col')
-      if (k === 'w' && !e.shiftKey) {
-        if (platform === 'darwin') {
-          e.preventDefault()
-          e.stopPropagation()
-          closeActiveTabRef.current()
-          return
-        }
-        if (inTerm) return // 터미널 포커스 시 claude로 (단어 삭제)
+      const isKey = (key: string, code?: string): boolean => k === key || (!!code && e.code === code)
+      const isT = isKey('t', 'KeyT')
+      const termId = focusedTermId(activeEl)
+      const termSideForShortcut = focusedWorkSide(activeEl) ?? termSide(termTabs.find((t) => t.id === termId))
+      const primary = platform === 'darwin' ? e.metaKey && !e.ctrlKey : e.ctrlKey
+      const macCtrlTInAgent = platform === 'darwin' && !!termId && e.ctrlKey && !e.metaKey && isT
+      if ((!primary && !macCtrlTInAgent) || e.altKey) return
+      if (termId && isT && !e.shiftKey) {
         e.preventDefault()
-        if (activeDoc) closeDoc(activeDoc)
-      } else if (k === 'n' && e.shiftKey) {
+        e.stopPropagation()
+        addTermSame(termSideForShortcut, termId)
+        return
+      }
+      if (isKey('w', 'KeyW') && !e.shiftKey) {
         e.preventDefault()
+        e.stopPropagation()
+        closeActiveTabRef.current()
+      } else if (isKey('n', 'KeyN') && e.shiftKey) {
+        e.preventDefault()
+        e.stopPropagation()
         openNewWorkspaceWindow()
-      } else if (k === 'n' && !e.shiftKey) {
+      } else if (isKey('n', 'KeyN') && !e.shiftKey) {
         e.preventDefault()
+        e.stopPropagation()
         addDoc()
       } else if (k === 'tab') {
-        // Ctrl/Cmd+Tab: 문서 탭 순환 (터미널 포커스 시엔 터미널이 자체 처리)
-        if (inTerm) return
+        // Ctrl/Cmd+Tab: Agent/터미널 포커스면 작업 탭, 아니면 문서 탭 순환
         e.preventDefault()
-        cycleDoc(e.shiftKey ? -1 : 1)
+        e.stopPropagation()
+        if (termId) cycleTerm(e.shiftKey ? -1 : 1, termId)
+        else cycleDoc(e.shiftKey ? -1 : 1)
       } else if (k === 'pageup' || k === 'pagedown') {
-        // Ctrl/Cmd+PageUp/PageDown: 문서 탭 이동 (터미널 포커스 시엔 터미널이 자체 처리)
-        if (inTerm) return
+        // Ctrl/Cmd+PageUp/PageDown: Agent/터미널 포커스면 작업 탭, 아니면 문서 탭 이동
         e.preventDefault()
-        cycleDoc(k === 'pageup' ? -1 : 1)
+        e.stopPropagation()
+        if (termId) cycleTerm(k === 'pageup' ? -1 : 1, termId)
+        else cycleDoc(k === 'pageup' ? -1 : 1)
       }
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [activeDoc, activeTerm, termTabs, docTabs, platform]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [activeDoc, activeTerm, activeWork, termTabs, docTabs, platform]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const openSettings = (): void => {
     const existing = docTabs.find((t) => t.kind === 'settings')
@@ -1603,8 +1619,8 @@ export default function App(): JSX.Element {
 
   // ＋T / 터미널로 실행: 같은 사건에서 PTY 터미널(claude 자동 실행)을 연다.
   // 활성 탭이 없으면 마지막 사건에서, 그것도 없으면 폴더 선택.
-  const addTermSame = (preferredSide?: DockSide): void => {
-    const cur = termTabs.find((t) => t.id === activeTerm)
+  const addTermSame = (preferredSide?: DockSide, sourceTermId = activeTerm): void => {
+    const cur = termTabs.find((t) => t.id === sourceTermId)
     const side = preferredSide ?? termSide(cur)
     if (!cur) {
       if (currentCase) {
@@ -1799,12 +1815,12 @@ export default function App(): JSX.Element {
   const dismissToast = (key: number): void => setToasts((ts) => ts.filter((x) => x.key !== key))
 
   // Ctrl+Tab: 같은 종류 탭 순환 (터미널끼리 / 문서끼리)
-  const cycleTerm = (dir: number): void => {
-    const cur = termTabs.find((t) => t.id === activeTerm)
+  const cycleTerm = (dir: number, sourceTermId = activeTerm): void => {
+    const cur = termTabs.find((t) => t.id === sourceTermId)
     const side = termSide(cur)
     const scoped = termTabs.filter((t) => termSide(t) === side)
     if (scoped.length < 2) return
-    const i = scoped.findIndex((t) => t.id === activeTerm)
+    const i = scoped.findIndex((t) => t.id === sourceTermId)
     const ni = (((i < 0 ? 0 : i) + dir) % scoped.length + scoped.length) % scoped.length
     selectTerm(scoped[ni].id)
   }
@@ -2246,13 +2262,22 @@ export default function App(): JSX.Element {
   }
 
   // 탐색기 인라인 생성: 버튼 → 트리에 입력칸 표시
-  const newFile = (): void =>
-    activeDraftsFolder ? setPendingCreate({ type: 'file', dir: activeDraftsFolder }) : addDoc()
+  const newFile = (): void => {
+    if (!activeDraftsFolder) {
+      addDoc()
+      return
+    }
+    setMode('explorer')
+    setPendingCreate({ type: 'file', dir: activeDraftsFolder })
+  }
   const newFolder = (): void => {
-    if (activeDraftsFolder) setPendingCreate({ type: 'folder', dir: activeDraftsFolder })
+    if (!activeDraftsFolder) return
+    setMode('explorer')
+    setPendingCreate({ type: 'folder', dir: activeDraftsFolder })
   }
 
   const onCreateEntry = (name: string, type: 'file' | 'folder', targetDir?: string): void => {
+    const createSide = pendingCreate?.side ?? 'left'
     setPendingCreate(null)
     const dir = targetDir ?? activeDraftsFolder
     if (!dir) return
@@ -2278,7 +2303,7 @@ export default function App(): JSX.Element {
     window.lt.fs.createFile(dir, fn).then((r) => {
       if (r.ok && r.path) {
         setTreeRefresh((x) => x + 1)
-        openFile(r.path, r.path.split(/[\\/]/).pop() ?? fn)
+        openFile(r.path, r.path.split(/[\\/]/).pop() ?? fn, createSide)
       } else if (r.error) {
         window.alert('문서 생성 실패: ' + r.error)
       }
@@ -2525,14 +2550,24 @@ export default function App(): JSX.Element {
   }
   closeActiveTabRef.current = (): void => {
     const activeEl = document.activeElement as HTMLElement | null
-    const inTerm = activeEl?.closest?.('.term-col')
-    const inDoc = activeEl?.closest?.('.doc-content')
-    if (inTerm && activeTerm) {
-      closeTermWithConfirm(activeTerm)
+    const termId = focusedTermId(activeEl)
+    const docId = focusedDocId(activeEl)
+    if (termId && termTabs.some((t) => t.id === termId)) {
+      closeTermWithConfirm(termId)
       return
     }
-    if (inDoc && activeDoc) {
-      closeDoc(activeDoc)
+    if (docId && docTabs.some((d) => d.id === docId)) {
+      closeDoc(docId)
+      return
+    }
+    const side = focusedWorkSide(activeEl)
+    const parsed = side ? parseWorkKey(activeWork[side]) : null
+    if (parsed?.kind === 'terminal') {
+      closeTermWithConfirm(parsed.id)
+      return
+    }
+    if (parsed?.kind === 'doc') {
+      closeDoc(parsed.id)
       return
     }
     if (activeTerm) {
@@ -2980,6 +3015,16 @@ export default function App(): JSX.Element {
           <div
             key={t.id}
             className="term-pane"
+            data-term-id={t.id}
+            data-work-side={termSide(t)}
+            tabIndex={isAgentTab(t) ? -1 : undefined}
+            onFocus={() => selectTerm(t.id)}
+            onMouseDown={(e) => {
+              selectTerm(t.id)
+              if (!isAgentTab(t)) return
+              const target = e.target as HTMLElement
+              if (!target.closest('input, textarea, button, select, a')) e.currentTarget.focus()
+            }}
             style={{ display: t.id === activeTerm ? 'block' : 'none' }}
           >
             {isAgentTab(t) ? (
@@ -2992,7 +3037,7 @@ export default function App(): JSX.Element {
                 profileId={t.profileId}
                 visible={t.id === activeTerm}
                 onStatus={(s) => onTermStatus(t.id, s)}
-                onOpenTerminal={() => addTermSame(termSide(t))}
+                onOpenTerminal={() => addTermSame(termSide(t), t.id)}
               />
             ) : (
               <Terminal
@@ -3004,11 +3049,11 @@ export default function App(): JSX.Element {
                 visible={t.id === activeTerm}
                 focusNonce={termFocusNonce[t.id] ?? 0}
                 onDropPaths={(paths) => dropFilesToTerm(t.id, paths)}
-                onNewTerminal={() => addTermSame(termSide(t))}
+                onNewTerminal={() => addTermSame(termSide(t), t.id)}
                 onRequestClose={() => closeTermWithConfirm(t.id)}
                 onStatus={(s) => onTermStatus(t.id, s)}
                 onBracketedPasteModeChange={(enabled) => onTermBracketedPasteMode(t.id, enabled)}
-                onCycleTab={cycleTerm}
+                onCycleTab={(dir) => cycleTerm(dir, t.id)}
               />
             )}
           </div>
@@ -3020,7 +3065,7 @@ export default function App(): JSX.Element {
   const renderWorkPane = (side: DockSide): ReactNode => {
     if (side === 'left' && mode === 'cases') {
       return (
-        <div className="work-pane work-left" key="cases">
+        <div className="work-pane work-left" key="cases" data-work-side="left">
           <CasesDashboard
             onOpenWorkspace={openCaseWorkspace}
             onOpenRemote={openCaseRemote}
@@ -3086,7 +3131,7 @@ export default function App(): JSX.Element {
     const canMoveActiveTab = !!activeKey
 
     return (
-      <div className={`work-pane work-${side}`} key={side}>
+      <div className={`work-pane work-${side}`} key={side} data-work-side={side}>
         <TabBar
           tabs={workTabs}
           activeId={activeKey}
@@ -3242,7 +3287,12 @@ export default function App(): JSX.Element {
               <Empty label="왼쪽에 열린 탭이 없습니다" actionLabel="새 문서" onAction={() => addDoc(side)} />
             ))}
           {activeDocForPane && (
-            <div className="doc-content" onMouseDown={() => activateDocTab(activeDocForPane.id)}>
+            <div
+              className="doc-content"
+              data-doc-id={activeDocForPane.id}
+              data-work-side={side}
+              onMouseDown={() => activateDocTab(activeDocForPane.id)}
+            >
               {renderDocContent(activeDocForPane)}
             </div>
           )}
@@ -3250,6 +3300,16 @@ export default function App(): JSX.Element {
             <div
               key={t.id}
               className="term-pane"
+              data-term-id={t.id}
+              data-work-side={side}
+              tabIndex={isAgentTab(t) ? -1 : undefined}
+              onFocus={() => selectTerm(t.id)}
+              onMouseDown={(e) => {
+                selectTerm(t.id)
+                if (!isAgentTab(t)) return
+                const target = e.target as HTMLElement
+                if (!target.closest('input, textarea, button, select, a')) e.currentTarget.focus()
+              }}
               style={{ display: t.id === visibleTermId ? 'block' : 'none' }}
             >
               {isAgentTab(t) ? (
@@ -3262,7 +3322,7 @@ export default function App(): JSX.Element {
                   profileId={t.profileId}
                   visible={t.id === visibleTermId}
                   onStatus={(s) => onTermStatus(t.id, s)}
-                  onOpenTerminal={() => addTermSame(side)}
+                  onOpenTerminal={() => addTermSame(side, t.id)}
                 />
               ) : (
                 <Terminal
@@ -3274,11 +3334,11 @@ export default function App(): JSX.Element {
                   visible={t.id === visibleTermId}
                   focusNonce={termFocusNonce[t.id] ?? 0}
                   onDropPaths={(paths) => dropFilesToTerm(t.id, paths)}
-                  onNewTerminal={() => addTermSame(side)}
+                  onNewTerminal={() => addTermSame(side, t.id)}
                   onRequestClose={() => closeTermWithConfirm(t.id)}
                   onStatus={(s) => onTermStatus(t.id, s)}
                   onBracketedPasteModeChange={(enabled) => onTermBracketedPasteMode(t.id, enabled)}
-                  onCycleTab={cycleTerm}
+                  onCycleTab={(dir) => cycleTerm(dir, t.id)}
                 />
               )}
             </div>
@@ -3294,7 +3354,7 @@ export default function App(): JSX.Element {
       <div className="shell-doconly" {...shellDragProps}>
         <div className="body-col">
           {docTabBar}
-          <div className="doc-content">{renderDocContent(activeDocTab)}</div>
+          <div className="doc-content" data-doc-id={activeDocTab?.id}>{renderDocContent(activeDocTab)}</div>
         </div>
         <SelectionAsk onAsk={askClaude} />
         <SelectionMenu onAsk={askClaude} />
@@ -5968,9 +6028,11 @@ function RemoteFolderPicker({
   const [creatingFolder, setCreatingFolder] = useState(false)
   const [createFolderErr, setCreateFolderErr] = useState('')
   const folderSearchSeq = useRef(0)
+  const loadSeq = useRef(0)
 
   const load = (path: string): void => {
     const nextPath = path.trim() || '~'
+    const seq = ++loadSeq.current
     folderSearchSeq.current++
     setPathInput(nextPath)
     setLoading(true)
@@ -5982,6 +6044,7 @@ function RemoteFolderPicker({
     window.lt.ssh
       .listDir(profile, nextPath)
       .then((r) => {
+        if (loadSeq.current !== seq) return
         setLoading(false)
         if (r.ok) {
           setCwd(r.cwd)
@@ -5993,6 +6056,7 @@ function RemoteFolderPicker({
         }
       })
       .catch((e: unknown) => {
+        if (loadSeq.current !== seq) return
         setLoading(false)
         setErr(e instanceof Error ? e.message : String(e))
         setEntries(null)
@@ -6036,6 +6100,7 @@ function RemoteFolderPicker({
   const visibleDirs = folderSearchResults ? sortEntries(folderSearchResults, sortMode) : dirs
   const folderQueryText = folderQuery.trim()
   const canCreateFolder = !loading && !err && !!cwd.trim() && !!newFolderName.trim() && !creatingFolder
+  const canPickCurrentFolder = !loading && !folderSearching && !err && !!cwd.trim()
   const closeSync = (): void => {
     const reloadPath = syncOpen?.reloadPath
     setSyncOpen(null)
@@ -6296,8 +6361,15 @@ function RemoteFolderPicker({
               ))}
           </div>
           <div className="modal-actions">
-            <button className="empty-action" onClick={() => onPick(cwd)}>
-              {confirmLabel}
+            <button
+              className="empty-action"
+              type="button"
+              disabled={!canPickCurrentFolder}
+              onClick={() => {
+                if (canPickCurrentFolder) onPick(cwd)
+              }}
+            >
+              {loading ? '불러오는 중' : confirmLabel}
             </button>
             <button className="header-btn" onClick={onCancel}>
               취소

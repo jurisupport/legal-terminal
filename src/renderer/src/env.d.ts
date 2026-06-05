@@ -334,7 +334,7 @@ export interface LtApi {
     move: (src: string, destDir: string) => Promise<{ ok: boolean; path?: string; error?: string }>
     rename: (path: string, name: string) => Promise<{ ok: boolean; path?: string; error?: string }>
     delete: (path: string) => Promise<{ ok: boolean; error?: string }>
-    mkdir: (dir: string, name: string) => Promise<{ ok: boolean; error?: string }>
+    mkdir: (dir: string, name: string) => Promise<{ ok: boolean; path?: string; error?: string }>
     createFile: (
       dir: string,
       name: string,

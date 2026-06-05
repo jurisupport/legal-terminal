@@ -31,6 +31,7 @@ const SETTINGS_UPDATED_EVENT = 'lt:settings-updated'
 const DEFAULT_AGENT_FONT_SIZE = 13
 const FONT_SIZE_MIN = 8
 const FONT_SIZE_MAX = 32
+const PROMPT_HISTORY_LIMIT = 100
 
 const clampAgentFontSize = (value: number | undefined): number => {
   if (typeof value !== 'number' || !Number.isFinite(value)) return DEFAULT_AGENT_FONT_SIZE
@@ -268,6 +269,28 @@ function uniqueStrings(values: string[]): string[] {
     out.push(trimmed)
   }
   return out
+}
+
+function mergePromptHistory(current: string[], entries: string[]): string[] {
+  const merged = [...current]
+  for (const entry of entries) {
+    const prompt = entry.trim()
+    if (!prompt) continue
+    const existing = merged.indexOf(prompt)
+    if (existing >= 0) merged.splice(existing, 1)
+    merged.push(prompt)
+  }
+  return merged.slice(-PROMPT_HISTORY_LIMIT)
+}
+
+function caretOnFirstLine(textarea: HTMLTextAreaElement): boolean {
+  if (textarea.selectionStart !== textarea.selectionEnd) return false
+  return !textarea.value.slice(0, textarea.selectionStart).includes('\n')
+}
+
+function caretOnLastLine(textarea: HTMLTextAreaElement): boolean {
+  if (textarea.selectionStart !== textarea.selectionEnd) return false
+  return !textarea.value.slice(textarea.selectionStart).includes('\n')
 }
 
 function dataTransferPaths(dataTransfer: DataTransfer): string[] {
@@ -816,6 +839,59 @@ export default function AgentPanel({
   const openedAuthUrlsRef = useRef<Set<string>>(new Set())
   const copyFeedbackTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const loadedHistoryKeyRef = useRef<string | null>(null)
+  const promptHistoryRef = useRef<string[]>([])
+  const promptHistoryIndexRef = useRef<number | null>(null)
+  const promptHistoryDraftRef = useRef('')
+
+  const resetPromptHistoryCursor = useCallback((): void => {
+    promptHistoryIndexRef.current = null
+    promptHistoryDraftRef.current = ''
+  }, [])
+
+  const rememberPrompts = useCallback(
+    (prompts: string[]): void => {
+      promptHistoryRef.current = mergePromptHistory(promptHistoryRef.current, prompts)
+      resetPromptHistoryCursor()
+    },
+    [resetPromptHistoryCursor]
+  )
+
+  const recallPromptHistory = useCallback(
+    (direction: -1 | 1): boolean => {
+      const history = promptHistoryRef.current
+      if (history.length === 0) return false
+
+      const currentIndex = promptHistoryIndexRef.current
+      if (direction === 1 && currentIndex === null) return false
+
+      let nextIndex: number | null
+      if (direction === -1) {
+        if (currentIndex === null) {
+          promptHistoryDraftRef.current = input
+          nextIndex = history.length - 1
+        } else {
+          nextIndex = Math.max(0, currentIndex - 1)
+        }
+      } else if (currentIndex !== null && currentIndex >= history.length - 1) {
+        nextIndex = null
+      } else {
+        nextIndex = (currentIndex ?? history.length - 1) + 1
+      }
+
+      promptHistoryIndexRef.current = nextIndex
+      const nextInput = nextIndex === null ? promptHistoryDraftRef.current : history[nextIndex]
+      if (nextIndex === null) promptHistoryDraftRef.current = ''
+      setInput(nextInput)
+      window.requestAnimationFrame(() => {
+        const textarea = textareaRef.current
+        if (!textarea) return
+        textarea.focus()
+        textarea.setSelectionRange(nextInput.length, nextInput.length)
+      })
+      return true
+    },
+    [input]
+  )
 
   const showTransientFeedback = useCallback((message: string): void => {
     setCopyFeedback(message)
@@ -902,6 +978,11 @@ export default function AgentPanel({
       .then((transcript) => {
         if (!alive || !transcript || transcript.messages.length === 0) return
         const historyItems = transcriptToTimeline(transcript)
+        rememberPrompts(
+          transcript.messages
+            .filter((message) => message.role === 'user')
+            .map((message) => message.text)
+        )
         setItems((current) => {
           const existing = new Set(current.map((item) => item.id))
           const missing = historyItems.filter((item) => !existing.has(item.id))
@@ -915,7 +996,7 @@ export default function AgentPanel({
     return () => {
       alive = false
     }
-  }, [resumeSessionId, ssh])
+  }, [rememberPrompts, resumeSessionId, ssh])
 
   useEffect(() => {
     if (!modeMenuOpen) return
@@ -1097,6 +1178,7 @@ export default function AgentPanel({
     }
     const nextMode = expanded.mode ?? mode
     if (expanded.mode) setMode(expanded.mode)
+    if (rawText) rememberPrompts([rawText])
     setInput('')
     setAttachments([])
     setError('')
@@ -1693,7 +1775,10 @@ export default function AgentPanel({
           value={input}
           disabled={authActive}
           placeholder={authActive ? 'Claude 로그인 진행 중' : 'Claude에게 요청'}
-          onChange={(e) => setInput(e.target.value)}
+          onChange={(e) => {
+            resetPromptHistoryCursor()
+            setInput(e.target.value)
+          }}
           onPaste={onAttachmentPaste}
           onKeyDown={(e) => {
             if (authActive) return
@@ -1708,6 +1793,17 @@ export default function AgentPanel({
               e.preventDefault()
               const command = slashMatches[slashIndex]
               if (command) applySlashCommand(command)
+              return
+            }
+            if ((e.key === 'ArrowUp' || e.key === 'ArrowDown') && !e.altKey && !e.ctrlKey && !e.metaKey) {
+              const textarea = e.currentTarget
+              const direction = e.key === 'ArrowUp' ? -1 : 1
+              if (
+                (direction === -1 && caretOnFirstLine(textarea)) ||
+                (direction === 1 && promptHistoryIndexRef.current !== null && caretOnLastLine(textarea))
+              ) {
+                if (recallPromptHistory(direction)) e.preventDefault()
+              }
               return
             }
             if (e.key !== 'Enter' || e.shiftKey) return

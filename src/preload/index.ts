@@ -331,7 +331,7 @@ const api = {
       ipcRenderer.invoke('fs:rename', { path, name }),
     delete: (path: string): Promise<{ ok: boolean; error?: string }> =>
       ipcRenderer.invoke('fs:delete', path),
-    mkdir: (dir: string, name: string): Promise<{ ok: boolean; error?: string }> =>
+    mkdir: (dir: string, name: string): Promise<{ ok: boolean; path?: string; error?: string }> =>
       ipcRenderer.invoke('fs:mkdir', { dir, name }),
     createFile: (
       dir: string,
