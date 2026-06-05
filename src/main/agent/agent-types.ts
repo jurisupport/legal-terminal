@@ -135,6 +135,8 @@ export type AgentEvent =
       delivery: 'queue' | 'steer'
     }
   | { type: 'queue:started'; sessionId: string; queueId: string }
+  | { type: 'queue:promoted'; sessionId: string; queueId: string; position: number }
+  | { type: 'queue:removed'; sessionId: string; queueId: string }
   | { type: 'queue:cleared'; sessionId: string; queueIds: string[] }
   | { type: 'tool:start'; sessionId: string; toolId: string; name: string; label: string; inputPreview?: string }
   | { type: 'tool:done'; sessionId: string; toolId: string; outputPreview?: string; elapsedMs?: number; isError?: boolean }

@@ -174,6 +174,23 @@ const agentStatusLabels: Record<AgentPanelStatus, string> = {
   error: '오류'
 }
 
+function timelineStatusLabel(item: TimelineItem): string | undefined {
+  if (item.kind !== 'queue') return item.status
+  if (item.status === 'queued') return '대기'
+  if (item.status === 'priority') return '바로 지시 대기'
+  if (item.status === 'started') return '실행 중'
+  if (item.status === 'canceled') return '취소됨'
+  return item.status
+}
+
+function isWaitingQueueItem(item: TimelineItem): boolean {
+  return (
+    item.kind === 'queue' &&
+    Boolean(item.queueId) &&
+    (item.status === 'queued' || item.status === 'priority')
+  )
+}
+
 function expandSlashInput(text: string): { text: string; mode?: AgentPermissionMode } {
   const match = text.match(/^(\/[^\s]+)(?:\s+([\s\S]*))?$/)
   if (!match) return { text }
@@ -468,7 +485,7 @@ function reduceTimeline(items: TimelineItem[], event: AgentEvent): TimelineItem[
   if (event.type === 'queue:added') {
     const queueId = stringValue(event.queueId) ?? `queue-${Date.now()}`
     const delivery = stringValue(event.delivery)
-    const title = delivery === 'steer' ? '스티어링 대기' : '대기열'
+    const title = delivery === 'steer' ? '바로 지시 대기' : '대기 중인 지시'
     return [
       ...items,
       {
@@ -485,8 +502,20 @@ function reduceTimeline(items: TimelineItem[], event: AgentEvent): TimelineItem[
     const queueId = stringValue(event.queueId)
     if (!queueId) return items
     return items.map((item) =>
-      item.queueId === queueId ? { ...item, title: '대기열 실행', status: 'started' } : item
+      item.queueId === queueId ? { ...item, title: '지시 실행 중', status: 'started' } : item
     )
+  }
+  if (event.type === 'queue:promoted') {
+    const queueId = stringValue(event.queueId)
+    if (!queueId) return items
+    return items.map((item) =>
+      item.queueId === queueId ? { ...item, title: '바로 지시 대기', status: 'priority' } : item
+    )
+  }
+  if (event.type === 'queue:removed') {
+    const queueId = stringValue(event.queueId)
+    if (!queueId) return items
+    return items.filter((item) => item.queueId !== queueId)
   }
   if (event.type === 'queue:cleared') {
     const queueIds = stringArray(event.queueIds)
@@ -1085,6 +1114,8 @@ export default function AgentPanel({
     () => hasPrompt && !sendBlockedReason,
     [hasPrompt, sendBlockedReason]
   )
+  const queuesNewInput =
+    status === 'working' || status === 'waiting_permission' || status === 'waiting_user'
   const slashToken = useMemo(() => {
     const trimmed = input.trimStart()
     if (!/^\/[^\s]*$/.test(trimmed)) return ''
@@ -1182,7 +1213,7 @@ export default function AgentPanel({
     setInput('')
     setAttachments([])
     setError('')
-    const nextDelivery = delivery ?? (status === 'working' ? 'queue' : 'normal')
+    const nextDelivery = delivery ?? (queuesNewInput ? 'queue' : 'normal')
     const result = await window.lt.agent.send(id, {
       text,
       attachments: sendAttachments,
@@ -1193,6 +1224,18 @@ export default function AgentPanel({
       setError(result.error ?? 'Agent 요청을 보낼 수 없습니다.')
       setStatus('error')
     }
+  }
+
+  const promoteQueuedMessage = async (queueId: string): Promise<void> => {
+    setError('')
+    const result = await window.lt.agent.promoteQueued(id, queueId)
+    if (!result.ok) setError(result.error ?? '대기 중인 지시를 바로 실행할 수 없습니다.')
+  }
+
+  const removeQueuedMessage = async (queueId: string): Promise<void> => {
+    setError('')
+    const result = await window.lt.agent.removeQueued(id, queueId)
+    if (!result.ok) setError(result.error ?? '대기 중인 지시를 삭제할 수 없습니다.')
   }
 
   const resolvePermission = async (
@@ -1621,6 +1664,8 @@ export default function AgentPanel({
               </section>
             )
           }
+          const cardStatus = timelineStatusLabel(item)
+          const waitingQueue = isWaitingQueueItem(item)
           return (
             <section key={item.id} className={`agent-card ${item.kind} ${item.status ?? ''}`}>
               <div className="agent-card-head">
@@ -1651,7 +1696,24 @@ export default function AgentPanel({
                       </button>
                     </span>
                   )}
-                  {item.status && <span className="agent-card-status">{item.status}</span>}
+                  {waitingQueue && item.queueId && (
+                    <span className="agent-queue-actions" aria-label="대기 중인 지시 작업">
+                      <button
+                        type="button"
+                        onClick={() => void promoteQueuedMessage(item.queueId!)}
+                      >
+                        바로 지시하기
+                      </button>
+                      <button
+                        type="button"
+                        className="danger"
+                        onClick={() => void removeQueuedMessage(item.queueId!)}
+                      >
+                        삭제
+                      </button>
+                    </span>
+                  )}
+                  {cardStatus && <span className="agent-card-status">{cardStatus}</span>}
                 </span>
               </div>
               {item.text &&
@@ -1840,13 +1902,17 @@ export default function AgentPanel({
             )}
             {queuedCount > 0 && <span className="agent-status-queue">대기 {queuedCount}</span>}
           </span>
-          {status === 'working' ? (
+          {queuesNewInput ? (
             <div className="agent-working-actions">
-              <button disabled={!canSubmit} onClick={() => void send('queue')}>
-                큐 추가
+              <button
+                disabled={!canSubmit}
+                title="Enter로도 대기열에 넣습니다"
+                onClick={() => void send('queue')}
+              >
+                대기열에 넣기
               </button>
               <button disabled={!canSubmit} onClick={() => void send('steer')}>
-                스티어
+                바로 지시하기
               </button>
               <button onClick={() => void interrupt()}>중지</button>
             </div>

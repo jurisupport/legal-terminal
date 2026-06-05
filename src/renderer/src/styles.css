@@ -2029,6 +2029,7 @@ body {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  flex-wrap: wrap;
   gap: 8px;
   color: var(--fg);
   font-size: var(--agent-small-font-size);
@@ -2036,10 +2037,16 @@ body {
   -webkit-user-select: none;
   user-select: none;
 }
+.agent-card-head > span:first-child {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
 .agent-card-head-right {
   flex: 0 0 auto;
   display: inline-flex;
   align-items: center;
+  flex-wrap: wrap;
+  justify-content: flex-end;
   gap: 8px;
 }
 .agent-copy-actions {
@@ -2062,6 +2069,33 @@ body {
 .agent-copy-actions button:hover {
   color: var(--fg);
   background: rgba(255, 255, 255, 0.07);
+}
+.agent-queue-actions {
+  display: inline-flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 4px;
+}
+.agent-queue-actions button {
+  min-height: max(22px, calc(var(--agent-font-size, 13px) * 1.75));
+  padding: 0 7px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 4px;
+  color: var(--fg-muted);
+  background: rgba(255, 255, 255, 0.025);
+  font-size: var(--agent-micro-font-size);
+  white-space: nowrap;
+  cursor: pointer;
+  -webkit-user-select: none;
+  user-select: none;
+}
+.agent-queue-actions button:hover {
+  color: var(--fg);
+  background: rgba(255, 255, 255, 0.07);
+}
+.agent-queue-actions button.danger {
+  border-color: rgba(240, 160, 160, 0.28);
+  color: #f0a0a0;
 }
 .agent-card-status,
 .agent-decision {
@@ -2622,6 +2656,7 @@ body {
 .agent-working-actions {
   display: flex;
   justify-content: flex-end;
+  flex-wrap: wrap;
   gap: 6px;
 }
 .agent-prompt-actions button:disabled {

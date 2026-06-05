@@ -1243,6 +1243,20 @@ function clearAgentQueue(session: AgentSession): void {
   emit(session, { type: 'queue:cleared', sessionId: session.id, queueIds })
 }
 
+function interruptForImmediateInstruction(session: AgentSession): void {
+  emitProcessEvent(
+    session,
+    `steer-${Date.now()}`,
+    '바로 지시하기',
+    '현재 작업을 중단하고 새 지시를 바로 실행합니다.',
+    'running'
+  )
+  rejectPendingPermissions(session, '사용자가 바로 지시하기로 현재 작업을 중단했습니다.')
+  cancelPendingDialogs(session)
+  session.running?.abort()
+  session.remoteProcess?.kill()
+}
+
 function enqueueAgentMessage(
   session: AgentSession,
   input: AgentSendInput,
@@ -1265,6 +1279,42 @@ function enqueueAgentMessage(
     delivery
   })
   return item
+}
+
+export function promoteQueuedAgentMessage(sessionId: string, queueId: string): AgentCommandResult {
+  const session = sessions.get(sessionId)
+  if (!session) return { ok: false, error: 'Agent 세션을 찾을 수 없습니다.' }
+  if (session.authProcess) return { ok: false, error: 'Claude 로그인 절차가 진행 중입니다.' }
+
+  const index = session.queue.findIndex((item) => item.queueId === queueId)
+  if (index < 0) return { ok: false, error: '대기 중인 지시를 찾을 수 없습니다.' }
+
+  const [item] = session.queue.splice(index, 1)
+  item.delivery = 'steer'
+  item.input = { ...item.input, delivery: 'steer' }
+  session.queue.unshift(item)
+  emit(session, {
+    type: 'queue:promoted',
+    sessionId: session.id,
+    queueId,
+    position: 1
+  })
+
+  if (session.running) interruptForImmediateInstruction(session)
+  else startNextQueuedMessage(session)
+  return { ok: true }
+}
+
+export function removeQueuedAgentMessage(sessionId: string, queueId: string): AgentCommandResult {
+  const session = sessions.get(sessionId)
+  if (!session) return { ok: false, error: 'Agent 세션을 찾을 수 없습니다.' }
+
+  const index = session.queue.findIndex((item) => item.queueId === queueId)
+  if (index < 0) return { ok: false, error: '대기 중인 지시를 찾을 수 없습니다.' }
+
+  session.queue.splice(index, 1)
+  emit(session, { type: 'queue:removed', sessionId: session.id, queueId })
+  return { ok: true }
 }
 
 function startNextQueuedMessage(session: AgentSession): void {
@@ -1371,17 +1421,7 @@ export function sendAgentMessage(sessionId: string, input: AgentSendInput): Agen
     const delivery = input.delivery === 'steer' ? 'steer' : 'queue'
     enqueueAgentMessage(session, input, delivery)
     if (delivery === 'steer') {
-      emitProcessEvent(
-        session,
-        `steer-${Date.now()}`,
-        '사용자 스티어링',
-        '현재 작업을 중단하고 새 지시를 우선 실행합니다.',
-        'running'
-      )
-      rejectPendingPermissions(session, '사용자가 새 지시로 현재 작업을 중단했습니다.')
-      cancelPendingDialogs(session)
-      session.running.abort()
-      session.remoteProcess?.kill()
+      interruptForImmediateInstruction(session)
     }
     return { ok: true }
   }
@@ -1513,6 +1553,12 @@ export function registerAgentIpc(ipcMain: IpcMain): void {
   ipcMain.handle('agent:create', (e, opts: AgentCreateOptions) => createAgentSession(opts, e.sender))
   ipcMain.handle('agent:send', (_e, p: { sessionId: string; input: AgentSendInput }) =>
     sendAgentMessage(p.sessionId, p.input)
+  )
+  ipcMain.handle('agent:promoteQueued', (_e, p: { sessionId: string; queueId: string }) =>
+    promoteQueuedAgentMessage(p.sessionId, p.queueId)
+  )
+  ipcMain.handle('agent:removeQueued', (_e, p: { sessionId: string; queueId: string }) =>
+    removeQueuedAgentMessage(p.sessionId, p.queueId)
   )
   ipcMain.handle('agent:approve', (_e, decision: AgentPermissionDecision) =>
     approveAgentPermission(decision)

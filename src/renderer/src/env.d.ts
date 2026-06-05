@@ -419,6 +419,8 @@ export interface LtApi {
   agent: {
     create: (opts: AgentCreateOptions) => Promise<AgentCommandResult>
     send: (sessionId: string, input: AgentSendInput) => Promise<AgentCommandResult>
+    promoteQueued: (sessionId: string, queueId: string) => Promise<AgentCommandResult>
+    removeQueued: (sessionId: string, queueId: string) => Promise<AgentCommandResult>
     approve: (decision: AgentPermissionDecision) => Promise<AgentCommandResult>
     answerDialog: (answer: AgentDialogAnswer) => Promise<AgentCommandResult>
     interrupt: (sessionId: string) => Promise<AgentCommandResult>

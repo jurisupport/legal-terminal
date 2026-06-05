@@ -447,6 +447,10 @@ const api = {
       ipcRenderer.invoke('agent:create', opts),
     send: (sessionId: string, input: AgentSendInput): Promise<AgentCommandResult> =>
       ipcRenderer.invoke('agent:send', { sessionId, input }),
+    promoteQueued: (sessionId: string, queueId: string): Promise<AgentCommandResult> =>
+      ipcRenderer.invoke('agent:promoteQueued', { sessionId, queueId }),
+    removeQueued: (sessionId: string, queueId: string): Promise<AgentCommandResult> =>
+      ipcRenderer.invoke('agent:removeQueued', { sessionId, queueId }),
     approve: (decision: AgentPermissionDecision): Promise<AgentCommandResult> =>
       ipcRenderer.invoke('agent:approve', decision),
     answerDialog: (answer: AgentDialogAnswer): Promise<AgentCommandResult> =>
