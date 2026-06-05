@@ -64,7 +64,7 @@ function Read-InstallerYesNo {
     return ConvertTo-InstallerBoolean -Value $configured -DefaultValue $DefaultYes
   }
 
-  $suffix = if ($DefaultYes) { '[Y/n]' } else { '[y/N]' }
+  $suffix = if ($DefaultYes) { '[예/Y, 기본: 예]' } else { '[아니요/N, 기본: 아니요]' }
 
   while ($true) {
     $answer = (Read-Host "$Question $suffix").Trim().ToLowerInvariant()
@@ -81,13 +81,31 @@ function Read-InstallerYesNo {
       return $false
     }
 
-    Write-Host "Y 또는 N으로 입력해 주세요."
+    Write-Host "예(Y) 또는 아니요(N)로 입력해 주세요."
   }
 }
 
 function Write-InstallStep {
   param([string]$Message)
   Write-Host "[legal-terminal] $Message"
+}
+
+function Format-ByteSize {
+  param([long]$Bytes)
+
+  if ($Bytes -ge 1GB) {
+    return '{0:N1} GB' -f ($Bytes / 1GB)
+  }
+
+  if ($Bytes -ge 1MB) {
+    return '{0:N1} MB' -f ($Bytes / 1MB)
+  }
+
+  if ($Bytes -ge 1KB) {
+    return '{0:N1} KB' -f ($Bytes / 1KB)
+  }
+
+  return "$Bytes B"
 }
 
 function Enable-ModernTls {
@@ -191,41 +209,95 @@ function Save-ReleaseAsset {
   $targetDir = Split-Path -Parent $TargetPath
   New-Item -ItemType Directory -Force -Path $targetDir | Out-Null
 
-  $oldProgressPreference = $ProgressPreference
-  $ProgressPreference = 'SilentlyContinue'
+  $tempPath = "$TargetPath.download"
+  if (Test-Path $tempPath) {
+    Remove-Item -Force -Path $tempPath
+  }
+
+  $activity = '다운로드 중'
 
   try {
-    $request = @{
-      Uri = $Url
-      OutFile = $TargetPath
+    $request = [System.Net.HttpWebRequest]::Create($Url)
+    $request.AllowAutoRedirect = $true
+    $request.UserAgent = 'legal-terminal-installer'
+
+    $response = $request.GetResponse()
+    $responseStream = $null
+    $fileStream = $null
+
+    try {
+      $totalBytes = [long]$response.ContentLength
+      $responseStream = $response.GetResponseStream()
+      $fileStream = [System.IO.File]::Create($tempPath)
+      $buffer = New-Object byte[] (1024 * 1024)
+      $downloadedBytes = [long]0
+
+      while ($true) {
+        $read = $responseStream.Read($buffer, 0, $buffer.Length)
+        if ($read -le 0) {
+          break
+        }
+
+        $fileStream.Write($buffer, 0, $read)
+        $downloadedBytes += $read
+
+        $progress = @{
+          Activity = $activity
+          Status = if ($totalBytes -gt 0) {
+            "$(Format-ByteSize $downloadedBytes) / $(Format-ByteSize $totalBytes)"
+          } else {
+            "$(Format-ByteSize $downloadedBytes) 다운로드됨"
+          }
+        }
+
+        if ($totalBytes -gt 0) {
+          $progress.PercentComplete = [Math]::Min(100, [int](($downloadedBytes * 100) / $totalBytes))
+        }
+
+        Write-Progress @progress
+      }
+    } finally {
+      if ($fileStream) {
+        $fileStream.Dispose()
+      }
+
+      if ($responseStream) {
+        $responseStream.Dispose()
+      }
+
+      if ($response) {
+        $response.Dispose()
+      }
+
+      Write-Progress -Activity $activity -Completed
     }
 
-    if ($PSVersionTable.PSVersion.Major -lt 6) {
-      $request.UseBasicParsing = $true
-    }
-
-    Invoke-WebRequest @request
+    Move-Item -Force -Path $tempPath -Destination $TargetPath
   } catch {
-    $webRequestError = $_
+    $downloadError = $_
+    Write-Progress -Activity $activity -Completed
+
+    if (Test-Path $tempPath) {
+      Remove-Item -Force -Path $tempPath
+    }
+
     $curl = Get-Command curl.exe -ErrorAction SilentlyContinue
 
     if (-not $curl) {
-      throw $webRequestError
+      throw $downloadError
     }
 
-    Write-InstallStep 'Invoke-WebRequest failed; retrying with curl.exe.'
-    & $curl.Source -fL $Url -o $TargetPath
+    Write-InstallStep '기본 다운로드 방식이 실패해서 curl.exe로 다시 시도합니다.'
+    & $curl.Source -fL --progress-bar $Url -o $TargetPath
 
     if ($LASTEXITCODE -ne 0) {
-      throw "curl.exe failed with exit code $LASTEXITCODE."
+      throw "curl.exe 다운로드가 실패했습니다. 종료 코드: $LASTEXITCODE"
     }
-  } finally {
-    $ProgressPreference = $oldProgressPreference
   }
 
   $downloaded = Get-Item $TargetPath
   if ($downloaded.Length -le 0) {
-    throw "Downloaded file is empty: $TargetPath"
+    throw "다운로드된 파일이 비어 있습니다: $TargetPath"
   }
 }
 
@@ -239,11 +311,11 @@ function Install-WingetPackage {
     throw "winget을 찾을 수 없어 $Name 설치를 자동으로 진행할 수 없습니다. Microsoft Store에서 App Installer를 업데이트한 뒤 다시 실행해 주세요."
   }
 
-  Write-InstallStep "Installing $Name with winget."
+  Write-InstallStep "winget으로 $Name 설치 중입니다."
   & winget install --id $Id --exact --silent --accept-package-agreements --accept-source-agreements
 
   if (($LASTEXITCODE -ne 0) -and ($LASTEXITCODE -ne -1978335189)) {
-    throw "$Name winget install failed with exit code $LASTEXITCODE."
+    throw "$Name winget 설치가 실패했습니다. 종료 코드: $LASTEXITCODE"
   }
 
   Refresh-ProcessPath
@@ -257,7 +329,7 @@ function Ensure-GitForClaudeCode {
     return
   }
 
-  Write-InstallStep 'Claude Code on native Windows uses Git for Windows. Installing it first.'
+  Write-InstallStep 'Windows에서 Claude Code를 쓰려면 Git for Windows가 필요합니다. 먼저 설치합니다.'
   Install-WingetPackage -Id 'Git.Git' -Name 'Git for Windows'
 }
 
@@ -266,7 +338,7 @@ function Ensure-NpmForClaudeCode {
     return
   }
 
-  Write-InstallStep 'Node.js/npm is required for Claude Code. Installing Node.js LTS first.'
+  Write-InstallStep 'Claude Code 설치에 Node.js/npm이 필요합니다. Node.js LTS를 먼저 설치합니다.'
   Install-WingetPackage -Id 'OpenJS.NodeJS.LTS' -Name 'Node.js LTS'
 
   if (-not (Test-InstallerCommand -Names @('npm.cmd', 'npm'))) {
@@ -277,17 +349,17 @@ function Ensure-NpmForClaudeCode {
 function Ensure-ClaudeCode {
   if (Test-InstallerCommand -Names @('claude.cmd', 'claude')) {
     $claude = Get-InstallerCommand -Names @('claude.cmd', 'claude')
-    Write-InstallStep "Claude Code found: $claude"
+    Write-InstallStep "Claude Code를 찾았습니다: $claude"
     return
   }
 
   $shouldInstallClaude = Read-InstallerYesNo `
-    -Question 'Claude Code가 설치되어 있지 않습니다. 먼저 설치할까요?' `
+    -Question 'Claude Code가 설치되어 있지 않습니다. legal-terminal의 AI 터미널 기능에 필요합니다. 지금 설치할까요?' `
     -DefaultYes $true `
     -OptionName 'InstallClaude'
 
   if (-not $shouldInstallClaude) {
-    Write-InstallStep 'Skipping Claude Code installation.'
+    Write-InstallStep 'Claude Code 설치를 건너뜁니다.'
     return
   }
 
@@ -299,7 +371,7 @@ function Ensure-ClaudeCode {
     throw 'npm을 찾을 수 없어 Claude Code를 설치할 수 없습니다.'
   }
 
-  Write-InstallStep 'Installing Claude Code with npm.'
+  Write-InstallStep 'npm으로 Claude Code를 설치합니다.'
   $previousErrorActionPreference = $ErrorActionPreference
   $ErrorActionPreference = 'Continue'
 
@@ -307,7 +379,7 @@ function Ensure-ClaudeCode {
     & $npm install -g '@anthropic-ai/claude-code' 2>&1 | ForEach-Object { Write-Host $_ }
 
     if ($LASTEXITCODE -ne 0) {
-      throw "Claude Code npm install failed with exit code $LASTEXITCODE."
+      throw "Claude Code npm 설치가 실패했습니다. 종료 코드: $LASTEXITCODE"
     }
   } finally {
     $ErrorActionPreference = $previousErrorActionPreference
@@ -317,9 +389,9 @@ function Ensure-ClaudeCode {
 
   if (Test-InstallerCommand -Names @('claude.cmd', 'claude')) {
     $claudeVersion = & (Get-InstallerCommand -Names @('claude.cmd', 'claude')) --version 2>$null
-    Write-InstallStep "Claude Code installed. $claudeVersion"
+    Write-InstallStep "Claude Code 설치를 확인했습니다. $claudeVersion"
   } else {
-    Write-InstallStep 'Claude Code installed, but this PowerShell session cannot find claude yet. Open a new PowerShell window if legal-terminal cannot find it.'
+    Write-InstallStep 'Claude Code 설치는 끝났지만 현재 PowerShell 창에서는 아직 claude 명령을 찾지 못했습니다. legal-terminal에서 찾지 못하면 새 PowerShell 창을 열어 다시 확인해 주세요.'
   }
 }
 
@@ -337,7 +409,7 @@ function Test-JuriSupportPluginsInstalled {
         return $true
       }
     } catch {
-      # Treat unreadable settings as unknown and fall back to asking the user.
+      # 설정 파일을 읽지 못하면 알 수 없음으로 보고 사용자에게 물어본다.
     }
   }
 
@@ -348,38 +420,38 @@ function Invoke-JuriSupportPluginsBootstrap {
   param([bool]$ShouldInstall)
 
   if (-not $ShouldInstall) {
-    Write-InstallStep 'Skipping jurisupport-plugins bootstrap.'
+    Write-InstallStep 'jurisupport-plugins 준비 과정을 건너뜁니다.'
     return
   }
 
   $bootstrapUrl = 'https://raw.githubusercontent.com/jurisupport/jurisupport-plugins/main/windows-bootstrap.ps1'
   $bootstrapPath = Join-Path ([IO.Path]::GetTempPath()) 'jurisupport-windows-bootstrap.ps1'
 
-  Write-InstallStep 'Downloading jurisupport-plugins Windows bootstrap.'
+  Write-InstallStep 'jurisupport-plugins Windows 준비 스크립트를 내려받습니다.'
   Write-InstallStep $bootstrapUrl
   Save-ReleaseAsset -Url $bootstrapUrl -TargetPath $bootstrapPath
 
   $powerShell = Get-InstallerCommand -Names @('powershell.exe', 'powershell')
   if (-not $powerShell) {
-    throw 'powershell.exe를 찾을 수 없어 jurisupport-plugins bootstrap을 실행할 수 없습니다.'
+    throw 'powershell.exe를 찾을 수 없어 jurisupport-plugins 준비 스크립트를 실행할 수 없습니다.'
   }
 
-  Write-InstallStep 'Starting jurisupport-plugins bootstrap before legal-terminal setup.'
+  Write-InstallStep 'legal-terminal 설치 전에 jurisupport-plugins 준비 스크립트를 실행합니다.'
   & $powerShell -NoProfile -ExecutionPolicy Bypass -File $bootstrapPath
 
   if ($LASTEXITCODE -ne 0) {
-    throw "jurisupport-plugins bootstrap failed with exit code $LASTEXITCODE."
+    throw "jurisupport-plugins 준비 스크립트가 실패했습니다. 종료 코드: $LASTEXITCODE"
   }
 
   Refresh-ProcessPath
 }
 
 if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) {
-  throw 'This installer is for Windows only.'
+  throw '이 설치 스크립트는 Windows 전용입니다.'
 }
 
 if (-not [Environment]::Is64BitOperatingSystem) {
-  throw 'legal-terminal Windows releases require 64-bit Windows.'
+  throw 'legal-terminal Windows 배포판은 64비트 Windows가 필요합니다.'
 }
 
 $Channel = [string](Get-InstallerOption -Name 'Channel' -DefaultValue 'setup')
@@ -388,8 +460,12 @@ $DestinationOption = Get-InstallerOption -Name 'Destination' -DefaultValue $null
 $InstallerArgsOption = Get-InstallerOption -Name 'InstallerArgs' -DefaultValue @()
 
 if (($Channel -ne 'setup') -and ($Channel -ne 'portable')) {
-  throw "Invalid channel '$Channel'. Use 'setup' or 'portable'."
+  throw "잘못된 채널입니다: '$Channel'. 'setup' 또는 'portable'을 사용해 주세요."
 }
+
+Write-InstallStep 'Windows 설치를 시작합니다.'
+Write-InstallStep '진행 순서: 필요한 도구 확인 → 설치 파일 다운로드(진행률 표시) → 설치 파일 실행'
+Write-InstallStep '추가 도구가 필요하면 먼저 물어본 뒤 진행합니다.'
 
 if ($DestinationOption) {
   $Destination = [string]$DestinationOption
@@ -411,11 +487,11 @@ $juriSupportOption = Get-InstallerOption -Name 'InstallJuriSupport' -DefaultValu
 if ($null -ne $juriSupportOption) {
   $shouldInstallJuriSupport = ConvertTo-InstallerBoolean -Value $juriSupportOption -DefaultValue $false
 } elseif (Test-JuriSupportPluginsInstalled) {
-  Write-InstallStep 'jurisupport-plugins already appears installed; skipping bootstrap.'
+  Write-InstallStep 'jurisupport-plugins가 이미 설치된 것으로 보여 준비 과정을 건너뜁니다.'
   $shouldInstallJuriSupport = $false
 } else {
   $shouldInstallJuriSupport = Read-InstallerYesNo `
-    -Question 'jurisupport-plugins(송무 플러그인/검색 도구)가 설치되어 있지 않은 것 같습니다. 설치할까요?' `
+    -Question 'jurisupport-plugins(송무 플러그인/검색 도구)가 설치되어 있지 않은 것 같습니다. 판례/법령 검색과 개인정보 보호 훅에 필요합니다. 지금 설치할까요?' `
     -DefaultYes $true `
     -OptionName 'InstallJuriSupport'
 }
@@ -439,21 +515,22 @@ $downloadPath = Resolve-DownloadPath `
   -AssetName $assetName `
   -SelectedChannel $Channel
 
-Write-InstallStep "Downloading $assetName"
+Write-InstallStep "$assetName 내려받는 중입니다. PowerShell 창에 진행률이 표시됩니다."
 Write-InstallStep $downloadUrl
 Save-ReleaseAsset -Url $downloadUrl -TargetPath $downloadPath
+Write-InstallStep "다운로드 완료: $downloadPath"
 
 if (Get-Command Unblock-File -ErrorAction SilentlyContinue) {
   Unblock-File -Path $downloadPath
 }
 
 if ($Channel -eq 'portable') {
-  Write-InstallStep "Saved portable app to $downloadPath"
+  Write-InstallStep "포터블 앱을 저장했습니다: $downloadPath"
   Start-Process -FilePath $downloadPath | Out-Null
   return
 }
 
-Write-InstallStep 'Starting setup. Follow the installer prompts to finish.'
+Write-InstallStep '설치 파일을 실행합니다. 열리는 설치 창의 안내에 따라 마무리해 주세요.'
 $startProcessArgs = @{
   FilePath = $downloadPath
   Wait = $true
@@ -467,7 +544,7 @@ if ($InstallerArgs.Count -gt 0) {
 $process = Start-Process @startProcessArgs
 
 if ($process.ExitCode -ne 0) {
-  throw "Setup exited with code $($process.ExitCode)."
+  throw "설치 파일이 오류로 종료되었습니다. 종료 코드: $($process.ExitCode)"
 }
 
-Write-InstallStep 'Done.'
+Write-InstallStep '설치가 끝났습니다.'

@@ -15,7 +15,7 @@ import {
   setJsPairing
 } from './caseStore'
 import * as js from './jurisupport'
-import { listRemoteDir } from './ssh'
+import { listRemoteDir, searchRemoteDirs } from './ssh'
 import { remoteRcloneInfo, runRemoteSync, cancelSync, type RemoteSyncOpts } from './sync'
 import {
   isRemote,
@@ -29,6 +29,7 @@ import {
   rfsMkdir,
   rfsCreateFile,
   rfsMove,
+  rfsRename,
   rfsStat,
   rfsDelete,
   disposeRemote
@@ -523,6 +524,15 @@ ipcMain.handle('js:getCase', async (_e, id: string) => {
 // 원격 디렉터리 목록 (사건 폴더 선택용). 키/agent 인증일 때만 성공(아니면 ok:false).
 ipcMain.handle('ssh:listDir', (_e, p: { profile: SshProfile; path: string }) =>
   listRemoteDir(p.profile, p.path)
+)
+ipcMain.handle(
+  'ssh:searchDirs',
+  (_e, p: { profile: SshProfile; path: string; query: string; maxDepth?: number; limit?: number }) =>
+    searchRemoteDirs(p.profile, p.path, {
+      query: p.query,
+      maxDepth: p.maxDepth,
+      limit: p.limit
+    })
 )
 
 // ── rclone 동기화 IPC (클라우드 경유: 맥에서 rclone 실행) ──
@@ -1043,6 +1053,22 @@ ipcMain.handle('fs:delete', async (_e, p: string) => {
     if (isRemote(p)) await rfsDelete(p)
     else await rm(p, { recursive: true, force: true })
     return { ok: true }
+  } catch (e) {
+    return { ok: false, error: String(e) }
+  }
+})
+
+ipcMain.handle('fs:rename', async (_e, p: { path: string; name: string }) => {
+  try {
+    const name = p.name.trim()
+    if (!name) return { ok: false, error: '이름을 입력하세요.' }
+    if (/[\\/]/.test(name)) return { ok: false, error: '이름에 경로 구분자를 사용할 수 없습니다.' }
+    if (isRemote(p.path)) return await rfsRename(p.path, name)
+    const dest = join(dirname(p.path), name)
+    if (dest === p.path) return { ok: true, path: p.path }
+    if (existsSync(dest)) return { ok: false, error: '같은 이름이 이미 있습니다.' }
+    await rename(p.path, dest)
+    return { ok: true, path: dest }
   } catch (e) {
     return { ok: false, error: String(e) }
   }

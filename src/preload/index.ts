@@ -14,6 +14,7 @@ interface SshProfile extends SshConn {
   label: string
   draftsRoot?: string
   recordsRoot?: string
+  quickStartPaths?: string[]
 }
 
 interface RemoteEntry {
@@ -43,6 +44,7 @@ interface PtyCreateOpts {
 interface TerminalTabPayload {
   id: string
   title: string
+  kind?: 'terminal' | 'agent'
   cwd: string
   recordsFolder?: string
   suggestedRecords?: string
@@ -184,10 +186,11 @@ interface AppSettings {
   notificationVolume?: number
   mdFont?: string
   mdFontSize?: number
+  agentFontSize?: number
   sshProfiles?: SshProfile[]
 }
 
-type AgentPermissionMode = 'ask' | 'plan' | 'acceptEdits' | 'dontAsk'
+type AgentPermissionMode = 'ask' | 'plan' | 'acceptEdits' | 'bypassPermissions' | 'dontAsk'
 
 interface AgentAttachment {
   kind: 'file' | 'folder' | 'selection' | 'pdf-page-range' | 'terminal-snippet'
@@ -208,11 +211,14 @@ interface AgentCreateOptions {
   allowedTools?: string[]
   disallowedTools?: string[]
   source?: 'local' | 'ssh'
+  ssh?: SshConn
 }
 
 interface AgentSendInput {
   text: string
   attachments?: AgentAttachment[]
+  permissionMode?: AgentPermissionMode
+  delivery?: 'normal' | 'queue' | 'steer'
 }
 
 interface AgentPermissionDecision {
@@ -220,6 +226,14 @@ interface AgentPermissionDecision {
   decision: 'allow' | 'reject'
   message?: string
   remember?: boolean
+}
+
+interface AgentDialogAnswer {
+  sessionId: string
+  dialogId: string
+  answers?: Record<string, string>
+  response?: string
+  cancelled?: boolean
 }
 
 interface AgentCommandResult {
@@ -294,6 +308,11 @@ const api = {
       ipcRenderer.invoke('fs:download', source),
     move: (src: string, destDir: string): Promise<{ ok: boolean; path?: string; error?: string }> =>
       ipcRenderer.invoke('fs:move', { src, destDir }),
+    rename: (
+      path: string,
+      name: string
+    ): Promise<{ ok: boolean; path?: string; error?: string }> =>
+      ipcRenderer.invoke('fs:rename', { path, name }),
     delete: (path: string): Promise<{ ok: boolean; error?: string }> =>
       ipcRenderer.invoke('fs:delete', path),
     mkdir: (dir: string, name: string): Promise<{ ok: boolean; error?: string }> =>
@@ -359,7 +378,15 @@ const api = {
       path: string
     ): Promise<
       { ok: true; entries: RemoteEntry[]; cwd: string } | { ok: false; error: string }
-    > => ipcRenderer.invoke('ssh:listDir', { profile, path })
+    > => ipcRenderer.invoke('ssh:listDir', { profile, path }),
+    searchDirs: (
+      profile: SshProfile,
+      path: string,
+      opts: { query: string; maxDepth?: number; limit?: number }
+    ): Promise<
+      | { ok: true; entries: RemoteEntry[]; cwd: string; truncated?: boolean }
+      | { ok: false; error: string }
+    > => ipcRenderer.invoke('ssh:searchDirs', { profile, path, ...opts })
   },
   sync: {
     remoteInfo: (
@@ -404,10 +431,16 @@ const api = {
       ipcRenderer.invoke('agent:send', { sessionId, input }),
     approve: (decision: AgentPermissionDecision): Promise<AgentCommandResult> =>
       ipcRenderer.invoke('agent:approve', decision),
+    answerDialog: (answer: AgentDialogAnswer): Promise<AgentCommandResult> =>
+      ipcRenderer.invoke('agent:answerDialog', answer),
     interrupt: (sessionId: string): Promise<AgentCommandResult> =>
       ipcRenderer.invoke('agent:interrupt', sessionId),
     close: (sessionId: string): Promise<AgentCommandResult> =>
       ipcRenderer.invoke('agent:close', sessionId),
+    authLogin: (sessionId: string): Promise<AgentCommandResult> =>
+      ipcRenderer.invoke('agent:authLogin', sessionId),
+    authInput: (sessionId: string, text: string): Promise<AgentCommandResult> =>
+      ipcRenderer.invoke('agent:authInput', { sessionId, input: { text } }),
     onEvent: (cb: (event: AgentEvent) => void): (() => void) => {
       const listener = (_e: unknown, event: AgentEvent): void => cb(event)
       ipcRenderer.on('agent:event', listener)

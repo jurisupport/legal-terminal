@@ -78,6 +78,7 @@ export default function FileTree({
   onOpenFile,
   onDropTo,
   onMove,
+  onRename,
   onDelete,
   onPasteTo,
   onDownload,
@@ -93,6 +94,7 @@ export default function FileTree({
   onOpenFile: (path: string, name: string) => void
   onDropTo?: (dir: string, files: FileList) => void
   onMove?: (src: string, destDir: string) => void
+  onRename?: (path: string, name: string) => void
   onDelete?: (path: string, name: string, isDir: boolean) => void
   onPasteTo?: (dir: string) => void
   onDownload?: (path: string, name: string, isDir: boolean) => void
@@ -109,6 +111,7 @@ export default function FileTree({
   const [err, setErr] = useState<string>('')
   const [rootOver, setRootOver] = useState(false)
   const [rootDropLabel, setRootDropLabel] = useState('')
+  const [editingPath, setEditingPath] = useState<string | null>(null)
   const lastRoot = useRef<string | null>(null)
   const entriesRef = useRef<Entry[] | null>(null)
   const query = filter.trim()
@@ -146,6 +149,15 @@ export default function FileTree({
       document.removeEventListener('scroll', close, true)
     }
   }, [menu])
+
+  useEffect(() => {
+    setEditingPath(null)
+  }, [root, query])
+
+  const commitRename = (path: string, name: string): void => {
+    setEditingPath(null)
+    onRename?.(path, name)
+  }
 
   useEffect(() => {
     let alive = true
@@ -259,23 +271,47 @@ export default function FileTree({
             searchEntries &&
             sortEntries(searchEntries, sortMode).map((e) => (
               <li key={e.path}>
-                <div
-                  className="tree-row tree-search-row"
-                  style={{ paddingLeft: 8 }}
-                  title={e.path}
-                  draggable
-                  onClick={() => onOpenFile(e.path, e.name)}
-                  onContextMenu={(ev) => onContext(ev, e)}
-                  onDragStart={(ev) => {
-                    ev.stopPropagation()
-                    ev.dataTransfer.setData(LT_PATH, e.path)
-                    ev.dataTransfer.effectAllowed = 'copyMove'
-                  }}
-                >
-                  <span className="tree-icon">{fileIcon(e.name)}</span>
-                  <span className="tree-name">{e.name}</span>
-                  <span className="tree-path">{relativePath(root, e.path)}</span>
-                </div>
+                {editingPath === e.path ? (
+                  <RenameEntryRow
+                    entry={e}
+                    depth={0}
+                    onRename={(name) => commitRename(e.path, name)}
+                    onCancel={() => setEditingPath(null)}
+                  />
+                ) : (
+                  <div
+                    className="tree-row tree-search-row"
+                    style={{ paddingLeft: 8 }}
+                    title={e.path}
+                    tabIndex={0}
+                    draggable
+                    onMouseDown={(ev) => {
+                      ev.stopPropagation()
+                      ev.currentTarget.focus()
+                    }}
+                    onClick={() => onOpenFile(e.path, e.name)}
+                    onContextMenu={(ev) => onContext(ev, e)}
+                    onKeyDown={(ev) => {
+                      if (ev.key === 'F2' && onRename) {
+                        ev.preventDefault()
+                        ev.stopPropagation()
+                        setEditingPath(e.path)
+                      } else if (ev.key === 'Enter') {
+                        ev.preventDefault()
+                        onOpenFile(e.path, e.name)
+                      }
+                    }}
+                    onDragStart={(ev) => {
+                      ev.stopPropagation()
+                      ev.dataTransfer.setData(LT_PATH, e.path)
+                      ev.dataTransfer.effectAllowed = 'copyMove'
+                    }}
+                  >
+                    <span className="tree-icon">{fileIcon(e.name)}</span>
+                    <span className="tree-name">{e.name}</span>
+                    <span className="tree-path">{relativePath(root, e.path)}</span>
+                  </div>
+                )}
               </li>
             ))}
         </>
@@ -306,6 +342,10 @@ export default function FileTree({
                 onOpenFile={onOpenFile}
                 onDropTo={onDropTo}
                 onMove={onMove}
+                onRename={onRename ? (path, name) => commitRename(path, name) : undefined}
+                editingPath={editingPath}
+                onStartRename={setEditingPath}
+                onCancelRename={() => setEditingPath(null)}
                 onContext={onContext}
                 pendingCreate={pendingCreate}
                 onCreate={onCreate}
@@ -375,6 +415,18 @@ export default function FileTree({
               다운로드
             </li>
           )}
+          {menu.entry && onRename && (
+            <li
+              className="ctx-item"
+              onClick={() => {
+                const { path } = menu.entry as Entry
+                setMenu(null)
+                setEditingPath(path)
+              }}
+            >
+              이름 변경
+            </li>
+          )}
           {menu.entry && onDelete && (
             <li
               className="ctx-item"
@@ -402,6 +454,10 @@ function TreeNode({
   onOpenFile,
   onDropTo,
   onMove,
+  onRename,
+  editingPath,
+  onStartRename,
+  onCancelRename,
   onContext,
   pendingCreate,
   onCreate,
@@ -414,6 +470,10 @@ function TreeNode({
   onOpenFile: (path: string, name: string) => void
   onDropTo?: (dir: string, files: FileList) => void
   onMove?: (src: string, destDir: string) => void
+  onRename?: (path: string, name: string) => void
+  editingPath?: string | null
+  onStartRename?: (path: string) => void
+  onCancelRename?: () => void
   onContext?: (e: React.MouseEvent, entry: Entry) => void
   pendingCreate?: PendingCreateRequest | null
   onCreate?: (name: string, type: 'file' | 'folder', dir?: string) => void
@@ -469,6 +529,7 @@ function TreeNode({
   }
 
   const droppable = entry.isDir && (!!onDropTo || !!onMove)
+  const renaming = editingPath === entry.path
 
   return (
     <li>
@@ -476,11 +537,27 @@ function TreeNode({
         className={`tree-row ${over ? 'drop-target' : ''}`}
         data-drop-label={dropLabel}
         style={{ paddingLeft: 8 + depth * 14 }}
-        onClick={onClick}
+        onClick={renaming ? undefined : onClick}
         onContextMenu={(e) => onContext?.(e, entry)}
         title={entry.name}
-        draggable
+        tabIndex={0}
+        draggable={!renaming}
+        onMouseDown={(e) => {
+          e.stopPropagation()
+          e.currentTarget.focus()
+        }}
+        onKeyDown={(e) => {
+          if (e.key === 'F2' && onRename) {
+            e.preventDefault()
+            e.stopPropagation()
+            onStartRename?.(entry.path)
+          } else if (e.key === 'Enter' && !renaming) {
+            e.preventDefault()
+            onClick()
+          }
+        }}
         onDragStart={(e) => {
+          if (renaming) return
           e.stopPropagation()
           e.dataTransfer.setData(LT_PATH, entry.path)
           // 폴더로 '이동'과 터미널로 '복사'를 모두 허용 (copy만/move만이면 다른 드롭존에서 '금지' 표시됨)
@@ -541,7 +618,15 @@ function TreeNode({
         <span className="tree-icon">
           {entry.isDir ? (open ? '📂' : '📁') : fileIcon(entry.name)}
         </span>
-        <span className="tree-name">{entry.name}</span>
+        {renaming && onRename ? (
+          <RenameEntryInput
+            entry={entry}
+            onRename={(name) => onRename(entry.path, name)}
+            onCancel={onCancelRename}
+          />
+        ) : (
+          <span className="tree-name">{entry.name}</span>
+        )}
       </div>
       {entry.isDir && open && children && (
         <ul className="tree">
@@ -563,6 +648,10 @@ function TreeNode({
               onOpenFile={onOpenFile}
               onDropTo={onDropTo}
               onMove={onMove}
+              onRename={onRename}
+              editingPath={editingPath}
+              onStartRename={onStartRename}
+              onCancelRename={onCancelRename}
               onContext={onContext}
               pendingCreate={pendingCreate}
               onCreate={onCreate}
@@ -572,6 +661,84 @@ function TreeNode({
         </ul>
       )}
     </li>
+  )
+}
+
+function RenameEntryRow({
+  entry,
+  depth,
+  onRename,
+  onCancel
+}: {
+  entry: Entry
+  depth: number
+  onRename: (name: string) => void
+  onCancel?: () => void
+}): JSX.Element {
+  return (
+    <div className="tree-row" style={{ paddingLeft: 8 + depth * 14 }}>
+      <span className="tree-icon">{entry.isDir ? '📁' : fileIcon(entry.name)}</span>
+      <RenameEntryInput entry={entry} onRename={onRename} onCancel={onCancel} />
+    </div>
+  )
+}
+
+function RenameEntryInput({
+  entry,
+  onRename,
+  onCancel
+}: {
+  entry: Entry
+  onRename: (name: string) => void
+  onCancel?: () => void
+}): JSX.Element {
+  const [value, setValue] = useState(entry.name)
+  const inputRef = useRef<HTMLInputElement>(null)
+  const done = useRef(false)
+
+  useEffect(() => {
+    const input = inputRef.current
+    if (!input) return
+    if (entry.isDir) {
+      input.select()
+      return
+    }
+    const dot = entry.name.lastIndexOf('.')
+    input.setSelectionRange(0, dot > 0 ? dot : entry.name.length)
+  }, [entry.isDir, entry.name])
+
+  const cancel = (): void => {
+    if (done.current) return
+    done.current = true
+    onCancel?.()
+  }
+  const commit = (): void => {
+    if (done.current) return
+    done.current = true
+    const next = value.trim()
+    if (!next || next === entry.name) {
+      onCancel?.()
+      return
+    }
+    onRename(next)
+  }
+
+  return (
+    <input
+      ref={inputRef}
+      className="tree-input tree-rename-input"
+      autoFocus
+      value={value}
+      onMouseDown={(e) => e.stopPropagation()}
+      onClick={(e) => e.stopPropagation()}
+      onChange={(e) => setValue(e.target.value)}
+      onKeyDown={(e) => {
+        e.stopPropagation()
+        if (e.key === 'Enter') commit()
+        else if (e.key === 'Escape') cancel()
+      }}
+      onBlur={commit}
+    />
   )
 }
 

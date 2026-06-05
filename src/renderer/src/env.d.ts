@@ -12,6 +12,7 @@ export interface SshProfile extends SshConn {
   label: string
   draftsRoot?: string
   recordsRoot?: string
+  quickStartPaths?: string[]
 }
 
 export interface RemoteEntry {
@@ -41,6 +42,7 @@ export interface PtyCreateOpts {
 export interface TerminalTabPayload {
   id: string
   title: string
+  kind?: 'terminal' | 'agent'
   cwd: string
   recordsFolder?: string
   suggestedRecords?: string
@@ -182,10 +184,11 @@ export interface AppSettings {
   notificationVolume?: number
   mdFont?: string
   mdFontSize?: number
+  agentFontSize?: number
   sshProfiles?: SshProfile[]
 }
 
-export type AgentPermissionMode = 'ask' | 'plan' | 'acceptEdits' | 'dontAsk'
+export type AgentPermissionMode = 'ask' | 'plan' | 'acceptEdits' | 'bypassPermissions' | 'dontAsk'
 
 export interface AgentAttachment {
   kind: 'file' | 'folder' | 'selection' | 'pdf-page-range' | 'terminal-snippet'
@@ -206,11 +209,14 @@ export interface AgentCreateOptions {
   allowedTools?: string[]
   disallowedTools?: string[]
   source?: 'local' | 'ssh'
+  ssh?: SshConn
 }
 
 export interface AgentSendInput {
   text: string
   attachments?: AgentAttachment[]
+  permissionMode?: AgentPermissionMode
+  delivery?: 'normal' | 'queue' | 'steer'
 }
 
 export interface AgentPermissionDecision {
@@ -218,6 +224,14 @@ export interface AgentPermissionDecision {
   decision: 'allow' | 'reject'
   message?: string
   remember?: boolean
+}
+
+export interface AgentDialogAnswer {
+  sessionId: string
+  dialogId: string
+  answers?: Record<string, string>
+  response?: string
+  cancelled?: boolean
 }
 
 export interface AgentCommandResult {
@@ -302,6 +316,7 @@ export interface LtApi {
     ) => Promise<{ ok: boolean; path?: string; error?: string }>
     copyInto: (destDir: string, srcPaths: string[]) => Promise<{ copied: string[] }>
     move: (src: string, destDir: string) => Promise<{ ok: boolean; path?: string; error?: string }>
+    rename: (path: string, name: string) => Promise<{ ok: boolean; path?: string; error?: string }>
     delete: (path: string) => Promise<{ ok: boolean; error?: string }>
     mkdir: (dir: string, name: string) => Promise<{ ok: boolean; error?: string }>
     createFile: (
@@ -348,6 +363,14 @@ export interface LtApi {
     ) => Promise<
       { ok: true; entries: RemoteEntry[]; cwd: string } | { ok: false; error: string }
     >
+    searchDirs: (
+      profile: SshProfile,
+      path: string,
+      opts: { query: string; maxDepth?: number; limit?: number }
+    ) => Promise<
+      | { ok: true; entries: RemoteEntry[]; cwd: string; truncated?: boolean }
+      | { ok: false; error: string }
+    >
   }
   sync: {
     remoteInfo: (
@@ -380,8 +403,11 @@ export interface LtApi {
     create: (opts: AgentCreateOptions) => Promise<AgentCommandResult>
     send: (sessionId: string, input: AgentSendInput) => Promise<AgentCommandResult>
     approve: (decision: AgentPermissionDecision) => Promise<AgentCommandResult>
+    answerDialog: (answer: AgentDialogAnswer) => Promise<AgentCommandResult>
     interrupt: (sessionId: string) => Promise<AgentCommandResult>
     close: (sessionId: string) => Promise<AgentCommandResult>
+    authLogin: (sessionId: string) => Promise<AgentCommandResult>
+    authInput: (sessionId: string, text: string) => Promise<AgentCommandResult>
     onEvent: (cb: (event: AgentEvent) => void) => () => void
   }
   workspace: {

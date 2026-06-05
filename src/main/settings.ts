@@ -20,6 +20,8 @@ export interface SshProfile {
   draftsRoot?: string
   /** 원격 소송기록 루트 (Phase 2 예정) */
   recordsRoot?: string
+  /** 원격 폴더 선택기 빠른 시작 경로 목록 */
+  quickStartPaths?: string[]
 }
 
 /** 앱 전역 설정 (userData/config.json에 영구 저장) */
@@ -46,6 +48,8 @@ export interface Settings {
   mdFont?: string
   /** 마크다운 글자 크기(px) */
   mdFontSize?: number
+  /** Agent Panel 답변 글자 크기(px) */
+  agentFontSize?: number
   /** JuriSupport MCP 토큰 (safeStorage로 암호화된 base64) */
   jurisupportTokenEnc?: string
   /** 사용자가 건너뛴 최신 릴리스 버전. 더 높은 버전이 나오면 다시 알린다. */

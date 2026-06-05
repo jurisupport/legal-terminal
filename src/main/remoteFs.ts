@@ -751,6 +751,28 @@ export async function rfsMove(
   }
 }
 
+export async function rfsRename(
+  srcUri: string,
+  newName: string
+): Promise<{ ok: boolean; path?: string; error?: string }> {
+  const src = parseRemote(srcUri)
+  const name = newName.trim()
+  if (!name) return { ok: false, error: '이름을 입력하세요.' }
+  if (name.includes('/')) return { ok: false, error: '이름에 /를 사용할 수 없습니다.' }
+  const target = posix.join(posix.dirname(src.path), name)
+  if (target === src.path) return { ok: true, path: srcUri }
+  const sftp = await getSftp(src.profileId)
+  if (await exists(sftp, target)) return { ok: false, error: '같은 이름이 이미 있습니다.' }
+  try {
+    await new Promise<void>((resolve, reject) =>
+      sftp.rename(src.path, target, (err) => (err ? reject(err) : resolve()))
+    )
+    return { ok: true, path: makeRemote(src.profileId, target) }
+  } catch (e) {
+    return { ok: false, error: String(e) }
+  }
+}
+
 // 파일/폴더 삭제 (폴더는 재귀). lstat로 심볼릭 링크는 따라가지 않고 unlink.
 export async function rfsDelete(uri: string): Promise<void> {
   const { profileId, path } = parseRemote(uri)

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react'
 import Terminal from './terminal/Terminal'
+import AgentPanel from './agent/AgentPanel'
 import FileTree, { LT_PATH, sortEntries, type PendingCreateRequest, type SortMode } from './filetree/FileTree'
 import PdfViewer, { type PdfViewStatus } from './viewer/PdfViewer'
 import RecordViewer from './viewer/RecordViewer'
@@ -63,6 +64,7 @@ const SETTINGS_UPDATED_EVENT = 'lt:settings-updated'
 const TAB_DND_TYPE = 'application/x-legal-terminal-tab'
 const DEFAULT_TERM_FONT_SIZE = 13
 const DEFAULT_MD_FONT_SIZE = 14
+const DEFAULT_AGENT_FONT_SIZE = 13
 const FONT_SIZE_MIN = 8
 const FONT_SIZE_MAX = 32
 const DEFAULT_MD_FONT = "'D2Coding', 'Cascadia Mono', Consolas, monospace"
@@ -173,11 +175,12 @@ interface DocTab {
 interface TermTab {
   id: string
   title: string
+  kind?: 'terminal' | 'agent'
   cwd: string
   recordsFolder?: string
   suggestedRecords?: string // 페어링으로 추천된 소송기록 폴더 (사용자가 '열기' 눌러야 적용)
   suggestedRecordOptions?: FolderMatchSuggestion[]
-  autoClaude?: boolean // 사건 열기 = claude 자동 실행, + 새 터미널 = 빈 셸
+  autoClaude?: boolean // 명시적으로 터미널을 열 때만 claude 자동 실행
   // JuriSupport 사건에서 연 세션의 메타 (자동 명명·사건별 필터용)
   jsId?: string
   court?: string
@@ -207,6 +210,7 @@ interface FolderMatchSuggestion {
 
 const docSide = (tab?: DocTab): DockSide => tab?.side ?? 'left'
 const termSide = (tab?: TermTab): DockSide => tab?.side ?? 'right'
+const isAgentTab = (tab?: TermTab): boolean => tab?.kind === 'agent'
 const otherSide = (side: DockSide): DockSide => (side === 'left' ? 'right' : 'left')
 const docKey = (id: string): WorkTabKey => `doc:${id}`
 const termKeyOf = (id: string): WorkTabKey => `terminal:${id}`
@@ -329,6 +333,26 @@ const pathLeaf = (path?: string): string | undefined => {
   return clean.split(/[\\/]/).filter(Boolean).pop() || clean
 }
 
+const normalizeRemoteQuickStartPaths = (paths: Array<string | undefined> = []): string[] => {
+  const seen = new Set<string>()
+  const out: string[] = []
+  for (const path of paths) {
+    const trimmed = path?.trim()
+    if (!trimmed) continue
+    const key = trimmed.replace(/\/+$/, '') || '/'
+    if (seen.has(key)) continue
+    seen.add(key)
+    out.push(trimmed)
+  }
+  return out
+}
+
+const remoteQuickStartInputValue = (paths?: string[]): string =>
+  normalizeRemoteQuickStartPaths(paths).join('\n')
+
+const remoteQuickStartInputToPaths = (value: string): string[] =>
+  normalizeRemoteQuickStartPaths(value.split(/\r?\n/))
+
 const joinStatus = (parts: (string | undefined | false)[]): string =>
   parts.filter((part): part is string => !!part).join(' · ')
 
@@ -410,16 +434,25 @@ const describeRecordsStatus = (
 
 const describeTermStatus = (term: TermTab | undefined, status?: TermRunStatus): string | undefined => {
   if (!term) return undefined
+  const agent = isAgentTab(term)
   const run =
     status === 'working'
-      ? 'Claude 작업 중'
+      ? agent
+        ? 'Agent 작업 중'
+        : 'Claude 작업 중'
       : status === 'question'
-        ? 'Claude 질문 대기'
+        ? agent
+          ? 'Agent 확인 대기'
+          : 'Claude 질문 대기'
         : status === 'done'
-          ? 'Claude 완료'
-          : term.autoClaude
-            ? 'Claude 대기'
-            : '터미널 대기'
+          ? agent
+            ? 'Agent 완료'
+            : 'Claude 완료'
+          : agent
+            ? 'Agent 대기'
+            : term.autoClaude
+              ? 'Claude 대기'
+              : '터미널 대기'
   const connection = term.ssh ? `원격 ${term.sshLabel ?? term.ssh.host}` : '로컬'
   return joinStatus([run, connection])
 }
@@ -439,6 +472,28 @@ const matchNorm = (value?: string | null): string =>
 
 const fileNameFromPath = (path: string): string =>
   path.replace(/[\\/]+$/, '').split(/[\\/]/).pop() || path
+
+const docKindForPath = (path: string): DocTab['kind'] => {
+  const lower = path.toLowerCase()
+  if (lower.endsWith('.pdf')) return 'pdf'
+  if (/\.(png|jpe?g|gif|webp|bmp|svg|ico|tiff?|avif)$/.test(lower)) return 'image'
+  if (/\.(hwp|hwpx)$/.test(lower)) return 'hwp'
+  if (/\.(md|markdown)$/.test(lower)) return 'mdview'
+  if (lower.endsWith('.csv')) return 'csv'
+  return 'file'
+}
+
+const replacePathPrefix = (
+  value: string | undefined,
+  from: string,
+  to: string
+): string | undefined => {
+  if (!value) return value
+  if (value === from) return to
+  if (value.startsWith(from + '/')) return to + value.slice(from.length)
+  if (value.startsWith(from + '\\')) return to + value.slice(from.length)
+  return value
+}
 
 const matchesSearch = (parts: (string | number | undefined)[], query: string): boolean => {
   const tokens = query
@@ -769,7 +824,10 @@ export default function App(): JSX.Element {
   termTabsRef.current = termTabs
   useEffect(() => {
     const killWindowTerms = (): void => {
-      for (const t of termTabsRef.current) window.lt.pty.kill(t.id)
+      for (const t of termTabsRef.current) {
+        if (isAgentTab(t)) void window.lt.agent.close(t.id)
+        else window.lt.pty.kill(t.id)
+      }
     }
     window.addEventListener('beforeunload', killWindowTerms)
     return () => window.removeEventListener('beforeunload', killWindowTerms)
@@ -917,13 +975,7 @@ export default function App(): JSX.Element {
       activateDocTab(existing.id)
       return
     }
-    const lower = path.toLowerCase()
-    let kind: DocTab['kind'] = 'file'
-    if (lower.endsWith('.pdf')) kind = 'pdf'
-    else if (/\.(png|jpe?g|gif|webp|bmp|svg|ico|tiff?|avif)$/.test(lower)) kind = 'image'
-    else if (/\.(hwp|hwpx)$/.test(lower)) kind = 'hwp'
-    else if (/\.(md|markdown)$/.test(lower)) kind = 'mdview'
-    else if (lower.endsWith('.csv')) kind = 'csv'
+    const kind = docKindForPath(path)
     const tab: DocTab = { id: `file-${++docSeq}`, title: name, kind, path, side }
     setDocTabs((t) => [...t, tab])
     setActiveDoc(tab.id)
@@ -1068,8 +1120,19 @@ export default function App(): JSX.Element {
     })
   }
 
-  // ── 사건 터미널 탭 (작성서류 폴더 = cwd로 claude 실행) ──
-  const createCase = (
+  const rememberLocalCase = (
+    drafts: string,
+    records: string | undefined,
+    name: string,
+    caseMeta?: CaseMeta
+  ): void => {
+    setCurrentCase({ drafts, records, name, meta: caseMeta })
+    window.lt.case.addHistory({ drafts, records, name }).then(setRecent)
+  }
+
+  // ── 사건 작업 탭 (기본: Agent Panel, 명시 fallback: PTY 터미널) ──
+  const createLocalCaseTab = (
+    kind: 'agent' | 'terminal',
     drafts: string,
     name: string,
     records?: string,
@@ -1081,11 +1144,12 @@ export default function App(): JSX.Element {
     const tab: TermTab = {
       id: newId(),
       title: name,
+      kind,
       cwd: drafts,
       recordsFolder: records,
       suggestedRecords: suggested,
       suggestedRecordOptions: suggestedOptions,
-      autoClaude: true, // 사건 열기 → claude 자동 실행
+      autoClaude: kind === 'terminal',
       createdAt: Date.now(),
       side,
       ...caseMeta
@@ -1093,14 +1157,33 @@ export default function App(): JSX.Element {
     setTermTabs((t) => [...t, tab])
     setActiveTerm(tab.id)
     setWorkActive(side, termKeyOf(tab.id))
-    setCurrentCase({ drafts, records, name, meta: caseMeta })
-    window.lt.case.addHistory({ drafts, records, name }).then(setRecent)
+    rememberLocalCase(drafts, records, name, caseMeta)
   }
+
+  const createCase = (
+    drafts: string,
+    name: string,
+    records?: string,
+    suggested?: string,
+    caseMeta?: CaseMeta,
+    side: DockSide = 'right',
+    suggestedOptions?: FolderMatchSuggestion[]
+  ): void => createLocalCaseTab('agent', drafts, name, records, suggested, caseMeta, side, suggestedOptions)
+
+  const createCaseTerminal = (
+    drafts: string,
+    name: string,
+    records?: string,
+    suggested?: string,
+    caseMeta?: CaseMeta,
+    side: DockSide = 'right',
+    suggestedOptions?: FolderMatchSuggestion[]
+  ): void => createLocalCaseTab('terminal', drafts, name, records, suggested, caseMeta, side, suggestedOptions)
 
   const historyDraftsForTerm = (t: TermTab): string =>
     t.ssh && t.profileId ? remoteUri(t.profileId, t.cwd) : t.cwd
 
-  const addTerm = async (side: DockSide = 'right'): Promise<void> => {
+  const addCase = async (side: DockSide = 'right'): Promise<void> => {
     const picked = await window.lt.dialog.pickFolder({
       title: '사건(작성서류) 폴더 선택',
       defaultPath: draftsRoot
@@ -1111,7 +1194,17 @@ export default function App(): JSX.Element {
     createCase(picked.path, picked.name, undefined, paired ?? undefined, undefined, side)
   }
 
-  // 원격(SSH) 사건 터미널 — cwd는 원격 경로, claude도 원격에서 실행.
+  const addTerm = async (side: DockSide = 'right'): Promise<void> => {
+    const picked = await window.lt.dialog.pickFolder({
+      title: '터미널로 실행할 사건(작성서류) 폴더 선택',
+      defaultPath: draftsRoot
+    })
+    if (!picked) return
+    const paired = await window.lt.case.getPairing(picked.path)
+    createCaseTerminal(picked.path, picked.name, undefined, paired ?? undefined, undefined, side)
+  }
+
+  // 원격(SSH) 사건 작업 탭 — 기본은 Agent, 명시 fallback은 터미널.
   // 파일 패널(탐색기·뷰어·에디터)은 ssh://<profileId>/<경로> URI로 원격 파일을 다룬다.
   const createRemoteCase = (
     profile: SshProfile,
@@ -1119,7 +1212,8 @@ export default function App(): JSX.Element {
     name?: string,
     meta?: CaseMeta,
     records?: string,
-    side: DockSide = 'right'
+    side: DockSide = 'right',
+    kind: 'agent' | 'terminal' = 'agent'
   ): { id: string; title: string } => {
     const title = name || remotePath.replace(/\/+$/, '').split('/').pop() || profile.label
     const draftsUri = remoteUri(profile.id, remotePath)
@@ -1127,9 +1221,10 @@ export default function App(): JSX.Element {
     const tab: TermTab = {
       id: newId(),
       title,
+      kind,
       cwd: remotePath,
       recordsFolder: records,
-      autoClaude: true,
+      autoClaude: kind === 'terminal',
       createdAt: Date.now(),
       ssh,
       sshLabel: profile.label,
@@ -1310,7 +1405,7 @@ export default function App(): JSX.Element {
     const profs = s.sshProfiles ?? []
     setSshProfiles(profs)
     if (profs.length > 0) setConnMenu(true)
-    else void addTerm()
+    else void addCase()
   }
 
   // 최근 사건은 사용자가 명시적으로 고른 것이므로 연결된 소송기록을 바로 적용
@@ -1348,12 +1443,16 @@ export default function App(): JSX.Element {
         ? currentCase
         : undefined
     const meta = base?.meta
+    const ssh = source?.ssh ?? base?.ssh
+    const sshLabel = source?.sshLabel ?? base?.sshLabel
+    const profileId = source?.profileId ?? base?.profileId
     const tab: TermTab = {
       id: newId(),
       title: title ? title : base?.name ?? cwd.split(/[\\/]/).pop() ?? '세션',
+      kind: 'agent',
       cwd,
       recordsFolder: base?.records ?? source?.recordsFolder,
-      autoClaude: true,
+      autoClaude: false,
       createdAt: Date.now(),
       resumeSessionId: sessionId,
       renamed: !!title, // 과거 세션 제목을 그대로 쓰면 자동 갱신 안 함
@@ -1362,9 +1461,9 @@ export default function App(): JSX.Element {
       caseNumber: source?.caseNumber,
       caseName: source?.caseName,
       client: source?.client,
-      ssh: source?.ssh,
-      sshLabel: source?.sshLabel,
-      profileId: source?.profileId,
+      ssh,
+      sshLabel,
+      profileId,
       side,
       ...meta
     }
@@ -1373,7 +1472,8 @@ export default function App(): JSX.Element {
     setWorkActive(side, termKeyOf(tab.id))
   }
 
-  // + / Ctrl+T : 같은 사건에서 새 터미널(claude 실행). 활성 터미널이 없으면 마지막 사건에서, 그것도 없으면 폴더 선택.
+  // ＋T / 터미널로 실행: 같은 사건에서 PTY 터미널(claude 자동 실행)을 연다.
+  // 활성 탭이 없으면 마지막 사건에서, 그것도 없으면 폴더 선택.
   const addTermSame = (preferredSide?: DockSide): void => {
     const cur = termTabs.find((t) => t.id === activeTerm)
     const side = preferredSide ?? termSide(cur)
@@ -1396,10 +1496,11 @@ export default function App(): JSX.Element {
             currentCase.name,
             currentCase.meta,
             currentCase.records,
-            side
+            side,
+            'terminal'
           )
         } else {
-          createCase(currentCase.drafts, currentCase.name, currentCase.records, undefined, currentCase.meta, side)
+          createCaseTerminal(currentCase.drafts, currentCase.name, currentCase.records, undefined, currentCase.meta, side)
         }
       } else {
         void addTerm(side)
@@ -1426,6 +1527,43 @@ export default function App(): JSX.Element {
       side
     }
     setTermTabs((t) => [...t, tab])
+    setActiveTerm(tab.id)
+    setWorkActive(side, termKeyOf(tab.id))
+  }
+
+  const addAgentSame = (preferredSide?: DockSide): void => {
+    const cur = termTabs.find((t) => t.id === activeTerm)
+    const side = preferredSide ?? termSide(cur)
+    const ssh = cur?.ssh ?? currentCase?.ssh
+    const cwd = cur?.cwd ?? (ssh ? currentCase?.remotePath : currentCase?.drafts)
+    if (!cwd) {
+      void (async () => {
+        const picked = await window.lt.dialog.openCase()
+        if (!picked) return
+        createCase(picked.path, picked.name, undefined, undefined, undefined, side)
+      })()
+      return
+    }
+    const title = cur?.title ?? currentCase?.name ?? cwd.split(/[\\/]/).pop() ?? '세션'
+    const tab: TermTab = {
+      id: newId(),
+      title,
+      kind: 'agent',
+      cwd,
+      recordsFolder: cur?.recordsFolder ?? currentCase?.records,
+      autoClaude: false,
+      createdAt: Date.now(),
+      jsId: cur?.jsId ?? currentCase?.meta?.jsId,
+      court: cur?.court ?? currentCase?.meta?.court,
+      caseNumber: cur?.caseNumber ?? currentCase?.meta?.caseNumber,
+      caseName: cur?.caseName ?? currentCase?.meta?.caseName,
+      client: cur?.client ?? currentCase?.meta?.client,
+      ssh,
+      sshLabel: cur?.sshLabel ?? currentCase?.sshLabel,
+      profileId: cur?.profileId ?? currentCase?.profileId,
+      side
+    }
+    setTermTabs((tabs) => [...tabs, tab])
     setActiveTerm(tab.id)
     setWorkActive(side, termKeyOf(tab.id))
   }
@@ -1471,7 +1609,9 @@ export default function App(): JSX.Element {
     })
   }
   const closeTerm = (id: string): void => {
-    window.lt.pty.kill(id)
+    const tab = termTabs.find((t) => t.id === id)
+    if (isAgentTab(tab)) window.lt.agent.close(id)
+    else window.lt.pty.kill(id)
     removeTermTab(id)
   }
   const detachTerm = (id: string): void => removeTermTab(id)
@@ -1677,6 +1817,7 @@ export default function App(): JSX.Element {
     const docs = docTabs.map(toWorkspaceDoc).filter((t): t is WorkspaceDocTabPayload => !!t)
     const terminals = await Promise.all(
       termTabs.map(async (t) => {
+        if (isAgentTab(t)) return { ...t, side: termSide(t) }
         const current = await window.lt.sessions
           .current(t.cwd, (t.createdAt ?? 0) - 3000, t.ssh)
           .catch(() => null)
@@ -1710,6 +1851,7 @@ export default function App(): JSX.Element {
     return {
       id: typeof t.id === 'string' && t.id ? t.id : newId(),
       title: typeof t.title === 'string' && t.title ? t.title : t.cwd.split(/[\\/]/).pop() || '세션',
+      kind: t.kind === 'agent' ? 'agent' : 'terminal',
       cwd: t.cwd,
       recordsFolder: typeof t.recordsFolder === 'string' ? t.recordsFolder : undefined,
       suggestedRecords: typeof t.suggestedRecords === 'string' ? t.suggestedRecords : undefined,
@@ -1726,7 +1868,7 @@ export default function App(): JSX.Element {
             )
             .slice(0, 6)
         : undefined,
-      autoClaude: t.autoClaude ?? true,
+      autoClaude: t.kind === 'agent' ? false : (t.autoClaude ?? true),
       jsId: typeof t.jsId === 'string' ? t.jsId : undefined,
       court: typeof t.court === 'string' ? t.court : undefined,
       caseNumber: typeof t.caseNumber === 'string' ? t.caseNumber : undefined,
@@ -1937,6 +2079,35 @@ export default function App(): JSX.Element {
     })
   }
 
+  const renameEntry = (path: string, name: string): void => {
+    window.lt.fs.rename(path, name).then((r) => {
+      if (!r.ok || !r.path) {
+        if (r.error) window.alert('이름 변경 실패: ' + r.error)
+        return
+      }
+      const nextRoot = r.path
+      setTreeRefresh((n) => n + 1)
+      setDocTabs((tabs) =>
+        tabs.map((t) => {
+          const nextPath = replacePathPrefix(t.path, path, nextRoot)
+          if (!nextPath || nextPath === t.path) return t
+          const direct = t.path === path
+          return {
+            ...t,
+            path: nextPath,
+            title: direct ? fileNameFromPath(nextPath) : t.title,
+            kind: direct ? docKindForPath(nextPath) : t.kind
+          }
+        })
+      )
+      setPdfRecord((record) => {
+        if (!record) return record
+        const nextPath = replacePathPrefix(record.path, path, nextRoot)
+        return nextPath && nextPath !== record.path ? { ...record, path: nextPath } : record
+      })
+    })
+  }
+
   // 파일/폴더 삭제 (확인은 FileTree에서 받음) — 삭제 후 트리 새로고침 + 해당 문서 탭 닫기
   const deleteEntry = (path: string): void => {
     window.lt.fs.delete(path).then((r) => {
@@ -2045,10 +2216,15 @@ export default function App(): JSX.Element {
     window.lt.pty.write(termId, `\x1b[200~${normalizePasteForPty(payload)}\x1b[201~`)
   }
 
-  // Claude 질문 전송: 이 창에 터미널이 있으면 직접, 없으면(문서 전용 창) 메인 창 터미널로 IPC 전달.
+  // Claude 질문 전송: Agent 탭이면 SDK로, 터미널이면 paste로, 문서 전용 창이면 메인 창으로 전달.
   const activeTermRef = useRef(activeTerm)
   activeTermRef.current = activeTerm
   const sendClaude = (payload: string): void => {
+    const tab = termTabs.find((t) => t.id === activeTerm)
+    if (tab && isAgentTab(tab)) {
+      void window.lt.agent.send(tab.id, { text: payload })
+      return
+    }
     if (activeTerm) pasteToTerm(activeTerm, payload)
     else window.lt.claude.ask(payload)
   }
@@ -2083,12 +2259,14 @@ export default function App(): JSX.Element {
     ].filter((line): line is string => line !== undefined)
     return lines.join('\n')
   }
-  // 메인 창: 다른 창에서 온 Claude 질문을 활성 터미널에 주입.
+  // 메인 창: 다른 창에서 온 Claude 질문을 활성 Claude surface에 주입.
   useEffect(
     () =>
       window.lt.claude.onIncoming((payload) => {
         const term = activeTermRef.current
-        if (term) pasteToTerm(term, payload)
+        const tab = termTabsRef.current.find((t) => t.id === term)
+        if (tab && isAgentTab(tab)) void window.lt.agent.send(tab.id, { text: payload })
+        else if (term) pasteToTerm(term, payload)
       }),
     []
   )
@@ -2097,7 +2275,8 @@ export default function App(): JSX.Element {
   const askAboutFile = (termId: string, path: string, label: string): void => {
     const term = termTabs.find((t) => t.id === termId)
     void buildFreshFilePrompt(path, label, term).then((prompt) => {
-      pasteToTerm(termId, `${prompt}위 파일에 대해 `)
+      if (isAgentTab(term)) void window.lt.agent.send(termId, { text: `${prompt}위 파일에 대해 ` })
+      else pasteToTerm(termId, `${prompt}위 파일에 대해 `)
     })
   }
 
@@ -2497,6 +2676,7 @@ export default function App(): JSX.Element {
       onOpenFile={openFile}
       onDropTo={copyFilesTo}
       onMove={moveEntry}
+      onRename={renameEntry}
       onDelete={deleteEntry}
       onPasteTo={pasteFilesTo}
       onDownload={downloadEntry}
@@ -2527,13 +2707,16 @@ export default function App(): JSX.Element {
             ? t.title
             : t.sessionTitle
               ? `${t.title} · ${t.sessionTitle}`
-              : t.title,
+              : isAgentTab(t)
+                ? `Agent · ${t.title}`
+                : t.title,
           attention: termAttention.has(t.id) && termStatus.get(t.id) !== 'question',
           working: termStatus.get(t.id) === 'working',
           question: termStatus.get(t.id) === 'question' && termAttention.has(t.id),
           renamable: true,
           dragPayload: { kind: 'terminal', tab: { ...t } } as TabPayload,
           tooltip: [
+            isAgentTab(t) && 'Claude Agent',
             t.ssh && `🔗 ${t.sshLabel ?? '원격'} (${t.ssh.user}@${t.ssh.host})`,
             t.court && `${t.court}`,
             t.caseNumber,
@@ -2547,8 +2730,8 @@ export default function App(): JSX.Element {
         activeId={activeTerm}
         onSelect={selectTerm}
         onClose={closeTerm}
-        onAdd={() => addTermSame()}
-        addTitle="새 터미널"
+        onAdd={() => addAgentSame(termSide(activeTermTab))}
+        addTitle="새 Agent"
         dropSide="right"
         onReorder={reorderTerms}
         onTearOut={detachTerm}
@@ -2570,10 +2753,16 @@ export default function App(): JSX.Element {
             }
           }
         ]}
-        extra={{
-          icon: <IconWorkspace size={15} />,
-          title: '새 작업환경 열기',
-          onClick: () => void openConnOrLocal()
+        menu={{
+          label: '▾',
+          title: '작업 추가 메뉴',
+          items: [
+            {
+              label: '터미널로 실행',
+              title: '현재 사건을 터미널로 실행',
+              onClick: () => addTermSame(termSide(activeTermTab))
+            }
+          ]
         }}
       />
       {sessionListOpen && (
@@ -2599,11 +2788,11 @@ export default function App(): JSX.Element {
         {termTabs.length === 0 &&
           (currentCase ? (
             <Empty
-              label={`「${currentCase.name}」 — 터미널이 모두 닫혔습니다`}
-              actionLabel="이 사건에서 터미널 열기"
-              onAction={addTermSame}
-              secondaryLabel="✕ 사건 지정 해제"
-              onSecondary={clearCase}
+              label={`「${currentCase.name}」 — Claude 탭이 모두 닫혔습니다`}
+              actionLabel="이 사건에서 Agent 열기"
+              onAction={() => addAgentSame('right')}
+              secondaryLabel="터미널로 실행"
+              onSecondary={() => addTermSame('right')}
             />
           ) : (
             <Empty
@@ -2620,20 +2809,33 @@ export default function App(): JSX.Element {
             className="term-pane"
             style={{ display: t.id === activeTerm ? 'block' : 'none' }}
           >
-            <Terminal
-              id={t.id}
-              cwd={t.cwd}
-              autoClaude={t.autoClaude ?? false}
-              resumeSessionId={t.resumeSessionId}
-              ssh={t.ssh}
-              visible={t.id === activeTerm}
-              focusNonce={termFocusNonce[t.id] ?? 0}
-              onDropPaths={(paths) => dropFilesToTerm(t.id, paths)}
-              onNewTerminal={() => addTermSame(termSide(t))}
-              onRequestClose={() => closeTermWithConfirm(t.id)}
-              onStatus={(s) => onTermStatus(t.id, s)}
-              onCycleTab={cycleTerm}
-            />
+            {isAgentTab(t) ? (
+              <AgentPanel
+                id={t.id}
+                cwd={t.cwd}
+                title={t.title}
+                resumeSessionId={t.resumeSessionId}
+                ssh={t.ssh}
+                visible={t.id === activeTerm}
+                onStatus={(s) => onTermStatus(t.id, s)}
+                onOpenTerminal={() => addTermSame(termSide(t))}
+              />
+            ) : (
+              <Terminal
+                id={t.id}
+                cwd={t.cwd}
+                autoClaude={t.autoClaude ?? false}
+                resumeSessionId={t.resumeSessionId}
+                ssh={t.ssh}
+                visible={t.id === activeTerm}
+                focusNonce={termFocusNonce[t.id] ?? 0}
+                onDropPaths={(paths) => dropFilesToTerm(t.id, paths)}
+                onNewTerminal={() => addTermSame(termSide(t))}
+                onRequestClose={() => closeTermWithConfirm(t.id)}
+                onStatus={(s) => onTermStatus(t.id, s)}
+                onCycleTab={cycleTerm}
+              />
+            )}
           </div>
         ))}
       </div>
@@ -2675,13 +2877,16 @@ export default function App(): JSX.Element {
           ? t.title
           : t.sessionTitle
             ? `${t.title} · ${t.sessionTitle}`
-            : t.title,
+            : isAgentTab(t)
+              ? `Agent · ${t.title}`
+              : t.title,
         attention: termAttention.has(t.id) && termStatus.get(t.id) !== 'question',
         working: termStatus.get(t.id) === 'working',
         question: termStatus.get(t.id) === 'question' && termAttention.has(t.id),
         renamable: true,
         dragPayload: { kind: 'terminal', tab: { ...t, side } } as TabPayload,
         tooltip: [
+          isAgentTab(t) && 'Claude Agent',
           t.ssh && `🔗 ${t.sshLabel ?? '원격'} (${t.ssh.user}@${t.ssh.host})`,
           t.court && `${t.court}`,
           t.caseNumber,
@@ -2722,8 +2927,8 @@ export default function App(): JSX.Element {
             if (parsed.kind === 'doc') closeDoc(parsed.id)
             else closeTerm(parsed.id)
           }}
-          onAdd={() => (side === 'right' ? addTermSame(side) : addDoc(side))}
-          addTitle={side === 'right' ? '새 터미널' : '새 문서'}
+          onAdd={() => (side === 'right' ? addAgentSame(side) : addDoc(side))}
+          addTitle={side === 'right' ? '새 Agent' : '새 문서'}
           dropSide={side}
           onReorder={(from, to) => {
             const f = parseWorkKey(from)
@@ -2788,19 +2993,37 @@ export default function App(): JSX.Element {
           ]}
           extra={
             side === 'left'
-              ? [
-                  {
-                    label: '＋T',
-                    title: '새 터미널',
-                    onClick: () => addTermSame(side)
-                  },
-                  {
-                    icon: <IconWorkspace size={15} />,
-                    title: '새 작업환경 열기',
-                    onClick: () => void openConnOrLocal()
-                  }
-                ]
+              ? {
+                  label: '＋A',
+                  title: '새 Agent',
+                  onClick: () => addAgentSame(side)
+                }
               : undefined
+          }
+          menu={
+            side === 'right'
+              ? {
+                  label: '▾',
+                  title: '작업 추가 메뉴',
+                  items: [
+                    {
+                      label: '터미널로 실행',
+                      title: '현재 사건을 터미널로 실행',
+                      onClick: () => addTermSame(side)
+                    }
+                  ]
+                }
+              : {
+                  label: '▾',
+                  title: '작업 추가 메뉴',
+                  items: [
+                    {
+                      label: '새 터미널',
+                      title: '이 패널에 터미널 열기',
+                      onClick: () => addTermSame(side)
+                    }
+                  ]
+                }
           }
         />
         {sessionListOpen && side === sessionListSide && (
@@ -2828,8 +3051,10 @@ export default function App(): JSX.Element {
               currentCase ? (
                 <Empty
                   label={`「${currentCase.name}」 — 오른쪽에 열린 탭이 없습니다`}
-                  actionLabel="이 사건에서 터미널 열기"
-                  onAction={() => addTermSame(side)}
+                  actionLabel="이 사건에서 Agent 열기"
+                  onAction={() => addAgentSame(side)}
+                  secondaryLabel="터미널로 실행"
+                  onSecondary={() => addTermSame(side)}
                 />
               ) : (
                 <Empty
@@ -2852,20 +3077,33 @@ export default function App(): JSX.Element {
               className="term-pane"
               style={{ display: t.id === visibleTermId ? 'block' : 'none' }}
             >
-              <Terminal
-                id={t.id}
-                cwd={t.cwd}
-                autoClaude={t.autoClaude ?? false}
-                resumeSessionId={t.resumeSessionId}
-                ssh={t.ssh}
-                visible={t.id === visibleTermId}
-                focusNonce={termFocusNonce[t.id] ?? 0}
-                onDropPaths={(paths) => dropFilesToTerm(t.id, paths)}
-                onNewTerminal={() => addTermSame(side)}
-                onRequestClose={() => closeTermWithConfirm(t.id)}
-                onStatus={(s) => onTermStatus(t.id, s)}
-                onCycleTab={cycleTerm}
-              />
+              {isAgentTab(t) ? (
+                <AgentPanel
+                  id={t.id}
+                  cwd={t.cwd}
+                  title={t.title}
+                  resumeSessionId={t.resumeSessionId}
+                  ssh={t.ssh}
+                  visible={t.id === visibleTermId}
+                  onStatus={(s) => onTermStatus(t.id, s)}
+                  onOpenTerminal={() => addTermSame(side)}
+                />
+              ) : (
+                <Terminal
+                  id={t.id}
+                  cwd={t.cwd}
+                  autoClaude={t.autoClaude ?? false}
+                  resumeSessionId={t.resumeSessionId}
+                  ssh={t.ssh}
+                  visible={t.id === visibleTermId}
+                  focusNonce={termFocusNonce[t.id] ?? 0}
+                  onDropPaths={(paths) => dropFilesToTerm(t.id, paths)}
+                  onNewTerminal={() => addTermSame(side)}
+                  onRequestClose={() => closeTermWithConfirm(t.id)}
+                  onStatus={(s) => onTermStatus(t.id, s)}
+                  onCycleTab={cycleTerm}
+                />
+              )}
             </div>
           ))}
         </div>
@@ -2978,7 +3216,7 @@ export default function App(): JSX.Element {
           profiles={sshProfiles}
           onLocal={() => {
             setConnMenu(false)
-            void addTerm()
+            void addCase()
           }}
           onRemote={(p) => {
             setConnMenu(false)
@@ -3246,6 +3484,7 @@ function DocsPanel({
   onOpenFile,
   onDropTo,
   onMove,
+  onRename,
   onDelete,
   onPasteTo,
   onDownload,
@@ -3275,6 +3514,7 @@ function DocsPanel({
   onOpenFile: (path: string, name: string) => void
   onDropTo: (dir: string, files: FileList) => void
   onMove: (src: string, destDir: string) => void
+  onRename: (path: string, name: string) => void
   onDelete: (path: string, name: string, isDir: boolean) => void
   onPasteTo: (dir: string) => void
   onDownload: (path: string, name: string, isDir: boolean) => void
@@ -3449,6 +3689,7 @@ function DocsPanel({
               onOpenFile={onOpenFile}
               onDropTo={onDropTo}
               onMove={onMove}
+              onRename={onRename}
               onDelete={onDelete}
               onPasteTo={onPasteTo}
               onDownload={onDownload}
@@ -3655,18 +3896,31 @@ interface TabBarProps {
   onAdd?: () => void
   addTitle: string
   dropSide?: DockSide
-  extra?:
-    | { label?: string; icon?: ReactNode; title: string; onClick: () => void }
-    | { label?: string; icon?: ReactNode; title: string; onClick: () => void }[]
+  extra?: TabBarAction | TabBarAction[]
+  menu?: {
+    label?: string
+    icon?: ReactNode
+    title: string
+    items: TabBarAction[]
+  }
   extraLeft?:
-    | { label?: string; icon?: ReactNode; title: string; active?: boolean; onClick: () => void }
-    | { label?: string; icon?: ReactNode; title: string; active?: boolean; onClick: () => void }[]
+    | TabBarAction
+    | TabBarAction[]
   // 탭 재정렬(같은 창) + 창 간 이동/찢기. 둘 다 주어질 때만 탭이 draggable.
   onReorder?: (fromId: string, toId: string) => void
   onTearOut?: (id: string) => void
   onDragActive?: (active: boolean) => void
   onRename?: (id: string, title: string) => void
 }
+
+interface TabBarAction {
+  label?: string
+  icon?: ReactNode
+  title: string
+  active?: boolean
+  onClick: () => void
+}
+
 function TabBar({
   tabs,
   activeId,
@@ -3676,6 +3930,7 @@ function TabBar({
   addTitle,
   dropSide,
   extra,
+  menu,
   extraLeft,
   onReorder,
   onTearOut,
@@ -3686,8 +3941,10 @@ function TabBar({
   const [overflow, setOverflow] = useState(false)
   const [editing, setEditing] = useState<{ id: string; value: string } | null>(null)
   const [dropHint, setDropHint] = useState(false)
+  const [menuOpen, setMenuOpen] = useState(false)
   const dragId = useRef<string | null>(null)
   const dropHintTimer = useRef<number | null>(null)
+  const menuRef = useRef<HTMLDivElement>(null)
   const draggable = !!onTearOut
   const extraLeftItems = extraLeft ? (Array.isArray(extraLeft) ? extraLeft : [extraLeft]) : []
   const extraItems = extra ? (Array.isArray(extra) ? extra : [extra]) : []
@@ -3708,6 +3965,17 @@ function TabBar({
     },
     []
   )
+
+  useEffect(() => {
+    if (!menuOpen) return
+    const close = (event: MouseEvent): void => {
+      const target = event.target instanceof Node ? event.target : null
+      if (target && menuRef.current?.contains(target)) return
+      setMenuOpen(false)
+    }
+    document.addEventListener('mousedown', close)
+    return () => document.removeEventListener('mousedown', close)
+  }, [menuOpen])
 
   const scrollBy = (d: number): void => scrollRef.current?.scrollBy({ left: d, behavior: 'smooth' })
   const isTabDrop = (e: React.DragEvent): boolean => e.dataTransfer.types.includes(TAB_DND_TYPE)
@@ -3891,6 +4159,42 @@ function TabBar({
         <button className="tab-add" title={addTitle} onClick={onAdd}>
           ＋
         </button>
+      )}
+      {menu && menu.items.length > 0 && (
+        <div className="tab-menu-wrap" ref={menuRef}>
+          <button
+            className={`tab-add tab-menu-trigger ${menuOpen ? 'on' : ''}`}
+            title={menu.title}
+            aria-haspopup="menu"
+            aria-expanded={menuOpen}
+            onClick={(e) => {
+              e.stopPropagation()
+              setMenuOpen((open) => !open)
+            }}
+          >
+            {menu.icon ?? menu.label ?? '▾'}
+          </button>
+          {menuOpen && (
+            <div className="tab-menu" role="menu">
+              {menu.items.map((item, i) => (
+                <button
+                  key={i}
+                  className="tab-menu-item"
+                  role="menuitem"
+                  title={item.title}
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    setMenuOpen(false)
+                    item.onClick()
+                  }}
+                >
+                  {item.icon && <span className="tab-menu-icon">{item.icon}</span>}
+                  <span>{item.label ?? item.title}</span>
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
       )}
     </div>
   )
@@ -4658,6 +4962,7 @@ function SettingsView(): JSX.Element {
   const [loaded, setLoaded] = useState(false)
   const [termFontSizeInput, setTermFontSizeInput] = useState(String(DEFAULT_TERM_FONT_SIZE))
   const [mdFontSizeInput, setMdFontSizeInput] = useState(String(DEFAULT_MD_FONT_SIZE))
+  const [agentFontSizeInput, setAgentFontSizeInput] = useState(String(DEFAULT_AGENT_FONT_SIZE))
   const [notificationVolumeInput, setNotificationVolumeInput] = useState(DEFAULT_NOTIFICATION_VOLUME)
 
   useEffect(() => {
@@ -4683,6 +4988,10 @@ function SettingsView(): JSX.Element {
   }, [s.mdFontSize])
 
   useEffect(() => {
+    setAgentFontSizeInput(String(s.agentFontSize ?? DEFAULT_AGENT_FONT_SIZE))
+  }, [s.agentFontSize])
+
+  useEffect(() => {
     setNotificationVolumeInput(clampNotificationVolume(s.notificationVolume))
   }, [s.notificationVolume])
 
@@ -4702,6 +5011,12 @@ function SettingsView(): JSX.Element {
     const next = clampFontSize(mdFontSizeInput, s.mdFontSize ?? DEFAULT_MD_FONT_SIZE)
     setMdFontSizeInput(String(next))
     if (next !== (s.mdFontSize ?? DEFAULT_MD_FONT_SIZE)) await savePatch({ mdFontSize: next })
+  }
+
+  const commitAgentFontSize = async (): Promise<void> => {
+    const next = clampFontSize(agentFontSizeInput, s.agentFontSize ?? DEFAULT_AGENT_FONT_SIZE)
+    setAgentFontSizeInput(String(next))
+    if (next !== (s.agentFontSize ?? DEFAULT_AGENT_FONT_SIZE)) await savePatch({ agentFontSize: next })
   }
 
   const commitNotificationVolume = async (): Promise<void> => {
@@ -4962,6 +5277,34 @@ function SettingsView(): JSX.Element {
         </div>
       </section>
 
+      <section className="setting-row">
+        <div className="setting-label">
+          Agent 답변 글자 크기 <span className="muted small">— Agent Panel 출력에 즉시 적용</span>
+        </div>
+        <div className="setting-value">
+          <input
+            className="setting-input narrow"
+            type="number"
+            min={8}
+            max={32}
+            value={agentFontSizeInput}
+            onFocus={(e) => e.currentTarget.select()}
+            onChange={(e) => setAgentFontSizeInput(e.target.value)}
+            onBlur={() => {
+              void commitAgentFontSize()
+            }}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') e.currentTarget.blur()
+              if (e.key === 'Escape') {
+                setAgentFontSizeInput(String(s.agentFontSize ?? DEFAULT_AGENT_FONT_SIZE))
+                e.currentTarget.blur()
+              }
+            }}
+          />
+          <span className="muted small">px</span>
+        </div>
+      </section>
+
       <section className="setting-row col">
         <div className="setting-label">
           SSH 접속 프로필{' '}
@@ -4970,7 +5313,9 @@ function SettingsView(): JSX.Element {
         <SshProfilesEditor />
       </section>
 
-      <p className="muted small">{loaded ? '변경 즉시 저장됩니다 (마크다운은 새로 열 때 적용).' : '불러오는 중…'}</p>
+      <p className="muted small">
+        {loaded ? '변경 즉시 저장됩니다 (터미널·마크다운 편집기는 새로 열 때 적용).' : '불러오는 중…'}
+      </p>
     </div>
   )
 }
@@ -5101,6 +5446,22 @@ function SshProfilesEditor(): JSX.Element {
                   찾아보기
                 </button>
               </div>
+            </label>
+            <label className="wide">
+              SSH 빠른 시작 폴더 <span className="muted small">(줄마다 원격 경로)</span>
+              <textarea
+                key={'q:' + remoteQuickStartInputValue(p.quickStartPaths)}
+                className="setting-input ssh-quickstart-input"
+                rows={3}
+                placeholder={'/Users/me/Library/CloudStorage/OneDrive\n/home/me/cases'}
+                defaultValue={remoteQuickStartInputValue(p.quickStartPaths)}
+                onBlur={(e) => {
+                  const quickStartPaths = remoteQuickStartInputToPaths(e.target.value)
+                  update(p.id, {
+                    quickStartPaths: quickStartPaths.length > 0 ? quickStartPaths : undefined
+                  })
+                }}
+              />
             </label>
           </div>
         </div>
@@ -5327,7 +5688,12 @@ function cloudPathFromOneDrivePath(path: string): string {
   return i >= 0 ? parts.slice(i + 1).join('/').normalize('NFC') : ''
 }
 
-const REMOTE_START_POINTS = [
+interface RemoteStartPoint {
+  label: string
+  path: string
+}
+
+const REMOTE_FALLBACK_START_POINTS: RemoteStartPoint[] = [
   { label: '홈', path: '~' },
   { label: '루트 /', path: '/' },
   { label: '/Users', path: '/Users' },
@@ -5339,6 +5705,31 @@ const REMOTE_START_POINTS = [
 ]
 const REMOTE_FOLDER_SEARCH_DEPTH = 5
 const REMOTE_FOLDER_SEARCH_LIMIT = 150
+
+function addRemoteStartPoint(
+  points: RemoteStartPoint[],
+  seen: Set<string>,
+  label: string,
+  path?: string
+): void {
+  const trimmed = path?.trim()
+  if (!trimmed) return
+  const key = trimmed.replace(/\/+$/, '') || '/'
+  if (seen.has(key)) return
+  seen.add(key)
+  points.push({ label, path: trimmed })
+}
+
+function profileRemoteStartPoints(profile: SshProfile): RemoteStartPoint[] {
+  const points: RemoteStartPoint[] = []
+  const seen = new Set<string>()
+  for (const path of normalizeRemoteQuickStartPaths(profile.quickStartPaths)) {
+    addRemoteStartPoint(points, seen, pathLeaf(path) ?? path, path)
+  }
+  addRemoteStartPoint(points, seen, '작성서류 루트', profile.draftsRoot)
+  addRemoteStartPoint(points, seen, '소송기록 루트', profile.recordsRoot)
+  return points.length > 0 ? points : REMOTE_FALLBACK_START_POINTS
+}
 
 function joinRemotePickerPath(dir: string, name: string): string {
   const cleanDir = dir.trim().replace(/\/+$/, '')
@@ -5380,6 +5771,7 @@ function RemoteFolderPicker({
   const [folderSearching, setFolderSearching] = useState(false)
   const [folderSearchResults, setFolderSearchResults] = useState<RemoteEntry[] | null>(null)
   const [folderSearchErr, setFolderSearchErr] = useState('')
+  const [folderSearchTruncated, setFolderSearchTruncated] = useState(false)
   const [newFolderName, setNewFolderName] = useState('')
   const [creatingFolder, setCreatingFolder] = useState(false)
   const [createFolderErr, setCreateFolderErr] = useState('')
@@ -5394,6 +5786,7 @@ function RemoteFolderPicker({
     setFolderSearching(false)
     setFolderSearchResults(null)
     setFolderSearchErr('')
+    setFolderSearchTruncated(false)
     window.lt.ssh
       .listDir(profile, nextPath)
       .then((r) => {
@@ -5428,6 +5821,7 @@ function RemoteFolderPicker({
   const syncPath = (pathInput.trim() || cwd).trim()
   const canSyncOneDrive = looksLikeOneDrivePath(syncPath)
   const syncFolderLabel = title.includes('소송기록') ? '소송기록 폴더' : '사건폴더'
+  const quickStartPoints = profileRemoteStartPoints(profile)
   const visibleDirs = folderSearchResults ? sortEntries(folderSearchResults, sortMode) : dirs
   const folderQueryText = folderQuery.trim()
   const canCreateFolder = !loading && !err && !!cwd.trim() && !!newFolderName.trim() && !creatingFolder
@@ -5442,6 +5836,7 @@ function RemoteFolderPicker({
     setFolderSearching(false)
     setFolderSearchResults(null)
     setFolderSearchErr('')
+    setFolderSearchTruncated(false)
   }
   const searchFolders = (): void => {
     if (!folderQueryText) {
@@ -5449,44 +5844,33 @@ function RemoteFolderPicker({
       return
     }
     const seq = ++folderSearchSeq.current
-    const results: RemoteEntry[] = []
-    const seen = new Set<string>()
     setFolderSearching(true)
     setFolderSearchResults(null)
     setFolderSearchErr('')
+    setFolderSearchTruncated(false)
 
-    const walk = async (dir: string, depth: number): Promise<void> => {
-      if (depth > REMOTE_FOLDER_SEARCH_DEPTH || results.length >= REMOTE_FOLDER_SEARCH_LIMIT) return
-      const r = await window.lt.ssh.listDir(profile, dir)
-      if (folderSearchSeq.current !== seq) return
-      if (!r.ok) {
-        if (depth === 0) throw new Error(r.error)
-        return
-      }
-      const children = r.entries.filter((entry) => entry.isDir)
-      for (const entry of children) {
-        if (results.length >= REMOTE_FOLDER_SEARCH_LIMIT) return
-        if (!seen.has(entry.path) && matchesSearch([entry.name, entry.path], folderQueryText)) {
-          seen.add(entry.path)
-          results.push(entry)
-        }
-      }
-      for (const entry of children) {
-        if (results.length >= REMOTE_FOLDER_SEARCH_LIMIT) return
-        await walk(entry.path, depth + 1)
-      }
-    }
-
-    void walk(cwd, 0)
-      .then(() => {
+    void window.lt.ssh
+      .searchDirs(profile, cwd, {
+        query: folderQueryText,
+        maxDepth: REMOTE_FOLDER_SEARCH_DEPTH,
+        limit: REMOTE_FOLDER_SEARCH_LIMIT
+      })
+      .then((r) => {
         if (folderSearchSeq.current !== seq) return
-        setFolderSearchResults(results)
         setFolderSearching(false)
+        if (r.ok) {
+          setFolderSearchResults(r.entries)
+          setFolderSearchTruncated(!!r.truncated)
+        } else {
+          setFolderSearchResults([])
+          setFolderSearchErr(r.error)
+        }
       })
       .catch((e: unknown) => {
         if (folderSearchSeq.current !== seq) return
         setFolderSearchResults([])
         setFolderSearchErr(e instanceof Error ? e.message : String(e))
+        setFolderSearchTruncated(false)
         setFolderSearching(false)
       })
   }
@@ -5584,8 +5968,14 @@ function RemoteFolderPicker({
           </div>
           <div className="remote-quick">
             <span className="muted small">빠른 시작</span>
-            {REMOTE_START_POINTS.map((p) => (
-              <button key={p.path} className="remote-chip" type="button" onClick={() => load(p.path)}>
+            {quickStartPoints.map((p) => (
+              <button
+                key={p.path}
+                className="remote-chip"
+                type="button"
+                title={p.path}
+                onClick={() => load(p.path)}
+              >
                 {p.label}
               </button>
             ))}
@@ -5656,6 +6046,11 @@ function RemoteFolderPicker({
           </form>
           {createFolderErr && <pre className="remote-err">{createFolderErr}</pre>}
           {folderSearchErr && <pre className="remote-err">{folderSearchErr}</pre>}
+          {folderSearchTruncated && (
+            <p className="muted small remote-hint">
+              검색 결과가 많아 상위 {REMOTE_FOLDER_SEARCH_LIMIT}개만 표시합니다.
+            </p>
+          )}
           <div className="remote-list">
             {loading && <p className="muted pad small">불러오는 중…</p>}
             {!loading && folderSearching && <p className="muted pad small">폴더를 검색하는 중…</p>}

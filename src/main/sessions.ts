@@ -1,7 +1,7 @@
 import { app } from 'electron'
 import { homedir } from 'os'
 import { dirname, join } from 'path'
-import { mkdir, open, readFile, readdir, stat, writeFile } from 'fs/promises'
+import { mkdir, open, readFile, readdir, realpath, stat, writeFile } from 'fs/promises'
 import { execFile } from 'child_process'
 import type { SshProfile } from './settings'
 
@@ -72,6 +72,7 @@ interface SessionIndex {
 
 const SESSION_INDEX_VERSION = 1
 const MAX_SESSION_INDEX_ENTRIES = 600
+const REMOTE_TRANSCRIPT_SCAN_LIMIT = 1000
 
 function shq(s: string): string {
   return `'${s.replace(/'/g, "'\\''")}'`
@@ -93,6 +94,27 @@ function pathLeaf(path?: string): string | undefined {
   if (!path) return undefined
   const clean = path.replace(/[\\/]+$/, '')
   return clean.split(/[\\/]/).filter(Boolean).pop() || clean
+}
+
+function comparablePath(path?: string): string {
+  if (!path) return ''
+  const clean = path.trim().replace(/[\\/]+$/, '') || '/'
+  return clean.normalize('NFKC')
+}
+
+function pathMatchesAny(candidate: string | undefined, aliases: Set<string>): boolean {
+  const comparable = comparablePath(candidate)
+  return !!comparable && aliases.has(comparable)
+}
+
+async function localCwdAliases(cwd: string): Promise<Set<string>> {
+  const aliases = new Set([comparablePath(cwd)])
+  try {
+    aliases.add(comparablePath(await realpath(cwd)))
+  } catch {
+    /* The original cwd is still useful if the folder is unavailable. */
+  }
+  return aliases
 }
 
 function searchNorm(value?: string): string {
@@ -209,8 +231,13 @@ export async function rememberSessionMeta(input: SessionMetaInput): Promise<{ ok
   }
 }
 
-function matchIndexedSession(meta: SessionMeta, cwd: string, context?: SessionSearchContext): boolean {
-  if (meta.cwd === cwd) return true
+function matchIndexedSession(
+  meta: SessionMeta,
+  cwd: string,
+  context?: SessionSearchContext,
+  cwdAliases = new Set([comparablePath(cwd)])
+): boolean {
+  if (pathMatchesAny(meta.cwd, cwdAliases)) return true
   const needles = [
     context?.query,
     context?.caseNumber,
@@ -261,6 +288,31 @@ function sshBaseArgs(ssh: SshConn): string[] {
   return a
 }
 
+async function remoteRealpath(ssh: SshConn, path: string): Promise<string | undefined> {
+  const script = `cd ${shq(path)} 2>/dev/null && pwd -P`
+  return new Promise((resolve) => {
+    execFile(
+      sshBin,
+      [...sshBaseArgs(ssh), script],
+      { timeout: 8000, windowsHide: true, maxBuffer: 1024 * 1024 },
+      (err, stdout) => {
+        if (err) {
+          resolve(undefined)
+          return
+        }
+        resolve(stdout.trim() || undefined)
+      }
+    )
+  })
+}
+
+async function remoteCwdAliases(ssh: SshConn, cwd: string): Promise<Set<string>> {
+  const aliases = new Set([comparablePath(cwd)])
+  const resolved = await remoteRealpath(ssh, cwd)
+  if (resolved) aliases.add(comparablePath(resolved))
+  return aliases
+}
+
 async function listTranscripts(): Promise<TranscriptRef[]> {
   const out: TranscriptRef[] = []
   let dirs
@@ -303,7 +355,7 @@ async function readHead(file: string, bytes = 65536): Promise<string> {
   }
 }
 
-async function listRemoteTranscriptHeads(ssh: SshConn, bytes = 65536): Promise<TranscriptHead[]> {
+async function listRemoteTranscriptHeads(ssh: SshConn, bytes = 32768): Promise<TranscriptHead[]> {
   const script = `
 root="$HOME/.claude/projects"
 [ -d "$root" ] || exit 0
@@ -312,7 +364,7 @@ find "$root" -type f -name '*.jsonl' -print 2>/dev/null | while IFS= read -r f; 
   id=\${f##*/}
   id=\${id%.jsonl}
   printf '%s\\t%s\\t%s\\n' "$m" "$id" "$f"
-done | sort -rn | head -200 | while IFS="$(printf '\\t')" read -r m id f; do
+done | sort -rn | head -${REMOTE_TRANSCRIPT_SCAN_LIMIT} | while IFS="$(printf '\\t')" read -r m id f; do
   b64=$(head -c ${bytes} "$f" | base64 | tr -d '\\n\\r')
   printf '%s\\t%s\\t%s\\n' "$m" "$id" "$b64"
 done
@@ -386,6 +438,7 @@ export async function listSessions(
   context?: SessionSearchContext
 ): Promise<SessionListEntry[]> {
   const indexed = await readSessionIndex()
+  const cwdAliases = ssh ? await remoteCwdAliases(ssh, cwd) : await localCwdAliases(cwd)
   const indexedByKey = new Map(
     indexed.filter((meta) => sameSource(meta, ssh)).map((meta) => [meta.sessionId, meta])
   )
@@ -402,7 +455,7 @@ export async function listSessions(
     for (const t of ts) {
       if (out.length >= limit) break
       const p = parseHead(t.head)
-      if (p.cwd && p.cwd === cwd) {
+      if (p.cwd && pathMatchesAny(p.cwd, cwdAliases)) {
         push(
           decorateSession(
             { sessionId: t.sessionId, title: p.title, mtime: t.mtime, cwd: p.cwd },
@@ -414,7 +467,7 @@ export async function listSessions(
     }
     for (const meta of indexed) {
       if (out.length >= limit) break
-      if (!sameSource(meta, ssh) || !matchIndexedSession(meta, cwd, context)) continue
+      if (!sameSource(meta, ssh) || !matchIndexedSession(meta, cwd, context, cwdAliases)) continue
       push(
         decorateSession(
           {
@@ -440,7 +493,7 @@ export async function listSessions(
       continue
     }
     const p = parseHead(head)
-    if (p.cwd && p.cwd === cwd) {
+    if (p.cwd && pathMatchesAny(p.cwd, cwdAliases)) {
       push(
         decorateSession(
           { sessionId: t.sessionId, title: p.title, mtime: t.mtime, cwd: p.cwd },
@@ -452,7 +505,7 @@ export async function listSessions(
   }
   for (const meta of indexed) {
     if (out.length >= limit) break
-    if (!sameSource(meta, ssh) || !matchIndexedSession(meta, cwd, context)) continue
+    if (!sameSource(meta, ssh) || !matchIndexedSession(meta, cwd, context, cwdAliases)) continue
     push(
       decorateSession(
         {
@@ -476,12 +529,13 @@ export async function currentSession(
   since = 0,
   ssh?: SshConn
 ): Promise<{ sessionId: string; title?: string } | null> {
+  const cwdAliases = ssh ? await remoteCwdAliases(ssh, cwd) : await localCwdAliases(cwd)
   if (ssh) {
     const ts = await listRemoteTranscriptHeads(ssh)
     for (const t of ts) {
       if (since && t.mtime < since) continue
       const p = parseHead(t.head)
-      if (p.cwd && p.cwd === cwd) {
+      if (p.cwd && pathMatchesAny(p.cwd, cwdAliases)) {
         return { sessionId: t.sessionId, title: p.title }
       }
     }
@@ -497,7 +551,7 @@ export async function currentSession(
       continue
     }
     const p = parseHead(head)
-    if (p.cwd && p.cwd === cwd) {
+    if (p.cwd && pathMatchesAny(p.cwd, cwdAliases)) {
       return { sessionId: t.sessionId, title: p.title }
     }
   }
