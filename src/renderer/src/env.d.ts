@@ -198,6 +198,8 @@ export interface AppSettings {
   mdFont?: string
   mdFontSize?: number
   agentFontSize?: number
+  explorerSortMode?: string
+  remotePickerSortMode?: string
   sshProfiles?: SshProfile[]
 }
 

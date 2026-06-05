@@ -50,6 +50,10 @@ export interface Settings {
   mdFontSize?: number
   /** Agent Panel 답변 글자 크기(px) */
   agentFontSize?: number
+  /** 파일 탐색기 정렬 방식 */
+  explorerSortMode?: string
+  /** 원격 폴더 선택기 정렬 방식 */
+  remotePickerSortMode?: string
   /** JuriSupport MCP 토큰 (safeStorage로 암호화된 base64) */
   jurisupportTokenEnc?: string
   /** 사용자가 건너뛴 최신 릴리스 버전. 더 높은 버전이 나오면 다시 알린다. */

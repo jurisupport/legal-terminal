@@ -57,6 +57,7 @@ const SORT_OPTIONS: { value: SortMode; label: string; title: string }[] = [
   { value: 'mtime-desc', label: '수정↓', title: '최근 수정순' },
   { value: 'mtime-asc', label: '수정↑', title: '오래된 수정순' }
 ]
+const DEFAULT_SORT_MODE: SortMode = 'name-asc'
 
 const CASE_OPEN_LOCAL = 'local'
 const CASE_OPEN_REMOTE_PREFIX = 'remote:'
@@ -142,6 +143,8 @@ const resolveNotificationSound = (value?: string): NotificationSound =>
   NOTIFICATION_SOUND_OPTIONS.some((option) => option.value === value)
     ? (value as NotificationSound)
     : DEFAULT_NOTIFICATION_SOUND
+const resolveSortMode = (value?: string): SortMode =>
+  SORT_OPTIONS.some((option) => option.value === value) ? (value as SortMode) : DEFAULT_SORT_MODE
 const clampNotificationVolume = (
   value: string | number | undefined,
   fallback = DEFAULT_NOTIFICATION_VOLUME
@@ -3536,7 +3539,7 @@ function DocsPanel({
 }): JSX.Element {
   const title = { explorer: '탐색기', cases: '다가오는 기일', viewer: '문서' }[mode]
   const [dragOver, setDragOver] = useState(false)
-  const [sortMode, setSortMode] = useState<SortMode>('name-asc')
+  const [sortMode, setSortMode] = useState<SortMode>(DEFAULT_SORT_MODE)
   const [fileFindOpen, setFileFindOpen] = useState(false)
   const [fileFindQuery, setFileFindQuery] = useState('')
   const canDrop = mode === 'explorer' && !!draftsFolder
@@ -3545,6 +3548,23 @@ function DocsPanel({
   const closeFileFind = (): void => {
     setFileFindOpen(false)
     setFileFindQuery('')
+  }
+  useEffect(() => {
+    let alive = true
+    const applySettings = (settings: AppSettings): void => {
+      if (alive) setSortMode(resolveSortMode(settings.explorerSortMode))
+    }
+    window.lt.settings.get().then(applySettings).catch(() => {})
+    const onSettingsUpdated = (e: Event): void => applySettings((e as CustomEvent<AppSettings>).detail)
+    window.addEventListener(SETTINGS_UPDATED_EVENT, onSettingsUpdated)
+    return () => {
+      alive = false
+      window.removeEventListener(SETTINGS_UPDATED_EVENT, onSettingsUpdated)
+    }
+  }, [])
+  const updateSortMode = (nextMode: SortMode): void => {
+    setSortMode(nextMode)
+    void window.lt.settings.set({ explorerSortMode: nextMode }).then(emitSettingsUpdated).catch(() => {})
   }
   return (
     <div
@@ -3634,7 +3654,7 @@ function DocsPanel({
                 title="정렬"
                 aria-label="탐색기 정렬"
                 disabled={!draftsFolder}
-                onChange={(e) => setSortMode(e.target.value as SortMode)}
+                onChange={(e) => updateSortMode(resolveSortMode(e.target.value))}
               >
                 {SORT_OPTIONS.map((opt) => (
                   <option key={opt.value} value={opt.value}>
@@ -5766,7 +5786,7 @@ function RemoteFolderPicker({
     reloadPath: string
     folderLabel: string
   } | null>(null)
-  const [sortMode, setSortMode] = useState<SortMode>('name-asc')
+  const [sortMode, setSortMode] = useState<SortMode>(DEFAULT_SORT_MODE)
   const [folderQuery, setFolderQuery] = useState('')
   const [folderSearching, setFolderSearching] = useState(false)
   const [folderSearchResults, setFolderSearchResults] = useState<RemoteEntry[] | null>(null)
@@ -5811,6 +5831,25 @@ function RemoteFolderPicker({
     load(initial)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
+
+  useEffect(() => {
+    let alive = true
+    const applySettings = (settings: AppSettings): void => {
+      if (alive) setSortMode(resolveSortMode(settings.remotePickerSortMode))
+    }
+    window.lt.settings.get().then(applySettings).catch(() => {})
+    const onSettingsUpdated = (e: Event): void => applySettings((e as CustomEvent<AppSettings>).detail)
+    window.addEventListener(SETTINGS_UPDATED_EVENT, onSettingsUpdated)
+    return () => {
+      alive = false
+      window.removeEventListener(SETTINGS_UPDATED_EVENT, onSettingsUpdated)
+    }
+  }, [])
+
+  const updateSortMode = (nextMode: SortMode): void => {
+    setSortMode(nextMode)
+    void window.lt.settings.set({ remotePickerSortMode: nextMode }).then(emitSettingsUpdated).catch(() => {})
+  }
 
   const up = (): void => {
     load(parentRemotePath(cwd))
@@ -5938,7 +5977,7 @@ function RemoteFolderPicker({
               value={sortMode}
               title="정렬"
               aria-label="원격 폴더 정렬"
-              onChange={(e) => setSortMode(e.target.value as SortMode)}
+              onChange={(e) => updateSortMode(resolveSortMode(e.target.value))}
             >
               {SORT_OPTIONS.map((opt) => (
                 <option key={opt.value} value={opt.value}>
