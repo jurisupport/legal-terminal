@@ -550,6 +550,111 @@ const sessionRememberInput = (
   ssh: source.ssh
 })
 
+const sessionListCache = new Map<string, SessionListEntry[]>()
+const sessionListInflight = new Map<string, Promise<SessionListEntry[]>>()
+
+const sessionListKey = (
+  cwd: string,
+  ssh?: SshConn,
+  context?: SessionSearchContext
+): string =>
+  JSON.stringify({
+    cwd,
+    ssh: ssh
+      ? {
+          host: ssh.host,
+          user: ssh.user,
+          port: ssh.port ?? 22,
+          identityFile: ssh.identityFile ?? ''
+        }
+      : null,
+    context: context ?? null
+  })
+
+const cachedPastSessions = (
+  cwd: string,
+  source?: TermTab,
+  query = ''
+): SessionListEntry[] | undefined => {
+  const context = sessionContextForTerm(source, query)
+  return sessionListCache.get(sessionListKey(cwd, source?.ssh, context))
+}
+
+const loadPastSessions = (
+  cwd: string,
+  source?: TermTab,
+  query = '',
+  refresh = false
+): Promise<SessionListEntry[]> => {
+  const context = sessionContextForTerm(source, query)
+  const key = sessionListKey(cwd, source?.ssh, context)
+  if (!refresh) {
+    const cached = sessionListCache.get(key)
+    if (cached) return Promise.resolve(cached)
+    const inflight = sessionListInflight.get(key)
+    if (inflight) return inflight
+  }
+  const request = window.lt.sessions
+    .list(cwd, source?.ssh, context)
+    .then((entries) => {
+      if (source) {
+        entries.forEach((entry) => {
+          void window.lt.sessions
+            .remember(
+              sessionRememberInput(
+                source,
+                entry.sessionId,
+                entry.transcriptTitle || entry.title,
+                entry.mtime
+              )
+            )
+            .catch(() => {})
+        })
+      }
+      sessionListCache.set(key, entries)
+      return entries
+    })
+    .finally(() => {
+      sessionListInflight.delete(key)
+    })
+  sessionListInflight.set(key, request)
+  return request
+}
+
+const preloadPastSessions = (cwd?: string, source?: TermTab): void => {
+  if (!cwd) return
+  void loadPastSessions(cwd, source).catch(() => {})
+}
+
+const currentCaseSessionSource = (
+  currentCase: CurrentCase | null | undefined,
+  profiles: SshProfile[]
+): TermTab | undefined => {
+  if (!currentCase) return undefined
+  const remote = parseRemoteUri(currentCase.drafts)
+  const profileId = currentCase.profileId ?? remote?.profileId
+  const savedProfile = profileId ? profiles.find((p) => p.id === profileId) : undefined
+  const ssh = currentCase.ssh ?? (savedProfile ? sshConnFromProfile(savedProfile) : undefined)
+  const cwd = currentCase.remotePath ?? remote?.path ?? currentCase.drafts
+  return {
+    id: '__current_case__',
+    title: currentCase.name,
+    kind: 'agent',
+    cwd,
+    recordsFolder: currentCase.records,
+    autoClaude: true,
+    jsId: currentCase.meta?.jsId,
+    court: currentCase.meta?.court,
+    caseNumber: currentCase.meta?.caseNumber,
+    caseName: currentCase.meta?.caseName,
+    client: currentCase.meta?.client,
+    ssh,
+    sshLabel: currentCase.sshLabel ?? savedProfile?.label,
+    profileId,
+    side: 'right'
+  }
+}
+
 const toWorkspaceDoc = (tab: DocTab): WorkspaceDocTabPayload | null => {
   if (!RESTORABLE_DOC_KINDS.has(tab.kind)) return null
   if (tab.kind !== 'settings' && !tab.path) return null
@@ -1161,6 +1266,7 @@ export default function App(): JSX.Element {
     setActiveTerm(tab.id)
     setWorkActive(side, termKeyOf(tab.id))
     rememberLocalCase(drafts, records, name, caseMeta)
+    preloadPastSessions(tab.cwd, tab)
   }
 
   const createCase = (
@@ -1248,6 +1354,7 @@ export default function App(): JSX.Element {
       profileId: profile.id,
       remotePath
     })
+    preloadPastSessions(tab.cwd, tab)
     window.lt.case.addHistory({ drafts: draftsUri, records, name: title }).then(setRecent)
     // 소송기록이 정해졌으면 페어링 기억(다음에 자동 적용) — 로컬과 동일
     if (records) window.lt.case.setPairing(draftsUri, records)
@@ -1790,31 +1897,7 @@ export default function App(): JSX.Element {
     resolveCaseOpenTarget(caseOpenTarget, sshProfiles)
   )
   const isViewer = mode === 'viewer'
-  const sessionCaseSource: TermTab | undefined = currentCase
-    ? (() => {
-        const remote = parseRemoteUri(currentCase.drafts)
-        const profileId = currentCase.profileId ?? remote?.profileId
-        const savedProfile = profileId ? sshProfiles.find((p) => p.id === profileId) : undefined
-        const ssh = currentCase.ssh ?? (savedProfile ? sshConnFromProfile(savedProfile) : undefined)
-        const cwd = currentCase.remotePath ?? remote?.path ?? currentCase.drafts
-        return {
-          id: '__current_case__',
-          title: currentCase.name,
-          cwd,
-          recordsFolder: currentCase.records,
-          autoClaude: true,
-          jsId: currentCase.meta?.jsId,
-          court: currentCase.meta?.court,
-          caseNumber: currentCase.meta?.caseNumber,
-          caseName: currentCase.meta?.caseName,
-          client: currentCase.meta?.client,
-          ssh,
-          sshLabel: currentCase.sshLabel ?? savedProfile?.label,
-          profileId,
-          side: 'right'
-        }
-      })()
-    : undefined
+  const sessionCaseSource = currentCaseSessionSource(currentCase, sshProfiles)
 
   const buildWorkspaceSnapshot = async (): Promise<WorkspaceSnapshot> => {
     const docs = docTabs.map(toWorkspaceDoc).filter((t): t is WorkspaceDocTabPayload => !!t)
@@ -1953,7 +2036,11 @@ export default function App(): JSX.Element {
 
     if (isWorkspaceMode(snapshot.mode)) setMode(snapshot.mode)
     const restoredCase = sanitizeCurrentCase(snapshot.currentCase)
-    setCurrentCase(restoredCase ?? (activeTermTab ? currentCaseFromTerm(activeTermTab) : currentCase))
+    const nextCurrentCase = restoredCase ?? (activeTermTab ? currentCaseFromTerm(activeTermTab) : currentCase)
+    setCurrentCase(nextCurrentCase)
+    nextTerms.forEach((term) => preloadPastSessions(term.cwd, term))
+    const restoredCaseSource = currentCaseSessionSource(nextCurrentCase, sshProfiles)
+    if (restoredCaseSource) preloadPastSessions(restoredCaseSource.cwd, restoredCaseSource)
     if (snapshot.crop) {
       setCropOn(!!snapshot.crop.on)
       if (Number.isFinite(snapshot.crop.ratio)) setCropRatio(snapshot.crop.ratio)
@@ -4329,19 +4416,17 @@ function SessionList({
       return
     }
     let alive = true
-    setPast(null)
-    const context = sessionContextForTerm(filterSource, query)
-    window.lt.sessions.list(filterCwd, filterSource?.ssh, context).then((r) => {
-      if (!alive) return
-      if (filterSource) {
-        r.forEach((entry) => {
-          void window.lt.sessions
-            .remember(sessionRememberInput(filterSource, entry.sessionId, entry.transcriptTitle || entry.title, entry.mtime))
-            .catch(() => {})
-        })
-      }
-      setPast(r)
-    })
+    const cached = cachedPastSessions(filterCwd, filterSource, query)
+    if (cached) setPast(cached)
+    else setPast(null)
+    loadPastSessions(filterCwd, filterSource, query, !!cached)
+      .then((r) => {
+        if (!alive) return
+        setPast(r)
+      })
+      .catch(() => {
+        if (alive && !cached) setPast([])
+      })
     return () => {
       alive = false
     }
