@@ -11,11 +11,6 @@ import FindBar from '../search/FindBar'
 // D2Coding(번들, 한글:영문=2:1 고정폭)을 우선 — 한글/영문 폭이 한 폰트로 통일되어 정렬이 맞는다.
 const DEFAULT_FONT = "'D2Coding', 'Cascadia Mono', Consolas, monospace"
 
-// PTY 입력에서 Enter는 LF(\n)가 아니라 CR(\r)이다. LF만 보내면 다음 줄이 같은
-// 커서 열에서 시작해 멀티라인 paste가 들여쓰기처럼 보일 수 있다.
-const normalizePasteForPty = (text: string): string =>
-  text.replace(/\r\n/g, '\n').replace(/\r/g, '\n').replace(/\n/g, '\r')
-
 const normalizeTerminalCopyText = (text: string): string => text.replace(/(^|[\r\n]) {2}/g, '$1')
 
 const WIN_IME_FIX_CLASS = 'lt-win-ime-fix'
@@ -240,6 +235,7 @@ export default function Terminal({
   onNewTerminal,
   onRequestClose,
   onStatus,
+  onBracketedPasteModeChange,
   onCycleTab
 }: {
   id: string
@@ -253,6 +249,7 @@ export default function Terminal({
   onNewTerminal?: () => void
   onRequestClose?: () => void
   onStatus?: (status: 'working' | 'done' | 'question') => void
+  onBracketedPasteModeChange?: (enabled: boolean) => void
   onCycleTab?: (dir: number) => void
 }): JSX.Element {
   const hostRef = useRef<HTMLDivElement>(null)
@@ -266,6 +263,8 @@ export default function Terminal({
   onCloseRef.current = onRequestClose
   const onStatusRef = useRef(onStatus)
   onStatusRef.current = onStatus
+  const onBracketedPasteModeChangeRef = useRef(onBracketedPasteModeChange)
+  onBracketedPasteModeChangeRef.current = onBracketedPasteModeChange
   const onCycleRef = useRef(onCycleTab)
   onCycleRef.current = onCycleTab
   const findOpenRef = useRef(false)
@@ -457,13 +456,31 @@ export default function Terminal({
       termRef.current = term
       fitRef.current = fit
       const windowsImeCorrection = installWindowsImeCorrection(term, appInfo.platform)
+      let bracketedPasteMode = term.modes.bracketedPasteMode
+      onBracketedPasteModeChangeRef.current?.(bracketedPasteMode)
+      const emitBracketedPasteMode = (): void => {
+        const next = term.modes.bracketedPasteMode
+        if (next === bracketedPasteMode) return
+        bracketedPasteMode = next
+        onBracketedPasteModeChangeRef.current?.(next)
+      }
+      const onWriteParsedDisp = term.onWriteParsed(emitBracketedPasteMode)
       // 새 터미널 생성 직후 활성 탭이면 바로 포커스 (커서가 그 터미널 안에 들어가게)
       if (visible) term.focus()
 
-      // 붙여넣기: 셸/claude가 줄바꿈을 즉시 실행하지 않도록 bracketed paste로 감싼다.
+      // 붙여넣기는 xterm에 맡긴다. xterm은 대상 프로그램이 bracketed paste를 켠 경우에만 감싼다.
       const pasteText = (txt: string): void => {
-        const normalized = normalizePasteForPty(txt)
-        if (normalized) window.lt.pty.write(id, `\x1b[200~${normalized}\x1b[201~`)
+        if (txt) term.paste(txt)
+      }
+      let suppressNativePasteEvent = false
+      let suppressNativePasteTimer: ReturnType<typeof setTimeout> | null = null
+      const suppressNextNativePasteEvent = (): void => {
+        suppressNativePasteEvent = true
+        if (suppressNativePasteTimer) clearTimeout(suppressNativePasteTimer)
+        suppressNativePasteTimer = setTimeout(() => {
+          suppressNativePasteEvent = false
+          suppressNativePasteTimer = null
+        }, 500)
       }
       const pasteFromClipboard = (): void => {
         navigator.clipboard.readText().then((txt) => {
@@ -485,9 +502,14 @@ export default function Terminal({
       }
       // 복사/붙여넣기 키 처리. true=xterm/pty로 전달, false=가로채서 기본동작 차단.
       term.attachCustomKeyEventHandler((e) => {
-        const primary = isMac ? e.metaKey && !e.ctrlKey : e.ctrlKey
-        if (e.type !== 'keydown' || !primary) return true
+        if (e.type !== 'keydown') return true
         const k = e.key.toLowerCase()
+        if (k === 'c' && e.ctrlKey && !e.metaKey && term.hasSelection() && (e.shiftKey || !e.altKey)) {
+          copySelection()
+          return false
+        }
+        const primary = isMac ? e.metaKey && !e.ctrlKey : e.ctrlKey
+        if (!primary) return true
         if (k === 't' && !e.shiftKey && !e.altKey) {
           // Ctrl/Cmd+T: 새 터미널 (같은 사건, claude 실행)
           e.stopPropagation()
@@ -528,6 +550,7 @@ export default function Terminal({
           return true // 선택 없는 Ctrl+C → 인터럽트
         }
         if (k === 'v') {
+          suppressNextNativePasteEvent()
           pasteFromClipboard()
           return false
         }
@@ -557,10 +580,18 @@ export default function Terminal({
       }
       mount.addEventListener('copy', onCopy, true)
       const onPaste = (ev: ClipboardEvent): void => {
-        const txt = ev.clipboardData?.getData('text/plain')
-        if (!txt) return
         ev.preventDefault()
         ev.stopPropagation()
+        if (suppressNativePasteEvent) {
+          suppressNativePasteEvent = false
+          if (suppressNativePasteTimer) {
+            clearTimeout(suppressNativePasteTimer)
+            suppressNativePasteTimer = null
+          }
+          return
+        }
+        const txt = ev.clipboardData?.getData('text/plain')
+        if (!txt) return
         pasteText(txt)
       }
       mount.addEventListener('paste', onPaste, true)
@@ -649,7 +680,9 @@ export default function Terminal({
         offExit()
         onInput.dispose()
         onBellDisp.dispose()
+        onWriteParsedDisp.dispose()
         if (idleTimer) clearTimeout(idleTimer)
+        if (suppressNativePasteTimer) clearTimeout(suppressNativePasteTimer)
         mount.removeEventListener('contextmenu', onCtx)
         mount.removeEventListener('copy', onCopy, true)
         mount.removeEventListener('paste', onPaste, true)

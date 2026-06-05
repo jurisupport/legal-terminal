@@ -57,6 +57,29 @@ function oneDriveCloudPath(path: string): string | undefined {
   return cloudStorage ? 'onedrive:' + cloudStorage[1].normalize('NFC') : undefined
 }
 
+function entryKey(name: string): string {
+  return name.normalize('NFC')
+}
+
+function mergeEntries(localEntries: Entry[], cloudEntries: Entry[]): Entry[] {
+  const byName = new Map<string, Entry>()
+  for (const entry of cloudEntries) byName.set(entryKey(entry.name), entry)
+  for (const entry of localEntries) byName.set(entryKey(entry.name), entry)
+  return [...byName.values()].sort((a, b) =>
+    a.isDir === b.isDir ? a.name.localeCompare(b.name, 'ko') : a.isDir ? -1 : 1
+  )
+}
+
+function mergePdfEntries(
+  localEntries: { name: string; path: string }[],
+  cloudEntries: { name: string; path: string }[]
+): { name: string; path: string }[] {
+  const byPath = new Map<string, { name: string; path: string }>()
+  for (const entry of cloudEntries) byPath.set(entry.path.normalize('NFC'), entry)
+  for (const entry of localEntries) byPath.set(entry.path.normalize('NFC'), entry)
+  return [...byPath.values()]
+}
+
 function remoteRcloneBootstrap(): string {
   return [
     'PATH="/opt/homebrew/bin:/usr/local/bin:/opt/local/bin:$PATH"',
@@ -81,6 +104,104 @@ function remoteMaterializeTmpPath(profileId: string, cloudPath: string): string 
     .slice(0, 24)
   const base = posix.basename(rel) || 'file'
   return posix.join(REMOTE_MATERIALIZE_TMP_ROOT, profileId, `${hash}-${base}`)
+}
+
+async function listRemoteOneDriveEntries(
+  profileId: string,
+  cloudPath: string,
+  localDir: string
+): Promise<Entry[]> {
+  const profile = await getProfile(profileId)
+  const script = [
+    remoteRcloneBootstrap(),
+    `cloud=${shq(cloudPath)}`,
+    '"$rclone_bin" lsf "$cloud" --max-depth 1 --format p --retries=1 --low-level-retries=1'
+  ].join('\n')
+
+  return await new Promise<Entry[]>((resolve, reject) => {
+    const chunks: Buffer[] = []
+    const errs: Buffer[] = []
+    const proc = spawn(sshBin, [...sshArgs(profile), script], { windowsHide: true })
+    const timer = setTimeout(() => {
+      proc.kill()
+      reject(new Error('rclone list timed out'))
+    }, RCLONE_READ_TIMEOUT_MS)
+    proc.stdout.on('data', (chunk: Buffer) => chunks.push(chunk))
+    proc.stderr.on('data', (chunk: Buffer) => errs.push(chunk))
+    proc.on('error', (err) => {
+      clearTimeout(timer)
+      reject(new Error(`rclone list 실행 실패: ${err.message}`))
+    })
+    proc.on('close', (code) => {
+      clearTimeout(timer)
+      if (code !== 0) {
+        reject(new Error(Buffer.concat(errs).toString('utf8').trim() || `rclone 종료 코드 ${code}`))
+        return
+      }
+      const entries = Buffer.concat(chunks)
+        .toString('utf8')
+        .split(/\r?\n/)
+        .flatMap((raw): Entry[] => {
+          if (!raw) return []
+          const isDir = raw.endsWith('/')
+          const rel = raw.replace(/\/+$/, '')
+          const name = posix.basename(rel)
+          if (!name || name.startsWith('.')) return []
+          return [
+            {
+              name,
+              path: makeRemote(profileId, posix.join(localDir, rel)),
+              isDir
+            }
+          ]
+        })
+      resolve(entries)
+    })
+  })
+}
+
+async function listRemoteOneDrivePdfs(
+  profileId: string,
+  cloudPath: string,
+  localRoot: string
+): Promise<{ name: string; path: string }[]> {
+  const profile = await getProfile(profileId)
+  const script = [
+    remoteRcloneBootstrap(),
+    `cloud=${shq(cloudPath)}`,
+    '"$rclone_bin" lsf "$cloud" --recursive --files-only --format p --retries=1 --low-level-retries=1'
+  ].join('\n')
+
+  return await new Promise<{ name: string; path: string }[]>((resolve, reject) => {
+    const chunks: Buffer[] = []
+    const errs: Buffer[] = []
+    const proc = spawn(sshBin, [...sshArgs(profile), script], { windowsHide: true })
+    const timer = setTimeout(() => {
+      proc.kill()
+      reject(new Error('rclone pdf list timed out'))
+    }, RCLONE_READ_TIMEOUT_MS)
+    proc.stdout.on('data', (chunk: Buffer) => chunks.push(chunk))
+    proc.stderr.on('data', (chunk: Buffer) => errs.push(chunk))
+    proc.on('error', (err) => {
+      clearTimeout(timer)
+      reject(new Error(`rclone pdf list 실행 실패: ${err.message}`))
+    })
+    proc.on('close', (code) => {
+      clearTimeout(timer)
+      if (code !== 0) {
+        reject(new Error(Buffer.concat(errs).toString('utf8').trim() || `rclone 종료 코드 ${code}`))
+        return
+      }
+      const entries = Buffer.concat(chunks)
+        .toString('utf8')
+        .split(/\r?\n/)
+        .flatMap((rel): { name: string; path: string }[] => {
+          if (!rel || !rel.toLowerCase().endsWith('.pdf')) return []
+          return [{ name: posix.basename(rel), path: makeRemote(profileId, posix.join(localRoot, rel)) }]
+        })
+      resolve(entries)
+    })
+  })
 }
 
 async function getProfile(profileId: string): Promise<SshProfile> {
@@ -235,29 +356,43 @@ async function resolveRemotePath(sftp: SFTPWrapper, requestedPath: string): Prom
 export async function rfsList(uri: string): Promise<Entry[]> {
   const { profileId, path } = parseRemote(uri)
   const sftp = await getSftp(profileId)
-  const actualPath = await resolveRemotePath(sftp, path)
-  const list = await new Promise<{ filename: string; attrs: { mode: number; mtime?: number } }[]>(
-    (resolve, reject) =>
-      sftp.readdir(actualPath, (err, l) => (err ? reject(err) : resolve(l as never)))
-  )
-  const out: Entry[] = []
-  for (const e of list) {
-    if (e.filename.startsWith('.')) continue
-    const remotePath = posix.join(actualPath, e.filename)
-    let isDir = (e.attrs.mode & S_IFMT) === S_IFDIR
-    if ((e.attrs.mode & S_IFMT) === S_IFLNK) {
-      isDir = await statIsDir(sftp, remotePath)
+  const cloudPath = oneDriveCloudPath(path)
+  let actualPath = path
+  let out: Entry[] = []
+  try {
+    actualPath = await resolveRemotePath(sftp, path)
+    const list = await new Promise<{ filename: string; attrs: { mode: number; mtime?: number } }[]>(
+      (resolve, reject) =>
+        sftp.readdir(actualPath, (err, l) => (err ? reject(err) : resolve(l as never)))
+    )
+    for (const e of list) {
+      if (e.filename.startsWith('.')) continue
+      const remotePath = posix.join(actualPath, e.filename)
+      let isDir = (e.attrs.mode & S_IFMT) === S_IFDIR
+      if ((e.attrs.mode & S_IFMT) === S_IFLNK) {
+        isDir = await statIsDir(sftp, remotePath)
+      }
+      out.push({
+        name: e.filename,
+        path: makeRemote(profileId, remotePath),
+        isDir,
+        mtimeMs: e.attrs.mtime ? e.attrs.mtime * 1000 : undefined
+      })
     }
-    out.push({
-      name: e.filename,
-      path: makeRemote(profileId, remotePath),
-      isDir,
-      mtimeMs: e.attrs.mtime ? e.attrs.mtime * 1000 : undefined
-    })
+  } catch (e) {
+    if (!cloudPath) throw e
   }
-  out.sort((a, b) =>
-    a.isDir === b.isDir ? a.name.localeCompare(b.name, 'ko') : a.isDir ? -1 : 1
-  )
+  if (cloudPath) {
+    try {
+      out = mergeEntries(out, await listRemoteOneDriveEntries(profileId, cloudPath, actualPath))
+    } catch (e) {
+      if (out.length === 0) throw e
+    }
+  } else {
+    out.sort((a, b) =>
+      a.isDir === b.isDir ? a.name.localeCompare(b.name, 'ko') : a.isDir ? -1 : 1
+    )
+  }
   prefetchRemoteOneDriveFiles(profileId, out.filter((e) => !e.isDir).map((e) => e.path))
   return out
 }
@@ -271,7 +406,15 @@ function statIsDir(sftp: SFTPWrapper, path: string): Promise<boolean> {
 export async function rfsReadBytes(uri: string): Promise<Buffer> {
   const { profileId, path } = parseRemote(uri)
   const sftp = await getSftp(profileId)
-  const actualPath = await resolveRemotePath(sftp, path)
+  let actualPath: string
+  try {
+    actualPath = await resolveRemotePath(sftp, path)
+  } catch (e) {
+    const cloudPath = oneDriveCloudPath(path)
+    if (!cloudPath) throw e
+    await materializeRemoteOneDriveFile(profileId, cloudPath, path)
+    actualPath = await resolveRemotePath(sftp, path)
+  }
   if (isLikelyOneDrivePath(actualPath)) {
     const cloudPath = oneDriveCloudPath(actualPath)
     try {
@@ -449,14 +592,18 @@ async function materializeRemoteOneDriveFile(
     `cloud=${shq(cloudPath)}`,
     `target=${shq(targetPath)}`,
     `tmp=${shq(tmpPath)}`,
-    'if ! ls -lO "$target" 2>/dev/null | grep -q "dataless"; then exit 0; fi',
+    'target_state=$(ls -lO "$target" 2>/dev/null || true)',
+    'if [ -n "$target_state" ] && ! printf "%s\\n" "$target_state" | grep -q "dataless"; then exit 0; fi',
+    'mkdir -p "$(dirname "$target")"',
     'mode=$(stat -f "%Lp" "$target" 2>/dev/null || echo 600)',
-    'gid=$(stat -f "%g" "$target" 2>/dev/null || true)',
+    'gid=$(stat -f "%g" "$target" 2>/dev/null || stat -f "%g" "$(dirname "$target")" 2>/dev/null || true)',
     'mkdir -p "$(dirname "$tmp")"',
     'rm -f "$tmp"',
     '"$rclone_bin" copyto "$cloud" "$tmp" --ignore-times --retries=1 --low-level-retries=1',
     'chmod "$mode" "$tmp" >/dev/null 2>&1 || true',
     'if [ -n "$gid" ]; then chgrp "$gid" "$tmp" >/dev/null 2>&1 || true; fi',
+    'target_state=$(ls -lO "$target" 2>/dev/null || true)',
+    'if [ -n "$target_state" ] && ! printf "%s\\n" "$target_state" | grep -q "dataless"; then rm -f "$tmp"; exit 0; fi',
     'mv -f "$tmp" "$target"'
   ].join('\n')
 
@@ -509,9 +656,11 @@ function prefetchRemoteOneDriveFiles(profileId: string, uris: string[]): void {
       '  [ -z "$cloud64" ] && continue',
       '  cloud=$(printf "%s" "$cloud64" | base64 --decode)',
       '  target=$(printf "%s" "$target64" | base64 --decode)',
-      '  ls -lO "$target" 2>/dev/null | grep -q "dataless" || continue',
+      '  target_state=$(ls -lO "$target" 2>/dev/null || true)',
+      '  if [ -n "$target_state" ] && ! printf "%s\\n" "$target_state" | grep -q "dataless"; then continue; fi',
+      '  mkdir -p "$(dirname "$target")"',
       '  mode=$(stat -f "%Lp" "$target" 2>/dev/null || echo 600)',
-      '  gid=$(stat -f "%g" "$target" 2>/dev/null || true)',
+      '  gid=$(stat -f "%g" "$target" 2>/dev/null || stat -f "%g" "$(dirname "$target")" 2>/dev/null || true)',
       '  mkdir -p "$tmp_root"',
       '  name=$(basename "$target")',
       '  tmp="$tmp_root/$name.part.$$"',
@@ -519,7 +668,8 @@ function prefetchRemoteOneDriveFiles(profileId: string, uris: string[]): void {
       '  if "$rclone_bin" copyto "$cloud" "$tmp" --ignore-times --retries=1 --low-level-retries=1; then',
       '    chmod "$mode" "$tmp" >/dev/null 2>&1 || true',
       '    if [ -n "$gid" ]; then chgrp "$gid" "$tmp" >/dev/null 2>&1 || true; fi',
-      '    if ls -lO "$target" 2>/dev/null | grep -q "dataless"; then',
+      '    target_state=$(ls -lO "$target" 2>/dev/null || true)',
+      '    if [ -z "$target_state" ] || printf "%s\\n" "$target_state" | grep -q "dataless"; then',
       '      mv -f "$tmp" "$target"',
       '    else',
       '      rm -f "$tmp"',
@@ -806,9 +956,27 @@ async function removeRec(sftp: SFTPWrapper, path: string): Promise<void> {
 export async function rfsListPdfs(uri: string): Promise<{ name: string; path: string }[]> {
   const { profileId, path } = parseRemote(uri)
   const sftp = await getSftp(profileId)
-  const actualPath = await resolveRemotePath(sftp, path)
+  const cloudPath = oneDriveCloudPath(path)
+  let actualPath = path
   const out: { name: string; path: string }[] = []
-  await walk(sftp, profileId, actualPath, out, 0)
+  let localFailed: unknown
+  try {
+    actualPath = await resolveRemotePath(sftp, path)
+    await walk(sftp, profileId, actualPath, out, 0)
+  } catch (e) {
+    localFailed = e
+    if (!cloudPath) throw e
+  }
+  if (cloudPath && (localFailed || out.length === 0)) {
+    try {
+      const cloudOut = await listRemoteOneDrivePdfs(profileId, cloudPath, actualPath)
+      const merged = mergePdfEntries(out, cloudOut)
+      prefetchRemoteOneDriveFiles(profileId, merged.map((p) => p.path))
+      return merged
+    } catch (e) {
+      if (localFailed) throw e
+    }
+  }
   prefetchRemoteOneDriveFiles(profileId, out.map((p) => p.path))
   return out
 }

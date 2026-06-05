@@ -255,6 +255,22 @@ const fileAccessNote = (path: string, term?: TermTab): string | undefined => {
   return undefined
 }
 
+const dirnameForClaudeContext = (path: string): string | undefined => {
+  const remote = parseRemoteUri(path)
+  if (remote) {
+    const trimmed = remote.path.replace(/\/+$/, '')
+    const slash = trimmed.lastIndexOf('/')
+    return remoteUri(remote.profileId, slash > 0 ? trimmed.slice(0, slash) : '/')
+  }
+  const slash = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'))
+  return slash > 0 ? path.slice(0, slash) : undefined
+}
+
+const selectionContextFileName = (): string =>
+  `.legal-terminal-claude-selection-${new Date().toISOString().replace(/[:.]/g, '-')}.txt`
+
+const formatCharCount = (count: number): string => new Intl.NumberFormat('ko-KR').format(count)
+
 const formatFileMtime = (mtimeMs?: number): string =>
   mtimeMs ? new Date(mtimeMs).toLocaleString('ko-KR') : '알 수 없음'
 
@@ -844,6 +860,9 @@ export default function App(): JSX.Element {
   const [termTabs, setTermTabs] = useState<TermTab[]>([])
   const [activeTerm, setActiveTerm] = useState<string>('')
   const [termFocusNonce, setTermFocusNonce] = useState<Record<string, number>>({})
+  const [termBracketedPasteMode, setTermBracketedPasteMode] = useState<Record<string, boolean>>({})
+  const termBracketedPasteModeRef = useRef<Record<string, boolean>>({})
+  termBracketedPasteModeRef.current = termBracketedPasteMode
   const termTabsRef = useRef<TermTab[]>([])
   const rememberedSessionsRef = useRef<Set<string>>(new Set())
   const [activeWork, setActiveWork] = useState<Record<DockSide, string>>({
@@ -1705,6 +1724,12 @@ export default function App(): JSX.Element {
 
   const removeTermTab = (id: string): void => {
     setTermTabs((tabs) => closeTab(tabs, id, activeTerm, setActiveTerm))
+    setTermBracketedPasteMode((m) => {
+      if (!(id in m)) return m
+      const n = { ...m }
+      delete n[id]
+      return n
+    })
     setTermAttention((s) => {
       if (!s.has(id)) return s
       const n = new Set(s)
@@ -1758,6 +1783,9 @@ export default function App(): JSX.Element {
       if (bg) setTermAttention((s) => new Set(s).add(id))
       if (status === 'question' && bg) pushToast(id)
     }
+  }
+  const onTermBracketedPasteMode = (id: string, enabled: boolean): void => {
+    setTermBracketedPasteMode((m) => (m[id] === enabled ? m : { ...m, [id]: enabled }))
   }
 
   // 질문/확인 대기 팝업(토스트)
@@ -2297,22 +2325,26 @@ export default function App(): JSX.Element {
     else if (it.page > 0) jumpToPage(it.page)
   }
 
-  // 임의 터미널에 bracketed paste로 텍스트 주입 (줄바꿈이 바로 제출되지 않게).
+  // 임의 터미널에 텍스트 주입. 대상 프로그램이 bracketed paste를 켠 경우에만 감싼다.
   const pasteToTerm = (termId: string, payload: string): void => {
     const tab = termTabs.find((t) => t.id === termId)
+    const normalized = normalizePasteForPty(payload)
+    const text = termBracketedPasteModeRef.current[termId]
+      ? `\x1b[200~${normalized}\x1b[201~`
+      : normalized
     setActiveTerm(termId)
     setWorkActive(termSide(tab), termKeyOf(termId))
     setTermFocusNonce((n) => ({ ...n, [termId]: (n[termId] ?? 0) + 1 }))
-    window.lt.pty.write(termId, `\x1b[200~${normalizePasteForPty(payload)}\x1b[201~`)
+    window.lt.pty.write(termId, text)
   }
 
   // Claude 질문 전송: Agent 탭이면 SDK로, 터미널이면 paste로, 문서 전용 창이면 메인 창으로 전달.
   const activeTermRef = useRef(activeTerm)
   activeTermRef.current = activeTerm
-  const sendClaude = (payload: string): void => {
+  const sendClaude = (payload: string, opts?: { displayText?: string }): void => {
     const tab = termTabs.find((t) => t.id === activeTerm)
     if (tab && isAgentTab(tab)) {
-      void window.lt.agent.send(tab.id, { text: payload })
+      void window.lt.agent.send(tab.id, { text: payload, displayText: opts?.displayText })
       return
     }
     if (activeTerm) pasteToTerm(activeTerm, payload)
@@ -2349,6 +2381,44 @@ export default function App(): JSX.Element {
     ].filter((line): line is string => line !== undefined)
     return lines.join('\n')
   }
+
+  const claudeSelectionContextDir = (docPath?: string): string | undefined => {
+    const target = activeTermTab ?? sessionCaseSource
+    if (target?.ssh && target.profileId) return remoteUri(target.profileId, target.cwd)
+    if (target?.cwd) return target.cwd
+    if (docPath) return dirnameForClaudeContext(docPath)
+    if (currentCase?.drafts) return currentCase.drafts
+    return draftsRoot
+  }
+
+  const createClaudeSelectionContext = async (
+    text: string,
+    opts: { docPath?: string; docName?: string }
+  ): Promise<{ path: string; readablePath: string } | null> => {
+    const dir = claudeSelectionContextDir(opts.docPath)
+    if (!dir) return null
+    const target = activeTermTab ?? sessionCaseSource
+    const content = [
+      '# legal-terminal 선택 본문',
+      opts.docName ? `문서: ${opts.docName}` : undefined,
+      opts.docPath ? `문서 경로: ${claudeReadablePath(opts.docPath, target)}` : undefined,
+      `생성: ${new Date().toLocaleString('ko-KR')}`,
+      '',
+      text
+    ].filter((line): line is string => line !== undefined).join('\n')
+    const result = await window.lt.fs.createFile(dir, selectionContextFileName(), content)
+    if (!result.ok || !result.path) return null
+    return {
+      path: result.path,
+      readablePath: claudeReadablePath(result.path, target)
+    }
+  }
+
+  const hiddenSelectionDisplay = (docName: string | undefined, text: string): string =>
+    [
+      `${docName ? `「${docName}」 ` : ''}선택 본문 ${formatCharCount(text.length)}자를 Claude 컨텍스트로 추가했습니다.`,
+      '원문은 화면 표시에서 숨겼습니다.'
+    ].join('\n')
   // 메인 창: 다른 창에서 온 Claude 질문을 활성 Claude surface에 주입.
   useEffect(
     () =>
@@ -2381,16 +2451,29 @@ export default function App(): JSX.Element {
       const filePrompt =
         docPath && docName ? await buildFreshFilePrompt(docPath, docName, activeTermTab) : ''
       let payload: string
+      let displayText: string | undefined
       if (t) {
-        payload = filePrompt
-          ? `${filePrompt}아래 선택 내용은 위치 힌트야. 최종 기준은 위 경로에서 다시 읽은 현재 저장본으로 삼아줘.\n\n<selection>\n${t}\n</selection>\n\n`
-          : ref
-            ? `${ref} 중 다음 부분:\n"${t}"\n\n`
-            : `"${t}"\n\n`
+        displayText = hiddenSelectionDisplay(docName, t)
+        const selectionContext = await createClaudeSelectionContext(t, { docPath, docName })
+        payload = selectionContext
+          ? [
+              filePrompt || (ref ? `${ref} 중 다음 선택 본문:` : '다음 선택 본문:'),
+              '선택 본문 원문은 화면에 붙여넣지 않고 아래 컨텍스트 파일에 저장했어.',
+              `- 선택 본문 파일: ${selectionContext.readablePath}`,
+              filePrompt
+                ? '선택 본문 파일은 위치 힌트야. 최종 기준은 위 경로에서 다시 읽은 현재 저장본으로 삼아줘.'
+                : '먼저 이 파일을 읽고 선택 본문을 기준으로 이어지는 요청에 답해줘.',
+              ''
+            ].join('\n')
+          : filePrompt
+            ? `${filePrompt}아래 선택 내용은 위치 힌트야. 최종 기준은 위 경로에서 다시 읽은 현재 저장본으로 삼아줘.\n\n<selection>\n${t}\n</selection>\n\n`
+            : ref
+              ? `${ref} 중 다음 부분:\n"${t}"\n\n`
+              : `"${t}"\n\n`
       } else if (docName) {
         payload = filePrompt ? `${filePrompt}위 파일에 대해 ` : `${ref} 파일에 대해 `
       } else return
-      sendClaude(payload)
+      sendClaude(payload, { displayText })
     })()
   }
 
@@ -2906,6 +2989,7 @@ export default function App(): JSX.Element {
                 title={t.title}
                 resumeSessionId={t.resumeSessionId}
                 ssh={t.ssh}
+                profileId={t.profileId}
                 visible={t.id === activeTerm}
                 onStatus={(s) => onTermStatus(t.id, s)}
                 onOpenTerminal={() => addTermSame(termSide(t))}
@@ -2923,6 +3007,7 @@ export default function App(): JSX.Element {
                 onNewTerminal={() => addTermSame(termSide(t))}
                 onRequestClose={() => closeTermWithConfirm(t.id)}
                 onStatus={(s) => onTermStatus(t.id, s)}
+                onBracketedPasteModeChange={(enabled) => onTermBracketedPasteMode(t.id, enabled)}
                 onCycleTab={cycleTerm}
               />
             )}
@@ -3174,6 +3259,7 @@ export default function App(): JSX.Element {
                   title={t.title}
                   resumeSessionId={t.resumeSessionId}
                   ssh={t.ssh}
+                  profileId={t.profileId}
                   visible={t.id === visibleTermId}
                   onStatus={(s) => onTermStatus(t.id, s)}
                   onOpenTerminal={() => addTermSame(side)}
@@ -3191,6 +3277,7 @@ export default function App(): JSX.Element {
                   onNewTerminal={() => addTermSame(side)}
                   onRequestClose={() => closeTermWithConfirm(t.id)}
                   onStatus={(s) => onTermStatus(t.id, s)}
+                  onBracketedPasteModeChange={(enabled) => onTermBracketedPasteMode(t.id, enabled)}
                   onCycleTab={cycleTerm}
                 />
               )}

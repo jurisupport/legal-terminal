@@ -229,6 +229,7 @@ export interface AgentCreateOptions {
 
 export interface AgentSendInput {
   text: string
+  displayText?: string
   attachments?: AgentAttachment[]
   permissionMode?: AgentPermissionMode
   delivery?: 'normal' | 'queue' | 'steer'

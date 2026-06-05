@@ -1813,6 +1813,7 @@ body {
   --agent-micro-font-size: calc(var(--agent-font-size, 13px) * 0.8);
   --agent-control-height: max(26px, calc(var(--agent-font-size, 13px) * 2.15));
   --agent-input-min-height: max(64px, calc(var(--agent-font-size, 13px) * 4.9));
+  position: relative;
   width: 100%;
   height: 100%;
   min-height: 0;
@@ -1823,6 +1824,18 @@ body {
   font-size: var(--agent-font-size, 13px);
   -webkit-user-select: text;
   user-select: text;
+}
+.agent-panel.file-drop-target {
+  box-shadow:
+    inset 0 0 0 2px var(--accent),
+    inset 0 0 46px color-mix(in srgb, var(--accent) 16%, transparent);
+}
+.agent-drop-guide {
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  align-items: center;
+  text-align: center;
 }
 .agent-head {
   min-height: max(42px, calc(var(--agent-font-size, 13px) * 3.2));
@@ -2376,6 +2389,55 @@ body {
 .agent-dialog-actions {
   justify-content: flex-end;
 }
+.agent-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.agent-attachments.sent {
+  margin-top: 8px;
+}
+.agent-attachments.pending {
+  margin-top: 7px;
+}
+.agent-attachment-chip {
+  min-width: 0;
+  max-width: 100%;
+  min-height: max(24px, calc(var(--agent-font-size, 13px) * 1.9));
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 7px;
+  border: 1px solid #4f6b7a;
+  border-radius: 4px;
+  color: #d7eef8;
+  background: rgba(79, 107, 122, 0.22);
+  font-size: var(--agent-small-font-size);
+}
+.agent-attachment-chip.removable {
+  cursor: pointer;
+}
+.agent-attachment-chip.removable:hover {
+  border-color: var(--accent);
+  background: rgba(14, 99, 156, 0.28);
+}
+.agent-attachment-kind {
+  flex: 0 0 auto;
+  color: #9bd0e4;
+  font-size: var(--agent-micro-font-size);
+}
+.agent-attachment-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.agent-attachment-remove {
+  flex: 0 0 auto;
+  color: var(--fg-muted);
+  font-size: 14px;
+  line-height: 1;
+}
 .agent-auth-codes {
   display: flex;
   flex-wrap: wrap;
@@ -2567,11 +2629,29 @@ body {
   cursor: default;
 }
 .agent-status {
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   color: var(--fg-muted);
   font-size: var(--agent-small-font-size);
 }
 .agent-status.working {
   color: #d7ba7d;
+}
+.agent-status-spinner {
+  width: 13px;
+  height: 13px;
+  display: inline-block;
+  flex-shrink: 0;
+  border: 2px solid color-mix(in srgb, currentColor 34%, transparent);
+  border-top-color: currentColor;
+  border-radius: 50%;
+  animation: spin 0.9s linear infinite;
+}
+.agent-status-queue {
+  color: var(--fg-muted);
+  white-space: nowrap;
 }
 .agent-status.waiting_permission,
 .agent-status.error {

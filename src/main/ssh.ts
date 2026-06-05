@@ -15,9 +15,97 @@ function cdTarget(path: string): string {
   return shq(target)
 }
 
+function oneDriveCloudPath(path: string): string | undefined {
+  const marker = '/OneDrive/'
+  const idx = path.indexOf(marker)
+  if (idx >= 0) return 'onedrive:' + path.slice(idx + marker.length).normalize('NFC')
+  const cloudStorage = path.match(/\/Library\/CloudStorage\/OneDrive[^/]*\/(.+)$/)
+  return cloudStorage ? 'onedrive:' + cloudStorage[1].normalize('NFC') : undefined
+}
+
+function remoteRcloneBootstrap(): string {
+  return [
+    'PATH="/opt/homebrew/bin:/usr/local/bin:/opt/local/bin:$PATH"',
+    'rclone_bin=$(command -v rclone 2>/dev/null || true)',
+    'if [ -z "$rclone_bin" ]; then',
+    '  for p in /opt/homebrew/bin/rclone /usr/local/bin/rclone /opt/local/bin/rclone; do',
+    '    [ -x "$p" ] && rclone_bin="$p" && break',
+    '  done',
+    'fi',
+    'if [ -z "$rclone_bin" ]; then',
+    '  echo "rclone not found on remote Mac" >&2',
+    '  exit 127',
+    'fi'
+  ].join('\n')
+}
+
 // 원격 경로 join (원격은 POSIX 경로)
 function joinRemote(dir: string, name: string): string {
   return `${dir.replace(/\/+$/, '')}/${name}`
+}
+
+function searchTextKey(value: string): string {
+  return value.normalize('NFKC').toLocaleLowerCase('ko-KR')
+}
+
+function remoteSearchQueryVariants(query: string): string[] {
+  const variants = new Set<string>()
+  for (const value of [query, query.normalize('NFKC')]) {
+    variants.add(value.normalize('NFC'))
+    variants.add(value.normalize('NFD'))
+  }
+  return [...variants].filter(Boolean)
+}
+
+function remoteDirMatchesQuery(rel: string, name: string, query: string): boolean {
+  const needle = searchTextKey(query)
+  if (!needle) return false
+  return searchTextKey(name).includes(needle) || searchTextKey(rel).includes(needle)
+}
+
+function mergeRemoteEntries(localEntries: RemoteEntry[], cloudEntries: RemoteEntry[]): RemoteEntry[] {
+  const byName = new Map<string, RemoteEntry>()
+  for (const entry of cloudEntries) byName.set(entry.name.normalize('NFC'), entry)
+  for (const entry of localEntries) byName.set(entry.name.normalize('NFC'), entry)
+  return [...byName.values()].sort((a, b) =>
+    a.isDir === b.isDir ? a.name.localeCompare(b.name, 'ko') : a.isDir ? -1 : 1
+  )
+}
+
+function listCloudRemoteDirs(profile: SshProfile, cwd: string): Promise<RemoteEntry[]> {
+  const cloud = oneDriveCloudPath(cwd)
+  if (!cloud) return Promise.resolve([])
+  const args = sshArgs(profile, 20)
+  const script = [
+    remoteRcloneBootstrap(),
+    `cloud=${shq(cloud)}`,
+    '"$rclone_bin" lsf "$cloud" --dirs-only --max-depth 1 --format p --retries=1 --low-level-retries=1'
+  ].join('\n')
+  args.push(script)
+
+  return new Promise((resolve, reject) => {
+    execFile(
+      sshBin,
+      args,
+      { timeout: 30000, windowsHide: true, maxBuffer: 4 * 1024 * 1024 },
+      (err, stdout, stderr) => {
+        if (err) {
+          reject(new Error((stderr || err.message || 'rclone 목록 실패').trim()))
+          return
+        }
+        const entries = stdout
+          .split(/\r?\n/)
+          .flatMap((raw): RemoteEntry[] => {
+            if (!raw) return []
+            const rel = raw.replace(/\/+$/, '')
+            const name = rel.split('/').filter(Boolean).pop()
+            if (!name || name.startsWith('.')) return []
+            return [{ name, path: joinRemote(cwd, rel), isDir: true }]
+          })
+        resolve(entries)
+      }
+    )
+  })
 }
 
 export interface RemoteEntry {
@@ -65,12 +153,21 @@ for p do
   m=$(stat -f %m "$p" 2>/dev/null || stat -c %Y "$p" 2>/dev/null || echo 0)
   printf '%s\t%s\n' "$m" "$name"
 done
-`.trim()
+		`.trim()
   args.push(`cd ${cdTarget(target)} && pwd && find . ! -name . -prune -exec sh -c ${shq(listDirs)} sh {} +`)
 
   return new Promise((resolve) => {
-    execFile(sshBin, args, { timeout: 15000, windowsHide: true }, (err, stdout, stderr) => {
+    execFile(sshBin, args, { timeout: 15000, windowsHide: true }, async (err, stdout, stderr) => {
       if (err) {
+        const cloud = oneDriveCloudPath(target)
+        if (cloud) {
+          try {
+            resolve({ ok: true, entries: await listCloudRemoteDirs(profile, target), cwd: target })
+            return
+          } catch {
+            /* fall through to the original SSH error */
+          }
+        }
         resolve({ ok: false, error: (stderr || err.message || '연결 실패').trim() })
         return
       }
@@ -92,10 +189,14 @@ done
           mtimeMs: Number.isFinite(mtimeSec) ? mtimeSec * 1000 : undefined
         })
       }
-      entries.sort((a, b) =>
-        a.isDir === b.isDir ? a.name.localeCompare(b.name, 'ko') : a.isDir ? -1 : 1
-      )
-      resolve({ ok: true, entries, cwd })
+      try {
+        resolve({ ok: true, entries: mergeRemoteEntries(entries, await listCloudRemoteDirs(profile, cwd)), cwd })
+      } catch {
+        entries.sort((a, b) =>
+          a.isDir === b.isDir ? a.name.localeCompare(b.name, 'ko') : a.isDir ? -1 : 1
+        )
+        resolve({ ok: true, entries, cwd })
+      }
     })
   })
 }
@@ -120,10 +221,25 @@ export function searchRemoteDirs(
   const shellLimit = limit + 1
   const args = sshArgs(profile, 20)
   const target = remotePath && remotePath.trim() ? remotePath : '~'
+  const queryVariants = remoteSearchQueryVariants(query)
+  const queryArgs = [...queryVariants, ...Array(Math.max(0, 4 - queryVariants.length)).fill('')].slice(0, 4)
   const searchDirs = `
-q=$1
-limit=$2
+q1=$1
+q2=$2
+q3=$3
+q4=$4
+limit=$5
 count=0
+matches_search() {
+  text=$1
+  for q in "$q1" "$q2" "$q3" "$q4"; do
+    [ -n "$q" ] || continue
+    if printf '%s\\n' "$text" | grep -iF -- "$q" >/dev/null 2>&1; then
+      return 0
+    fi
+  done
+  return 1
+}
 while IFS= read -r p; do
   [ -d "$p" ] || continue
   rel=\${p#./}
@@ -131,19 +247,23 @@ while IFS= read -r p; do
   name=\${rel##*/}
   [ -n "$name" ] || continue
   case "$name" in .*) continue ;; esac
-  if printf '%s\\n%s\\n' "$name" "$rel" | grep -iF -- "$q" >/dev/null 2>&1; then
+  if matches_search "$name
+$rel"; then
     m=$(stat -f %m "$p" 2>/dev/null || stat -c %Y "$p" 2>/dev/null || echo 0)
     printf '%s\\t%s\\n' "$m" "$rel"
     count=$((count + 1))
     [ "$count" -ge "$limit" ] && break
   fi
 done
-`.trim()
+exit 0
+	`.trim()
   args.push(
     [
       `cd ${cdTarget(target)} && pwd &&`,
       `find . -maxdepth ${maxDepth} \\( -name '.*' -a ! -name . \\) -prune -o`,
-      `-type d ! -name . -print 2>/dev/null | sh -c ${shq(searchDirs)} sh ${shq(query)} ${shellLimit}`
+      `-type d ! -name . -print 2>/dev/null | sh -c ${shq(searchDirs)} sh ${queryArgs
+        .map(shq)
+        .join(' ')} ${shq(String(shellLimit))}`
     ].join(' ')
   )
 
@@ -170,6 +290,7 @@ done
           const path = joinRemote(cwd, rel)
           const name = rel.split('/').filter(Boolean).pop()
           if (!name || name.startsWith('.')) continue
+          if (!remoteDirMatchesQuery(rel, name, query)) continue
           entries.push({
             name,
             path,

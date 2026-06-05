@@ -1,20 +1,31 @@
 import {
+  useCallback,
   useEffect,
   useMemo,
   useRef,
   useState,
   type CSSProperties,
   type ClipboardEvent,
+  type DragEvent,
   type MouseEvent
 } from 'react'
 import DOMPurify from 'dompurify'
 import { marked } from 'marked'
-import type { AgentEvent, AgentPermissionMode, AppSettings, SessionTranscript, SshConn } from '../env'
+import { LT_PATH } from '../filetree/FileTree'
+import type {
+  AgentAttachment,
+  AgentEvent,
+  AgentPermissionMode,
+  AppSettings,
+  SessionTranscript,
+  SshConn
+} from '../env'
 
 type AgentRunStatus = 'working' | 'done' | 'question'
 type AgentSendDelivery = 'normal' | 'queue' | 'steer'
 type AgentCopyMode = 'rich' | 'markdown' | 'text'
 type AgentAuthStatus = 'checking' | 'authenticated' | 'unauthenticated' | 'unavailable' | 'error'
+type AgentPanelStatus = 'idle' | 'working' | 'waiting_permission' | 'waiting_user' | 'done' | 'error'
 
 const SETTINGS_UPDATED_EVENT = 'lt:settings-updated'
 const DEFAULT_AGENT_FONT_SIZE = 13
@@ -32,6 +43,7 @@ interface AgentPanelProps {
   title: string
   resumeSessionId?: string
   ssh?: SshConn
+  profileId?: string
   visible: boolean
   onStatus?: (status: AgentRunStatus) => void
   onOpenTerminal?: () => void
@@ -42,6 +54,7 @@ interface TimelineItem {
   kind: 'user' | 'assistant' | 'tool' | 'permission' | 'diff' | 'error' | 'auth' | 'process' | 'queue' | 'dialog'
   title?: string
   text?: string
+  attachments?: AgentAttachment[]
   status?: string
   requestId?: string
   dialogId?: string
@@ -151,6 +164,15 @@ const slashCommands: SlashCommand[] = [
   }
 ]
 
+const agentStatusLabels: Record<AgentPanelStatus, string> = {
+  idle: '대기',
+  working: '작업 중',
+  waiting_permission: '권한 확인 대기',
+  waiting_user: '응답 대기',
+  done: '완료',
+  error: '오류'
+}
+
 function expandSlashInput(text: string): { text: string; mode?: AgentPermissionMode } {
   const match = text.match(/^(\/[^\s]+)(?:\s+([\s\S]*))?$/)
   if (!match) return { text }
@@ -188,6 +210,100 @@ const dialogQuestions = (value: unknown): AgentDialogQuestion[] =>
 
 const isAuthFailureText = (text: string | undefined): boolean =>
   /failed to authenticate|invalid authentication credentials|api error:\s*401/i.test(text ?? '')
+
+function fileNameFromPath(path: string): string {
+  const clean = path.replace(/[\\/]+$/, '')
+  return clean.split(/[\\/]/).filter(Boolean).pop() || clean
+}
+
+function parseRemoteUri(uri: string): { profileId: string; path: string } | null {
+  if (!uri.startsWith('ssh://')) return null
+  const rest = uri.slice('ssh://'.length)
+  const slash = rest.indexOf('/')
+  if (slash < 0) return { profileId: rest, path: '/' }
+  return { profileId: rest.slice(0, slash), path: rest.slice(slash) }
+}
+
+function fileLikeClipboardType(type: string): boolean {
+  return /^(Files|text\/uri-list|public\.file-url|NSFilenamesPboardType|x-special\/gnome-copied-files)$/i.test(type)
+}
+
+function pathLikeText(text: string): boolean {
+  const lines = text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean)
+  return (
+    lines.length > 0 &&
+    lines.length <= 20 &&
+    lines.every((line) =>
+      /^file:\/\/|^ssh:\/\/|^\/(?:Users|Volumes|private|var|tmp|opt|Applications|Library)\/|^[A-Za-z]:[\\/]|^\\\\/.test(
+        line
+      )
+    )
+  )
+}
+
+function pathsFromPathLikeText(text: string): string[] {
+  return uniqueStrings(
+    text
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .map((line) => {
+        if (!line.startsWith('file://')) return line
+        try {
+          return decodeURIComponent(new URL(line).pathname)
+        } catch {
+          return decodeURIComponent(line.slice('file://'.length))
+        }
+      })
+  )
+}
+
+function uniqueStrings(values: string[]): string[] {
+  const seen = new Set<string>()
+  const out: string[] = []
+  for (const value of values) {
+    const trimmed = value.trim()
+    if (!trimmed || seen.has(trimmed)) continue
+    seen.add(trimmed)
+    out.push(trimmed)
+  }
+  return out
+}
+
+function dataTransferPaths(dataTransfer: DataTransfer): string[] {
+  const internal = dataTransfer.getData(LT_PATH)
+  if (internal) return [internal]
+  return uniqueStrings(
+    Array.from(dataTransfer.files)
+      .map((file) => window.lt.fs.pathForFile(file))
+      .filter(Boolean)
+  )
+}
+
+function normalizeAgentAttachments(value: unknown): AgentAttachment[] {
+  return recordArray(value)
+    .flatMap((attachment): AgentAttachment[] => {
+      const kind = stringValue(attachment.kind)
+      const label = stringValue(attachment.label)
+      if (
+        !label ||
+        (kind !== 'file' &&
+          kind !== 'folder' &&
+          kind !== 'selection' &&
+          kind !== 'pdf-page-range' &&
+          kind !== 'terminal-snippet')
+      )
+        return []
+      return [
+        {
+          kind,
+          label,
+          path: stringValue(attachment.path),
+          text: stringValue(attachment.text)
+        }
+      ]
+    })
+}
 
 const eventSessionId = (event: AgentEvent): string | undefined => {
   const direct = stringValue(event.sessionId)
@@ -279,7 +395,8 @@ function reduceTimeline(items: TimelineItem[], event: AgentEvent): TimelineItem[
         id: stringValue(event.messageId) ?? `user-${Date.now()}`,
         kind: 'user',
         title: '나',
-        text: stringValue(event.text) ?? ''
+        text: stringValue(event.text) ?? '',
+        attachments: normalizeAgentAttachments(event.attachments)
       }
     ]
   }
@@ -669,6 +786,7 @@ export default function AgentPanel({
   title,
   resumeSessionId,
   ssh,
+  profileId,
   visible,
   onStatus,
   onOpenTerminal
@@ -676,7 +794,7 @@ export default function AgentPanel({
   const [items, setItems] = useState<TimelineItem[]>([])
   const [input, setInput] = useState('')
   const [mode, setMode] = useState<AgentPermissionMode>('ask')
-  const [status, setStatus] = useState<'idle' | 'working' | 'waiting_permission' | 'waiting_user' | 'done' | 'error'>('idle')
+  const [status, setStatus] = useState<AgentPanelStatus>('idle')
   const [error, setError] = useState('')
   const [slashIndex, setSlashIndex] = useState(0)
   const [authActive, setAuthActive] = useState(false)
@@ -689,6 +807,8 @@ export default function AgentPanel({
   const [copyFeedback, setCopyFeedback] = useState('')
   const [dialogChoices, setDialogChoices] = useState<Record<string, Record<string, string[]>>>({})
   const [dialogResponses, setDialogResponses] = useState<Record<string, string>>({})
+  const [attachments, setAttachments] = useState<AgentAttachment[]>([])
+  const [attachmentDropOver, setAttachmentDropOver] = useState(false)
   const createdRef = useRef(false)
   const scrollRef = useRef<HTMLDivElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
@@ -696,6 +816,12 @@ export default function AgentPanel({
   const openedAuthUrlsRef = useRef<Set<string>>(new Set())
   const copyFeedbackTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const loadedHistoryKeyRef = useRef<string | null>(null)
+
+  const showTransientFeedback = useCallback((message: string): void => {
+    setCopyFeedback(message)
+    if (copyFeedbackTimerRef.current) clearTimeout(copyFeedbackTimerRef.current)
+    copyFeedbackTimerRef.current = setTimeout(() => setCopyFeedback(''), 1400)
+  }, [])
 
   useEffect(() => {
     const off = window.lt.agent.onEvent((event) => {
@@ -842,7 +968,7 @@ export default function AgentPanel({
     return () => document.removeEventListener('copy', onCopy, true)
   }, [])
 
-  const hasPrompt = useMemo(() => input.trim().length > 0, [input])
+  const hasPrompt = useMemo(() => input.trim().length > 0 || attachments.length > 0, [attachments.length, input])
   const queuedCount = useMemo(
     () =>
       items.filter(
@@ -852,7 +978,8 @@ export default function AgentPanel({
       ).length,
     [items]
   )
-  const statusText = queuedCount > 0 ? `${status} · 대기 ${queuedCount}` : status
+  const statusLabel = agentStatusLabels[status]
+  const statusAccessibleLabel = queuedCount > 0 ? `${statusLabel}, 대기 ${queuedCount}` : statusLabel
   const needsAuth = useMemo(
     () => Boolean(ssh) && items.some((item) => isAuthFailureText(item.text)),
     [items, ssh]
@@ -906,21 +1033,77 @@ export default function AgentPanel({
     window.requestAnimationFrame(() => textareaRef.current?.focus())
   }
 
+  const attachmentForPath = useCallback(
+    async (path: string): Promise<AgentAttachment> => {
+      const remote = parseRemoteUri(path)
+      const sameRemote = remote && ssh && profileId && remote.profileId === profileId
+      const readablePath = sameRemote ? remote.path : path
+      const stat = await window.lt.fs.stat(path).catch(() => null)
+      const notes = [
+        sameRemote ? `앱 원격 URI: ${path}` : undefined,
+        remote && !sameRemote
+          ? '주의: 이 파일은 Legal Terminal 원격 URI입니다. 같은 SSH 프로필의 Agent가 아니면 Claude가 직접 읽지 못할 수 있습니다.'
+          : undefined,
+        !remote && ssh
+          ? '주의: 이 파일은 로컬 경로입니다. 현재 Agent가 원격에서 실행 중이면 원격 서버에 같은 파일이 있어야 Claude가 직접 읽을 수 있습니다.'
+          : undefined
+      ].filter((note): note is string => Boolean(note))
+      return {
+        kind: stat?.ok && stat.isDir ? 'folder' : 'file',
+        label: fileNameFromPath(readablePath),
+        path: readablePath,
+        text: notes.length ? notes.join('\n') : undefined
+      }
+    },
+    [profileId, ssh]
+  )
+
+  const addPathAttachments = useCallback(
+    (paths: string[], source: 'drop' | 'paste'): void => {
+      const unique = uniqueStrings(paths)
+      if (unique.length === 0 || authActive) return
+      void Promise.all(unique.map(attachmentForPath))
+        .then((nextAttachments) => {
+          setAttachments((current) => {
+            const seen = new Set(current.map((attachment) => `${attachment.kind}:${attachment.path ?? attachment.label}`))
+            const merged = [...current]
+            for (const attachment of nextAttachments) {
+              const key = `${attachment.kind}:${attachment.path ?? attachment.label}`
+              if (seen.has(key)) continue
+              seen.add(key)
+              merged.push(attachment)
+            }
+            return merged
+          })
+          showTransientFeedback(`${source === 'drop' ? '드롭' : '붙여넣기'} 파일 ${nextAttachments.length}개 첨부됨`)
+        })
+        .catch((e) => setError(String(e instanceof Error ? e.message : e)))
+    },
+    [attachmentForPath, authActive, showTransientFeedback]
+  )
+
+  const removeAttachment = (index: number): void => {
+    setAttachments((current) => current.filter((_, itemIndex) => itemIndex !== index))
+  }
+
   const send = async (delivery?: AgentSendDelivery): Promise<void> => {
     const rawText = input.trim()
-    const expanded = expandSlashInput(rawText)
+    const expanded = rawText ? expandSlashInput(rawText) : { text: '' }
     const text = expanded.text
-    if (!text || sendBlockedReason) {
+    const sendAttachments = attachments
+    if ((!text && sendAttachments.length === 0) || sendBlockedReason) {
       if (sendBlockedReason) setError(sendBlockedReason)
       return
     }
     const nextMode = expanded.mode ?? mode
     if (expanded.mode) setMode(expanded.mode)
     setInput('')
+    setAttachments([])
     setError('')
     const nextDelivery = delivery ?? (status === 'working' ? 'queue' : 'normal')
     const result = await window.lt.agent.send(id, {
       text,
+      attachments: sendAttachments,
       permissionMode: nextMode,
       delivery: nextDelivery
     })
@@ -1014,11 +1197,22 @@ export default function AgentPanel({
     await answerDialog(item, answers, response)
   }
 
-  const interrupt = async (): Promise<void> => {
+  const interrupt = useCallback(async (): Promise<void> => {
     await window.lt.agent.interrupt(id)
     setAuthActive(false)
     setStatus('idle')
-  }
+  }, [id])
+
+  useEffect(() => {
+    if (!visible || (status !== 'working' && !authActive)) return
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.key !== 'Escape' || event.repeat) return
+      event.preventDefault()
+      void interrupt()
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [authActive, interrupt, status, visible])
 
   const startAuthLogin = async (): Promise<void> => {
     setError('')
@@ -1064,6 +1258,55 @@ export default function AgentPanel({
     copyFeedbackTimerRef.current = setTimeout(() => setCopyFeedback(''), 1200)
   }
 
+  const attachableTransfer = (dataTransfer: DataTransfer | null): dataTransfer is DataTransfer =>
+    Boolean(dataTransfer && (dataTransfer.types.includes(LT_PATH) || dataTransfer.types.includes('Files')))
+
+  const onAttachmentDrag = (event: DragEvent<HTMLDivElement>): void => {
+    if (!attachableTransfer(event.dataTransfer) || authActive) return
+    event.preventDefault()
+    event.stopPropagation()
+    event.dataTransfer.dropEffect = 'copy'
+    setAttachmentDropOver(true)
+  }
+
+  const onAttachmentDrop = (event: DragEvent<HTMLDivElement>): void => {
+    if (!attachableTransfer(event.dataTransfer) || authActive) return
+    event.preventDefault()
+    event.stopPropagation()
+    setAttachmentDropOver(false)
+    addPathAttachments(dataTransferPaths(event.dataTransfer), 'drop')
+  }
+
+  const onAttachmentPaste = (event: ClipboardEvent<HTMLTextAreaElement>): void => {
+    if (authActive) return
+    const clipboard = event.clipboardData
+    const directPaths = dataTransferPaths(clipboard)
+    if (directPaths.length > 0) {
+      event.preventDefault()
+      addPathAttachments(directPaths, 'paste')
+      return
+    }
+    const types = Array.from(clipboard.types)
+    const text = clipboard.getData('text/plain')
+    if (pathLikeText(text)) {
+      event.preventDefault()
+      addPathAttachments(pathsFromPathLikeText(text), 'paste')
+      return
+    }
+    if (!types.some(fileLikeClipboardType)) return
+    event.preventDefault()
+    void window.lt.fs
+      .clipboardFiles()
+      .then((clip) => {
+        if (clip.paths.length === 0) {
+          setError('클립보드에서 파일 경로를 찾을 수 없습니다.')
+          return
+        }
+        addPathAttachments(clip.paths, 'paste')
+      })
+      .catch((e) => setError(String(e instanceof Error ? e.message : e)))
+  }
+
   const toggleProcess = (processId: string): void => {
     setExpandedProcessIds((current) => {
       const next = new Set(current)
@@ -1103,7 +1346,24 @@ export default function AgentPanel({
   } as CSSProperties
 
   return (
-    <div className="agent-panel" data-visible={visible ? 'true' : 'false'} style={panelStyle}>
+    <div
+      className={`agent-panel ${attachmentDropOver ? 'file-drop-target' : ''}`}
+      data-visible={visible ? 'true' : 'false'}
+      style={panelStyle}
+      onDragEnter={onAttachmentDrag}
+      onDragOver={onAttachmentDrag}
+      onDragLeave={(event) => {
+        if (event.currentTarget.contains(event.relatedTarget as Node | null)) return
+        setAttachmentDropOver(false)
+      }}
+      onDrop={onAttachmentDrop}
+    >
+      {attachmentDropOver && (
+        <div className="drop-guide agent-drop-guide" role="status" aria-live="polite">
+          <strong>Agent에 파일 첨부</strong>
+          <span>전송 전에 입력창 아래에서 확인할 수 있습니다</span>
+        </div>
+      )}
       <header className="agent-head">
         <div className="agent-title">
           <span className="agent-title-main">{title}</span>
@@ -1319,6 +1579,18 @@ export default function AgentPanel({
                   <pre className="agent-card-text">{item.text}</pre>
                 ))}
               {item.inputPreview && <pre className="agent-card-input">{item.inputPreview}</pre>}
+              {item.attachments && item.attachments.length > 0 && (
+                <div className="agent-attachments sent" aria-label="전송된 첨부">
+                  {item.attachments.map((attachment, index) => (
+                    <span key={`${attachment.path ?? attachment.label}-${index}`} className="agent-attachment-chip">
+                      <span className="agent-attachment-kind">{attachment.kind === 'folder' ? '폴더' : '파일'}</span>
+                      <span className="agent-attachment-label" title={attachment.path}>
+                        {attachment.label}
+                      </span>
+                    </span>
+                  ))}
+                </div>
+              )}
               {item.kind === 'auth' && item.urls && item.urls.length > 0 && (
                 <div className="agent-card-actions">
                   {item.urls.map((url) => (
@@ -1422,6 +1694,7 @@ export default function AgentPanel({
           disabled={authActive}
           placeholder={authActive ? 'Claude 로그인 진행 중' : 'Claude에게 요청'}
           onChange={(e) => setInput(e.target.value)}
+          onPaste={onAttachmentPaste}
           onKeyDown={(e) => {
             if (authActive) return
             if (e.nativeEvent.isComposing) return
@@ -1442,8 +1715,35 @@ export default function AgentPanel({
             void send()
           }}
         />
+        {attachments.length > 0 && (
+          <div className="agent-attachments pending" aria-label="첨부 파일">
+            {attachments.map((attachment, index) => (
+              <button
+                key={`${attachment.path ?? attachment.label}-${index}`}
+                type="button"
+                className="agent-attachment-chip removable"
+                title={attachment.path}
+                onClick={() => removeAttachment(index)}
+              >
+                <span className="agent-attachment-kind">{attachment.kind === 'folder' ? '폴더' : '파일'}</span>
+                <span className="agent-attachment-label">{attachment.label}</span>
+                <span className="agent-attachment-remove" aria-hidden="true">×</span>
+              </button>
+            ))}
+          </div>
+        )}
         <div className="agent-prompt-actions">
-          <span className={`agent-status ${status}`}>{statusText}</span>
+          <span className={`agent-status ${status}`} title={statusAccessibleLabel} aria-label={statusAccessibleLabel}>
+            {status === 'working' ? (
+              <>
+                <span className="agent-status-spinner" aria-hidden="true" />
+                <span className="sr-only">{statusLabel}</span>
+              </>
+            ) : (
+              <span>{statusLabel}</span>
+            )}
+            {queuedCount > 0 && <span className="agent-status-queue">대기 {queuedCount}</span>}
+          </span>
           {status === 'working' ? (
             <div className="agent-working-actions">
               <button disabled={!canSubmit} onClick={() => void send('queue')}>

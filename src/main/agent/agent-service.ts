@@ -1205,8 +1205,12 @@ function isEmptyAgentInput(input: AgentSendInput): boolean {
   return !input.text.trim() && (!input.attachments || input.attachments.length === 0)
 }
 
+function agentInputDisplayText(input: AgentSendInput): string {
+  return input.displayText?.trim() || input.text
+}
+
 function queuedTextPreview(input: AgentSendInput): string {
-  const text = input.text.trim()
+  const text = agentInputDisplayText(input).trim()
   if (text) return textPreview(text, 360)
   return (input.attachments ?? []).map((attachment) => attachment.label).join(', ')
 }
@@ -1284,7 +1288,7 @@ function startAgentTurn(session: AgentSession, input: AgentSendInput): void {
     type: 'message:user',
     sessionId,
     messageId,
-    text: input.text,
+    text: agentInputDisplayText(input),
     attachments: input.attachments ?? []
   })
   emit(session, { type: 'status', sessionId, status: 'working' })
