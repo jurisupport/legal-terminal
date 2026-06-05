@@ -20,6 +20,14 @@ import { IconSave, IconSaveAs, IconSearch } from '../icons/Icons'
 
 const DEFAULT_MD_FONT = "'D2Coding', 'Cascadia Mono', Consolas, monospace"
 const DEFAULT_UNTITLED_NAME = '무제.md'
+export const TEXT_SELECTION_OVERLAY_EVENT = 'lt:text-selection-overlay'
+
+export interface TextSelectionOverlayDetail {
+  x: number
+  y: number
+  text: string
+  count: number
+}
 
 interface TextReplacement {
   from: number
@@ -184,6 +192,40 @@ function restoreSelection(state: EditorState, bookmark: SelectionBookmark): Edit
 
 function changeCoversSelection(changes: ChangeDesc, selection: EditorSelection): boolean {
   return selection.ranges.some((range) => changes.touchesRange(range.from, range.to) === 'cover')
+}
+
+function editorSelectionOverlay(view: EditorView): TextSelectionOverlayDetail | null {
+  const ranges = view.state.selection.ranges.filter((range) => !range.empty)
+  if (ranges.length === 0) return null
+  const text = ranges.map((range) => view.state.sliceDoc(range.from, range.to)).join('\n')
+  const visibleText = text.trim()
+  if (!visibleText) return null
+
+  const main = view.state.selection.main
+  const from = Math.min(main.from, main.to)
+  const to = Math.max(main.from, main.to)
+  const start = view.coordsAtPos(from)
+  const end = view.coordsAtPos(to)
+  const first = start ?? end
+  if (!first) return null
+
+  const editorRect = view.scrollDOM.getBoundingClientRect()
+  const sameLine = !!start && !!end && Math.abs(start.top - end.top) < 4
+  const rawX = sameLine && start && end ? (start.left + end.right) / 2 : first.left + 16
+  return {
+    x: Math.min(Math.max(rawX, editorRect.left + 8), editorRect.right - 8),
+    y: first.top - 6,
+    text,
+    count: Array.from(visibleText).length
+  }
+}
+
+function emitEditorSelectionOverlay(view: EditorView): void {
+  window.dispatchEvent(
+    new CustomEvent<TextSelectionOverlayDetail | null>(TEXT_SELECTION_OVERLAY_EVENT, {
+      detail: editorSelectionOverlay(view)
+    })
+  )
 }
 
 function captureViewport(view: EditorView): ViewportBookmark {
@@ -439,6 +481,7 @@ export default function MarkdownEditor({
             makeTheme(family, size),
             previewComp.current.of(preview ? livePreview : []),
             EditorView.updateListener.of((u) => {
+              if (u.selectionSet || u.docChanged || u.viewportChanged) emitEditorSelectionOverlay(u.view)
               if (u.docChanged) {
                 if (applyingRemoteRef.current) {
                   localDirtyRef.current = false

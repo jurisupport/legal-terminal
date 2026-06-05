@@ -17,7 +17,11 @@ import {
   IconSearch,
   IconSave
 } from './icons/Icons'
-import MarkdownEditor, { type MarkdownDocumentPayload } from './editor/MarkdownEditor'
+import MarkdownEditor, {
+  TEXT_SELECTION_OVERLAY_EVENT,
+  type MarkdownDocumentPayload,
+  type TextSelectionOverlayDetail
+} from './editor/MarkdownEditor'
 import FindBar from './search/FindBar'
 import CasesDashboard from './dashboard/CasesDashboard'
 import UpcomingHearings from './dashboard/UpcomingHearings'
@@ -865,6 +869,7 @@ export default function App(): JSX.Element {
   const [mode, setMode] = useState<Mode>('explorer')
   const [bridgeStatus, setBridgeStatus] = useState<string>('')
   const [platform, setPlatform] = useState<string>('')
+  const [selectionCharCount, setSelectionCharCount] = useState(0)
 
   const [docTabs, setDocTabs] = useState<DocTab[]>(() =>
     docOnly ? [] : [{ id: 'doc-welcome', title: '시작하기.md', kind: 'welcome', side: 'left' }]
@@ -1211,6 +1216,41 @@ export default function App(): JSX.Element {
     const off = window.lt.tabs.onReceive((p) => receiveTabRef.current(p))
     window.lt.tabs.ready() // 큐잉된 페이로드 flush 요청
     return off
+  }, [])
+
+  useEffect(() => {
+    let frame = 0
+    const readSelection = (): void => {
+      frame = 0
+      const sel = window.getSelection()
+      const text = sel && !sel.isCollapsed && sel.rangeCount > 0 ? sel.toString().trim() : ''
+      const node = sel && sel.rangeCount > 0 ? sel.getRangeAt(0).commonAncestorContainer : null
+      const el = node instanceof Element ? node : node?.parentElement
+      const inWorkArea = !!el?.closest?.('.work-pane, .body-col, .term-col')
+      const count = inWorkArea && text ? Array.from(text).length : 0
+      if (!count && document.activeElement instanceof Element && document.activeElement.closest('.cm-editor')) return
+      setSelectionCharCount((prev) => (prev === count ? prev : count))
+    }
+    const scheduleRead = (): void => {
+      if (frame) return
+      frame = window.requestAnimationFrame(readSelection)
+    }
+    const onEditorSelection = (event: Event): void => {
+      const detail = (event as CustomEvent<TextSelectionOverlayDetail | null>).detail
+      setSelectionCharCount((prev) => (prev === (detail?.count ?? 0) ? prev : detail?.count ?? 0))
+    }
+
+    document.addEventListener('selectionchange', scheduleRead)
+    document.addEventListener('mouseup', scheduleRead)
+    document.addEventListener('keyup', scheduleRead)
+    window.addEventListener(TEXT_SELECTION_OVERLAY_EVENT, onEditorSelection)
+    return () => {
+      if (frame) window.cancelAnimationFrame(frame)
+      document.removeEventListener('selectionchange', scheduleRead)
+      document.removeEventListener('mouseup', scheduleRead)
+      document.removeEventListener('keyup', scheduleRead)
+      window.removeEventListener(TEXT_SELECTION_OVERLAY_EVENT, onEditorSelection)
+    }
   }, [])
 
   const rememberSessionForTerm = (term: TermTab, sessionId: string, title?: string, mtime?: number): void => {
@@ -2281,11 +2321,88 @@ export default function App(): JSX.Element {
       )
     })
   }
+
+  const replaceAppPathPrefix = (from: string, to: string): void => {
+    setDocTabs((tabs) =>
+      tabs.map((t) => {
+        const nextPath = replacePathPrefix(t.path, from, to)
+        if (!nextPath || nextPath === t.path) return t
+        const direct = t.path === from
+        return {
+          ...t,
+          path: nextPath,
+          title: direct ? fileNameFromPath(nextPath) : t.title,
+          kind: direct ? docKindForPath(nextPath) : t.kind
+        }
+      })
+    )
+    setTermTabs((tabs) =>
+      tabs.map((t) => {
+        const cwdPath =
+          t.ssh && t.profileId
+            ? parseRemoteUri(replacePathPrefix(remoteUri(t.profileId, t.cwd), from, to) ?? '')?.path
+            : replacePathPrefix(t.cwd, from, to)
+        const nextRecords = replacePathPrefix(t.recordsFolder, from, to)
+        const nextSuggested = replacePathPrefix(t.suggestedRecords, from, to)
+        const nextOptions = t.suggestedRecordOptions?.map((option) => ({
+          ...option,
+          path: replacePathPrefix(option.path, from, to) ?? option.path
+        }))
+        const changed =
+          (cwdPath && cwdPath !== t.cwd) ||
+          nextRecords !== t.recordsFolder ||
+          nextSuggested !== t.suggestedRecords ||
+          nextOptions?.some((option, i) => option.path !== t.suggestedRecordOptions?.[i]?.path)
+        if (!changed) return t
+        return {
+          ...t,
+          cwd: cwdPath ?? t.cwd,
+          recordsFolder: nextRecords,
+          suggestedRecords: nextSuggested,
+          suggestedRecordOptions: nextOptions
+        }
+      })
+    )
+    setCurrentCase((c) => {
+      if (!c) return c
+      const nextDrafts = replacePathPrefix(c.drafts, from, to) ?? c.drafts
+      const nextRecords = replacePathPrefix(c.records, from, to)
+      const nextRemotePath =
+        c.profileId && c.remotePath
+          ? parseRemoteUri(replacePathPrefix(remoteUri(c.profileId, c.remotePath), from, to) ?? '')
+              ?.path ?? c.remotePath
+          : c.remotePath
+      if (
+        nextDrafts === c.drafts &&
+        nextRecords === c.records &&
+        nextRemotePath === c.remotePath
+      )
+        return c
+      const nextCase = { ...c, drafts: nextDrafts, records: nextRecords, remotePath: nextRemotePath }
+      void window.lt.case.addHistory({
+        drafts: nextCase.drafts,
+        records: nextCase.records,
+        name: nextCase.name
+      }).then(setRecent)
+      if (nextCase.records) void window.lt.case.setPairing(nextCase.drafts, nextCase.records)
+      return nextCase
+    })
+    setPdfRecord((record) => {
+      if (!record) return record
+      const nextPath = replacePathPrefix(record.path, from, to)
+      return nextPath && nextPath !== record.path ? { ...record, path: nextPath } : record
+    })
+  }
+
   // 트리 내부 이동 (드래그앤드롭)
   const moveEntry = (src: string, destDir: string): void => {
     window.lt.fs.move(src, destDir).then((r) => {
-      if (r.ok) setTreeRefresh((n) => n + 1)
-      else if (r.error) console.warn('[move]', r.error)
+      if (!r.ok) {
+        if (r.error) console.warn('[move]', r.error)
+        return
+      }
+      setTreeRefresh((n) => n + 1)
+      if (r.path) replaceAppPathPrefix(src, r.path)
     })
   }
 
@@ -2297,24 +2414,7 @@ export default function App(): JSX.Element {
       }
       const nextRoot = r.path
       setTreeRefresh((n) => n + 1)
-      setDocTabs((tabs) =>
-        tabs.map((t) => {
-          const nextPath = replacePathPrefix(t.path, path, nextRoot)
-          if (!nextPath || nextPath === t.path) return t
-          const direct = t.path === path
-          return {
-            ...t,
-            path: nextPath,
-            title: direct ? fileNameFromPath(nextPath) : t.title,
-            kind: direct ? docKindForPath(nextPath) : t.kind
-          }
-        })
-      )
-      setPdfRecord((record) => {
-        if (!record) return record
-        const nextPath = replacePathPrefix(record.path, path, nextRoot)
-        return nextPath && nextPath !== record.path ? { ...record, path: nextPath } : record
-      })
+      replaceAppPathPrefix(path, nextRoot)
     })
   }
 
@@ -2340,18 +2440,7 @@ export default function App(): JSX.Element {
       const previousPath = tab.path as string
       const nextPath = r.path
       setTreeRefresh((n) => n + 1)
-      setDocTabs((tabs) =>
-        tabs.map((t) => {
-          const replaced = replacePathPrefix(t.path, previousPath, nextPath)
-          if (!replaced || replaced === t.path) return t
-          return {
-            ...t,
-            path: replaced,
-            title: t.path === previousPath ? fileNameFromPath(replaced) : t.title,
-            kind: t.path === previousPath ? docKindForPath(replaced) : t.kind
-          }
-        })
-      )
+      replaceAppPathPrefix(previousPath, nextPath)
     })
   }
 
@@ -2646,8 +2735,10 @@ export default function App(): JSX.Element {
   }
   const activePdfStatus = activeDocTab?.kind === 'pdf' ? pdfStatus[activeDocTab.id] : undefined
   const activeTermRunStatus = activeTerm ? termStatus.get(activeTerm) : undefined
+  const selectionStatus = selectionCharCount > 0 ? `선택 ${formatCharCount(selectionCharCount)}자` : undefined
   const statusInfo =
     joinStatus([
+      selectionStatus,
       describeDocStatus(activeDocTab, !!activeDocTab && dirtyDocs.has(activeDocTab.id), activePdfStatus),
       describeCaseStatus(activeTermTab, currentCase),
       describeRecordsStatus(activeRecordsFolder, activeSuggestedRecords, !!(activeTermTab || currentCase)),
@@ -3489,6 +3580,10 @@ export default function App(): JSX.Element {
           {docTabBar}
           <div className="doc-content" data-doc-id={activeDocTab?.id}>{renderDocContent(activeDocTab)}</div>
         </div>
+        <div className="statusbar">
+          <span className="status-left">legal-terminal · 문서</span>
+          <span className="status-right">{statusInfo}</span>
+        </div>
         <SelectionAsk onAsk={askClaude} />
         <SelectionMenu onAsk={askClaude} />
       </div>
@@ -3770,16 +3865,21 @@ function SelectionMenu({ onAsk }: { onAsk: (text: string) => void }): JSX.Elemen
   )
 }
 
-// 본문에서 텍스트를 드래그 선택하면 떠오르는 "Claude에 묻기" 버튼
+// 본문에서 텍스트를 선택하면 떠오르는 "Claude에 묻기" 버튼
 function SelectionAsk({ onAsk }: { onAsk: (text: string) => void }): JSX.Element | null {
-  const [box, setBox] = useState<{ x: number; y: number; text: string } | null>(null)
+  const [box, setBox] = useState<TextSelectionOverlayDetail | null>(null)
 
   useEffect(() => {
-    const onUp = (): void => {
+    let frame = 0
+
+    const updateFromSelection = (): void => {
       const sel = window.getSelection()
       const text = sel?.toString() ?? ''
-      if (!sel || sel.rangeCount === 0 || !text.trim()) {
-        setBox(null)
+      const visibleText = text.trim()
+      if (!sel || sel.rangeCount === 0 || !visibleText) {
+        if (!(document.activeElement instanceof Element) || !document.activeElement.closest('.cm-editor')) {
+          setBox(null)
+        }
         return
       }
       const node = sel.anchorNode
@@ -3793,14 +3893,39 @@ function SelectionAsk({ onAsk }: { onAsk: (text: string) => void }): JSX.Element
         setBox(null)
         return
       }
-      setBox({ x: rect.left + rect.width / 2, y: rect.top - 6, text })
+      setBox({ x: rect.left + rect.width / 2, y: rect.top - 6, text, count: Array.from(visibleText).length })
     }
+
+    const scheduleUpdate = (): void => {
+      if (frame) cancelAnimationFrame(frame)
+      frame = requestAnimationFrame(() => {
+        frame = 0
+        updateFromSelection()
+      })
+    }
+
     const onDown = (): void => setBox(null)
-    document.addEventListener('mouseup', onUp)
+    const onEditorSelection = (event: Event): void => {
+      const detail = (event as CustomEvent<TextSelectionOverlayDetail | null>).detail
+      if (!detail?.text.trim()) {
+        setBox(null)
+        return
+      }
+      setBox(detail)
+    }
+
+    document.addEventListener('mouseup', scheduleUpdate)
     document.addEventListener('mousedown', onDown)
+    document.addEventListener('selectionchange', scheduleUpdate)
+    document.addEventListener('keyup', scheduleUpdate)
+    window.addEventListener(TEXT_SELECTION_OVERLAY_EVENT, onEditorSelection)
     return () => {
-      document.removeEventListener('mouseup', onUp)
+      if (frame) cancelAnimationFrame(frame)
+      document.removeEventListener('mouseup', scheduleUpdate)
       document.removeEventListener('mousedown', onDown)
+      document.removeEventListener('selectionchange', scheduleUpdate)
+      document.removeEventListener('keyup', scheduleUpdate)
+      window.removeEventListener(TEXT_SELECTION_OVERLAY_EVENT, onEditorSelection)
     }
   }, [])
 

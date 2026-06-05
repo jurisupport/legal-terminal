@@ -36,10 +36,14 @@ const sshBin = process.platform === 'win32' ? 'ssh.exe' : 'ssh'
 const SSH_READ_TIMEOUT_MS = 120_000
 const SSH_QUICK_READ_TIMEOUT_MS = 8_000
 const RCLONE_READ_TIMEOUT_MS = 5 * 60_000
+const RCLONE_LIST_TIMEOUT_MS = 15_000
+const RCLONE_LIST_MERGE_TIMEOUT_MS = 2_500
 const REMOTE_CLOUD_HYDRATE_TIMEOUT_MS = 10 * 60_000
 const REMOTE_MATERIALIZE_TMP_ROOT = '/tmp/legal-terminal-rclone-materialize'
+const REMOTE_LOCAL_MUTATION_WINDOW_MS = 30_000
 const remotePrefetching = new Set<string>()
 const remotePrefetchedAt = new Map<string, number>()
+const remoteLocalMutatedAt = new Map<string, number>()
 
 function shq(s: string): string {
   return `'${s.replace(/'/g, "'\\''")}'`
@@ -61,13 +65,17 @@ function entryKey(name: string): string {
   return name.normalize('NFC')
 }
 
+function sortEntryArray(entries: Entry[]): Entry[] {
+  return [...entries].sort((a, b) =>
+    a.isDir === b.isDir ? a.name.localeCompare(b.name, 'ko') : a.isDir ? -1 : 1
+  )
+}
+
 function mergeEntries(localEntries: Entry[], cloudEntries: Entry[]): Entry[] {
   const byName = new Map<string, Entry>()
   for (const entry of cloudEntries) byName.set(entryKey(entry.name), entry)
   for (const entry of localEntries) byName.set(entryKey(entry.name), entry)
-  return [...byName.values()].sort((a, b) =>
-    a.isDir === b.isDir ? a.name.localeCompare(b.name, 'ko') : a.isDir ? -1 : 1
-  )
+  return sortEntryArray([...byName.values()])
 }
 
 function mergePdfEntries(
@@ -106,10 +114,22 @@ function remoteMaterializeTmpPath(profileId: string, cloudPath: string): string 
   return posix.join(REMOTE_MATERIALIZE_TMP_ROOT, profileId, `${hash}-${base}`)
 }
 
+function noteRemoteLocalMutation(path: string): void {
+  if (!isLikelyOneDrivePath(path)) return
+  remoteLocalMutatedAt.set(path.replace(/\/+$/, '') || '/', Date.now())
+}
+
+function hasRecentRemoteLocalMutation(path: string): boolean {
+  const key = path.replace(/\/+$/, '') || '/'
+  const at = remoteLocalMutatedAt.get(key)
+  return at !== undefined && Date.now() - at < REMOTE_LOCAL_MUTATION_WINDOW_MS
+}
+
 async function listRemoteOneDriveEntries(
   profileId: string,
   cloudPath: string,
-  localDir: string
+  localDir: string,
+  timeoutMs = RCLONE_LIST_TIMEOUT_MS
 ): Promise<Entry[]> {
   const profile = await getProfile(profileId)
   const script = [
@@ -125,7 +145,7 @@ async function listRemoteOneDriveEntries(
     const timer = setTimeout(() => {
       proc.kill()
       reject(new Error('rclone list timed out'))
-    }, RCLONE_READ_TIMEOUT_MS)
+    }, timeoutMs)
     proc.stdout.on('data', (chunk: Buffer) => chunks.push(chunk))
     proc.stderr.on('data', (chunk: Buffer) => errs.push(chunk))
     proc.on('error', (err) => {
@@ -163,7 +183,8 @@ async function listRemoteOneDriveEntries(
 async function listRemoteOneDrivePdfs(
   profileId: string,
   cloudPath: string,
-  localRoot: string
+  localRoot: string,
+  timeoutMs = RCLONE_LIST_TIMEOUT_MS
 ): Promise<{ name: string; path: string }[]> {
   const profile = await getProfile(profileId)
   const script = [
@@ -179,7 +200,7 @@ async function listRemoteOneDrivePdfs(
     const timer = setTimeout(() => {
       proc.kill()
       reject(new Error('rclone pdf list timed out'))
-    }, RCLONE_READ_TIMEOUT_MS)
+    }, timeoutMs)
     proc.stdout.on('data', (chunk: Buffer) => chunks.push(chunk))
     proc.stderr.on('data', (chunk: Buffer) => errs.push(chunk))
     proc.on('error', (err) => {
@@ -382,16 +403,24 @@ export async function rfsList(uri: string): Promise<Entry[]> {
   } catch (e) {
     if (!cloudPath) throw e
   }
-  if (cloudPath) {
+  if (cloudPath && out.length > 0 && hasRecentRemoteLocalMutation(actualPath)) {
+    out = sortEntryArray(out)
+  } else if (cloudPath) {
     try {
-      out = mergeEntries(out, await listRemoteOneDriveEntries(profileId, cloudPath, actualPath))
+      out = mergeEntries(
+        out,
+        await listRemoteOneDriveEntries(
+          profileId,
+          cloudPath,
+          actualPath,
+          out.length > 0 ? RCLONE_LIST_MERGE_TIMEOUT_MS : RCLONE_LIST_TIMEOUT_MS
+        )
+      )
     } catch (e) {
       if (out.length === 0) throw e
     }
   } else {
-    out.sort((a, b) =>
-      a.isDir === b.isDir ? a.name.localeCompare(b.name, 'ko') : a.isDir ? -1 : 1
-    )
+    out = sortEntryArray(out)
   }
   prefetchRemoteOneDriveFiles(profileId, out.filter((e) => !e.isDir).map((e) => e.path))
   return out
@@ -806,6 +835,7 @@ export async function rfsWriteText(uri: string, content: string): Promise<void> 
   await new Promise<void>((resolve, reject) =>
     sftp.writeFile(path, content, { encoding: 'utf8' }, (err) => (err ? reject(err) : resolve()))
   )
+  noteRemoteLocalMutation(posix.dirname(path))
 }
 
 // 바이너리 업로드: destDirUri 하위에 name으로 저장 → 저장된 URI 반환
@@ -820,6 +850,7 @@ export async function rfsWriteBytes(
   await new Promise<void>((resolve, reject) =>
     sftp.writeFile(full, data, (err) => (err ? reject(err) : resolve()))
   )
+  noteRemoteLocalMutation(path)
   return makeRemote(profileId, full)
 }
 
@@ -848,6 +879,7 @@ export async function rfsMkdir(parentUri: string, name: string): Promise<void> {
   await new Promise<void>((resolve, reject) =>
     sftp.mkdir(posix.join(path, name), (err) => (err ? reject(err) : resolve()))
   )
+  noteRemoteLocalMutation(path)
 }
 
 // 빈 파일 생성 (이름 충돌 시 " (n)") → 새 경로(URI) 반환
@@ -871,6 +903,7 @@ export async function rfsCreateFile(
   await new Promise<void>((resolve, reject) =>
     sftp.writeFile(full, content, { encoding: 'utf8' }, (err) => (err ? reject(err) : resolve()))
   )
+  noteRemoteLocalMutation(path)
   return makeRemote(profileId, full)
 }
 
@@ -895,6 +928,8 @@ export async function rfsMove(
     await new Promise<void>((resolve, reject) =>
       sftp.rename(src.path, target, (err) => (err ? reject(err) : resolve()))
     )
+    noteRemoteLocalMutation(posix.dirname(src.path))
+    noteRemoteLocalMutation(dest.path)
     return { ok: true, path: makeRemote(src.profileId, target) }
   } catch (e) {
     return { ok: false, error: String(e) }
@@ -917,6 +952,8 @@ export async function rfsRename(
     await new Promise<void>((resolve, reject) =>
       sftp.rename(src.path, target, (err) => (err ? reject(err) : resolve()))
     )
+    noteRemoteLocalMutation(posix.dirname(src.path))
+    noteRemoteLocalMutation(target)
     return { ok: true, path: makeRemote(src.profileId, target) }
   } catch (e) {
     return { ok: false, error: String(e) }
@@ -928,6 +965,7 @@ export async function rfsDelete(uri: string): Promise<void> {
   const { profileId, path } = parseRemote(uri)
   const sftp = await getSftp(profileId)
   await removeRec(sftp, path)
+  noteRemoteLocalMutation(posix.dirname(path))
 }
 
 async function removeRec(sftp: SFTPWrapper, path: string): Promise<void> {

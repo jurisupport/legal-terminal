@@ -2,6 +2,8 @@ import { execFile } from 'child_process'
 import type { SshProfile } from './settings'
 
 const sshBin = process.platform === 'win32' ? 'ssh.exe' : 'ssh'
+const CLOUD_DIR_LIST_TIMEOUT_MS = 15_000
+const CLOUD_DIR_MERGE_TIMEOUT_MS = 2_500
 
 function shq(s: string): string {
   return `'${s.replace(/'/g, "'\\''")}'`
@@ -72,7 +74,11 @@ function mergeRemoteEntries(localEntries: RemoteEntry[], cloudEntries: RemoteEnt
   )
 }
 
-function listCloudRemoteDirs(profile: SshProfile, cwd: string): Promise<RemoteEntry[]> {
+function listCloudRemoteDirs(
+  profile: SshProfile,
+  cwd: string,
+  timeoutMs = CLOUD_DIR_LIST_TIMEOUT_MS
+): Promise<RemoteEntry[]> {
   const cloud = oneDriveCloudPath(cwd)
   if (!cloud) return Promise.resolve([])
   const args = sshArgs(profile, 20)
@@ -87,7 +93,7 @@ function listCloudRemoteDirs(profile: SshProfile, cwd: string): Promise<RemoteEn
     execFile(
       sshBin,
       args,
-      { timeout: 30000, windowsHide: true, maxBuffer: 4 * 1024 * 1024 },
+      { timeout: timeoutMs, windowsHide: true, maxBuffer: 4 * 1024 * 1024 },
       (err, stdout, stderr) => {
         if (err) {
           reject(new Error((stderr || err.message || 'rclone 목록 실패').trim()))
@@ -190,7 +196,18 @@ done
         })
       }
       try {
-        resolve({ ok: true, entries: mergeRemoteEntries(entries, await listCloudRemoteDirs(profile, cwd)), cwd })
+        resolve({
+          ok: true,
+          entries: mergeRemoteEntries(
+            entries,
+            await listCloudRemoteDirs(
+              profile,
+              cwd,
+              entries.length > 0 ? CLOUD_DIR_MERGE_TIMEOUT_MS : CLOUD_DIR_LIST_TIMEOUT_MS
+            )
+          ),
+          cwd
+        })
       } catch {
         entries.sort((a, b) =>
           a.isDir === b.isDir ? a.name.localeCompare(b.name, 'ko') : a.isDir ? -1 : 1
