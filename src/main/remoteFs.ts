@@ -380,12 +380,14 @@ export async function rfsList(uri: string): Promise<Entry[]> {
   const cloudPath = oneDriveCloudPath(path)
   let actualPath = path
   let out: Entry[] = []
+  let localListed = false
   try {
     actualPath = await resolveRemotePath(sftp, path)
     const list = await new Promise<{ filename: string; attrs: { mode: number; mtime?: number } }[]>(
       (resolve, reject) =>
         sftp.readdir(actualPath, (err, l) => (err ? reject(err) : resolve(l as never)))
     )
+    localListed = true
     for (const e of list) {
       if (e.filename.startsWith('.')) continue
       const remotePath = posix.join(actualPath, e.filename)
@@ -403,7 +405,7 @@ export async function rfsList(uri: string): Promise<Entry[]> {
   } catch (e) {
     if (!cloudPath) throw e
   }
-  if (cloudPath && out.length > 0 && hasRecentRemoteLocalMutation(actualPath)) {
+  if (cloudPath && hasRecentRemoteLocalMutation(actualPath)) {
     out = sortEntryArray(out)
   } else if (cloudPath) {
     try {
@@ -417,7 +419,8 @@ export async function rfsList(uri: string): Promise<Entry[]> {
         )
       )
     } catch (e) {
-      if (out.length === 0) throw e
+      if (!localListed && out.length === 0) throw e
+      out = sortEntryArray(out)
     }
   } else {
     out = sortEntryArray(out)
@@ -876,10 +879,12 @@ export async function rfsStat(
 export async function rfsMkdir(parentUri: string, name: string): Promise<void> {
   const { profileId, path } = parseRemote(parentUri)
   const sftp = await getSftp(profileId)
+  const full = posix.join(path, name)
   await new Promise<void>((resolve, reject) =>
-    sftp.mkdir(posix.join(path, name), (err) => (err ? reject(err) : resolve()))
+    sftp.mkdir(full, (err) => (err ? reject(err) : resolve()))
   )
   noteRemoteLocalMutation(path)
+  noteRemoteLocalMutation(full)
 }
 
 // 빈 파일 생성 (이름 충돌 시 " (n)") → 새 경로(URI) 반환
@@ -930,6 +935,7 @@ export async function rfsMove(
     )
     noteRemoteLocalMutation(posix.dirname(src.path))
     noteRemoteLocalMutation(dest.path)
+    noteRemoteLocalMutation(target)
     return { ok: true, path: makeRemote(src.profileId, target) }
   } catch (e) {
     return { ok: false, error: String(e) }
