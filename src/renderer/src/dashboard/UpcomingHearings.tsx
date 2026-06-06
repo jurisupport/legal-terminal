@@ -1,16 +1,8 @@
 import { useEffect, useState } from 'react'
 import type { JsCase, JsHearing } from '../env'
+import { formatHearingLabel } from './hearings'
 
 const WD = ['일', '월', '화', '수', '목', '금', '토']
-
-const HEARING_TYPE_KO: Record<string, string> = {
-  ruling: '선고',
-  hearing: '변론',
-  trial: '공판',
-  preparation: '변론준비',
-  mediation: '조정',
-  other: '기일'
-}
 
 interface Row {
   c: JsCase
@@ -84,7 +76,7 @@ export default function UpcomingHearings({
   return (
     <ul className="agenda">
       {rows.map((r, i) => {
-        const kind = r.h.note || HEARING_TYPE_KO[r.h.type] || r.h.type
+        const kind = formatHearingLabel(r.c, r.h)
         const court = r.c.court || ''
         // 장소(법정 호실)는 법원명이 있을 때만 의미가 있음
         const courtLine = court ? `${court}${r.h.location ? ` ${r.h.location}` : ''}` : ''

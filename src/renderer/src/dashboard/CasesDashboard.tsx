@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import type { JsCase, JsParty, SshProfile } from '../env'
+import { formatHearingLabel } from './hearings'
 
 const SIGNUP_URL = 'https://jurisupport.com/signup'
 const CASES_URL = 'https://jurisupport.com/cases'
@@ -32,7 +33,7 @@ function nextHearing(c: JsCase): { when: string; note: string } | null {
     (a, b) => new Date(a.dateTime).getTime() - new Date(b.dateTime).getTime()
   )
   const h = sorted.find((x) => new Date(x.dateTime).getTime() >= now) ?? sorted[sorted.length - 1]
-  return { when: fmtDate(h.dateTime), note: h.note || h.location || h.type }
+  return { when: fmtDate(h.dateTime), note: formatHearingLabel(c, h, { locationFirst: true }) }
 }
 
 function partyNames(parties: JsParty[], role: string): string {
@@ -271,7 +272,7 @@ export default function CasesDashboard({
                         .map((hh, i) => (
                           <div key={i} className="cd-row">
                             <span className="case-hdate">{fmtDate(hh.dateTime)}</span>{' '}
-                            {hh.note || hh.location || hh.type}
+                            {formatHearingLabel(det, hh, { locationFirst: true })}
                           </div>
                         ))}
                     </div>
