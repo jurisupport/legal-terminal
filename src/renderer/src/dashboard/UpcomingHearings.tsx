@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
-import type { JsCase, JsHearing } from '../env'
+import type { JsCase, JsHearing, SshProfile } from '../env'
 import { formatHearingLabel } from './hearings'
+import CaseContextMenu, { type CaseContextMenuState } from './CaseContextMenu'
 
 const WD = ['일', '월', '화', '수', '목', '금', '토']
 
@@ -20,13 +21,24 @@ function clientNames(c: JsCase): string {
 /** 좌측 사이드바: 모든 사건의 다가오는 기일을 날짜순으로. 클릭 → 그 사건 작업환경 열기. */
 export default function UpcomingHearings({
   nonce = 0,
-  onPick
+  onPick,
+  onOpenRemote,
+  sshProfiles = [],
+  defaultOpenProfileId,
+  onBrief,
+  onDraft
 }: {
   nonce?: number
   onPick: (c: JsCase) => void
+  onOpenRemote?: (c: JsCase, profile: SshProfile) => void
+  sshProfiles?: SshProfile[]
+  defaultOpenProfileId?: string
+  onBrief: (c: JsCase) => void
+  onDraft: (c: JsCase) => void
 }): JSX.Element {
   const [rows, setRows] = useState<Row[] | null>(null)
   const [hasTok, setHasTok] = useState(true)
+  const [menu, setMenu] = useState<CaseContextMenuState | null>(null)
 
   useEffect(() => {
     let alive = true
@@ -64,6 +76,16 @@ export default function UpcomingHearings({
     }
   }, [nonce])
 
+  useEffect(() => {
+    const close = (): void => setMenu(null)
+    document.addEventListener('click', close)
+    document.addEventListener('scroll', close, true)
+    return () => {
+      document.removeEventListener('click', close)
+      document.removeEventListener('scroll', close, true)
+    }
+  }, [])
+
   if (!hasTok) {
     return <p className="muted pad small">JuriSupport 연결 후 다가오는 기일이 표시됩니다.</p>
   }
@@ -74,33 +96,52 @@ export default function UpcomingHearings({
   const isSoon = (d: Date): boolean => (d.getTime() - today.getTime()) / 86400000 < 3
 
   return (
-    <ul className="agenda">
-      {rows.map((r, i) => {
-        const kind = formatHearingLabel(r.c, r.h)
-        const court = r.c.court || ''
-        // 장소(법정 호실)는 법원명이 있을 때만 의미가 있음
-        const courtLine = court ? `${court}${r.h.location ? ` ${r.h.location}` : ''}` : ''
-        const client = clientNames(r.c)
-        return (
-          <li
-            key={i}
-            className="agenda-row"
-            onClick={() => onPick(r.c)}
-            title={`${r.c.caseNumber ?? ''} ${r.c.caseName ?? ''}\n클릭 → 작업환경 열기`}
-          >
-            <span className={`agenda-date ${isSoon(r.when) ? 'soon' : ''}`}>
-              {r.when.getMonth() + 1}/{r.when.getDate()}
-              <span className="agenda-wd">({WD[r.when.getDay()]})</span>
-            </span>
-            <span className="agenda-body">
-              <span className="agenda-note">{kind}</span>
-              {courtLine && <span className="agenda-court">{courtLine}</span>}
-              {client && <span className="agenda-client">의뢰인 {client}</span>}
-              <span className="agenda-case">{r.c.caseName || r.c.caseNumber || ''}</span>
-            </span>
-          </li>
-        )
-      })}
-    </ul>
+    <>
+      <ul className="agenda">
+        {rows.map((r, i) => {
+          const kind = formatHearingLabel(r.c, r.h)
+          const court = r.c.court || ''
+          // 장소(법정 호실)는 법원명이 있을 때만 의미가 있음
+          const courtLine = court ? `${court}${r.h.location ? ` ${r.h.location}` : ''}` : ''
+          const client = clientNames(r.c)
+          return (
+            <li
+              key={i}
+              className="agenda-row"
+              onClick={() => onPick(r.c)}
+              onContextMenu={(e) => {
+                e.preventDefault()
+                e.stopPropagation()
+                setMenu({ x: e.clientX, y: e.clientY, c: r.c })
+              }}
+              title={`${r.c.caseNumber ?? ''} ${r.c.caseName ?? ''}\n클릭 → 작업환경 열기 · 우클릭 → 메뉴`}
+            >
+              <span className={`agenda-date ${isSoon(r.when) ? 'soon' : ''}`}>
+                {r.when.getMonth() + 1}/{r.when.getDate()}
+                <span className="agenda-wd">({WD[r.when.getDay()]})</span>
+              </span>
+              <span className="agenda-body">
+                <span className="agenda-note">{kind}</span>
+                {courtLine && <span className="agenda-court">{courtLine}</span>}
+                {client && <span className="agenda-client">의뢰인 {client}</span>}
+                <span className="agenda-case">{r.c.caseName || r.c.caseNumber || ''}</span>
+              </span>
+            </li>
+          )
+        })}
+      </ul>
+      {menu && (
+        <CaseContextMenu
+          menu={menu}
+          onClose={() => setMenu(null)}
+          onOpenWorkspace={onPick}
+          onOpenRemote={onOpenRemote}
+          sshProfiles={sshProfiles}
+          defaultOpenProfileId={defaultOpenProfileId}
+          onBrief={onBrief}
+          onDraft={onDraft}
+        />
+      )}
+    </>
   )
 }

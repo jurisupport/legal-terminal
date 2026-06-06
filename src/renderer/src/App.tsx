@@ -3257,6 +3257,11 @@ export default function App(): JSX.Element {
       onSync={sshProfiles.length > 0 ? openSync : undefined}
       onOpenWorkspace={() => void openConnOrLocal()}
       onOpenCase={openCaseWorkspace}
+      onOpenRemote={openCaseRemote}
+      sshProfiles={sshProfiles}
+      defaultOpenProfileId={defaultCaseOpenProfileId}
+      onBrief={briefCaseToClaude}
+      onDraft={draftCaseWithClaude}
       jsNonce={jsNonce}
       pendingCreate={pendingCreate}
       onRequestCreate={(dir, type) => setPendingCreate({ type, dir })}
@@ -4239,6 +4244,11 @@ function DocsPanel({
   onSync,
   onOpenWorkspace,
   onOpenCase,
+  onOpenRemote,
+  sshProfiles = [],
+  defaultOpenProfileId,
+  onBrief,
+  onDraft,
   jsNonce,
   pendingCreate,
   onRequestCreate,
@@ -4269,6 +4279,11 @@ function DocsPanel({
   onSync?: () => void
   onOpenWorkspace: () => void
   onOpenCase: (c: JsCase) => void
+  onOpenRemote?: (c: JsCase, profile: SshProfile) => void
+  sshProfiles?: SshProfile[]
+  defaultOpenProfileId?: string
+  onBrief: (c: JsCase) => void
+  onDraft: (c: JsCase) => void
   jsNonce: number
   pendingCreate: PendingCreateRequest | null
   onRequestCreate: (dir: string, type: 'file' | 'folder') => void
@@ -4482,7 +4497,17 @@ function DocsPanel({
               }}
             />
           ))}
-        {mode === 'cases' && <UpcomingHearings nonce={jsNonce} onPick={onOpenCase} />}
+        {mode === 'cases' && (
+          <UpcomingHearings
+            nonce={jsNonce}
+            onPick={onOpenCase}
+            onOpenRemote={onOpenRemote}
+            sshProfiles={sshProfiles}
+            defaultOpenProfileId={defaultOpenProfileId}
+            onBrief={onBrief}
+            onDraft={onDraft}
+          />
+        )}
       </div>
     </div>
   )

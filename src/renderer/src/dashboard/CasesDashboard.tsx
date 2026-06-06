@@ -1,10 +1,11 @@
 import { useEffect, useRef, useState } from 'react'
-import type { JsCase, JsParty, SshProfile } from '../env'
+import type { JsCase, SshProfile } from '../env'
 import { formatHearingLabel } from './hearings'
+import CaseContextMenu, { type CaseContextMenuState } from './CaseContextMenu'
+import { fmtDate, nextHearing, partyNames } from './caseUtils'
 
 const SIGNUP_URL = 'https://jurisupport.com/signup'
 const CASES_URL = 'https://jurisupport.com/cases'
-const caseWebUrl = (id: string): string => `https://jurisupport.com/cases/${id}`
 
 const CASE_TYPE_KO: Record<string, string> = {
   civil: '민사',
@@ -19,32 +20,7 @@ function statusKo(s: string): string {
   return { active: '진행중', closed: '종결', archived: '보관' }[s] ?? s
 }
 
-function fmtDate(iso?: string): string {
-  if (!iso) return ''
-  const d = new Date(iso)
-  if (isNaN(d.getTime())) return ''
-  return `${d.getMonth() + 1}/${d.getDate()}`
-}
-
-function nextHearing(c: JsCase): { when: string; note: string } | null {
-  if (!c.hearings?.length) return null
-  const now = Date.now()
-  const sorted = [...c.hearings].sort(
-    (a, b) => new Date(a.dateTime).getTime() - new Date(b.dateTime).getTime()
-  )
-  const h = sorted.find((x) => new Date(x.dateTime).getTime() >= now) ?? sorted[sorted.length - 1]
-  return { when: fmtDate(h.dateTime), note: formatHearingLabel(c, h, { locationFirst: true }) }
-}
-
-function partyNames(parties: JsParty[], role: string): string {
-  return parties
-    .filter((p) => p.role === role)
-    .map((p) => p.party.name)
-    .join(', ')
-}
-
 const openExt = (url: string): void => void window.lt.app.openExternal(url)
-const copy = (s: string): void => void navigator.clipboard.writeText(s)
 
 /** JuriSupport(본체) 사건 대시보드. 좌클릭=작업환경 열기, 우클릭=컨텍스트 메뉴. */
 export default function CasesDashboard({
@@ -70,13 +46,12 @@ export default function CasesDashboard({
   const [loading, setLoading] = useState(false)
   const [search, setSearch] = useState('')
   const [tokenInput, setTokenInput] = useState('')
-  const [menu, setMenu] = useState<{ x: number; y: number; c: JsCase } | null>(null)
+  const [menu, setMenu] = useState<CaseContextMenuState | null>(null)
   const [detail, setDetail] = useState<Record<string, JsCase>>({}) // 펼친 사건 상세
   const searchTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const defaultOpenProfile = defaultOpenProfileId
     ? sshProfiles.find((p) => p.id === defaultOpenProfileId)
     : undefined
-  const remoteMenuProfiles = sshProfiles.filter((p) => p.id !== defaultOpenProfile?.id)
   const openDefault = (c: JsCase): void => {
     if (defaultOpenProfile && onOpenRemote) onOpenRemote(c, defaultOpenProfile)
     else onOpenWorkspace(c)
@@ -291,65 +266,17 @@ export default function CasesDashboard({
       </div>
 
       {menu && (
-        <ul
-          className="ctx-menu"
-          style={{
-            left: Math.min(menu.x, window.innerWidth - 220),
-            top: Math.min(menu.y, window.innerHeight - 300)
-          }}
-          onMouseDown={(e) => e.stopPropagation()}
-        >
-          {(
-            [
-              ['✳ Claude에 브리핑 요청', () => onBrief(menu.c)],
-              ['✍ 준비서면 초안 (/brief-protocol)', () => onDraft(menu.c)],
-              ...(onOpenRemote && sshProfiles.length
-                  ? ([
-                      ...(defaultOpenProfile ? [['📁 로컬에서 열기', () => onOpenWorkspace(menu.c)]] : []),
-                      ...remoteMenuProfiles.map((p) => [
-                        `🔗 ${p.label}에서 열기`,
-                        () => onOpenRemote(menu.c, p)
-                      ])
-                    ] as [string, () => void][])
-                : []),
-              ['—', null],
-              ['🌐 JuriSupport에서 보기', () => openExt(caseWebUrl(menu.c.id))],
-              ['ℹ 상세 보기', () => toggleDetail(menu.c)],
-              ['—', null],
-              ['📋 사건번호 복사', () => copy(menu.c.caseNumber ?? '')],
-              [
-                '👤 당사자 복사',
-                () => {
-                  const cl = partyNames(menu.c.parties, 'client')
-                  const op = partyNames(menu.c.parties, 'opponent')
-                  copy([cl && `의뢰인: ${cl}`, op && `상대: ${op}`].filter(Boolean).join('\n'))
-                }
-              ],
-              [
-                '📅 다음 기일 복사',
-                () => {
-                  const nh = nextHearing(menu.c)
-                  copy(nh ? `${nh.when} ${nh.note}` : '')
-                }
-              ]
-            ] as [string, (() => void) | null][]
-          ).map(([label, act], i) =>
-            act === null ? (
-              <li key={i} className="ctx-sep" />
-            ) : (
-              <li
-                key={i}
-                className="ctx-item"
-                onClick={() => {
-                  act()
-                  setMenu(null)
-                }}
-              >
-                {label}
-              </li>
-            )
-          )}
-        </ul>
+        <CaseContextMenu
+          menu={menu}
+          onClose={() => setMenu(null)}
+          onOpenWorkspace={onOpenWorkspace}
+          onOpenRemote={onOpenRemote}
+          sshProfiles={sshProfiles}
+          defaultOpenProfileId={defaultOpenProfileId}
+          onBrief={onBrief}
+          onDraft={onDraft}
+          onDetail={toggleDetail}
+        />
       )}
     </div>
   )
