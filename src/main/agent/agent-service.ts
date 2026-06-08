@@ -1,6 +1,8 @@
 import type { IpcMain, WebContents } from 'electron'
 import { randomUUID } from 'crypto'
 import { spawn, type ChildProcessWithoutNullStreams } from 'child_process'
+import { existsSync } from 'fs'
+import { join } from 'path'
 import {
   query,
   type McpServerStatus,
@@ -88,6 +90,11 @@ const USER_DIALOG_TIMEOUT_MS = 30 * 60_000
 const MCP_STATUS_TIMEOUT_MS = 20_000
 const MIN_TEXT_OVERLAP = 4
 const sshBin = process.platform === 'win32' ? 'ssh.exe' : 'ssh'
+const CLAUDE_AGENT_SDK_BINARY_BY_PLATFORM: Partial<Record<NodeJS.Platform, string>> = {
+  darwin: 'claude',
+  linux: 'claude',
+  win32: 'claude.exe'
+}
 const CLAUDE_AUTH_ENV_KEYS = new Set([
   'ANTHROPIC_API_KEY',
   'ANTHROPIC_AUTH_TOKEN',
@@ -138,6 +145,23 @@ function shellListFlag(flag: string, values: string[] | undefined): string {
 
 function unsetClaudeAuthEnvCommand(): string {
   return `unset ${Array.from(CLAUDE_AUTH_ENV_KEYS).join(' ')}`
+}
+
+function packagedClaudeAgentSdkExecutable(): string | undefined {
+  const binaryName = CLAUDE_AGENT_SDK_BINARY_BY_PLATFORM[process.platform]
+  const resourcesPath = (process as NodeJS.Process & { resourcesPath?: string }).resourcesPath
+  if (!binaryName || !resourcesPath) return undefined
+
+  const packageName = `claude-agent-sdk-${process.platform}-${process.arch}`
+  const candidate = join(
+    resourcesPath,
+    'app.asar.unpacked',
+    'node_modules',
+    '@anthropic-ai',
+    packageName,
+    binaryName
+  )
+  return existsSync(candidate) ? candidate : undefined
 }
 
 function remoteClaudeCommand(session: AgentSession): string {
@@ -1478,6 +1502,7 @@ function startAgentTurn(session: AgentSession, input: AgentSendInput): void {
           tools: session.tools,
           allowedTools: session.allowedTools,
           disallowedTools: session.disallowedTools,
+          pathToClaudeCodeExecutable: packagedClaudeAgentSdkExecutable(),
           permissionMode: sdkPermissionMode(session.permissionMode),
           allowDangerouslySkipPermissions: session.permissionMode === 'bypassPermissions',
           canUseTool: (toolName, toolInput, permissionOptions) =>
@@ -1580,6 +1605,7 @@ export function inspectAgentMcpStatus(sessionId: string): AgentCommandResult {
           cwd: session.cwd,
           model: session.model,
           tools: [],
+          pathToClaudeCodeExecutable: packagedClaudeAgentSdkExecutable(),
           permissionMode: 'dontAsk',
           includeHookEvents: false,
           includePartialMessages: false,

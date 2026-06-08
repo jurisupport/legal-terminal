@@ -1,4 +1,5 @@
 const path = require('path')
+const { assertClaudeAgentSdkBinary } = require('./claudeAgentSdkBinary.cjs')
 const { assertNodePtyBinary, normalizeArch } = require('./nodePtyBinary.cjs')
 
 module.exports = async function afterPack(context) {
@@ -17,6 +18,13 @@ module.exports = async function afterPack(context) {
     nodeModulesDir,
     label: `packaged app (${context.electronPlatformName}-${arch})`
   })
+  const claudeSdkBinary = assertClaudeAgentSdkBinary({
+    platform: context.electronPlatformName,
+    arch,
+    nodeModulesDir,
+    label: `packaged app (${context.electronPlatformName}-${arch})`
+  })
 
   console.log(`[afterPack] Found ${expected.packageName}/${expected.binaryName}`)
+  console.log(`[afterPack] Found ${claudeSdkBinary.packageName}/${claudeSdkBinary.binaryName}`)
 }

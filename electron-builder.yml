@@ -10,10 +10,11 @@ files:
   - out/**
   - package.json
 
-# node-pty 네이티브 모듈은 asar 밖으로 풀어야 실행됨
+# node-pty와 Claude Agent SDK 네이티브 실행 파일은 asar 밖으로 풀어야 실행됨
 asar: true
 asarUnpack:
   - '**/node_modules/@lydell/**'
+  - '**/node_modules/@anthropic-ai/claude-agent-sdk-*/**'
   - '**/*.node'
 afterPack: build/afterPack.cjs
 
