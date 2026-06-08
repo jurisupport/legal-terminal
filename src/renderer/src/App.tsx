@@ -4138,9 +4138,13 @@ export default function App(): JSX.Element {
 const SELECTION_ACTION_TARGET_SELECTOR = '.text-doc, .file-view, .pdf-viewer, .textLayer, .csv-wrap'
 const SELECTION_ACTION_EXCLUDE_SELECTOR =
   '.terminal-surface, .xterm, .agent-panel, .tabs, .sidebar, .activitybar, .statusbar, button, input, textarea, select'
+const SELECTION_ACTION_CONTROL_SELECTOR = '.sel-ask, .ctx-menu'
 
 const elementFromSelectionNode = (node: Node | null | undefined): Element | null =>
   node instanceof Element ? node : (node?.parentElement ?? null)
+
+const isSelectionActionControl = (target: EventTarget | null): boolean =>
+  target instanceof Element && !!target.closest(SELECTION_ACTION_CONTROL_SELECTOR)
 
 const canShowSelectionActions = (element: Element | null): boolean => {
   if (!element) return false
@@ -4302,6 +4306,7 @@ function SelectionAsk({ onAsk }: { onAsk: (text: string) => void }): JSX.Element
     }
     const onPointerDown = (event: PointerEvent): void => {
       if (!event.isPrimary || event.button !== 0) return
+      if (isSelectionActionControl(event.target)) return
       pointerSelecting = true
       pendingEditorDetail = null
       setBox(null)
@@ -4355,6 +4360,10 @@ function SelectionAsk({ onAsk }: { onAsk: (text: string) => void }): JSX.Element
     <button
       className="sel-ask"
       style={{ left: box.x, top: box.y }}
+      onPointerDown={(e) => {
+        e.preventDefault()
+        e.stopPropagation()
+      }}
       onMouseDown={(e) => {
         e.preventDefault()
         e.stopPropagation()
