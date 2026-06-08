@@ -31,8 +31,6 @@ const MARKS = new Set([
   'CodeMark',
   'QuoteMark',
   'StrikethroughMark',
-  'LinkMark',
-  'URL',
   'CodeInfo'
 ])
 
@@ -98,6 +96,23 @@ class HtmlBreakWidget extends WidgetType {
   toDOM(): HTMLElement {
     return document.createElement('br')
   }
+}
+
+function decorateInactiveLinkMark(
+  token: string,
+  from: number,
+  to: number,
+  deco: Range<Decoration>[]
+): boolean {
+  if (token === '(') {
+    deco.push(Decoration.replace({ widget: new TextWidget(' (') }).range(from, to))
+    return true
+  }
+  if (token === '[' || token === ']' || token === '<' || token === '>') {
+    deco.push(hidden.range(from, to))
+    return true
+  }
+  return token === ')'
 }
 
 function decodeEntity(src: string): string | null {
@@ -477,6 +492,12 @@ function build(state: EditorState): DecorationSet {
         else if (name === 'Strikethrough') deco.push(strike.range(node.from, node.to))
         else if (name === 'InlineCode') deco.push(code.range(node.from, node.to))
         else if (name === 'Link') deco.push(link.range(node.from, node.to))
+        else if (name === 'URL') deco.push(link.range(node.from, node.to))
+
+        if (name === 'LinkMark' && !lineActive) {
+          const token = state.doc.sliceString(node.from, node.to)
+          if (decorateInactiveLinkMark(token, node.from, node.to, deco)) return undefined
+        }
 
         if (MARKS.has(name) && !lineActive && node.to > node.from) {
           deco.push(hidden.range(node.from, node.to))

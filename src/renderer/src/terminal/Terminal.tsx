@@ -285,6 +285,8 @@ export default function Terminal({
   const findOpenRef = useRef(false)
   const findQueryRef = useRef('')
   const findIndexRef = useRef(-1)
+  const visibleRef = useRef(visible)
+  visibleRef.current = visible
   const copyFeedbackSeq = useRef(0)
   const copyFeedbackTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const fileDropHintTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -521,6 +523,7 @@ export default function Terminal({
       // 복사/붙여넣기 키 처리. true=xterm/pty로 전달, false=가로채서 기본동작 차단.
       term.attachCustomKeyEventHandler((e) => {
         if (e.type !== 'keydown') return true
+        if (!visibleRef.current) return false
         const k = e.key.toLowerCase()
         if (k === 'c' && e.ctrlKey && !e.metaKey && term.hasSelection() && (e.shiftKey || !e.altKey)) {
           copySelection()
@@ -753,7 +756,11 @@ export default function Terminal({
 
   // 보이게 될 때 재핏 + 포커스
   useEffect(() => {
-    if (!visible) return
+    if (!visible) {
+      const active = document.activeElement
+      if (active instanceof HTMLElement && hostRef.current?.contains(active)) active.blur()
+      return
+    }
     const raf = requestAnimationFrame(() => {
       const term = termRef.current
       const fit = fitRef.current

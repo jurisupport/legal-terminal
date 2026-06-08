@@ -361,6 +361,10 @@ const closestHTMLElement = (element: HTMLElement | null, selector: string): HTML
   (element?.closest(selector) as HTMLElement | null) ?? null
 const datasetSide = (value?: string): DockSide | undefined =>
   value === 'left' || value === 'right' ? value : undefined
+const shouldFocusDocContainer = (target: HTMLElement): boolean =>
+  !target.closest(
+    'input, textarea, button, select, a, [contenteditable="true"], [role="button"], [role="textbox"], [tabindex]:not([tabindex="-1"])'
+  )
 
 const formatWorkspaceSavedAt = (savedAt: string): string => {
   const date = new Date(savedAt)
@@ -3665,7 +3669,12 @@ export default function App(): JSX.Element {
               className="doc-content"
               data-doc-id={activeDocForPane.id}
               data-work-side={side}
-              onMouseDown={() => activateDocTab(activeDocForPane.id)}
+              tabIndex={-1}
+              onMouseDown={(e) => {
+                activateDocTab(activeDocForPane.id)
+                const target = e.target as HTMLElement
+                if (shouldFocusDocContainer(target)) e.currentTarget.focus()
+              }}
             >
               {renderDocContent(activeDocForPane)}
             </div>
@@ -3735,7 +3744,16 @@ export default function App(): JSX.Element {
       <div className="shell-doconly" {...shellDragProps}>
         <div className="body-col">
           {docTabBar}
-          <div className="doc-content" data-doc-id={activeDocTab?.id} data-work-side="left">
+          <div
+            className="doc-content"
+            data-doc-id={activeDocTab?.id}
+            data-work-side="left"
+            tabIndex={-1}
+            onMouseDown={(e) => {
+              const target = e.target as HTMLElement
+              if (shouldFocusDocContainer(target)) e.currentTarget.focus()
+            }}
+          >
             {renderDocContent(activeDocTab)}
           </div>
         </div>

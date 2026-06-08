@@ -8,6 +8,9 @@ const MCP_URL = 'https://api.jurisupport.com/mcp'
 
 let sessionId: string | null = null
 
+const CASES_PAGE_LIMIT = 100
+const CASES_MAX_PAGES = 20
+
 // ── 토큰 저장/조회 (safeStorage 암호화, 불가 시 평문 폴백) ──
 export async function setToken(token: string): Promise<void> {
   let enc: string
@@ -160,15 +163,74 @@ export interface JsCase {
   _count?: { parties: number; hearings: number; progresses: number; documents: number }
 }
 
-export async function listCases(params: {
+export interface ListCasesParams {
   page?: number
   limit?: number
   search?: string
   status?: string
   caseType?: string
-}): Promise<JsCase[]> {
-  const r = await callTool('list_cases', { page: 1, limit: 50, ...params })
-  return Array.isArray(r) ? (r as JsCase[]) : []
+}
+
+function normalizeCaseList(r: unknown): JsCase[] {
+  if (Array.isArray(r)) return r as JsCase[]
+  if (!r || typeof r !== 'object') return []
+
+  const obj = r as Record<string, unknown>
+  for (const key of ['cases', 'items', 'data', 'results']) {
+    const value = obj[key]
+    if (Array.isArray(value)) return value as JsCase[]
+  }
+  return []
+}
+
+function caseKey(c: JsCase): string {
+  return [c.id, c.caseNumber, c.court, c.caseName].filter(Boolean).join('\0')
+}
+
+async function listCasePage(params: ListCasesParams): Promise<JsCase[]> {
+  return normalizeCaseList(await callTool('list_cases', params as Record<string, unknown>))
+}
+
+export async function listCases(params: ListCasesParams = {}): Promise<JsCase[]> {
+  const { page, limit, ...filters } = params
+  const hasExplicitPaging = page !== undefined || limit !== undefined
+
+  if (hasExplicitPaging) {
+    return listCasePage({
+      page: page ?? 1,
+      limit: limit ?? CASES_PAGE_LIMIT,
+      ...filters
+    })
+  }
+
+  const cases: JsCase[] = []
+  const seen = new Set<string>()
+
+  for (let pageNo = 1; pageNo <= CASES_MAX_PAGES; pageNo++) {
+    let pageCases: JsCase[]
+    try {
+      pageCases = await listCasePage({ page: pageNo, limit: CASES_PAGE_LIMIT, ...filters })
+    } catch (error) {
+      if (pageNo === 1) throw error
+      console.warn('[jurisupport] stopped paginating list_cases', error)
+      break
+    }
+
+    if (pageCases.length === 0) break
+
+    let added = 0
+    for (const c of pageCases) {
+      const key = caseKey(c)
+      if (key && seen.has(key)) continue
+      if (key) seen.add(key)
+      cases.push(c)
+      added++
+    }
+
+    if (added === 0 || pageCases.length < CASES_PAGE_LIMIT) break
+  }
+
+  return cases
 }
 
 export async function getCase(id: string): Promise<JsCase | null> {

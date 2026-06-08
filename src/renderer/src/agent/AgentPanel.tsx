@@ -613,23 +613,6 @@ function diffTitle(prefix: string, filePath?: string): string {
   return filePath ? `${prefix} · ${filePath.split(/[\\/]/).pop()}` : prefix
 }
 
-function diffOpenRequestFromEvent(event: AgentEvent): AgentDiffOpenRequest | null {
-  if (event.type === 'diff:proposed') {
-    const proposal = asRecord(event.proposal)
-    const id = stringValue(proposal?.proposalId)
-    const diff = diffViewFromRecord(proposal)
-    if (!id || !diff) return null
-    return { id, title: diffTitle('변경 제안', diff.filePath), diff }
-  }
-  if (event.type === 'diff:applied') {
-    const id = stringValue(event.proposalId)
-    const diff = diffViewFromRecord(event)
-    if (!id || !diff) return null
-    return { id, title: diffTitle('변경 적용', diff.filePath), diff }
-  }
-  return null
-}
-
 const upsertItem = (
   items: TimelineItem[],
   id: string,
@@ -1284,8 +1267,6 @@ export default function AgentPanel({
           void window.lt.app.openExternal(url)
         }
       }
-      const diffRequest = diffOpenRequestFromEvent(event)
-      if (diffRequest) onOpenDiff?.(diffRequest)
       if (event.type !== 'raw') setItems((prev) => reduceTimeline(prev, event))
       if (event.type === 'status') {
         const next = stringValue(event.status)
@@ -1307,7 +1288,7 @@ export default function AgentPanel({
       }
     })
     return off
-  }, [id, onOpenDiff, onStatus])
+  }, [id, onStatus])
 
   useEffect(() => {
     if (createdRef.current) return
@@ -1601,6 +1582,18 @@ export default function AgentPanel({
     const result = await window.lt.agent.removeQueued(id, queueId)
     if (!result.ok) setError(result.error ?? '대기 중인 지시를 삭제할 수 없습니다.')
   }
+
+  const openDiffFromItem = useCallback(
+    (item: TimelineItem): void => {
+      if (!item.diff || !onOpenDiff) return
+      onOpenDiff({
+        id: item.id,
+        title: item.title ?? diffTitle('변경 비교', item.diff.filePath),
+        diff: item.diff
+      })
+    },
+    [onOpenDiff]
+  )
 
   const resolvePermission = async (
     requestId: string,
@@ -2085,7 +2078,20 @@ export default function AgentPanel({
                   {cardStatus && <span className="agent-card-status">{cardStatus}</span>}
                 </span>
               </div>
-              {item.kind === 'diff' && <DiffPreview diff={item.diff} fallbackText={item.text} />}
+              {item.kind === 'diff' && item.diff && onOpenDiff && (
+                <div className="agent-card-actions">
+                  <button
+                    type="button"
+                    title="변경 전후 비교를 문서 탭에서 열기"
+                    onClick={() => openDiffFromItem(item)}
+                  >
+                    비교 보기
+                  </button>
+                </div>
+              )}
+              {item.kind === 'diff' && !item.diff && item.text && (
+                <pre className="agent-card-text">{item.text}</pre>
+              )}
               {item.kind !== 'diff' &&
                 item.text &&
                 (item.kind === 'assistant' ? (

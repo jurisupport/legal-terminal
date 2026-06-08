@@ -18,6 +18,20 @@ function clientNames(c: JsCase): string {
     .join(', ')
 }
 
+function rowSortKey(c: JsCase): string {
+  return [c.court, c.caseNumber, c.caseName, c.id].filter(Boolean).join(' ')
+}
+
+function compareRows(a: Row, b: Row): number {
+  const byTime = a.when.getTime() - b.when.getTime()
+  if (byTime !== 0) return byTime
+  return rowSortKey(a.c).localeCompare(rowSortKey(b.c), 'ko-KR')
+}
+
+function rowKey(r: Row, i: number): string {
+  return [r.c.id, r.h.dateTime, r.h.type, r.h.location, r.h.note, i].filter(Boolean).join('|')
+}
+
 /** 좌측 사이드바: 모든 사건의 다가오는 기일을 날짜순으로. 클릭 → 그 사건 작업환경 열기. */
 export default function UpcomingHearings({
   nonce = 0,
@@ -67,7 +81,7 @@ export default function UpcomingHearings({
         setRows(
           out
             .filter((x) => x.when.getTime() >= cutoff)
-            .sort((a, b) => a.when.getTime() - b.when.getTime())
+            .sort(compareRows)
         )
       })
     })
@@ -106,7 +120,7 @@ export default function UpcomingHearings({
           const client = clientNames(r.c)
           return (
             <li
-              key={i}
+              key={rowKey(r, i)}
               className="agenda-row"
               onClick={() => onPick(r.c)}
               onContextMenu={(e) => {

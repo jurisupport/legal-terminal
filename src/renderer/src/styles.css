@@ -17,9 +17,9 @@
   --fg-muted: #858585;
   --accent: #0e639c;
   --accent-fg: #ffffff;
-  --link: #8cc8ff;
-  --link-hover: #b9ddff;
-  --link-muted: #a7d4ff;
+  --link: #9ee7ff;
+  --link-hover: #d1f4ff;
+  --link-muted: #bdeeff;
   --statusbar: #007acc;
   --tab-active: #1e1e1e;
   --tab-inactive: #2d2d2d;
@@ -701,9 +701,10 @@ body {
 }
 .cm-md-link {
   color: var(--link);
+  font-weight: 500;
   text-decoration: underline;
-  text-decoration-color: color-mix(in srgb, var(--link) 72%, transparent);
-  text-decoration-thickness: 1px;
+  text-decoration-color: color-mix(in srgb, var(--link) 88%, transparent);
+  text-decoration-thickness: 1.5px;
   text-underline-offset: 2px;
 }
 .cm-md-heading {
@@ -883,9 +884,10 @@ body {
 }
 .md-body a {
   color: var(--link);
+  font-weight: 500;
   text-decoration: underline;
-  text-decoration-color: color-mix(in srgb, var(--link) 72%, transparent);
-  text-decoration-thickness: 1px;
+  text-decoration-color: color-mix(in srgb, var(--link) 88%, transparent);
+  text-decoration-thickness: 1.5px;
   text-underline-offset: 2px;
 }
 .md-body a:hover {

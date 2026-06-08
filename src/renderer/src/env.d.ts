@@ -302,6 +302,8 @@ export interface LtApi {
     setToken: (token: string) => Promise<void>
     hasToken: () => Promise<boolean>
     listCases: (params?: {
+      page?: number
+      limit?: number
       search?: string
       status?: string
       caseType?: string

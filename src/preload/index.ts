@@ -396,7 +396,13 @@ const api = {
     setToken: (token: string): Promise<void> => ipcRenderer.invoke('js:setToken', token),
     hasToken: (): Promise<boolean> => ipcRenderer.invoke('js:hasToken'),
     listCases: (
-      params?: { search?: string; status?: string; caseType?: string }
+      params?: {
+        page?: number
+        limit?: number
+        search?: string
+        status?: string
+        caseType?: string
+      }
     ): Promise<{ ok: boolean; cases?: unknown[]; error?: string }> =>
       ipcRenderer.invoke('js:listCases', params ?? {}),
     getCase: (id: string): Promise<{ ok: boolean; case?: unknown; error?: string }> =>
