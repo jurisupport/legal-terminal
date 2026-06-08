@@ -55,6 +55,8 @@ interface TerminalTabPayload {
   caseNumber?: string
   caseName?: string
   client?: string
+  opponent?: string
+  partyNames?: string
   sessionTitle?: string
   renamed?: boolean
   createdAt?: number
@@ -101,7 +103,7 @@ interface WorkspaceSnapshot {
   savedAt: string
   workspaceId?: string
   workspaceLabel?: string
-  mode: 'explorer' | 'cases' | 'viewer'
+  mode: 'explorer' | 'cases' | 'viewer' | 'todos'
   docs: WorkspaceDocTabPayload[]
   terminals: TerminalTabPayload[]
   activeDoc?: string
@@ -219,6 +221,79 @@ interface AppSettings {
   sshProfiles?: SshProfile[]
 }
 
+interface JsTodoProgress {
+  id?: string
+  text: string
+  createdAt?: string
+  source?: string
+  terminalId?: string
+  cwd?: string
+}
+
+interface JsTodo {
+  id: string
+  title: string
+  status: string
+  priority?: string | null
+  dueDate?: string | null
+  caseId?: string | null
+  court?: string | null
+  caseNumber?: string | null
+  caseName?: string | null
+  client?: string | null
+  opponent?: string | null
+  partyNames?: string | null
+  notes?: string | null
+  progress?: JsTodoProgress[]
+  createdAt?: string
+  updatedAt?: string
+  completedAt?: string | null
+}
+
+interface ListTodosParams {
+  page?: number
+  limit?: number
+  search?: string
+  status?: string
+  caseId?: string
+  includeArchived?: boolean
+}
+
+interface TodoMutationInput {
+  title?: string
+  status?: string
+  priority?: string
+  dueDate?: string | null
+  caseId?: string
+  court?: string
+  caseNumber?: string
+  caseName?: string
+  client?: string
+  opponent?: string
+  partyNames?: string
+  notes?: string
+}
+
+interface TodoTerminalContext {
+  terminalId?: string
+  cwd?: string
+  jsId?: string
+  court?: string
+  caseNumber?: string
+  caseName?: string
+  client?: string
+  opponent?: string
+  partyNames?: string
+}
+
+interface TodoTerminalResult {
+  ok: boolean
+  message: string
+  changed?: boolean
+  todo?: JsTodo | null
+  todos?: JsTodo[]
+}
+
 type AgentPermissionMode = 'ask' | 'plan' | 'acceptEdits' | 'bypassPermissions' | 'dontAsk'
 
 interface AgentAttachment {
@@ -282,6 +357,8 @@ const api = {
     openExternal: (url: string): Promise<void> => ipcRenderer.invoke('app:openExternal', url),
     newWindow: (): Promise<void> => ipcRenderer.invoke('window:new'),
     closeWindow: (): Promise<void> => ipcRenderer.invoke('window:close'),
+    setWindowTitle: (title: string): Promise<void> =>
+      ipcRenderer.invoke('app:setWindowTitle', title),
     requestAttention: (reason?: 'done' | 'question'): void =>
       ipcRenderer.send('app:requestAttention', { reason }),
     onCloseActiveTab: (cb: () => void): (() => void) => {
@@ -408,6 +485,38 @@ const api = {
     getCase: (id: string): Promise<{ ok: boolean; case?: unknown; error?: string }> =>
       ipcRenderer.invoke('js:getCase', id)
   },
+  todo: {
+    list: (params?: ListTodosParams): Promise<{ ok: boolean; todos?: JsTodo[]; error?: string }> =>
+      ipcRenderer.invoke('todo:list', params ?? {}),
+    get: (id: string): Promise<{ ok: boolean; todo?: JsTodo | null; error?: string }> =>
+      ipcRenderer.invoke('todo:get', id),
+    create: (input: TodoMutationInput): Promise<{ ok: boolean; todo?: JsTodo | null; error?: string }> =>
+      ipcRenderer.invoke('todo:create', input),
+    update: (
+      id: string,
+      patch: TodoMutationInput
+    ): Promise<{ ok: boolean; todo?: JsTodo | null; error?: string }> =>
+      ipcRenderer.invoke('todo:update', { id, patch }),
+    complete: (
+      id: string,
+      progressText?: string,
+      context?: TodoTerminalContext
+    ): Promise<{ ok: boolean; todo?: JsTodo | null; error?: string }> =>
+      ipcRenderer.invoke('todo:complete', { id, progressText, context }),
+    archive: (id: string): Promise<{ ok: boolean; todo?: JsTodo | null; error?: string }> =>
+      ipcRenderer.invoke('todo:archive', id),
+    appendProgress: (
+      id: string,
+      text: string,
+      context?: TodoTerminalContext
+    ): Promise<{ ok: boolean; todo?: JsTodo | null; error?: string }> =>
+      ipcRenderer.invoke('todo:appendProgress', { id, text, context }),
+    applyTerminalCommand: (
+      command: string,
+      context?: TodoTerminalContext
+    ): Promise<TodoTerminalResult> =>
+      ipcRenderer.invoke('todo:applyTerminalCommand', { command, context })
+  },
   ssh: {
     // 원격 디렉터리 목록 (사건 폴더 선택용). 키/agent 인증 시에만 성공.
     listDir: (
@@ -468,6 +577,8 @@ const api = {
       ipcRenderer.invoke('agent:create', opts),
     send: (sessionId: string, input: AgentSendInput): Promise<AgentCommandResult> =>
       ipcRenderer.invoke('agent:send', { sessionId, input }),
+    mcpStatus: (sessionId: string): Promise<AgentCommandResult> =>
+      ipcRenderer.invoke('agent:mcpStatus', sessionId),
     promoteQueued: (sessionId: string, queueId: string): Promise<AgentCommandResult> =>
       ipcRenderer.invoke('agent:promoteQueued', { sessionId, queueId }),
     removeQueued: (sessionId: string, queueId: string): Promise<AgentCommandResult> =>

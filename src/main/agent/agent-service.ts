@@ -3,6 +3,7 @@ import { randomUUID } from 'crypto'
 import { spawn, type ChildProcessWithoutNullStreams } from 'child_process'
 import {
   query,
+  type McpServerStatus,
   type PermissionMode,
   type PermissionResult,
   type UserDialogRequest,
@@ -84,6 +85,7 @@ const READ_ONLY_TOOLS = new Set([
 const EDIT_TOOLS = new Set(['Edit', 'MultiEdit', 'Write', 'NotebookEdit'])
 const PERMISSION_TIMEOUT_MS = 5 * 60_000
 const USER_DIALOG_TIMEOUT_MS = 30 * 60_000
+const MCP_STATUS_TIMEOUT_MS = 20_000
 const MIN_TEXT_OVERLAP = 4
 const sshBin = process.platform === 'win32' ? 'ssh.exe' : 'ssh'
 const CLAUDE_AUTH_ENV_KEYS = new Set([
@@ -324,6 +326,89 @@ function stringValue(value: unknown): string | undefined {
 
 function unknownArray(value: unknown): unknown[] {
   return Array.isArray(value) ? value : []
+}
+
+async function* waitForAbort(signal: AbortSignal): AsyncGenerator<never, void, unknown> {
+  if (signal.aborted) return
+  await new Promise<void>((resolve) => signal.addEventListener('abort', () => resolve(), { once: true }))
+}
+
+function withTimeout<T>(promise: Promise<T>, label: string, timeoutMs = MCP_STATUS_TIMEOUT_MS): Promise<T> {
+  let timer: NodeJS.Timeout | undefined
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${label} 시간이 초과되었습니다.`)), timeoutMs)
+  })
+  return Promise.race([promise, timeout]).finally(() => {
+    if (timer) clearTimeout(timer)
+  })
+}
+
+const mcpStatusLabels: Record<McpServerStatus['status'], string> = {
+  connected: '연결됨',
+  failed: '실패',
+  'needs-auth': '인증 필요',
+  pending: '보류',
+  disabled: '비활성'
+}
+
+function mcpConfigSummary(config: McpServerStatus['config'] | undefined): string | undefined {
+  const record = asRecord(config)
+  if (!record) return undefined
+  const type = stringValue(record.type)
+  const url = stringValue(record.url)
+  const command = stringValue(record.command)
+  const args = unknownArray(record.args).filter((item): item is string => typeof item === 'string')
+
+  if (url) return [type, url].filter(Boolean).join(' ')
+  if (command) return [type, command, ...args].filter(Boolean).join(' ')
+  return type
+}
+
+function formatMcpStatus(statuses: McpServerStatus[]): string {
+  if (statuses.length === 0) {
+    return 'MCP 서버가 설정되어 있지 않습니다.'
+  }
+
+  const counts = statuses.reduce(
+    (acc, server) => {
+      acc[server.status] += 1
+      return acc
+    },
+    {
+      connected: 0,
+      failed: 0,
+      'needs-auth': 0,
+      pending: 0,
+      disabled: 0
+    } satisfies Record<McpServerStatus['status'], number>
+  )
+  const summary = [
+    `총 ${statuses.length}개`,
+    `연결됨 ${counts.connected}개`,
+    `실패 ${counts.failed}개`,
+    `인증 필요 ${counts['needs-auth']}개`,
+    `보류 ${counts.pending}개`,
+    `비활성 ${counts.disabled}개`
+  ].join(', ')
+
+  const lines = [`MCP 상태를 확인했습니다. ${summary}.`, '']
+  for (const server of statuses) {
+    lines.push(`### ${server.name}`)
+    lines.push(`- 상태: ${mcpStatusLabels[server.status]}`)
+    if (server.scope) lines.push(`- 범위: ${server.scope}`)
+    const config = mcpConfigSummary(server.config)
+    if (config) lines.push(`- 설정: ${config}`)
+    if (server.serverInfo) {
+      lines.push(`- 서버: ${server.serverInfo.name} ${server.serverInfo.version}`)
+    }
+    if (server.error) lines.push(`- 오류: ${server.error}`)
+    if (server.tools?.length) {
+      const tools = server.tools.map((tool) => tool.name).join(', ')
+      lines.push(`- 도구: ${tools}`)
+    }
+    lines.push('')
+  }
+  return lines.join('\n').trim()
 }
 
 function diffEditsFromInput(input: Record<string, unknown>): { oldString?: string; newString?: string }[] {
@@ -1462,6 +1547,72 @@ export function sendAgentMessage(sessionId: string, input: AgentSendInput): Agen
   return { ok: true }
 }
 
+export function inspectAgentMcpStatus(sessionId: string): AgentCommandResult {
+  const session = sessions.get(sessionId)
+  if (!session) return { ok: false, error: 'Agent 세션을 찾을 수 없습니다.' }
+  if (session.source === 'ssh') {
+    return { ok: false, error: '원격 Agent의 MCP 상태 확인은 아직 지원하지 않습니다.' }
+  }
+  if (session.running) {
+    return { ok: false, error: 'Agent 작업이 끝난 뒤 /mcp를 실행해 주세요.' }
+  }
+
+  const userMessageId = randomUUID()
+  const assistantMessageId = randomUUID()
+  const abortController = new AbortController()
+  session.running = abortController
+  emit(session, {
+    type: 'message:user',
+    sessionId,
+    messageId: userMessageId,
+    text: '/mcp',
+    attachments: []
+  })
+  emit(session, { type: 'status', sessionId, status: 'working' })
+
+  void (async () => {
+    let diagnostic: ReturnType<typeof query> | undefined
+    try {
+      diagnostic = query({
+        prompt: waitForAbort(abortController.signal),
+        options: {
+          abortController,
+          cwd: session.cwd,
+          model: session.model,
+          tools: [],
+          permissionMode: 'dontAsk',
+          includeHookEvents: false,
+          includePartialMessages: false,
+          env: cleanEnv()
+        }
+      })
+      await withTimeout(diagnostic.initializationResult(), 'MCP 초기화')
+      const statuses = await withTimeout(diagnostic.mcpServerStatus(), 'MCP 상태 확인')
+      if (abortController.signal.aborted) return
+      appendAssistantText(session, assistantMessageId, formatMcpStatus(statuses))
+      completeAssistant(session, assistantMessageId)
+      emit(session, { type: 'status', sessionId, status: 'done' })
+      emit(session, { type: 'status', sessionId, status: 'idle' })
+    } catch (error) {
+      if (abortController.signal.aborted) return
+      emit(session, {
+        type: 'error',
+        sessionId,
+        message: error instanceof Error ? error.message : String(error),
+        recoverable: true
+      })
+      emit(session, { type: 'status', sessionId, status: 'error' })
+    } finally {
+      diagnostic?.close()
+      abortController.abort()
+      if (session.running === abortController) session.running = undefined
+      startNextQueuedMessage(session)
+    }
+  })()
+
+  return { ok: true }
+}
+
 function renderPrompt(input: AgentSendInput): string {
   const attachments = input.attachments ?? []
   const text =
@@ -1587,6 +1738,7 @@ export function registerAgentIpc(ipcMain: IpcMain): void {
   ipcMain.handle('agent:send', (_e, p: { sessionId: string; input: AgentSendInput }) =>
     sendAgentMessage(p.sessionId, p.input)
   )
+  ipcMain.handle('agent:mcpStatus', (_e, sessionId: string) => inspectAgentMcpStatus(sessionId))
   ipcMain.handle('agent:promoteQueued', (_e, p: { sessionId: string; queueId: string }) =>
     promoteQueuedAgentMessage(p.sessionId, p.queueId)
   )

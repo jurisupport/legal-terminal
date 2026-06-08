@@ -53,6 +53,8 @@ export interface TerminalTabPayload {
   caseNumber?: string
   caseName?: string
   client?: string
+  opponent?: string
+  partyNames?: string
   sessionTitle?: string
   renamed?: boolean
   createdAt?: number
@@ -99,7 +101,7 @@ export interface WorkspaceSnapshot {
   savedAt: string
   workspaceId?: string
   workspaceLabel?: string
-  mode: 'explorer' | 'cases' | 'viewer'
+  mode: 'explorer' | 'cases' | 'viewer' | 'todos'
   docs: WorkspaceDocTabPayload[]
   terminals: TerminalTabPayload[]
   activeDoc?: string
@@ -297,6 +299,79 @@ export interface JsCase {
   _count?: { parties: number; hearings: number; progresses: number; documents: number }
 }
 
+export interface JsTodoProgress {
+  id?: string
+  text: string
+  createdAt?: string
+  source?: string
+  terminalId?: string
+  cwd?: string
+}
+
+export interface JsTodo {
+  id: string
+  title: string
+  status: string
+  priority?: string | null
+  dueDate?: string | null
+  caseId?: string | null
+  court?: string | null
+  caseNumber?: string | null
+  caseName?: string | null
+  client?: string | null
+  opponent?: string | null
+  partyNames?: string | null
+  notes?: string | null
+  progress?: JsTodoProgress[]
+  createdAt?: string
+  updatedAt?: string
+  completedAt?: string | null
+}
+
+export interface ListTodosParams {
+  page?: number
+  limit?: number
+  search?: string
+  status?: string
+  caseId?: string
+  includeArchived?: boolean
+}
+
+export interface TodoMutationInput {
+  title?: string
+  status?: string
+  priority?: string
+  dueDate?: string | null
+  caseId?: string
+  court?: string
+  caseNumber?: string
+  caseName?: string
+  client?: string
+  opponent?: string
+  partyNames?: string
+  notes?: string
+}
+
+export interface TodoTerminalContext {
+  terminalId?: string
+  cwd?: string
+  jsId?: string
+  court?: string
+  caseNumber?: string
+  caseName?: string
+  client?: string
+  opponent?: string
+  partyNames?: string
+}
+
+export interface TodoTerminalResult {
+  ok: boolean
+  message: string
+  changed?: boolean
+  todo?: JsTodo | null
+  todos?: JsTodo[]
+}
+
 export interface LtApi {
   js: {
     setToken: (token: string) => Promise<void>
@@ -310,6 +385,30 @@ export interface LtApi {
     }) => Promise<{ ok: boolean; cases?: JsCase[]; error?: string }>
     getCase: (id: string) => Promise<{ ok: boolean; case?: JsCase; error?: string }>
   }
+  todo: {
+    list: (params?: ListTodosParams) => Promise<{ ok: boolean; todos?: JsTodo[]; error?: string }>
+    get: (id: string) => Promise<{ ok: boolean; todo?: JsTodo | null; error?: string }>
+    create: (input: TodoMutationInput) => Promise<{ ok: boolean; todo?: JsTodo | null; error?: string }>
+    update: (
+      id: string,
+      patch: TodoMutationInput
+    ) => Promise<{ ok: boolean; todo?: JsTodo | null; error?: string }>
+    complete: (
+      id: string,
+      progressText?: string,
+      context?: TodoTerminalContext
+    ) => Promise<{ ok: boolean; todo?: JsTodo | null; error?: string }>
+    archive: (id: string) => Promise<{ ok: boolean; todo?: JsTodo | null; error?: string }>
+    appendProgress: (
+      id: string,
+      text: string,
+      context?: TodoTerminalContext
+    ) => Promise<{ ok: boolean; todo?: JsTodo | null; error?: string }>
+    applyTerminalCommand: (
+      command: string,
+      context?: TodoTerminalContext
+    ) => Promise<TodoTerminalResult>
+  }
   app: {
     info: () => Promise<{
       platform: string
@@ -318,6 +417,7 @@ export interface LtApi {
     openExternal: (url: string) => Promise<void>
     newWindow: () => Promise<void>
     closeWindow: () => Promise<void>
+    setWindowTitle: (title: string) => Promise<void>
     requestAttention: (reason?: 'done' | 'question') => void
     onCloseActiveTab: (cb: () => void) => () => void
   }
@@ -436,6 +536,7 @@ export interface LtApi {
   agent: {
     create: (opts: AgentCreateOptions) => Promise<AgentCommandResult>
     send: (sessionId: string, input: AgentSendInput) => Promise<AgentCommandResult>
+    mcpStatus: (sessionId: string) => Promise<AgentCommandResult>
     promoteQueued: (sessionId: string, queueId: string) => Promise<AgentCommandResult>
     removeQueued: (sessionId: string, queueId: string) => Promise<AgentCommandResult>
     approve: (decision: AgentPermissionDecision) => Promise<AgentCommandResult>

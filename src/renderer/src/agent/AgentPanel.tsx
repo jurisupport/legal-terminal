@@ -58,6 +58,7 @@ export interface AgentAttachmentRequest {
   id: string
   attachment: AgentAttachment
   focusPrompt?: boolean
+  inputText?: string
 }
 
 interface TimelineItem {
@@ -250,6 +251,10 @@ function expandSlashInput(text: string): { text: string; mode?: AgentPermissionM
   const command = slashCommands.find((item) => item.name === match[1].toLowerCase())
   if (!command) return { text }
   return { text: command.expand((match[2] ?? '').trim()), mode: command.mode }
+}
+
+function slashCommandName(text: string): string | undefined {
+  return text.match(/^(\/[^\s]+)/)?.[1].toLowerCase()
 }
 
 const asRecord = (value: unknown): Record<string, unknown> | null =>
@@ -741,24 +746,23 @@ function reduceTimeline(items: TimelineItem[], event: AgentEvent): TimelineItem[
     const queueId = stringValue(event.queueId) ?? `queue-${Date.now()}`
     const delivery = stringValue(event.delivery)
     const title = delivery === 'steer' ? '바로 지시 대기' : '대기 중인 지시'
-    return [
-      ...items,
-      {
-        id: queueId,
-        kind: 'queue',
-        title,
-        queueId,
-        text: stringValue(event.text) ?? '',
-        status: delivery === 'steer' ? 'priority' : 'queued'
-      }
-    ]
+    const queueItem: TimelineItem = {
+      id: queueId,
+      kind: 'queue',
+      title,
+      queueId,
+      text: stringValue(event.text) ?? '',
+      status: delivery === 'steer' ? 'priority' : 'queued'
+    }
+    if (items.some((item) => item.queueId === queueId)) {
+      return items.map((item) => (item.queueId === queueId ? { ...item, ...queueItem } : item))
+    }
+    return [...items, queueItem]
   }
   if (event.type === 'queue:started') {
     const queueId = stringValue(event.queueId)
     if (!queueId) return items
-    return items.map((item) =>
-      item.queueId === queueId ? { ...item, title: '지시 실행 중', status: 'started' } : item
-    )
+    return items.filter((item) => item.queueId !== queueId)
   }
   if (event.type === 'queue:promoted') {
     const queueId = stringValue(event.queueId)
@@ -1509,6 +1513,19 @@ export default function AgentPanel({
     for (const request of pending) handledAttachmentRequestIdsRef.current.add(request.id)
     setAttachments((current) => appendUniqueAttachments(current, pending.map((request) => request.attachment)))
 
+    const inputText = pending
+      .map((request) => request.inputText)
+      .filter((text): text is string => !!text)
+      .join('\n')
+    if (inputText) {
+      resetPromptHistoryCursor()
+      setInput((current) => {
+        if (!current) return inputText
+        const separator = /\s$/.test(current) ? '' : '\n'
+        return `${current}${separator}${inputText}`
+      })
+    }
+
     const selectionCount = pending.filter((request) => request.attachment.kind === 'selection').length
     const fileCount = pending.length - selectionCount
     const parts = [
@@ -1545,9 +1562,30 @@ export default function AgentPanel({
 
   const send = async (delivery?: AgentSendDelivery): Promise<void> => {
     const rawText = input.trim()
+    const sendAttachments = attachments
+    if (rawText && slashCommandName(rawText) === '/mcp') {
+      if (sendAttachments.length > 0) {
+        setError('MCP 상태 확인에는 첨부를 사용할 수 없습니다.')
+        return
+      }
+      if (sendBlockedReason) {
+        setError(sendBlockedReason)
+        return
+      }
+      const result = await window.lt.agent.mcpStatus(id)
+      if (!result.ok) {
+        setError(result.error ?? 'MCP 상태를 확인할 수 없습니다.')
+        return
+      }
+      rememberPrompts([rawText])
+      setInput('')
+      setAttachments([])
+      setError('')
+      return
+    }
+
     const expanded = rawText ? expandSlashInput(rawText) : { text: '' }
     const text = expanded.text
-    const sendAttachments = attachments
     if ((!text && sendAttachments.length === 0) || sendBlockedReason) {
       if (sendBlockedReason) setError(sendBlockedReason)
       return

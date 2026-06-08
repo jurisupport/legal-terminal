@@ -4,6 +4,7 @@ import { formatHearingLabel } from './hearings'
 import CaseContextMenu, { type CaseContextMenuState } from './CaseContextMenu'
 
 const WD = ['일', '월', '화', '수', '목', '금', '토']
+const RETRY_DELAYS = [700, 1800]
 
 interface Row {
   c: JsCase
@@ -32,6 +33,21 @@ function rowKey(r: Row, i: number): string {
   return [r.c.id, r.h.dateTime, r.h.type, r.h.location, r.h.note, i].filter(Boolean).join('|')
 }
 
+function buildRows(cases: JsCase[]): Row[] {
+  const out: Row[] = []
+  for (const c of cases) {
+    for (const h of c.hearings ?? []) {
+      const d = new Date(h.dateTime)
+      if (isNaN(d.getTime())) continue
+      out.push({ c, when: d, h })
+    }
+  }
+  const cutoff = Date.now() - 86400000 // 어제까지 포함(오늘 기일 표시)
+  return out
+    .filter((x) => x.when.getTime() >= cutoff)
+    .sort(compareRows)
+}
+
 /** 좌측 사이드바: 모든 사건의 다가오는 기일을 날짜순으로. 클릭 → 그 사건 작업환경 열기. */
 export default function UpcomingHearings({
   nonce = 0,
@@ -52,43 +68,67 @@ export default function UpcomingHearings({
 }): JSX.Element {
   const [rows, setRows] = useState<Row[] | null>(null)
   const [hasTok, setHasTok] = useState(true)
+  const [err, setErr] = useState('')
+  const [loading, setLoading] = useState(false)
+  const [reloadNonce, setReloadNonce] = useState(0)
   const [menu, setMenu] = useState<CaseContextMenuState | null>(null)
 
   useEffect(() => {
     let alive = true
-    window.lt.js.hasToken().then((has) => {
+    let retryTimer: ReturnType<typeof setTimeout> | null = null
+
+    const fail = (message: string, attempt: number): void => {
       if (!alive) return
-      setHasTok(has)
-      if (!has) {
-        setRows([])
+      const nextDelay = RETRY_DELAYS[attempt]
+      if (nextDelay !== undefined) {
+        setErr(`${message} · 다시 불러오는 중`)
+        setLoading(true)
+        retryTimer = setTimeout(() => load(attempt + 1), nextDelay)
         return
       }
-      window.lt.js.listCases().then((r) => {
-        if (!alive) return
-        if (!r.ok || !r.cases) {
-          setRows([])
-          return
-        }
-        const out: Row[] = []
-        for (const c of r.cases) {
-          for (const h of c.hearings ?? []) {
-            const d = new Date(h.dateTime)
-            if (isNaN(d.getTime())) continue
-            out.push({ c, when: d, h })
+      setErr(message)
+      setLoading(false)
+      setRows((current) => current ?? [])
+    }
+
+    const load = (attempt = 0): void => {
+      if (attempt === 0) {
+        setErr('')
+        setLoading(true)
+      }
+      window.lt.js
+        .hasToken()
+        .then((has) => {
+          if (!alive) return
+          setHasTok(has)
+          if (!has) {
+            setRows([])
+            setLoading(false)
+            return
           }
-        }
-        const cutoff = Date.now() - 86400000 // 어제까지 포함(오늘 기일 표시)
-        setRows(
-          out
-            .filter((x) => x.when.getTime() >= cutoff)
-            .sort(compareRows)
-        )
-      })
-    })
+          window.lt.js
+            .listCases()
+            .then((r) => {
+              if (!alive) return
+              if (!r.ok || !r.cases) {
+                fail(r.error ?? '다가오는 기일을 불러오지 못했습니다.', attempt)
+                return
+              }
+              setRows(buildRows(r.cases))
+              setErr('')
+              setLoading(false)
+            })
+            .catch((error) => fail(error instanceof Error ? error.message : String(error), attempt))
+        })
+        .catch((error) => fail(error instanceof Error ? error.message : String(error), attempt))
+    }
+
+    load()
     return () => {
       alive = false
+      if (retryTimer) clearTimeout(retryTimer)
     }
-  }, [nonce])
+  }, [nonce, reloadNonce])
 
   useEffect(() => {
     const close = (): void => setMenu(null)
@@ -103,14 +143,35 @@ export default function UpcomingHearings({
   if (!hasTok) {
     return <p className="muted pad small">JuriSupport 연결 후 다가오는 기일이 표시됩니다.</p>
   }
-  if (!rows) return <p className="muted pad small">불러오는 중…</p>
-  if (rows.length === 0) return <p className="muted pad small">다가오는 기일이 없습니다.</p>
+  if (!rows) return <p className="muted pad small">불러오는 중...</p>
+  if (rows.length === 0) {
+    return (
+      <div className="agenda-state">
+        <p className={`muted pad small ${err ? 'agenda-error' : ''}`}>
+          {err || (loading ? '불러오는 중...' : '다가오는 기일이 없습니다.')}
+        </p>
+        {err && (
+          <button className="header-btn agenda-retry" onClick={() => setReloadNonce((n) => n + 1)}>
+            다시 불러오기
+          </button>
+        )}
+      </div>
+    )
+  }
 
   const today = new Date()
   const isSoon = (d: Date): boolean => (d.getTime() - today.getTime()) / 86400000 < 3
 
   return (
     <>
+      {err && (
+        <div className="agenda-warning">
+          <span>{err}</span>
+          <button className="header-btn agenda-retry" onClick={() => setReloadNonce((n) => n + 1)}>
+            새로고침
+          </button>
+        </div>
+      )}
       <ul className="agenda">
         {rows.map((r, i) => {
           const kind = formatHearingLabel(r.c, r.h)

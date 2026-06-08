@@ -68,6 +68,7 @@ const MAC_INSTALL_SCRIPT_URL =
   'https://raw.githubusercontent.com/jurisupport/legal-terminal/main/install-mac.sh'
 const WINDOWS_INSTALL_SCRIPT_URL =
   'https://raw.githubusercontent.com/jurisupport/legal-terminal/main/install.ps1'
+const DEFAULT_WINDOW_TITLE = 'legal-terminal'
 
 interface GitHubReleaseAsset {
   name?: string
@@ -387,7 +388,7 @@ function createWindow(setMain = true, opts?: { docOnly?: boolean; termOnly?: boo
     show: false,
     backgroundColor: '#1e1e1e',
     autoHideMenuBar: true,
-    title: 'legal-terminal',
+    title: DEFAULT_WINDOW_TITLE,
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
       sandbox: false,
@@ -463,6 +464,13 @@ ipcMain.handle('window:close', (e) => {
 ipcMain.on('app:requestAttention', (e, payload?: { reason?: 'done' | 'question' }) => {
   const win = BrowserWindow.fromWebContents(e.sender)
   if (win) requestWindowAttention(win, payload?.reason)
+})
+
+ipcMain.handle('app:setWindowTitle', (e, title: string) => {
+  const win = BrowserWindow.fromWebContents(e.sender)
+  if (!win || win.isDestroyed()) return
+  const nextTitle = typeof title === 'string' && title.trim() ? title.trim() : DEFAULT_WINDOW_TITLE
+  win.setTitle(nextTitle)
 })
 
 // 문서 전용(찢어낸) 창 등에서 'Claude에 물어보기' → 메인 창의 활성 터미널로 전달
@@ -671,6 +679,62 @@ ipcMain.handle('js:getCase', async (_e, id: string) => {
     return { ok: true, case: await js.getCase(id) }
   } catch (e) {
     return { ok: false, error: String(e instanceof Error ? e.message : e) }
+  }
+})
+ipcMain.handle('todo:list', async (_e, params: Record<string, unknown>) => {
+  try {
+    return { ok: true, todos: await js.listTodos(params ?? {}) }
+  } catch (e) {
+    return { ok: false, error: String(e instanceof Error ? e.message : e) }
+  }
+})
+ipcMain.handle('todo:get', async (_e, id: string) => {
+  try {
+    return { ok: true, todo: await js.getTodo(id) }
+  } catch (e) {
+    return { ok: false, error: String(e instanceof Error ? e.message : e) }
+  }
+})
+ipcMain.handle('todo:create', async (_e, input: js.TodoMutationInput) => {
+  try {
+    return { ok: true, todo: await js.createTodo(input) }
+  } catch (e) {
+    return { ok: false, error: String(e instanceof Error ? e.message : e) }
+  }
+})
+ipcMain.handle('todo:update', async (_e, p: { id: string; patch: js.TodoMutationInput }) => {
+  try {
+    return { ok: true, todo: await js.updateTodo(p.id, p.patch) }
+  } catch (e) {
+    return { ok: false, error: String(e instanceof Error ? e.message : e) }
+  }
+})
+ipcMain.handle('todo:complete', async (_e, p: { id: string; progressText?: string; context?: js.TodoTerminalContext }) => {
+  try {
+    return { ok: true, todo: await js.completeTodo(p.id, p.progressText, p.context) }
+  } catch (e) {
+    return { ok: false, error: String(e instanceof Error ? e.message : e) }
+  }
+})
+ipcMain.handle('todo:archive', async (_e, id: string) => {
+  try {
+    return { ok: true, todo: await js.archiveTodo(id) }
+  } catch (e) {
+    return { ok: false, error: String(e instanceof Error ? e.message : e) }
+  }
+})
+ipcMain.handle('todo:appendProgress', async (_e, p: { id: string; text: string; context?: js.TodoTerminalContext }) => {
+  try {
+    return { ok: true, todo: await js.appendTodoProgress(p.id, p.text, p.context) }
+  } catch (e) {
+    return { ok: false, error: String(e instanceof Error ? e.message : e) }
+  }
+})
+ipcMain.handle('todo:applyTerminalCommand', async (_e, p: { command: string; context?: js.TodoTerminalContext }) => {
+  try {
+    return await js.applyTodoTerminalCommand(p.command, p.context)
+  } catch (e) {
+    return { ok: false, message: '[todo] 오류: ' + String(e instanceof Error ? e.message : e) }
   }
 })
 

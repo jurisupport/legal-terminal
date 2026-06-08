@@ -48,7 +48,7 @@ export default function CaseContextMenu({
         ] as MenuItem[])
       : []),
     ['—', null],
-    ['🌐 JuriSupport에서 보기', () => openExt(caseWebUrl(c.id))],
+    ...(c.id ? ([['🌐 JuriSupport에서 보기', () => openExt(caseWebUrl(c.id))]] as MenuItem[]) : []),
     ...(onDetail ? ([['ℹ 상세 보기', () => onDetail(c)]] as MenuItem[]) : []),
     ['—', null],
     ['📋 사건번호 복사', () => copy(c.caseNumber ?? '')],

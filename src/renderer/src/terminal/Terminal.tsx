@@ -5,7 +5,7 @@ import { CanvasAddon } from '@xterm/addon-canvas'
 import { WebglAddon } from '@xterm/addon-webgl'
 import '@xterm/xterm/css/xterm.css'
 import { LT_PATH, LT_PATHS, readLtPaths } from '../filetree/FileTree'
-import type { SshConn } from '../env'
+import type { SshConn, TodoTerminalContext } from '../env'
 import FindBar from '../search/FindBar'
 import { installTerminalPointerDragGuard } from '../dragGuard'
 
@@ -245,6 +245,8 @@ export default function Terminal({
   onRequestClose,
   onStatus,
   onBracketedPasteModeChange,
+  todoContext,
+  onTodoChanged,
   onCycleTab
 }: {
   id: string
@@ -261,6 +263,8 @@ export default function Terminal({
   onRequestClose?: () => void
   onStatus?: (status: 'working' | 'done' | 'question') => void
   onBracketedPasteModeChange?: (enabled: boolean) => void
+  todoContext?: TodoTerminalContext
+  onTodoChanged?: () => void
   onCycleTab?: (dir: number) => void
 }): JSX.Element {
   const hostRef = useRef<HTMLDivElement>(null)
@@ -280,6 +284,10 @@ export default function Terminal({
   onStatusRef.current = onStatus
   const onBracketedPasteModeChangeRef = useRef(onBracketedPasteModeChange)
   onBracketedPasteModeChangeRef.current = onBracketedPasteModeChange
+  const todoContextRef = useRef(todoContext)
+  todoContextRef.current = todoContext
+  const onTodoChangedRef = useRef(onTodoChanged)
+  onTodoChangedRef.current = onTodoChanged
   const onCycleRef = useRef(onCycleTab)
   onCycleRef.current = onCycleTab
   const findOpenRef = useRef(false)
@@ -673,7 +681,87 @@ export default function Terminal({
       const offExit = window.lt.pty.onExit((p) => {
         if (p.id === id) term.write(`\r\n\x1b[90m[프로세스 종료: ${p.exitCode}]\x1b[0m\r\n`)
       })
-      const onInput = term.onData((data) => window.lt.pty.write(id, data))
+      let todoLineMode: 'pending' | 'todo' | 'passthrough' = 'pending'
+      let todoLine = ''
+      const resetTodoLine = (): void => {
+        todoLineMode = 'pending'
+        todoLine = ''
+      }
+      const writeTodoResult = (message: string, ok: boolean): void => {
+        const color = ok ? '32' : '31'
+        term.write(`\x1b[${color}m${message.replace(/\r?\n/g, '\r\n')}\x1b[0m\r\n`)
+      }
+      const runTodoCommand = (command: string): void => {
+        term.write('\r\n\x1b[90m[todo] 처리 중...\x1b[0m\r\n')
+        window.lt.todo
+          .applyTerminalCommand(command, todoContextRef.current)
+          .then((result) => {
+            writeTodoResult(result.message, result.ok)
+            if (result.ok && result.changed) onTodoChangedRef.current?.()
+          })
+          .catch((error) => writeTodoResult(`[todo] 오류: ${String(error)}`, false))
+      }
+      const handleTodoInputChar = (ch: string): boolean => {
+        if (ch === '\r' || ch === '\n') {
+          if (todoLineMode === 'todo' || (todoLineMode === 'pending' && /^todo$/i.test(todoLine))) {
+            if (todoLineMode === 'pending') term.write(todoLine)
+            runTodoCommand(todoLine.trim())
+            resetTodoLine()
+            return true
+          }
+          if (todoLineMode === 'pending' && todoLine) {
+            window.lt.pty.write(id, todoLine + ch)
+            resetTodoLine()
+            return true
+          }
+          if (todoLineMode === 'passthrough') resetTodoLine()
+          return false
+        }
+
+        if (ch === '\x7f' || ch === '\b') {
+          if (todoLineMode === 'todo' || todoLineMode === 'pending') {
+            if (todoLine) {
+              todoLine = todoLine.slice(0, -1)
+              if (todoLineMode === 'todo') term.write('\b \b')
+            }
+            return true
+          }
+          return false
+        }
+
+        if (todoLineMode === 'passthrough') return false
+        if (ch < ' ' && ch !== '\t') {
+          if (todoLine) {
+            window.lt.pty.write(id, todoLine)
+            resetTodoLine()
+          }
+          return false
+        }
+
+        todoLine += ch
+        if (todoLineMode === 'todo') {
+          term.write(ch)
+          return true
+        }
+
+        if (/^todo(?:\s|$)/i.test(todoLine)) {
+          todoLineMode = 'todo'
+          term.write(todoLine)
+          return true
+        }
+
+        if ('todo'.startsWith(todoLine.toLocaleLowerCase('en-US'))) return true
+
+        window.lt.pty.write(id, todoLine)
+        todoLine = ''
+        todoLineMode = 'passthrough'
+        return true
+      }
+      const onInput = term.onData((data) => {
+        for (const ch of Array.from(data)) {
+          if (!handleTodoInputChar(ch)) window.lt.pty.write(id, ch)
+        }
+      })
       // Claude의 BEL은 완료뿐 아니라 권한/확인 프롬프트에서도 울릴 수 있으므로 즉시 완료로 보지 않는다.
       const onBellDisp = term.onBell(() => {
         if (working) scheduleIdle(QUESTION_RE.test(stripAnsi(recent)) ? 500 : idleMs)

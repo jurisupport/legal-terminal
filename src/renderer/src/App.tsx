@@ -12,6 +12,7 @@ import { parseRecordFiles, type ParsedRecord, type OutlineItem } from './viewer/
 import {
   IconExplorer,
   IconCases,
+  IconTodos,
   IconViewer,
   IconSettings,
   IconNewFile,
@@ -30,11 +31,14 @@ import { markdownToPlainText, writeMarkdownClipboard } from './markdownClipboard
 import FindBar from './search/FindBar'
 import CasesDashboard from './dashboard/CasesDashboard'
 import UpcomingHearings from './dashboard/UpcomingHearings'
+import TodosDashboard from './dashboard/TodosDashboard'
+import TodayTodos from './dashboard/TodayTodos'
 import { cancelIfTerminalPointerDrag } from './dragGuard'
 import type {
   AppSettings,
   AgentAttachment,
   JsCase,
+  TodoTerminalContext,
   SessionListEntry,
   SessionRememberInput,
   SessionSearchContext,
@@ -49,7 +53,7 @@ import type {
   WorkspaceSnapshot
 } from './env'
 
-type Mode = 'explorer' | 'cases' | 'viewer'
+type Mode = 'explorer' | 'cases' | 'viewer' | 'todos'
 type DockSide = 'left' | 'right'
 
 interface ActivityItem {
@@ -60,6 +64,7 @@ interface ActivityItem {
 const ACTIVITY: ActivityItem[] = [
   { id: 'explorer', label: '탐색기', Icon: IconExplorer },
   { id: 'cases', label: '사건', Icon: IconCases },
+  { id: 'todos', label: '할일', Icon: IconTodos },
   { id: 'viewer', label: '기록뷰어', Icon: IconViewer }
 ]
 
@@ -80,6 +85,7 @@ const DEFAULT_MD_FONT_SIZE = 14
 const DEFAULT_AGENT_FONT_SIZE = 13
 const FONT_SIZE_MIN = 8
 const FONT_SIZE_MAX = 32
+const APP_WINDOW_TITLE = 'legal-terminal'
 const DEFAULT_MD_FONT = "'D2Coding', 'Cascadia Mono', Consolas, monospace"
 const DEFAULT_NOTIFICATION_SOUND: NotificationSound = 'chime'
 const DEFAULT_NOTIFICATION_VOLUME = 85
@@ -203,6 +209,8 @@ interface TermTab {
   caseNumber?: string
   caseName?: string
   client?: string
+  opponent?: string
+  partyNames?: string
   sessionTitle?: string // claude 세션 제목(ai-title) — transcript에서 자동 반영
   renamed?: boolean // 사용자가 직접 이름 변경 → 자동 반영 중단
   createdAt?: number // 세션 시작 시각 — 이 이후의 transcript만 현재 세션으로 매칭
@@ -236,6 +244,22 @@ const parseWorkKey = (key: string): { kind: WorkTabKind; id: string } | null => 
   const kind = key.slice(0, split)
   if (kind !== 'doc' && kind !== 'terminal') return null
   return { kind, id: key.slice(split + 1) }
+}
+
+const resolveClaudeTargetTab = (
+  tabs: TermTab[],
+  activeTermId: string,
+  activeWorkBySide: Record<DockSide, string>
+): TermTab | undefined => {
+  const active = tabs.find((tab) => tab.id === activeTermId)
+  if (active) return active
+  for (const side of ['right', 'left'] as DockSide[]) {
+    const parsed = parseWorkKey(activeWorkBySide[side] ?? '')
+    if (parsed?.kind !== 'terminal') continue
+    const visible = tabs.find((tab) => tab.id === parsed.id)
+    if (visible) return visible
+  }
+  return tabs[0]
 }
 
 // 원격 파일 패널이 쓰는 ssh:// URI 빌더 (main의 remoteFs와 동일 스킴)
@@ -321,6 +345,8 @@ interface CaseMeta {
   caseNumber?: string
   caseName?: string
   client?: string
+  opponent?: string
+  partyNames?: string
 }
 interface CurrentCase {
   drafts: string
@@ -352,7 +378,7 @@ const normalizeDocKind = (kind: DocTab['kind'], path?: string): DocTab['kind'] =
   kind === 'markdown' && path && MARKDOWN_EXT_RE.test(path) ? 'mdview' : kind
 
 const isWorkspaceMode = (value: unknown): value is Mode =>
-  value === 'explorer' || value === 'cases' || value === 'viewer'
+  value === 'explorer' || value === 'cases' || value === 'viewer' || value === 'todos'
 
 const isWorkKey = (value: unknown): value is WorkTabKey =>
   typeof value === 'string' && parseWorkKey(value) !== null
@@ -504,6 +530,46 @@ const describeTermStatus = (term: TermTab | undefined, status?: TermRunStatus): 
               : '터미널 대기'
   const connection = term.ssh ? `원격 ${term.sshLabel ?? term.ssh.host}` : '로컬'
   return joinStatus([run, connection])
+}
+
+const windowTitlePart = (value?: string | null): string | undefined => {
+  const trimmed = value?.replace(/\s+/g, ' ').trim()
+  if (!trimmed) return undefined
+  return trimmed.length > 140 ? `${trimmed.slice(0, 139)}…` : trimmed
+}
+
+const caseWindowTitlePart = (
+  term?: TermTab,
+  currentCase?: CurrentCase | null
+): string | undefined => {
+  const court = windowTitlePart(term?.court ?? currentCase?.meta?.court)
+  const caseNumber = windowTitlePart(term?.caseNumber ?? currentCase?.meta?.caseNumber)
+  const caseName = windowTitlePart(term?.caseName ?? currentCase?.meta?.caseName)
+  const client = windowTitlePart(term?.client ?? currentCase?.meta?.client)
+  const legalCore = [caseNumber, caseName, client].filter(Boolean).join(' ')
+  const legalTitle = legalCore ? [court ? abbrevCourt(court) : undefined, legalCore].filter(Boolean).join(' ') : ''
+  if (legalTitle) return legalTitle
+
+  const folder = pathLeaf(term?.cwd ?? currentCase?.remotePath ?? currentCase?.drafts)
+  return (
+    windowTitlePart(term?.title) ??
+    windowTitlePart(currentCase?.name) ??
+    windowTitlePart(folder)
+  )
+}
+
+const buildWindowTitle = (opts: {
+  term?: TermTab
+  currentCase?: CurrentCase | null
+  doc?: DocTab
+  docOnly: boolean
+  termOnly: boolean
+}): string => {
+  const caseTitle = caseWindowTitlePart(opts.term, opts.currentCase)
+  const docTitle =
+    opts.doc && opts.doc.kind !== 'welcome' ? windowTitlePart(opts.doc.title) : undefined
+  const context = opts.docOnly ? docTitle ?? caseTitle : opts.termOnly ? caseTitle : caseTitle ?? docTitle
+  return context ? `${context} - ${APP_WINDOW_TITLE}` : APP_WINDOW_TITLE
 }
 
 const searchNorm = (value?: string): string =>
@@ -710,6 +776,18 @@ const currentCaseSessionSource = (
     side: 'right'
   }
 }
+
+const todoContextForTerm = (term: TermTab): TodoTerminalContext => ({
+  terminalId: term.id,
+  cwd: term.cwd,
+  jsId: term.jsId,
+  court: term.court,
+  caseNumber: term.caseNumber,
+  caseName: term.caseName,
+  client: term.client,
+  opponent: term.opponent,
+  partyNames: term.partyNames
+})
 
 const toWorkspaceDoc = (tab: DocTab): WorkspaceDocTabPayload | null => {
   if (!RESTORABLE_DOC_KINDS.has(tab.kind)) return null
@@ -925,6 +1003,8 @@ export default function App(): JSX.Element {
     left: docOnly ? '' : docKey('doc-welcome'),
     right: ''
   })
+  const activeWorkRef = useRef(activeWork)
+  activeWorkRef.current = activeWork
   const [draftsRoot, setDraftsRoot] = useState<string | undefined>()
   const [recordsRoot, setRecordsRoot] = useState<string | undefined>()
   const [caseOpenTarget, setCaseOpenTarget] = useState<string>(CASE_OPEN_LOCAL)
@@ -1131,15 +1211,21 @@ export default function App(): JSX.Element {
       const isKey = (key: string, code?: string): boolean => k === key || (!!code && e.code === code)
       const isT = isKey('t', 'KeyT')
       const termId = focusedTermId(activeEl)
-      const termSideForShortcut = focusedWorkSide(activeEl) ?? termSide(termTabs.find((t) => t.id === termId))
+      const workSideForShortcut = focusedWorkSide(activeEl)
+      const workTabForShortcut = workSideForShortcut ? parseWorkKey(activeWork[workSideForShortcut]) : null
+      const sourceTermId =
+        termId ?? (workTabForShortcut?.kind === 'terminal' ? workTabForShortcut.id : activeTerm)
+      const termSideForShortcut =
+        workSideForShortcut ?? termSide(termTabs.find((t) => t.id === sourceTermId))
       const primary = platform === 'darwin' ? e.metaKey && !e.ctrlKey : e.ctrlKey
-      const macCtrlTInWorkTab = platform === 'darwin' && !!termId && e.ctrlKey && !e.metaKey && isT
-      if ((!primary && !macCtrlTInWorkTab) || e.altKey) return
-      if (termId && isT) {
+      const macCtrlTInWorkArea =
+        platform === 'darwin' && !!(termId || workSideForShortcut) && e.ctrlKey && !e.metaKey && isT
+      if ((!primary && !macCtrlTInWorkArea) || e.altKey) return
+      if (isT) {
         e.preventDefault()
         e.stopPropagation()
-        if (e.shiftKey) addTermSame(termSideForShortcut, termId)
-        else addAgentSame(termSideForShortcut, termId)
+        if (e.shiftKey) addTermSame(termSideForShortcut, sourceTermId)
+        else addAgentSame(termSideForShortcut, sourceTermId)
         return
       }
       if (isKey('w', 'KeyW') && !e.shiftKey) {
@@ -1230,7 +1316,9 @@ export default function App(): JSX.Element {
         court: t.court,
         caseNumber: t.caseNumber,
         caseName: t.caseName,
-        client: t.client
+        client: t.client,
+        opponent: t.opponent,
+        partyNames: t.partyNames
       },
       ssh: t.ssh,
       sshLabel: t.sshLabel,
@@ -2130,11 +2218,16 @@ export default function App(): JSX.Element {
     })
   }
 
-  const queueAgentAttachment = (term: TermTab, attachment: AgentAttachment): void => {
+  const queueAgentAttachment = (
+    term: TermTab,
+    attachment: AgentAttachment,
+    inputText?: string
+  ): void => {
     const request: AgentAttachmentRequest = {
       id: newId(),
       attachment,
-      focusPrompt: true
+      focusPrompt: true,
+      inputText
     }
     setAgentAttachmentRequests((current) => ({
       ...current,
@@ -2174,6 +2267,9 @@ export default function App(): JSX.Element {
       text: body
     }
   }
+
+  const agentSelectionInputText = (attachment: AgentAttachment): string =>
+    `「${attachment.label}」 선택 부분에 대해 `
 
   const buildWorkspaceSnapshot = async (): Promise<WorkspaceSnapshot> => {
     const docs = docTabs.map(toWorkspaceDoc).filter((t): t is WorkspaceDocTabPayload => !!t)
@@ -2672,7 +2768,7 @@ export default function App(): JSX.Element {
 
   // 임의 터미널에 텍스트 주입. 대상 프로그램이 bracketed paste를 켠 경우에만 감싼다.
   const pasteToTerm = (termId: string, payload: string): void => {
-    const tab = termTabs.find((t) => t.id === termId)
+    const tab = termTabsRef.current.find((t) => t.id === termId)
     const normalized = normalizePasteForPty(payload)
     const text = termBracketedPasteModeRef.current[termId]
       ? `\x1b[200~${normalized}\x1b[201~`
@@ -2687,12 +2783,12 @@ export default function App(): JSX.Element {
   const activeTermRef = useRef(activeTerm)
   activeTermRef.current = activeTerm
   const sendClaude = (payload: string, opts?: { displayText?: string }): void => {
-    const tab = termTabs.find((t) => t.id === activeTerm)
+    const tab = resolveClaudeTargetTab(termTabs, activeTerm, activeWork)
     if (tab && isAgentTab(tab)) {
       void window.lt.agent.send(tab.id, { text: payload, displayText: opts?.displayText })
       return
     }
-    if (activeTerm) pasteToTerm(activeTerm, payload)
+    if (tab) pasteToTerm(tab.id, payload)
     else window.lt.claude.ask(payload)
   }
 
@@ -2768,10 +2864,13 @@ export default function App(): JSX.Element {
   useEffect(
     () =>
       window.lt.claude.onIncoming((payload) => {
-        const term = activeTermRef.current
-        const tab = termTabsRef.current.find((t) => t.id === term)
+        const tab = resolveClaudeTargetTab(
+          termTabsRef.current,
+          activeTermRef.current,
+          activeWorkRef.current
+        )
         if (tab && isAgentTab(tab)) void window.lt.agent.send(tab.id, { text: payload })
-        else if (term) pasteToTerm(term, payload)
+        else if (tab) pasteToTerm(tab.id, payload)
       }),
     []
   )
@@ -2808,7 +2907,8 @@ export default function App(): JSX.Element {
       const ref = docName ? `「${docName}」${docPath ? `(${docPath})` : ''}` : ''
       const t = text.trim()
       if (t && activeTermTab && isAgentTab(activeTermTab)) {
-        queueAgentAttachment(activeTermTab, selectionAttachmentForAgent(t, { docPath, docName }, activeTermTab))
+        const attachment = selectionAttachmentForAgent(t, { docPath, docName }, activeTermTab)
+        queueAgentAttachment(activeTermTab, attachment, agentSelectionInputText(attachment))
         return
       }
       const filePrompt =
@@ -2854,6 +2954,7 @@ export default function App(): JSX.Element {
   // ── 사건 대시보드 동작 ──
   // 토큰 변경 등으로 좌측 '다가오는 기일' 패널을 새로고침하기 위한 nonce
   const [jsNonce, setJsNonce] = useState(0)
+  const [todoNonce, setTodoNonce] = useState(0)
   // 세션 목록 드롭다운 + 사건 필터('all' | jsId | '__folder__')
   const [sessionListOpen, setSessionListOpen] = useState(false)
   const [sessionFilter, setSessionFilter] = useState<string>('all')
@@ -2877,6 +2978,18 @@ export default function App(): JSX.Element {
       describeTermStatus(activeTermTab, activeTermRunStatus),
       bridgeStatus || undefined
     ]) || '작업환경 준비'
+  const windowTitle = buildWindowTitle({
+    term: activeTermTab,
+    currentCase,
+    doc: activeDocTab,
+    docOnly,
+    termOnly
+  })
+
+  useEffect(() => {
+    document.title = windowTitle
+    void window.lt.app.setWindowTitle(windowTitle).catch(() => {})
+  }, [windowTitle])
 
   // Ctrl+W 등으로 터미널 닫기 — claude가 작업 중이면 확인 후 닫는다.
   const closeTermWithConfirm = (id: string): boolean => {
@@ -2994,7 +3107,7 @@ export default function App(): JSX.Element {
 
   // 좌클릭: 사건 작업환경 열기 (폴더 매칭 → 없으면 직접 지정 → 터미널/뷰어 연결)
   const openCaseWorkspace = async (c: JsCase): Promise<void> => {
-    const saved = await window.lt.case.getJsPairing(c.id)
+    const saved = c.id ? await window.lt.case.getJsPairing(c.id) : undefined
     let drafts = saved?.drafts
     let records = saved?.records
     let recordSuggestions: FolderMatchSuggestion[] = []
@@ -3013,7 +3126,7 @@ export default function App(): JSX.Element {
       if (!picked) return
       drafts = picked.path
     }
-    await window.lt.case.setJsPairing(c.id, drafts, records)
+    if (c.id) await window.lt.case.setJsPairing(c.id, drafts, records)
     const suggested = records ? undefined : recordSuggestions[0]?.path
     // 세션 자동 명명: 법원(약칭) · 사건번호 · 사건명
     const court = c.court || ''
@@ -3021,15 +3134,22 @@ export default function App(): JSX.Element {
       .filter((p) => p.role === 'client')
       .map((p) => p.party.name)
       .join(', ')
+    const opponent = c.parties
+      .filter((p) => p.role === 'opponent')
+      .map((p) => p.party.name)
+      .join(', ')
+    const partyNames = [client, opponent].filter(Boolean).join(' / ')
     const name =
       [court && abbrevCourt(court), c.caseNumber, c.caseName, client].filter(Boolean).join(' ') ||
       caseRef(c)
     const meta: CaseMeta = {
-      jsId: c.id,
+      jsId: c.id || undefined,
       court: court || undefined,
       caseNumber: c.caseNumber || undefined,
       caseName: c.caseName || undefined,
-      client: client || undefined
+      client: client || undefined,
+      opponent: opponent || undefined,
+      partyNames: partyNames || undefined
     }
     setCurrentCase({ drafts, records, name, meta })
     const existing = termTabs.find((t) => t.cwd === drafts || (t.jsId && t.jsId === c.id))
@@ -3068,15 +3188,22 @@ export default function App(): JSX.Element {
       .filter((p) => p.role === 'client')
       .map((p) => p.party.name)
       .join(', ')
+    const opponent = c.parties
+      .filter((p) => p.role === 'opponent')
+      .map((p) => p.party.name)
+      .join(', ')
+    const partyNames = [client, opponent].filter(Boolean).join(' / ')
     const name =
       [court && abbrevCourt(court), c.caseNumber, c.caseName, client].filter(Boolean).join(' ') ||
       caseRef(c)
     const meta: CaseMeta = {
-      jsId: c.id,
+      jsId: c.id || undefined,
       court: court || undefined,
       caseNumber: c.caseNumber || undefined,
       caseName: c.caseName || undefined,
-      client: client || undefined
+      client: client || undefined,
+      opponent: opponent || undefined,
+      partyNames: partyNames || undefined
     }
     // 원격 작성서류 루트에서 폴더명(사건번호/당사자) 자동 매칭
     let matchedUri: string | undefined
@@ -3097,9 +3224,8 @@ export default function App(): JSX.Element {
 
   // 우클릭: Claude에 사건 브리핑 요청
   const briefCaseToClaude = (c: JsCase): void => {
-    sendClaude(
-      `「${caseRef(c)}」 사건(JuriSupport id: ${c.id})의 다가오는 기일과 진행상황을 정리해줘.\n`
-    )
+    const idPart = c.id ? `(JuriSupport id: ${c.id})` : ''
+    sendClaude(`「${caseRef(c)}」 사건${idPart}의 다가오는 기일과 진행상황을 정리해줘.\n`)
   }
   // 우클릭: 준비서면 초안 시작 (/brief-protocol 슬래시커맨드)
   const draftCaseWithClaude = (c: JsCase): void => {
@@ -3267,6 +3393,8 @@ export default function App(): JSX.Element {
       onBrief={briefCaseToClaude}
       onDraft={draftCaseWithClaude}
       jsNonce={jsNonce}
+      todoNonce={todoNonce}
+      onTodoChanged={() => setTodoNonce((n) => n + 1)}
       pendingCreate={pendingCreate}
       onRequestCreate={(dir, type) => setPendingCreate({ type, dir })}
       onCreateEntry={onCreateEntry}
@@ -3421,12 +3549,14 @@ export default function App(): JSX.Element {
                 ssh={t.ssh}
                 visible={t.id === activeTerm}
                 focusNonce={termFocusNonce[t.id] ?? 0}
+                todoContext={todoContextForTerm(t)}
                 onDropPaths={(paths) => dropFilesToTerm(t.id, paths)}
                 onAskSelection={(text) => askAboutTerminalSelection(t.id, text)}
                 onNewTerminal={() => addTermSame(termSide(t), t.id)}
                 onRequestClose={() => closeTermWithConfirm(t.id)}
                 onStatus={(s) => onTermStatus(t.id, s)}
                 onBracketedPasteModeChange={(enabled) => onTermBracketedPasteMode(t.id, enabled)}
+                onTodoChanged={() => setTodoNonce((n) => n + 1)}
                 onNewAgent={() => addAgentSame(termSide(t), t.id)}
                 onCycleTab={(dir) => cycleTerm(dir, t.id)}
               />
@@ -3449,6 +3579,26 @@ export default function App(): JSX.Element {
             onBrief={briefCaseToClaude}
             onDraft={draftCaseWithClaude}
             onChanged={() => setJsNonce((n) => n + 1)}
+          />
+        </div>
+      )
+    }
+
+    if (side === 'left' && mode === 'todos') {
+      return (
+        <div className="work-pane work-left" key="todos" data-work-side="left">
+          <TodosDashboard
+            nonce={todoNonce}
+            onChanged={() => setTodoNonce((n) => n + 1)}
+            onOpenWorkspace={openCaseWorkspace}
+            onOpenRemote={openCaseRemote}
+            sshProfiles={sshProfiles}
+            defaultOpenProfileId={defaultCaseOpenProfileId}
+            onBrief={briefCaseToClaude}
+            onDraft={draftCaseWithClaude}
+            onAskClaudeTodoUpdate={(prompt) =>
+              sendClaude(prompt, { displayText: '할일 변경분을 기준으로 클코 갱신 요청을 보냈습니다.' })
+            }
           />
         </div>
       )
@@ -3721,12 +3871,14 @@ export default function App(): JSX.Element {
                   ssh={t.ssh}
                   visible={t.id === visibleTermId}
                   focusNonce={termFocusNonce[t.id] ?? 0}
+                  todoContext={todoContextForTerm(t)}
                   onDropPaths={(paths) => dropFilesToTerm(t.id, paths)}
                   onAskSelection={(text) => askAboutTerminalSelection(t.id, text)}
                   onNewTerminal={() => addTermSame(side, t.id)}
                   onRequestClose={() => closeTermWithConfirm(t.id)}
                   onStatus={(s) => onTermStatus(t.id, s)}
                   onBracketedPasteModeChange={(enabled) => onTermBracketedPasteMode(t.id, enabled)}
+                  onTodoChanged={() => setTodoNonce((n) => n + 1)}
                   onNewAgent={() => addAgentSame(side, t.id)}
                   onCycleTab={(dir) => cycleTerm(dir, t.id)}
                 />
@@ -4219,7 +4371,7 @@ function SelectionAsk({ onAsk }: { onAsk: (text: string) => void }): JSX.Element
 }
 
 function modeLabel(mode: Mode): string {
-  return { explorer: '탐색기', cases: '사건', viewer: '기록뷰어' }[mode]
+  return { explorer: '탐색기', cases: '사건', viewer: '기록뷰어', todos: '할일' }[mode]
 }
 
 /** 탭 닫기 공통: 닫힌 탭이 활성이면 이웃으로 활성 이동 */
@@ -4268,6 +4420,8 @@ function DocsPanel({
   onBrief,
   onDraft,
   jsNonce,
+  todoNonce,
+  onTodoChanged,
   pendingCreate,
   onRequestCreate,
   onCreateEntry,
@@ -4303,12 +4457,14 @@ function DocsPanel({
   onBrief: (c: JsCase) => void
   onDraft: (c: JsCase) => void
   jsNonce: number
-  pendingCreate: PendingCreateRequest | null
+  todoNonce: number
+  onTodoChanged: () => void
+	  pendingCreate: PendingCreateRequest | null
   onRequestCreate: (dir: string, type: 'file' | 'folder') => void
   onCreateEntry: (name: string, type: 'file' | 'folder', dir?: string) => void
   onCancelCreate: () => void
 }): JSX.Element {
-  const title = { explorer: '탐색기', cases: '다가오는 기일', viewer: '문서' }[mode]
+  const title = { explorer: '탐색기', cases: '다가오는 기일', viewer: '문서', todos: '오늘 할일' }[mode]
   const [dragOver, setDragOver] = useState(false)
   const [sortMode, setSortMode] = useState<SortMode>(DEFAULT_SORT_MODE)
   const [fileFindOpen, setFileFindOpen] = useState(false)
@@ -4526,6 +4682,7 @@ function DocsPanel({
             onDraft={onDraft}
           />
         )}
+        {mode === 'todos' && <TodayTodos nonce={todoNonce} onChanged={onTodoChanged} />}
       </div>
     </div>
   )
