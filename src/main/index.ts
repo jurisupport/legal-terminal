@@ -65,12 +65,11 @@ import { disposeAgentSessions, registerAgentIpc } from './agent/agent-service'
 let mainWindow: BrowserWindow | null = null
 let updateCheckStarted = false
 const dockBounceByWindow = new Map<number, number>()
-const GITHUB_RELEASES_URL = 'https://github.com/jurisupport/legal-terminal/releases/latest'
+const GITHUB_PROJECT_URL = 'https://github.com/jurisupport/legal-terminal'
 const DEFAULT_WINDOW_TITLE = 'legal-terminal'
 
 interface GitHubRelease {
   tag_name?: string
-  html_url?: string
 }
 
 function parseVersionParts(version: string): number[] {
@@ -142,10 +141,9 @@ async function checkForUpdates(win: BrowserWindow): Promise<void> {
     const settings = await getSettings()
     if (settings.ignoredUpdateVersion === latestVersion) return
 
-    const url = release.html_url ?? GITHUB_RELEASES_URL
     const detail = [
       `현재 버전은 ${app.getVersion()}입니다.`,
-      '터미널 업데이트가 원활하지 않을 수 있어 GitHub 릴리스 페이지에서 설치 파일을 내려받아 업데이트해 주세요.'
+      '터미널 업데이트가 원활하지 않을 수 있어 GitHub 메인 페이지의 설치 링크에서 파일을 내려받아 업데이트해 주세요.'
     ].join('\n')
 
     const result = await dialog.showMessageBox(win, {
@@ -153,13 +151,13 @@ async function checkForUpdates(win: BrowserWindow): Promise<void> {
       title: 'legal-terminal 업데이트',
       message: `새 버전 ${latestVersion}을 사용할 수 있습니다.`,
       detail,
-      buttons: ['GitHub 릴리스 페이지 열기', '나중에', '이번 버전 다시 알리지 않기'],
+      buttons: ['GitHub 메인 페이지 열기', '나중에', '이번 버전 다시 알리지 않기'],
       defaultId: 0,
       cancelId: 1
     })
 
     if (result.response === 0) {
-      await shell.openExternal(url)
+      await shell.openExternal(GITHUB_PROJECT_URL)
     } else if (result.response === 2) {
       await setSettings({ ignoredUpdateVersion: latestVersion })
     }
