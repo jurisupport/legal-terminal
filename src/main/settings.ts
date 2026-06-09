@@ -54,6 +54,10 @@ export interface Settings {
   explorerSortMode?: string
   /** 원격 폴더 선택기 정렬 방식 */
   remotePickerSortMode?: string
+  /** SSH 원격 폴더/파일 목록을 디스크에 저장해 다음 실행에서 재사용 */
+  remoteDirectoryCache?: boolean
+  /** SSH 원격 파일 내용을 디스크에 저장해 다음 실행에서 재사용 */
+  remoteFileCache?: boolean
   /** JuriSupport MCP 토큰 (safeStorage로 암호화된 base64) */
   jurisupportTokenEnc?: string
   /** 사용자가 건너뛴 최신 릴리스 버전. 더 높은 버전이 나오면 다시 알린다. */

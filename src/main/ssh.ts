@@ -1,9 +1,17 @@
 import { execFile } from 'child_process'
 import type { SshProfile } from './settings'
+import {
+  invalidateRemoteDirListCache,
+  readRemoteDirListCache,
+  rememberRemoteDirListCache
+} from './remoteDirListCache'
 
 const sshBin = process.platform === 'win32' ? 'ssh.exe' : 'ssh'
 const CLOUD_DIR_LIST_TIMEOUT_MS = 15_000
 const CLOUD_DIR_MERGE_TIMEOUT_MS = 2_500
+const REMOTE_DIR_CACHE_TTL_MS = 10 * 60_000
+const REMOTE_DIR_CACHE_MAX = 500
+const REMOTE_DIR_DISK_CACHE_NAMESPACE = 'ssh-picker'
 
 function shq(s: string): string {
   return `'${s.replace(/'/g, "'\\''")}'`
@@ -121,10 +129,123 @@ export interface RemoteEntry {
   mtimeMs?: number
 }
 
+export interface ListRemoteDirOptions {
+  refresh?: boolean
+}
+
 export interface SearchRemoteDirsOptions {
   query: string
   maxDepth?: number
   limit?: number
+}
+
+interface RemoteDirCacheEntry {
+  cwd: string
+  entries: RemoteEntry[]
+  ts: number
+}
+
+const remoteDirCache = new Map<string, RemoteDirCacheEntry>()
+const remoteDirInflight = new Map<
+  string,
+  Promise<{ ok: true; entries: RemoteEntry[]; cwd: string } | { ok: false; error: string }>
+>()
+
+function normalizeRemoteDirPath(path: string): string {
+  const trimmed = path.trim().replace(/\/+$/, '')
+  return trimmed || '~'
+}
+
+function profileCachePrefix(profileId: string): string {
+  return `${profileId}\0`
+}
+
+function profileCacheKey(profile: SshProfile): string {
+  return [
+    profile.id,
+    profile.user,
+    profile.host,
+    String(profile.port ?? 22),
+    profile.identityFile ?? ''
+  ].join('\0')
+}
+
+function remoteDirCacheKey(profile: SshProfile, path: string): string {
+  return `${profileCacheKey(profile)}\0${normalizeRemoteDirPath(path)}`
+}
+
+function cloneEntries(entries: RemoteEntry[]): RemoteEntry[] {
+  return entries.map((entry) => ({ ...entry }))
+}
+
+function cloneListResult(
+  result: { ok: true; entries: RemoteEntry[]; cwd: string } | { ok: false; error: string }
+): { ok: true; entries: RemoteEntry[]; cwd: string } | { ok: false; error: string } {
+  return result.ok ? { ok: true, cwd: result.cwd, entries: cloneEntries(result.entries) } : result
+}
+
+function rememberRemoteDir(profile: SshProfile, path: string, cwd: string, entries: RemoteEntry[]): void {
+  const cache: RemoteDirCacheEntry = { cwd, entries: cloneEntries(entries), ts: Date.now() }
+  for (const key of [remoteDirCacheKey(profile, path), remoteDirCacheKey(profile, cwd)]) {
+    if (remoteDirCache.has(key)) remoteDirCache.delete(key)
+    remoteDirCache.set(key, cache)
+    rememberRemoteDirListCache(REMOTE_DIR_DISK_CACHE_NAMESPACE, key, cache)
+  }
+  while (remoteDirCache.size > REMOTE_DIR_CACHE_MAX) {
+    const oldest = remoteDirCache.keys().next().value
+    if (!oldest) break
+    remoteDirCache.delete(oldest)
+  }
+}
+
+function cachedRemoteDir(
+  profile: SshProfile,
+  path: string
+): { ok: true; entries: RemoteEntry[]; cwd: string } | undefined {
+  const key = remoteDirCacheKey(profile, path)
+  const cached = remoteDirCache.get(key)
+  if (!cached) return undefined
+  if (Date.now() - cached.ts > REMOTE_DIR_CACHE_TTL_MS) {
+    remoteDirCache.delete(key)
+    return undefined
+  }
+  return { ok: true, cwd: cached.cwd, entries: cloneEntries(cached.entries) }
+}
+
+function cachePathMatches(path: string, base: string): boolean {
+  return path === base || path.startsWith(base.endsWith('/') ? base : base + '/')
+}
+
+export function invalidateRemoteDirCacheForProfile(profileId: string, remotePath?: string): void {
+  const prefix = profileCachePrefix(profileId)
+  const normalized = remotePath ? normalizeRemoteDirPath(remotePath) : undefined
+  for (const key of [...remoteDirCache.keys()]) {
+    if (!key.startsWith(prefix)) continue
+    const keyPath = key.slice(key.lastIndexOf('\0') + 1)
+    const cachedCwd = remoteDirCache.get(key)?.cwd
+    const cwdMatches = cachedCwd ? cachePathMatches(normalizeRemoteDirPath(cachedCwd), normalized ?? '') : false
+    if (normalized && !cachePathMatches(keyPath, normalized) && !cwdMatches) continue
+    remoteDirCache.delete(key)
+  }
+  for (const key of [...remoteDirInflight.keys()]) {
+    if (!key.startsWith(prefix)) continue
+    const keyPath = key.slice(key.lastIndexOf('\0') + 1)
+    if (normalized && !cachePathMatches(keyPath, normalized)) continue
+    remoteDirInflight.delete(key)
+  }
+  invalidateRemoteDirListCache(REMOTE_DIR_DISK_CACHE_NAMESPACE, (key, record) => {
+    if (!key.startsWith(prefix)) return false
+    if (!normalized) return true
+    const keyPath = key.slice(key.lastIndexOf('\0') + 1)
+    const cwdMatches = record.cwd ? cachePathMatches(normalizeRemoteDirPath(record.cwd), normalized) : false
+    return cachePathMatches(keyPath, normalized) || cwdMatches
+  })
+}
+
+export function clearRemoteDirCache(): void {
+  remoteDirCache.clear()
+  remoteDirInflight.clear()
+  invalidateRemoteDirListCache(REMOTE_DIR_DISK_CACHE_NAMESPACE, () => true)
 }
 
 function sshArgs(profile: SshProfile, connectTimeout = 12): string[] {
@@ -137,12 +258,7 @@ function sshArgs(profile: SshProfile, connectTimeout = 12): string[] {
   return args
 }
 
-/**
- * 원격 디렉터리 목록 — 사건 폴더 선택용.
- * BatchMode=yes 로 비대화식 실행하므로 키/ssh-agent 인증일 때만 성공한다.
- * (비밀번호 인증은 여기서 응답할 수 없어 실패 → UI는 경로 직접 입력으로 폴백)
- */
-export function listRemoteDir(
+function readRemoteDir(
   profile: SshProfile,
   remotePath: string
 ): Promise<{ ok: true; entries: RemoteEntry[]; cwd: string } | { ok: false; error: string }> {
@@ -216,6 +332,46 @@ done
       }
     })
   })
+}
+
+/**
+ * 원격 디렉터리 목록 — 사건 폴더 선택용.
+ * BatchMode=yes 로 비대화식 실행하므로 키/ssh-agent 인증일 때만 성공한다.
+ * (비밀번호 인증은 여기서 응답할 수 없어 실패 → UI는 경로 직접 입력으로 폴백)
+ */
+export function listRemoteDir(
+  profile: SshProfile,
+  remotePath: string,
+  opts: ListRemoteDirOptions = {}
+): Promise<{ ok: true; entries: RemoteEntry[]; cwd: string } | { ok: false; error: string }> {
+  const key = remoteDirCacheKey(profile, remotePath)
+  if (!opts.refresh) {
+    const cached = cachedRemoteDir(profile, remotePath)
+    if (cached) return Promise.resolve(cached)
+    const inflight = remoteDirInflight.get(key)
+    if (inflight) return inflight.then(cloneListResult)
+  }
+
+  const request = (async () => {
+    if (!opts.refresh) {
+      const diskCached = await readRemoteDirListCache<RemoteEntry>(REMOTE_DIR_DISK_CACHE_NAMESPACE, key)
+      if (diskCached) {
+        const cwd = diskCached.cwd ?? remotePath
+        rememberRemoteDir(profile, remotePath, cwd, diskCached.entries)
+        return { ok: true, cwd, entries: cloneEntries(diskCached.entries) } as const
+      }
+    }
+    return await readRemoteDir(profile, remotePath)
+  })().then((result) => {
+    if (result.ok) rememberRemoteDir(profile, remotePath, result.cwd, result.entries)
+    return result
+  })
+  remoteDirInflight.set(key, request)
+  return request
+    .then(cloneListResult)
+    .finally(() => {
+      if (remoteDirInflight.get(key) === request) remoteDirInflight.delete(key)
+    })
 }
 
 /**

@@ -6,6 +6,16 @@ import { existsSync } from 'fs'
 import { homedir } from 'os'
 import { join, posix } from 'path'
 import { getSettings, type SshProfile } from './settings'
+import {
+  invalidateRemoteDirListCache,
+  readRemoteDirListCache,
+  rememberRemoteDirListCache
+} from './remoteDirListCache'
+import {
+  invalidateRemoteFileCache,
+  readRemoteFileCache,
+  rememberRemoteFileCache
+} from './remoteFileCache'
 
 // ── ssh:// URI 스킴 ──
 // 형식: ssh://<profileId>/<원격절대경로>  (profileId는 UUID라 슬래시 없음)
@@ -41,6 +51,10 @@ const RCLONE_LIST_MERGE_TIMEOUT_MS = 2_500
 const REMOTE_CLOUD_HYDRATE_TIMEOUT_MS = 10 * 60_000
 const REMOTE_MATERIALIZE_TMP_ROOT = '/tmp/legal-terminal-rclone-materialize'
 const REMOTE_LOCAL_MUTATION_WINDOW_MS = 30_000
+const REMOTE_DIR_CACHE_TTL_MS = 10 * 60_000
+const REMOTE_DIR_CACHE_MAX = 500
+const REMOTE_DIR_DISK_CACHE_NAMESPACE = 'remote-fs'
+const REMOTE_FILE_CACHE_NAMESPACE = 'remote-file'
 const remotePrefetching = new Set<string>()
 const remotePrefetchedAt = new Map<string, number>()
 const remoteLocalMutatedAt = new Map<string, number>()
@@ -358,6 +372,7 @@ async function getSftp(profileId: string): Promise<SFTPWrapper> {
 
 export function disposeRemote(profileId?: string): void {
   const ids = profileId ? [profileId] : [...pool.keys()]
+  invalidateRemoteDirCache(profileId)
   for (const id of ids) {
     const c = pool.get(id)
     pool.delete(id)
@@ -375,6 +390,104 @@ interface Entry {
   path: string
   isDir: boolean
   mtimeMs?: number
+}
+
+export interface RfsListOptions {
+  refresh?: boolean
+}
+
+interface RemoteDirCacheEntry {
+  entries: Entry[]
+  ts: number
+}
+
+const remoteDirCache = new Map<string, RemoteDirCacheEntry>()
+const remoteDirInflight = new Map<string, Promise<Entry[]>>()
+
+function normalizeRemoteDirPath(path: string): string {
+  const trimmed = path.trim().replace(/\/+$/, '')
+  return trimmed || '/'
+}
+
+function remoteDirCacheKey(profileId: string, path: string): string {
+  return `${profileId}\0${normalizeRemoteDirPath(path)}`
+}
+
+function remoteFileCacheKey(profileId: string, path: string): string {
+  return `${profileId}\0${path.normalize('NFC')}`
+}
+
+function cloneEntries(entries: Entry[]): Entry[] {
+  return entries.map((entry) => ({ ...entry }))
+}
+
+function rememberRemoteDir(profileId: string, path: string, entries: Entry[]): void {
+  const key = remoteDirCacheKey(profileId, path)
+  if (remoteDirCache.has(key)) remoteDirCache.delete(key)
+  remoteDirCache.set(key, { entries: cloneEntries(entries), ts: Date.now() })
+  rememberRemoteDirListCache(REMOTE_DIR_DISK_CACHE_NAMESPACE, key, { entries })
+  while (remoteDirCache.size > REMOTE_DIR_CACHE_MAX) {
+    const oldest = remoteDirCache.keys().next().value
+    if (!oldest) break
+    remoteDirCache.delete(oldest)
+  }
+}
+
+function cachedRemoteDir(profileId: string, path: string): Entry[] | undefined {
+  const key = remoteDirCacheKey(profileId, path)
+  const cached = remoteDirCache.get(key)
+  if (!cached) return undefined
+  if (Date.now() - cached.ts > REMOTE_DIR_CACHE_TTL_MS) {
+    remoteDirCache.delete(key)
+    return undefined
+  }
+  return cloneEntries(cached.entries)
+}
+
+function cachePathMatches(path: string, base: string): boolean {
+  return path === base || path.startsWith(base.endsWith('/') ? base : base + '/')
+}
+
+function invalidateRemoteDirCache(profileId?: string, path?: string): void {
+  const normalized = path ? normalizeRemoteDirPath(path) : undefined
+  for (const key of [...remoteDirCache.keys()]) {
+    const [keyProfileId, keyPath] = key.split('\0')
+    if (profileId && keyProfileId !== profileId) continue
+    if (normalized && !cachePathMatches(keyPath, normalized)) continue
+    remoteDirCache.delete(key)
+  }
+  for (const key of [...remoteDirInflight.keys()]) {
+    const [keyProfileId, keyPath] = key.split('\0')
+    if (profileId && keyProfileId !== profileId) continue
+    if (normalized && !cachePathMatches(keyPath, normalized)) continue
+    remoteDirInflight.delete(key)
+  }
+  invalidateRemoteDirListCache(REMOTE_DIR_DISK_CACHE_NAMESPACE, (key) => {
+    const [keyProfileId, keyPath] = key.split('\0')
+    if (profileId && keyProfileId !== profileId) return false
+    return !normalized || cachePathMatches(keyPath, normalized)
+  })
+}
+
+function cacheFilePathMatches(path: string, base: string): boolean {
+  return path === base || path.startsWith(base.endsWith('/') ? base : base + '/')
+}
+
+function invalidateRemoteFileContentCache(profileId: string, path: string): void {
+  const normalized = path.normalize('NFC')
+  invalidateRemoteFileCache(REMOTE_FILE_CACHE_NAMESPACE, (key) => {
+    const tab = key.indexOf('\0')
+    const keyProfileId = tab >= 0 ? key.slice(0, tab) : key
+    const keyPath = tab >= 0 ? key.slice(tab + 1) : ''
+    return keyProfileId === profileId && cacheFilePathMatches(keyPath, normalized)
+  })
+}
+
+export function clearRemoteDirCache(): void {
+  remoteDirCache.clear()
+  remoteDirInflight.clear()
+  invalidateRemoteDirListCache(REMOTE_DIR_DISK_CACHE_NAMESPACE, () => true)
+  invalidateRemoteFileCache(REMOTE_FILE_CACHE_NAMESPACE, () => true)
 }
 
 function sameFsName(a: string, b: string): boolean {
@@ -408,9 +521,7 @@ async function resolveRemotePath(sftp: SFTPWrapper, requestedPath: string): Prom
   return current
 }
 
-// 디렉터리 목록. 심볼릭 링크는 stat으로 디렉터리 여부 확인.
-export async function rfsList(uri: string): Promise<Entry[]> {
-  const { profileId, path } = parseRemote(uri)
+async function readRemoteDir(profileId: string, path: string): Promise<Entry[]> {
   const sftp = await getSftp(profileId)
   const cloudPath = oneDriveCloudPath(path)
   let actualPath = path
@@ -464,6 +575,33 @@ export async function rfsList(uri: string): Promise<Entry[]> {
   return out
 }
 
+// 디렉터리 목록. 심볼릭 링크는 stat으로 디렉터리 여부 확인.
+export async function rfsList(uri: string, opts: RfsListOptions = {}): Promise<Entry[]> {
+  const { profileId, path } = parseRemote(uri)
+  const key = remoteDirCacheKey(profileId, path)
+  if (!opts.refresh) {
+    const cached = cachedRemoteDir(profileId, path)
+    if (cached) return cached
+    const inflight = remoteDirInflight.get(key)
+    if (inflight) return cloneEntries(await inflight)
+    const diskCached = await readRemoteDirListCache<Entry>(REMOTE_DIR_DISK_CACHE_NAMESPACE, key)
+    if (diskCached) {
+      rememberRemoteDir(profileId, path, diskCached.entries)
+      return cloneEntries(diskCached.entries)
+    }
+  }
+  const request = readRemoteDir(profileId, path).then((entries) => {
+    rememberRemoteDir(profileId, path, entries)
+    return entries
+  })
+  remoteDirInflight.set(key, request)
+  try {
+    return cloneEntries(await request)
+  } finally {
+    if (remoteDirInflight.get(key) === request) remoteDirInflight.delete(key)
+  }
+}
+
 function statIsDir(sftp: SFTPWrapper, path: string): Promise<boolean> {
   return new Promise((resolve) =>
     sftp.stat(path, (err, st) => resolve(!err && st.isDirectory()))
@@ -472,6 +610,13 @@ function statIsDir(sftp: SFTPWrapper, path: string): Promise<boolean> {
 
 export async function rfsReadBytes(uri: string): Promise<Buffer> {
   const { profileId, path } = parseRemote(uri)
+  const cacheKey = remoteFileCacheKey(profileId, path)
+  const cached = await readRemoteFileCache(REMOTE_FILE_CACHE_NAMESPACE, cacheKey)
+  if (cached) return cached
+  const remember = (data: Buffer): Buffer => {
+    rememberRemoteFileCache(REMOTE_FILE_CACHE_NAMESPACE, cacheKey, data)
+    return data
+  }
   const sftp = await getSftp(profileId)
   let actualPath: string
   try {
@@ -485,20 +630,20 @@ export async function rfsReadBytes(uri: string): Promise<Buffer> {
   if (isLikelyOneDrivePath(actualPath)) {
     const cloudPath = oneDriveCloudPath(actualPath)
     try {
-      return await readBytesViaSsh(profileId, actualPath, SSH_QUICK_READ_TIMEOUT_MS)
+      return remember(await readBytesViaSsh(profileId, actualPath, SSH_QUICK_READ_TIMEOUT_MS))
     } catch (sshErr) {
       if (cloudPath) {
         try {
           await materializeRemoteOneDriveFile(profileId, cloudPath, actualPath)
-          return await readBytesViaSsh(profileId, actualPath, SSH_READ_TIMEOUT_MS)
+          return remember(await readBytesViaSsh(profileId, actualPath, SSH_READ_TIMEOUT_MS))
         } catch (materializeErr) {
           try {
-            return await readBytesViaRclone(profileId, cloudPath)
+            return remember(await readBytesViaRclone(profileId, cloudPath))
           } catch (rcloneErr) {
             if (!isCloudTimeout(sshErr)) throw new Error(readFailureMessage(sshErr, rcloneErr))
             await hydrateRemoteFile(profileId, actualPath)
             try {
-              return await readBytesViaSsh(profileId, actualPath)
+              return remember(await readBytesViaSsh(profileId, actualPath))
             } catch (retryErr) {
               throw new Error(
                 [
@@ -513,11 +658,11 @@ export async function rfsReadBytes(uri: string): Promise<Buffer> {
       }
       if (!isCloudTimeout(sshErr)) throw sshErr
       await hydrateRemoteFile(profileId, actualPath)
-      return await readBytesViaSsh(profileId, actualPath)
+      return remember(await readBytesViaSsh(profileId, actualPath))
     }
   }
   try {
-    return await new Promise<Buffer>((resolve, reject) => {
+    return remember(await new Promise<Buffer>((resolve, reject) => {
       const chunks: Buffer[] = []
       const stream = sftp.createReadStream(actualPath)
       let settled = false
@@ -545,16 +690,16 @@ export async function rfsReadBytes(uri: string): Promise<Buffer> {
         if (timer) clearTimeout(timer)
         resolve(Buffer.concat(chunks))
       })
-    })
+    }))
   } catch (e) {
     const sftpErr = e
     try {
-      return await readBytesViaSsh(profileId, actualPath)
+      return remember(await readBytesViaSsh(profileId, actualPath))
     } catch (sshErr) {
       if (isCloudTimeout(sshErr)) {
         await hydrateRemoteFile(profileId, actualPath)
         try {
-          return await readBytesViaSsh(profileId, actualPath)
+          return remember(await readBytesViaSsh(profileId, actualPath))
         } catch (retryErr) {
           throw new Error(cloudFileMessage(actualPath, sftpErr, retryErr))
         }
@@ -873,6 +1018,8 @@ export async function rfsWriteText(uri: string, content: string): Promise<void> 
   await new Promise<void>((resolve, reject) =>
     sftp.writeFile(path, content, { encoding: 'utf8' }, (err) => (err ? reject(err) : resolve()))
   )
+  invalidateRemoteDirCache(profileId, posix.dirname(path))
+  rememberRemoteFileCache(REMOTE_FILE_CACHE_NAMESPACE, remoteFileCacheKey(profileId, path), Buffer.from(content))
   noteRemoteLocalMutation(posix.dirname(path))
 }
 
@@ -888,6 +1035,8 @@ export async function rfsWriteBytes(
   await new Promise<void>((resolve, reject) =>
     sftp.writeFile(full, data, (err) => (err ? reject(err) : resolve()))
   )
+  invalidateRemoteDirCache(profileId, path)
+  rememberRemoteFileCache(REMOTE_FILE_CACHE_NAMESPACE, remoteFileCacheKey(profileId, full), data)
   noteRemoteLocalMutation(path)
   return makeRemote(profileId, full)
 }
@@ -918,6 +1067,7 @@ export async function rfsMkdir(parentUri: string, name: string): Promise<void> {
   await new Promise<void>((resolve, reject) =>
     sftp.mkdir(full, (err) => (err ? reject(err) : resolve()))
   )
+  invalidateRemoteDirCache(profileId, path)
   noteRemoteLocalMutation(path)
   noteRemoteLocalMutation(full)
 }
@@ -943,6 +1093,8 @@ export async function rfsCreateFile(
   await new Promise<void>((resolve, reject) =>
     sftp.writeFile(full, content, { encoding: 'utf8' }, (err) => (err ? reject(err) : resolve()))
   )
+  invalidateRemoteDirCache(profileId, path)
+  rememberRemoteFileCache(REMOTE_FILE_CACHE_NAMESPACE, remoteFileCacheKey(profileId, full), Buffer.from(content))
   noteRemoteLocalMutation(path)
   return makeRemote(profileId, full)
 }
@@ -968,6 +1120,12 @@ export async function rfsMove(
     await new Promise<void>((resolve, reject) =>
       sftp.rename(src.path, target, (err) => (err ? reject(err) : resolve()))
     )
+    invalidateRemoteDirCache(src.profileId, posix.dirname(src.path))
+    invalidateRemoteDirCache(src.profileId, src.path)
+    invalidateRemoteDirCache(src.profileId, dest.path)
+    invalidateRemoteDirCache(src.profileId, target)
+    invalidateRemoteFileContentCache(src.profileId, src.path)
+    invalidateRemoteFileContentCache(src.profileId, target)
     noteRemoteLocalMutation(posix.dirname(src.path))
     noteRemoteLocalMutation(dest.path)
     noteRemoteLocalMutation(target)
@@ -993,6 +1151,11 @@ export async function rfsRename(
     await new Promise<void>((resolve, reject) =>
       sftp.rename(src.path, target, (err) => (err ? reject(err) : resolve()))
     )
+    invalidateRemoteDirCache(src.profileId, posix.dirname(src.path))
+    invalidateRemoteDirCache(src.profileId, src.path)
+    invalidateRemoteDirCache(src.profileId, target)
+    invalidateRemoteFileContentCache(src.profileId, src.path)
+    invalidateRemoteFileContentCache(src.profileId, target)
     noteRemoteLocalMutation(posix.dirname(src.path))
     noteRemoteLocalMutation(target)
     return { ok: true, path: makeRemote(src.profileId, target) }
@@ -1010,6 +1173,14 @@ export async function rfsDelete(uri: string): Promise<void> {
     const sftp = await getSftp(profileId)
     const actualPath = await resolveRemotePath(sftp, path)
     await removeRec(sftp, actualPath)
+    invalidateRemoteDirCache(profileId, posix.dirname(actualPath))
+    invalidateRemoteDirCache(profileId, actualPath)
+    invalidateRemoteFileContentCache(profileId, actualPath)
+    if (actualPath !== path) {
+      invalidateRemoteDirCache(profileId, posix.dirname(path))
+      invalidateRemoteDirCache(profileId, path)
+      invalidateRemoteFileContentCache(profileId, path)
+    }
     noteRemoteLocalMutation(posix.dirname(actualPath))
     noteRemoteLocalMutation(actualPath)
     return
@@ -1020,6 +1191,9 @@ export async function rfsDelete(uri: string): Promise<void> {
 
   try {
     await deleteRemoteOneDrivePath(profileId, cloudPath)
+    invalidateRemoteDirCache(profileId, posix.dirname(path))
+    invalidateRemoteDirCache(profileId, path)
+    invalidateRemoteFileContentCache(profileId, path)
     noteRemoteLocalMutation(posix.dirname(path))
     noteRemoteLocalMutation(path)
   } catch (cloudError) {

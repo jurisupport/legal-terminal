@@ -24,6 +24,10 @@ interface RemoteEntry {
   mtimeMs?: number
 }
 
+interface FsListOptions {
+  refresh?: boolean
+}
+
 interface FolderMatchSuggestion {
   path: string
   name: string
@@ -223,6 +227,8 @@ interface AppSettings {
   agentFontSize?: number
   explorerSortMode?: string
   remotePickerSortMode?: string
+  remoteDirectoryCache?: boolean
+  remoteFileCache?: boolean
   sshProfiles?: SshProfile[]
 }
 
@@ -410,9 +416,10 @@ const api = {
   },
   fs: {
     list: (
-      dirPath: string
+      dirPath: string,
+      opts?: FsListOptions
     ): Promise<{ name: string; path: string; isDir: boolean; mtimeMs?: number }[]> =>
-      ipcRenderer.invoke('fs:list', dirPath),
+      ipcRenderer.invoke('fs:list', dirPath, opts),
     readBytes: (filePath: string): Promise<ArrayBuffer> =>
       ipcRenderer.invoke('fs:readBytes', filePath),
     readHwpText: (
@@ -553,10 +560,11 @@ const api = {
     // 원격 디렉터리 목록 (사건 폴더 선택용). 키/agent 인증 시에만 성공.
     listDir: (
       profile: SshProfile,
-      path: string
+      path: string,
+      opts?: { refresh?: boolean }
     ): Promise<
       { ok: true; entries: RemoteEntry[]; cwd: string } | { ok: false; error: string }
-    > => ipcRenderer.invoke('ssh:listDir', { profile, path }),
+    > => ipcRenderer.invoke('ssh:listDir', { profile, path, ...opts }),
     searchDirs: (
       profile: SshProfile,
       path: string,
@@ -564,7 +572,9 @@ const api = {
     ): Promise<
       | { ok: true; entries: RemoteEntry[]; cwd: string; truncated?: boolean }
       | { ok: false; error: string }
-    > => ipcRenderer.invoke('ssh:searchDirs', { profile, path, ...opts })
+    > => ipcRenderer.invoke('ssh:searchDirs', { profile, path, ...opts }),
+    clearDirCache: (): Promise<{ ok: boolean; error?: string }> =>
+      ipcRenderer.invoke('ssh:clearDirCache')
   },
   sync: {
     remoteInfo: (

@@ -192,6 +192,7 @@ export default function FileTree({
   const [selectRect, setSelectRect] = useState<SelectRect | null>(null)
   const treeRef = useRef<HTMLUListElement>(null)
   const lastRoot = useRef<string | null>(null)
+  const lastRefreshNonce = useRef(refreshNonce)
   const entriesRef = useRef<Entry[] | null>(null)
   const selectedPathsRef = useRef(selectedPaths)
   const anchorPathRef = useRef<string | null>(null)
@@ -358,13 +359,15 @@ export default function FileTree({
   useEffect(() => {
     let alive = true
     const rootChanged = lastRoot.current !== root
+    const refreshChanged = lastRefreshNonce.current !== refreshNonce
     lastRoot.current = root
+    lastRefreshNonce.current = refreshNonce
     const hasEntries = entriesRef.current !== null
     if (rootChanged) setEntries(null)
     if (rootChanged) entriesRef.current = null
     if (rootChanged || !hasEntries) setErr('')
     window.lt.fs
-      .list(root)
+      .list(root, { refresh: !rootChanged && refreshChanged })
       .then((e) => {
         if (!alive) return
         entriesRef.current = e
@@ -820,9 +823,9 @@ function TreeNode({
   // spring-load: 드래그한 채 폴더 위에 머물면 자동으로 펼침
   const springTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
 
-  const loadChildren = (): void => {
+  const loadChildren = (opts?: { refresh?: boolean }): void => {
     window.lt.fs
-      .list(entry.path)
+      .list(entry.path, opts)
       .then(setChildren)
       .catch(() => setChildren([]))
   }
@@ -838,7 +841,7 @@ function TreeNode({
 
   // 이동/복사 등으로 nonce가 바뀌면 펼쳐진 폴더 내용 갱신
   useEffect(() => {
-    if (entry.isDir && open) loadChildren()
+    if (entry.isDir && open) loadChildren({ refresh: true })
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [refreshNonce])
 

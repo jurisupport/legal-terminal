@@ -4368,6 +4368,20 @@ body {
   align-items: center;
   gap: 12px;
 }
+.setting-checkbox {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--fg);
+  font-size: 13px;
+}
+.setting-checkbox input {
+  margin: 0;
+  accent-color: var(--accent);
+}
+.setting-cache-options {
+  flex-wrap: wrap;
+}
 .setting-value code {
   flex: 1;
   background: var(--bg-alt);

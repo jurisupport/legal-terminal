@@ -22,6 +22,10 @@ export interface RemoteEntry {
   mtimeMs?: number
 }
 
+export interface FsListOptions {
+  refresh?: boolean
+}
+
 export interface FolderMatchSuggestion {
   path: string
   name: string
@@ -221,6 +225,8 @@ export interface AppSettings {
   agentFontSize?: number
   explorerSortMode?: string
   remotePickerSortMode?: string
+  remoteDirectoryCache?: boolean
+  remoteFileCache?: boolean
   sshProfiles?: SshProfile[]
 }
 
@@ -460,7 +466,10 @@ export interface LtApi {
     ) => Promise<{ ok: boolean; path?: string; error?: string }>
   }
   fs: {
-    list: (dirPath: string) => Promise<{ name: string; path: string; isDir: boolean; mtimeMs?: number }[]>
+    list: (
+      dirPath: string,
+      opts?: FsListOptions
+    ) => Promise<{ name: string; path: string; isDir: boolean; mtimeMs?: number }[]>
     readBytes: (filePath: string) => Promise<ArrayBuffer>
     readHwpText: (filePath: string) => Promise<{ ok: boolean; text: string; error?: string }>
     writeText: (path: string, content: string) => Promise<{ ok: boolean; error?: string }>
@@ -523,7 +532,8 @@ export interface LtApi {
   ssh: {
     listDir: (
       profile: SshProfile,
-      path: string
+      path: string,
+      opts?: { refresh?: boolean }
     ) => Promise<
       { ok: true; entries: RemoteEntry[]; cwd: string } | { ok: false; error: string }
     >
@@ -535,6 +545,7 @@ export interface LtApi {
       | { ok: true; entries: RemoteEntry[]; cwd: string; truncated?: boolean }
       | { ok: false; error: string }
     >
+    clearDirCache: () => Promise<{ ok: boolean; error?: string }>
   }
   sync: {
     remoteInfo: (

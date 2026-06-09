@@ -6665,6 +6665,43 @@ function SettingsView(): JSX.Element {
 
       <section className="setting-row">
         <div className="setting-label">
+          원격 캐시 <span className="muted small">— 한 번 연 SSH 폴더·파일을 다음 실행에서도 재사용</span>
+        </div>
+        <div className="setting-value setting-cache-options">
+          <label className="setting-checkbox">
+            <input
+              type="checkbox"
+              checked={s.remoteDirectoryCache === true}
+              onChange={(e) => {
+                void savePatch({ remoteDirectoryCache: e.currentTarget.checked })
+              }}
+            />
+            <span>폴더 구조와 파일 목록을 이 Mac에 저장</span>
+          </label>
+          <label className="setting-checkbox">
+            <input
+              type="checkbox"
+              checked={s.remoteFileCache === true}
+              onChange={(e) => {
+                void savePatch({ remoteFileCache: e.currentTarget.checked })
+              }}
+            />
+            <span>원격 파일 내용도 저장</span>
+          </label>
+          <button
+            className="header-btn setting-reset-btn"
+            type="button"
+            onClick={() => {
+              void window.lt.ssh.clearDirCache()
+            }}
+          >
+            캐시 비우기
+          </button>
+        </div>
+      </section>
+
+      <section className="setting-row">
+        <div className="setting-label">
           PDF 기본 배율 <span className="muted small">— 전자소송기록을 열 때 적용</span>
         </div>
         <div className="setting-value">
@@ -7345,7 +7382,7 @@ function RemoteFolderPicker({
   const folderSearchSeq = useRef(0)
   const loadSeq = useRef(0)
 
-  const load = (path: string): void => {
+  const load = (path: string, opts?: { refresh?: boolean }): void => {
     const nextPath = path.trim() || '~'
     const seq = ++loadSeq.current
     folderSearchSeq.current++
@@ -7357,7 +7394,7 @@ function RemoteFolderPicker({
     setFolderSearchErr('')
     setFolderSearchTruncated(false)
     window.lt.ssh
-      .listDir(profile, nextPath)
+      .listDir(profile, nextPath, opts)
       .then((r) => {
         if (loadSeq.current !== seq) return
         setLoading(false)
@@ -7419,7 +7456,7 @@ function RemoteFolderPicker({
   const closeSync = (): void => {
     const reloadPath = syncOpen?.reloadPath
     setSyncOpen(null)
-    if (reloadPath) load(reloadPath)
+    if (reloadPath) load(reloadPath, { refresh: true })
   }
   const clearFolderSearch = (): void => {
     folderSearchSeq.current++
@@ -7486,7 +7523,7 @@ function RemoteFolderPicker({
         }
         setNewFolderName('')
         clearFolderSearch()
-        load(createdPath)
+        load(createdPath, { refresh: true })
       })
       .catch((e: unknown) => {
         setCreatingFolder(false)
@@ -7521,7 +7558,7 @@ function RemoteFolderPicker({
               </div>
               <code className="remote-cwd">{cwd}</code>
             </div>
-            <button className="header-btn" onClick={() => load(cwd)} title="새로고침">
+            <button className="header-btn" onClick={() => load(cwd, { refresh: true })} title="새로고침">
               ⟳
             </button>
             <select

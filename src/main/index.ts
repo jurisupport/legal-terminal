@@ -16,7 +16,12 @@ import {
   setJsPairing
 } from './caseStore'
 import * as js from './jurisupport'
-import { listRemoteDir, searchRemoteDirs } from './ssh'
+import {
+  clearRemoteDirCache as clearRemotePickerDirCache,
+  invalidateRemoteDirCacheForProfile,
+  listRemoteDir,
+  searchRemoteDirs
+} from './ssh'
 import { remoteRcloneInfo, runRemoteSync, cancelSync, type RemoteSyncOpts } from './sync'
 import {
   isRemote,
@@ -33,6 +38,7 @@ import {
   rfsRename,
   rfsStat,
   rfsDelete,
+  clearRemoteDirCache as clearRemoteFsDirCache,
   disposeRemote
 } from './remoteFs'
 import type { SshProfile } from './settings'
@@ -581,8 +587,8 @@ ipcMain.handle('todo:applyTerminalCommand', async (_e, p: { command: string; con
 
 // ── SSH IPC ──
 // 원격 디렉터리 목록 (사건 폴더 선택용). 키/agent 인증일 때만 성공(아니면 ok:false).
-ipcMain.handle('ssh:listDir', (_e, p: { profile: SshProfile; path: string }) =>
-  listRemoteDir(p.profile, p.path)
+ipcMain.handle('ssh:listDir', (_e, p: { profile: SshProfile; path: string; refresh?: boolean }) =>
+  listRemoteDir(p.profile, p.path, { refresh: !!p.refresh })
 )
 ipcMain.handle(
   'ssh:searchDirs',
@@ -593,6 +599,11 @@ ipcMain.handle(
       limit: p.limit
     })
 )
+ipcMain.handle('ssh:clearDirCache', () => {
+  clearRemotePickerDirCache()
+  clearRemoteFsDirCache()
+  return { ok: true }
+})
 
 // ── rclone 동기화 IPC (클라우드 경유: 맥에서 rclone 실행) ──
 ipcMain.handle('sync:remoteInfo', (_e, profile: SshProfile) => remoteRcloneInfo(profile))
@@ -1065,6 +1076,18 @@ function remoteChild(parentUri: string, name: string): string {
   return makeRemote(profileId, posix.join(path, name))
 }
 
+function invalidateRemotePickerCache(uri: string): void {
+  if (!isRemote(uri)) return
+  const { profileId, path } = parseRemote(uri)
+  invalidateRemoteDirCacheForProfile(profileId, path)
+}
+
+function invalidateRemotePickerParentCache(uri: string): void {
+  if (!isRemote(uri)) return
+  const { profileId, path } = parseRemote(uri)
+  invalidateRemoteDirCacheForProfile(profileId, posix.dirname(path))
+}
+
 async function ensureRemoteChildDir(parentUri: string, name: string): Promise<string> {
   const child = remoteChild(parentUri, name)
   try {
@@ -1230,6 +1253,7 @@ ipcMain.handle('fs:mkdir', async (_e, p: { dir: string; name: string }) => {
   try {
     if (isRemote(p.dir)) {
       await rfsMkdir(p.dir, p.name)
+      invalidateRemotePickerCache(p.dir)
       return { ok: true, path: remoteChild(p.dir, p.name) }
     }
     const path = join(p.dir, p.name)
@@ -1267,8 +1291,11 @@ ipcMain.handle('fs:createFile', async (_e, p: { dir: string; name: string; conte
 // 파일/폴더 삭제 (폴더는 재귀). 로컬·원격 공통.
 ipcMain.handle('fs:delete', async (_e, p: string) => {
   try {
-    if (isRemote(p)) await rfsDelete(p)
-    else await rm(p, { recursive: true, force: true })
+    if (isRemote(p)) {
+      await rfsDelete(p)
+      invalidateRemotePickerParentCache(p)
+      invalidateRemotePickerCache(p)
+    } else await rm(p, { recursive: true, force: true })
     return { ok: true }
   } catch (e) {
     return { ok: false, error: String(e) }
@@ -1280,7 +1307,15 @@ ipcMain.handle('fs:rename', async (_e, p: { path: string; name: string }) => {
     const name = p.name.trim()
     if (!name) return { ok: false, error: '이름을 입력하세요.' }
     if (/[\\/]/.test(name)) return { ok: false, error: '이름에 경로 구분자를 사용할 수 없습니다.' }
-    if (isRemote(p.path)) return await rfsRename(p.path, name)
+    if (isRemote(p.path)) {
+      const result = await rfsRename(p.path, name)
+      if (result.ok) {
+        invalidateRemotePickerParentCache(p.path)
+        invalidateRemotePickerCache(p.path)
+        if (result.path) invalidateRemotePickerCache(result.path)
+      }
+      return result
+    }
     const dest = join(dirname(p.path), name)
     if (dest === p.path) return { ok: true, path: p.path }
     if (existsSync(dest)) return { ok: false, error: '같은 이름이 이미 있습니다.' }
@@ -1291,8 +1326,8 @@ ipcMain.handle('fs:rename', async (_e, p: { path: string; name: string }) => {
   }
 })
 
-ipcMain.handle('fs:list', async (_e, dirPath: string) => {
-  if (isRemote(dirPath)) return rfsList(dirPath)
+ipcMain.handle('fs:list', async (_e, dirPath: string, opts?: { refresh?: boolean }) => {
+  if (isRemote(dirPath)) return rfsList(dirPath, { refresh: !!opts?.refresh })
   const entries = await readLocalDirEntries(dirPath)
   const visible = entries.filter((e) => !e.name.startsWith('.'))
   const out = await Promise.all(
@@ -1363,7 +1398,16 @@ ipcMain.handle('fs:readHwpText', async (_e, filePath: string) => {
 // 트리 내부 이동 (탐색기 드래그앤드롭) — 같은 드라이브면 rename, 아니면 복사 후 삭제
 ipcMain.handle('fs:move', async (_e, p: { src: string; destDir: string }) => {
   try {
-    if (isRemote(p.src) || isRemote(p.destDir)) return await rfsMove(p.src, p.destDir)
+    if (isRemote(p.src) || isRemote(p.destDir)) {
+      const result = await rfsMove(p.src, p.destDir)
+      if (result.ok) {
+        invalidateRemotePickerParentCache(p.src)
+        invalidateRemotePickerCache(p.src)
+        invalidateRemotePickerCache(p.destDir)
+        if (result.path) invalidateRemotePickerCache(result.path)
+      }
+      return result
+    }
     const srcRes = resolve(p.src)
     const dest = join(p.destDir, basename(p.src))
     const destRes = resolve(dest)
@@ -1401,6 +1445,7 @@ ipcMain.handle('fs:copyInto', async (_e, p: { destDir: string; srcPaths: string[
       /* 개별 실패 무시 */
     }
   }
+  if (remote && copied.length > 0) invalidateRemotePickerCache(p.destDir)
   return { copied }
 })
 
