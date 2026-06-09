@@ -143,7 +143,7 @@ async function checkForUpdates(win: BrowserWindow): Promise<void> {
 
     const detail = [
       `현재 버전은 ${app.getVersion()}입니다.`,
-      '터미널 업데이트가 원활하지 않을 수 있어 GitHub 메인 페이지의 설치 링크에서 파일을 내려받아 업데이트해 주세요.'
+      'GitHub 페이지에서 운영체제에 맞는 최신 설치 파일을 내려받아 업데이트해 주세요.'
     ].join('\n')
 
     const result = await dialog.showMessageBox(win, {
@@ -151,7 +151,7 @@ async function checkForUpdates(win: BrowserWindow): Promise<void> {
       title: 'legal-terminal 업데이트',
       message: `새 버전 ${latestVersion}을 사용할 수 있습니다.`,
       detail,
-      buttons: ['GitHub 메인 페이지 열기', '나중에', '이번 버전 다시 알리지 않기'],
+      buttons: ['GitHub 페이지 열기', '나중에', '이번 버전 다시 알리지 않기'],
       defaultId: 0,
       cancelId: 1
     })
