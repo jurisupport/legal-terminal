@@ -635,6 +635,33 @@ export default function MarkdownEditor({
         : pathRef.current
           ? '저장 중…'
           : '미저장 (Ctrl+S)'
+  const isProofOfContentPrint = printLayout === 'proof-of-content'
+  const printLayoutTitle = isProofOfContentPrint
+    ? "내용증명 양식: 인쇄할 때 PDF 뷰어/프린터 옵션에서 '이미지로 인쇄'를 선택하세요."
+    : 'PDF 출력 양식'
+  const exportPdfTitle = isProofOfContentPrint
+    ? "내용증명 PDF로 내보내기. 인쇄할 때 '이미지로 인쇄'를 선택하세요."
+    : 'PDF로 내보내기'
+  const exportPdfNow = (): void => {
+    const v = viewRef.current
+    if (!v) return
+    const layout = printLayout
+    const name = (pathRef.current?.split(/[\\/]/).pop() ?? '문서').replace(/\.[^.]+$/, '')
+    const def =
+      (pathRef.current?.replace(/\.[^.]+$/, '') ?? (defaultDir ? defaultDir + '\\' + name : name)) + '.pdf'
+    void window.lt.export
+      .mdToPdf(mdToPrintHtml(v.state.doc.toString(), name, layout), def)
+      .then((r) => {
+        if (!r.ok) {
+          if (r.error) window.alert(`PDF 내보내기 실패: ${r.error}`)
+          return
+        }
+        if (layout === 'proof-of-content') {
+          window.alert("내용증명 PDF를 인쇄할 때는 PDF 뷰어/프린터 옵션에서 '이미지로 인쇄'를 선택하세요.")
+        }
+      })
+      .catch((e) => window.alert(`PDF 내보내기 실패: ${String(e)}`))
+  }
 
   return (
     <div className="text-doc" onKeyDown={onEditorKeyDown}>
@@ -660,8 +687,8 @@ export default function MarkdownEditor({
         <span className="tb-divider" />
         <select
           className="tb-select"
-          title="PDF 출력 양식"
-          aria-label="PDF 출력 양식"
+          title={printLayoutTitle}
+          aria-label={printLayoutTitle}
           value={printLayout}
           onChange={(e) => setPrintLayout(e.target.value as PrintLayoutProfile)}
         >
@@ -670,16 +697,8 @@ export default function MarkdownEditor({
         </select>
         <button
           className="tb-btn"
-          title="PDF로 내보내기"
-          onClick={() => {
-            const v = viewRef.current
-            if (!v) return
-            const name = (pathRef.current?.split(/[\\/]/).pop() ?? '문서').replace(/\.[^.]+$/, '')
-            const def =
-              (pathRef.current?.replace(/\.[^.]+$/, '') ?? (defaultDir ? defaultDir + '\\' + name : name)) +
-              '.pdf'
-            window.lt.export.mdToPdf(mdToPrintHtml(v.state.doc.toString(), name, printLayout), def)
-          }}
+          title={exportPdfTitle}
+          onClick={exportPdfNow}
         >
           PDF
         </button>
