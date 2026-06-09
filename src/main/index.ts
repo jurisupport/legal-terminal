@@ -3,7 +3,7 @@ import { spawn } from 'child_process'
 import { createHash } from 'crypto'
 import { request } from 'https'
 import { join, basename, dirname, extname, resolve, sep, posix } from 'path'
-import { readdir, readFile, stat, writeFile, copyFile, rm, mkdir, rename, cp, chmod } from 'fs/promises'
+import { readdir, readFile, stat, writeFile, copyFile, rm, mkdir, rename, cp } from 'fs/promises'
 import { existsSync, type Dirent } from 'fs'
 import { fileURLToPath } from 'url'
 import { getSettings, setSettings, type Settings } from './settings'
@@ -65,21 +65,12 @@ import { disposeAgentSessions, registerAgentIpc } from './agent/agent-service'
 let mainWindow: BrowserWindow | null = null
 let updateCheckStarted = false
 const dockBounceByWindow = new Map<number, number>()
-const MAC_INSTALL_SCRIPT_URL =
-  'https://raw.githubusercontent.com/jurisupport/legal-terminal/main/install-mac.sh'
-const WINDOWS_INSTALL_SCRIPT_URL =
-  'https://raw.githubusercontent.com/jurisupport/legal-terminal/main/install.ps1'
+const GITHUB_RELEASES_URL = 'https://github.com/jurisupport/legal-terminal/releases/latest'
 const DEFAULT_WINDOW_TITLE = 'legal-terminal'
-
-interface GitHubReleaseAsset {
-  name?: string
-  browser_download_url?: string
-}
 
 interface GitHubRelease {
   tag_name?: string
   html_url?: string
-  assets?: GitHubReleaseAsset[]
 }
 
 function parseVersionParts(version: string): number[] {
@@ -102,22 +93,6 @@ function compareVersions(a: string, b: string): number {
     if (delta !== 0) return delta
   }
   return 0
-}
-
-function preferredUpdateAssetNames(): string[] {
-  if (process.platform === 'win32') {
-    return ['legal-terminal-Setup.exe']
-  }
-
-  if (process.platform === 'darwin') {
-    if (process.arch === 'arm64') {
-      return ['legal-terminal-mac-arm64.dmg', 'legal-terminal-mac-arm64.zip']
-    }
-
-    return ['legal-terminal-mac-x64.zip', 'legal-terminal-mac-x64.dmg']
-  }
-
-  return []
 }
 
 function fetchLatestRelease(): Promise<GitHubRelease> {
@@ -158,190 +133,6 @@ function fetchLatestRelease(): Promise<GitHubRelease> {
   })
 }
 
-function updateDownloadUrl(release: GitHubRelease): string | null {
-  const assets = Array.isArray(release.assets) ? release.assets : []
-  for (const name of preferredUpdateAssetNames()) {
-    const asset = assets.find((candidate) => candidate.name === name)
-    if (asset?.browser_download_url) return asset.browser_download_url
-  }
-
-  return release.html_url ?? null
-}
-
-function quoteShellString(value: string): string {
-  return `'${value.replace(/'/g, `'\\''`)}'`
-}
-
-function quotePowerShellString(value: string): string {
-  return `'${value.replace(/'/g, `''`)}'`
-}
-
-function windowsPowerShellPath(): string {
-  const systemRoot = process.env['SystemRoot'] || process.env['WINDIR']
-  return systemRoot
-    ? join(systemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
-    : 'powershell.exe'
-}
-
-function windowsCmdPath(): string {
-  const comspec = process.env['ComSpec']
-  return comspec && comspec.trim() ? comspec : 'cmd.exe'
-}
-
-function updateInstallCommand(latestVersion: string): string | null {
-  if (process.platform === 'darwin') {
-    return [
-      `export LEGAL_TERMINAL_VERSION=${quoteShellString(latestVersion)}`,
-      `curl -fsSL ${quoteShellString(MAC_INSTALL_SCRIPT_URL)} | bash`
-    ].join('; ')
-  }
-
-  if (process.platform === 'win32') {
-    return [
-      `$env:LEGAL_TERMINAL_VERSION = ${quotePowerShellString(latestVersion)}`,
-      `irm ${quotePowerShellString(WINDOWS_INSTALL_SCRIPT_URL)} | iex`
-    ].join('; ')
-  }
-
-  return null
-}
-
-function launchDetached(command: string, args: string[], options?: { windowsHide?: boolean }): Promise<void> {
-  return new Promise((resolvePromise, reject) => {
-    const proc = spawn(command, args, {
-      detached: true,
-      stdio: 'ignore',
-      windowsHide: options?.windowsHide
-    })
-
-    proc.once('error', reject)
-    proc.once('spawn', () => {
-      proc.unref()
-      resolvePromise()
-    })
-  })
-}
-
-function launchAndWait(command: string, args: string[]): Promise<void> {
-  return new Promise((resolvePromise, reject) => {
-    const proc = spawn(command, args, { stdio: 'ignore' })
-
-    proc.once('error', reject)
-    proc.once('close', (code) => {
-      if (code === 0) resolvePromise()
-      else reject(new Error(`${command} exited with ${code ?? 'unknown'}`))
-    })
-  })
-}
-
-async function writeMacTerminalScript(command: string): Promise<string> {
-  const scriptPath = join(app.getPath('temp'), `legal-terminal-update-${Date.now()}.command`)
-  const script = [
-    '#!/bin/bash',
-    'set -e',
-    `trap 'rm -f "$0"' EXIT`,
-    command,
-    `printf '\\n[legal-terminal] update command finished. You can close this window.\\n'`
-  ].join('\n')
-
-  await writeFile(scriptPath, `${script}\n`, 'utf8')
-  await chmod(scriptPath, 0o755)
-  return scriptPath
-}
-
-async function writeWindowsTerminalScript(command: string): Promise<string> {
-  const id = Date.now()
-  const scriptPath = join(app.getPath('temp'), `legal-terminal-update-${id}.ps1`)
-  const script = [
-    `$ErrorActionPreference = 'Stop'`,
-    command,
-    `Write-Host ''`,
-    `Write-Host '[legal-terminal] update command finished. You can close this window.'`
-  ].join('\n')
-
-  await writeFile(scriptPath, `${script}\n`, 'utf8')
-  return scriptPath
-}
-
-function windowsUpdatePowerShellArgs(scriptPath: string): string[] {
-  return ['-NoProfile', '-NoExit', '-ExecutionPolicy', 'Bypass', '-File', scriptPath]
-}
-
-async function launchWindowsTerminalCommand(command: string): Promise<void> {
-  const scriptPath = await writeWindowsTerminalScript(command)
-  const powershell = windowsPowerShellPath()
-
-  try {
-    await launchDetached(powershell, windowsUpdatePowerShellArgs(scriptPath), { windowsHide: false })
-    return
-  } catch (error) {
-    const primaryReason = error instanceof Error ? error.message : String(error)
-    try {
-      await launchDetached(
-        windowsCmdPath(),
-        ['/d', '/c', 'start', 'legal-terminal update', powershell, ...windowsUpdatePowerShellArgs(scriptPath)],
-        { windowsHide: false }
-      )
-    } catch (fallbackError) {
-      const fallbackReason =
-        fallbackError instanceof Error ? fallbackError.message : String(fallbackError)
-      throw new Error(
-        `PowerShell launch failed: ${primaryReason}; cmd fallback failed: ${fallbackReason}`
-      )
-    }
-  }
-}
-
-async function launchTerminalCommand(command: string): Promise<void> {
-  if (process.platform === 'darwin') {
-    const scriptPath = await writeMacTerminalScript(command)
-    await launchAndWait('open', ['-a', 'Terminal', scriptPath])
-    return
-  }
-
-  if (process.platform === 'win32') {
-    return launchWindowsTerminalCommand(command)
-  }
-
-  throw new Error(`Unsupported update terminal platform: ${process.platform}`)
-}
-
-async function showUpdateTerminalError(
-  win: BrowserWindow,
-  command: string,
-  fallbackUrl: string,
-  error: unknown
-): Promise<void> {
-  const reason = error instanceof Error ? error.message : String(error)
-  await dialog.showMessageBox(win, {
-    type: 'warning',
-    title: 'legal-terminal 업데이트',
-    message: '터미널 업데이트를 시작하지 못해 다운로드로 전환합니다.',
-    detail: `원인: ${reason}\n\n실행하려던 명령:\n${command}`,
-    buttons: ['확인'],
-    defaultId: 0,
-    cancelId: 0
-  })
-
-  await shell.openExternal(fallbackUrl)
-}
-
-async function launchUpdateInstaller(
-  win: BrowserWindow,
-  latestVersion: string,
-  fallbackUrl: string
-): Promise<void> {
-  const command = updateInstallCommand(latestVersion)
-  if (!command) return
-
-  try {
-    await launchTerminalCommand(command)
-  } catch (error) {
-    console.warn('[update] terminal launch failed', error)
-    await showUpdateTerminalError(win, command, fallbackUrl, error)
-  }
-}
-
 async function checkForUpdates(win: BrowserWindow): Promise<void> {
   try {
     const release = await fetchLatestRelease()
@@ -351,30 +142,24 @@ async function checkForUpdates(win: BrowserWindow): Promise<void> {
     const settings = await getSettings()
     if (settings.ignoredUpdateVersion === latestVersion) return
 
-    const url = updateDownloadUrl(release)
-    if (!url) return
-
-    const command = updateInstallCommand(latestVersion)
-    const buttons = command
-      ? ['터미널에서 업데이트', '나중에', '이번 버전 다시 알리지 않기']
-      : ['다운로드', '나중에', '이번 버전 다시 알리지 않기']
-    const detail = command
-      ? `현재 버전은 ${app.getVersion()}입니다. 터미널 창을 열어 아래 명령으로 최신 설치 파일을 다운로드하고 설치합니다.\n\n${command}`
-      : `현재 버전은 ${app.getVersion()}입니다. 최신 설치 파일을 다운로드할까요?`
+    const url = release.html_url ?? GITHUB_RELEASES_URL
+    const detail = [
+      `현재 버전은 ${app.getVersion()}입니다.`,
+      '터미널 업데이트가 원활하지 않을 수 있어 GitHub 릴리스 페이지에서 설치 파일을 내려받아 업데이트해 주세요.'
+    ].join('\n')
 
     const result = await dialog.showMessageBox(win, {
       type: 'info',
       title: 'legal-terminal 업데이트',
       message: `새 버전 ${latestVersion}을 사용할 수 있습니다.`,
       detail,
-      buttons,
+      buttons: ['GitHub 릴리스 페이지 열기', '나중에', '이번 버전 다시 알리지 않기'],
       defaultId: 0,
       cancelId: 1
     })
 
     if (result.response === 0) {
-      if (command) await launchUpdateInstaller(win, latestVersion, url)
-      else await shell.openExternal(url)
+      await shell.openExternal(url)
     } else if (result.response === 2) {
       await setSettings({ ignoredUpdateVersion: latestVersion })
     }
