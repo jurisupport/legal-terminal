@@ -30,6 +30,7 @@ export default function CasesDashboard({
   defaultOpenProfileId,
   onBrief,
   onDraft,
+  onHearingRecord,
   onChanged
 }: {
   onOpenWorkspace: (c: JsCase) => void
@@ -38,6 +39,7 @@ export default function CasesDashboard({
   defaultOpenProfileId?: string
   onBrief: (c: JsCase) => void
   onDraft: (c: JsCase) => void
+  onHearingRecord?: (c: JsCase) => void
   onChanged?: () => void
 }): JSX.Element {
   const [tokenReady, setTokenReady] = useState<boolean | null>(null)
@@ -275,6 +277,7 @@ export default function CasesDashboard({
           defaultOpenProfileId={defaultOpenProfileId}
           onBrief={onBrief}
           onDraft={onDraft}
+          onHearingRecord={onHearingRecord}
           onDetail={toggleDetail}
         />
       )}

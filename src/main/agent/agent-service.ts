@@ -1,8 +1,9 @@
 import type { IpcMain, WebContents } from 'electron'
 import { randomUUID } from 'crypto'
-import { spawn, type ChildProcessWithoutNullStreams } from 'child_process'
+import { execFile, spawn, type ChildProcessWithoutNullStreams } from 'child_process'
 import { existsSync } from 'fs'
-import { join } from 'path'
+import { mkdir } from 'fs/promises'
+import { basename, dirname, join, relative } from 'path'
 import {
   query,
   type McpServerStatus,
@@ -12,6 +13,7 @@ import {
   type UserDialogResult
 } from '@anthropic-ai/claude-agent-sdk'
 import type {
+  AgentAttachment,
   AgentCommandResult,
   AgentCreateOptions,
   AgentEvent,
@@ -25,7 +27,9 @@ import type {
   AgentPermissionRequest,
   AgentSendInput,
   AgentSshConn,
-  AgentSource
+  AgentSource,
+  AgentWorktreeForkInput,
+  AgentWorktreeForkResult
 } from './agent-types'
 
 interface PendingPermission {
@@ -88,6 +92,7 @@ const EDIT_TOOLS = new Set(['Edit', 'MultiEdit', 'Write', 'NotebookEdit'])
 const PERMISSION_TIMEOUT_MS = 5 * 60_000
 const USER_DIALOG_TIMEOUT_MS = 30 * 60_000
 const MCP_STATUS_TIMEOUT_MS = 20_000
+const GIT_WORKTREE_TIMEOUT_MS = 60_000
 const MIN_TEXT_OVERLAP = 4
 const sshBin = process.platform === 'win32' ? 'ssh.exe' : 'ssh'
 const CLAUDE_AGENT_SDK_BINARY_BY_PLATFORM: Partial<Record<NodeJS.Platform, string>> = {
@@ -1296,6 +1301,130 @@ function requestPermission(
   })
 }
 
+function runGit(args: string[], cwd?: string): Promise<{ stdout: string; stderr: string }> {
+  return new Promise((resolve, reject) => {
+    execFile(
+      'git',
+      args,
+      {
+        cwd,
+        timeout: GIT_WORKTREE_TIMEOUT_MS,
+        windowsHide: true,
+        maxBuffer: 1024 * 1024
+      },
+      (error, stdout, stderr) => {
+        const out = String(stdout ?? '')
+        const err = String(stderr ?? '')
+        if (error) {
+          reject(new Error([error.message, err, out].filter(Boolean).join('\n').trim()))
+          return
+        }
+        resolve({ stdout: out, stderr: err })
+      }
+    )
+  })
+}
+
+function pathName(value: string): string {
+  const clean = value.replace(/[\\/]+$/, '')
+  return clean.split(/[\\/]/).filter(Boolean).pop() || 'worktree'
+}
+
+function safeBranchPart(value: string): string {
+  const normalized = value
+    .normalize('NFKD')
+    .replace(/[^A-Za-z0-9._-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+  return normalized.slice(0, 48) || 'worktree'
+}
+
+function safePathPart(value: string, maxLength = 96): string {
+  const normalized =
+    value
+      .normalize('NFKD')
+      .replace(/[^A-Za-z0-9._-]+/g, '-')
+      .replace(/^-+|-+$/g, '') || 'worktree'
+  if (normalized.length <= maxLength) return normalized
+  return `${normalized.slice(0, maxLength - 17)}-${normalized.slice(-16)}`
+}
+
+function timestampSlug(): string {
+  const now = new Date()
+  const pad = (value: number): string => String(value).padStart(2, '0')
+  return [
+    now.getFullYear(),
+    pad(now.getMonth() + 1),
+    pad(now.getDate()),
+    '-',
+    pad(now.getHours()),
+    pad(now.getMinutes()),
+    pad(now.getSeconds())
+  ].join('')
+}
+
+function defaultForkBranch(root: string, cwd: string): string {
+  return `codex/fork-${safeBranchPart(pathName(cwd) || pathName(root))}-${timestampSlug()}`
+}
+
+function worktreeLeaf(branchName: string): string {
+  return safePathPart(branchName.replace(/[\\/]+/g, '-'))
+}
+
+function childCwdForWorktree(root: string, cwd: string, worktreeRoot: string): string {
+  const child = relative(root, cwd)
+  if (
+    !child ||
+    child === '..' ||
+    child.startsWith('../') ||
+    child.startsWith('..\\') ||
+    /^[A-Za-z]:/.test(child)
+  ) {
+    return worktreeRoot
+  }
+  const target = join(worktreeRoot, child)
+  return existsSync(target) ? target : worktreeRoot
+}
+
+export async function createAgentWorktreeFork(
+  input: AgentWorktreeForkInput
+): Promise<AgentWorktreeForkResult> {
+  const cwd = input.cwd.trim()
+  if (!cwd) return { ok: false, error: 'worktree를 만들 cwd가 필요합니다.' }
+
+  try {
+    const rootResult = await runGit(['-C', cwd, 'rev-parse', '--show-toplevel'])
+    const root = rootResult.stdout.trim()
+    if (!root) return { ok: false, error: 'Git 저장소 루트를 찾을 수 없습니다.' }
+
+    const baseBranch = input.branchName?.trim() || defaultForkBranch(root, cwd)
+    await runGit(['check-ref-format', '--branch', baseBranch])
+
+    const worktreeBase = join(dirname(root), `${basename(root)}-worktrees`)
+    await mkdir(worktreeBase, { recursive: true })
+
+    let lastError = ''
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const branchName = attempt === 0 ? baseBranch : `${baseBranch}-${attempt + 1}`
+      const worktreeRoot = join(worktreeBase, worktreeLeaf(branchName))
+      try {
+        await runGit(['-C', root, 'worktree', 'add', '-b', branchName, worktreeRoot, 'HEAD'])
+        return {
+          ok: true,
+          path: childCwdForWorktree(root, cwd, worktreeRoot),
+          root: worktreeRoot,
+          branchName
+        }
+      } catch (error) {
+        lastError = error instanceof Error ? error.message : String(error)
+        if (input.branchName || !/already exists|exists|사용 중|이미/i.test(lastError)) break
+      }
+    }
+    return { ok: false, error: lastError || 'Git worktree 생성에 실패했습니다.' }
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error) }
+  }
+}
+
 export function createAgentSession(opts: AgentCreateOptions, webContents: WebContents): AgentCommandResult {
   const existing = sessions.get(opts.id)
   if (existing) {
@@ -1481,7 +1610,7 @@ function startAgentTurn(session: AgentSession, input: AgentSendInput): void {
     sessionId,
     messageId,
     text: agentInputDisplayText(input),
-    attachments: input.attachments ?? []
+    attachments: displayAgentAttachments(input.attachments)
   })
   emit(session, { type: 'status', sessionId, status: 'working' })
 
@@ -1639,6 +1768,10 @@ export function inspectAgentMcpStatus(sessionId: string): AgentCommandResult {
   return { ok: true }
 }
 
+function displayAgentAttachments(attachments: AgentAttachment[] | undefined): AgentAttachment[] {
+  return (attachments ?? []).map(({ content: _content, ...attachment }) => attachment)
+}
+
 function renderPrompt(input: AgentSendInput): string {
   const attachments = input.attachments ?? []
   const text =
@@ -1646,16 +1779,34 @@ function renderPrompt(input: AgentSendInput): string {
       ? `사용자가 진행 중인 작업을 중단하고 방향 전환을 요청했습니다. 아래 지시를 최우선으로 반영하세요.\n\n${input.text}`
       : input.text
   if (attachments.length === 0) return text
+  const hasContextOnly = attachments.some((attachment) => attachment.access === 'context-only')
   const renderedAttachments = attachments
     .map((attachment, index) => {
       const parts = [`${index + 1}. ${attachment.kind}: ${attachment.label}`]
-      if (attachment.path) parts.push(`path=${attachment.path}`)
+      if (attachment.origin) parts.push(`origin=${attachment.origin}`)
+      if (attachment.access) parts.push(`access=${attachment.access}`)
+      if (attachment.path) {
+        parts.push(
+          attachment.access === 'context-only'
+            ? `source_path=${attachment.path}`
+            : `path=${attachment.path}`
+        )
+      }
       if (attachment.range) parts.push(`range=${JSON.stringify(attachment.range)}`)
       if (attachment.text) parts.push(`text=${attachment.text}`)
+      if (attachment.content !== undefined) {
+        const marker = `LEGAL_TERMINAL_ATTACHMENT_${index + 1}_CONTENT`
+        if (attachment.contentTruncated) parts.push('content_truncated=true')
+        parts.push(`content<<${marker}\n${attachment.content}\n${marker}`)
+      }
       return parts.join('\n   ')
     })
     .join('\n')
-  return `${text}\n\n[legal-terminal attachments]\n${renderedAttachments}`
+  const rules = hasContextOnly
+    ? '\nContext-only attachments are embedded in this prompt. Treat source_path as informational only; do not try to read it from the remote workspace. Review the embedded content field instead.'
+    : ''
+  const block = `[legal-terminal attachments]${rules}\n${renderedAttachments}`
+  return text ? `${text}\n\n${block}` : block
 }
 
 export function approveAgentPermission(decision: AgentPermissionDecision): AgentCommandResult {
@@ -1761,6 +1912,9 @@ export function disposeAgentSessions(): void {
 
 export function registerAgentIpc(ipcMain: IpcMain): void {
   ipcMain.handle('agent:create', (e, opts: AgentCreateOptions) => createAgentSession(opts, e.sender))
+  ipcMain.handle('agent:worktreeFork', (_e, input: AgentWorktreeForkInput) =>
+    createAgentWorktreeFork(input)
+  )
   ipcMain.handle('agent:send', (_e, p: { sessionId: string; input: AgentSendInput }) =>
     sendAgentMessage(p.sessionId, p.input)
   )

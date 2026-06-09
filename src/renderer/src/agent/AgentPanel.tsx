@@ -1,6 +1,7 @@
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -12,6 +13,9 @@ import {
 } from 'react'
 import DOMPurify from 'dompurify'
 import { marked } from 'marked'
+import * as pdfjs from 'pdfjs-dist'
+import type { PDFDocumentProxy } from 'pdfjs-dist'
+import PdfJsWorker from 'pdfjs-dist/build/pdf.worker.min.mjs?worker&inline'
 import { LT_PATH, LT_PATHS, readLtPaths } from '../filetree/FileTree'
 import type {
   AgentAttachment,
@@ -33,11 +37,17 @@ const DEFAULT_AGENT_FONT_SIZE = 13
 const FONT_SIZE_MIN = 8
 const FONT_SIZE_MAX = 32
 const PROMPT_HISTORY_LIMIT = 100
+const CONTEXT_ATTACHMENT_TEXT_LIMIT = 160_000
+const TIMELINE_BOTTOM_THRESHOLD = 36
+const TIMELINE_PREVIEW_LIMIT = 78
 
 const clampAgentFontSize = (value: number | undefined): number => {
   if (typeof value !== 'number' || !Number.isFinite(value)) return DEFAULT_AGENT_FONT_SIZE
   return Math.min(FONT_SIZE_MAX, Math.max(FONT_SIZE_MIN, Math.round(value)))
 }
+
+const isTimelineNearBottom = (timeline: HTMLDivElement): boolean =>
+  timeline.scrollHeight - timeline.scrollTop - timeline.clientHeight <= TIMELINE_BOTTOM_THRESHOLD
 
 interface AgentPanelProps {
   id: string
@@ -289,6 +299,12 @@ const dialogQuestions = (value: unknown): AgentDialogQuestion[] =>
 const isAuthFailureText = (text: string | undefined): boolean =>
   /failed to authenticate|invalid authentication credentials|api error:\s*401/i.test(text ?? '')
 
+const attachmentOrigin = (value: unknown): AgentAttachment['origin'] | undefined =>
+  value === 'local' || value === 'remote' ? value : undefined
+
+const attachmentAccess = (value: unknown): AgentAttachment['access'] | undefined =>
+  value === 'workspace-path' || value === 'context-only' ? value : undefined
+
 function fileNameFromPath(path: string): string {
   const clean = path.replace(/[\\/]+$/, '')
   return clean.split(/[\\/]/).filter(Boolean).pop() || clean
@@ -300,6 +316,109 @@ function parseRemoteUri(uri: string): { profileId: string; path: string } | null
   const slash = rest.indexOf('/')
   if (slash < 0) return { profileId: rest, path: '/' }
   return { profileId: rest.slice(0, slash), path: rest.slice(slash) }
+}
+
+function createAgentPdfWorker(): pdfjs.PDFWorker {
+  const port = new PdfJsWorker({ name: 'pdfjs-agent-attachment-worker' })
+  return new pdfjs.PDFWorker({
+    port
+  } as unknown as ConstructorParameters<typeof pdfjs.PDFWorker>[0])
+}
+
+function pathExtension(path: string): string {
+  const clean = path.split(/[?#]/, 1)[0]
+  const dot = clean.lastIndexOf('.')
+  return dot >= 0 ? clean.slice(dot).toLowerCase() : ''
+}
+
+function clipAttachmentContent(text: string): { content: string; truncated: boolean } {
+  const normalized = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n').trim()
+  if (normalized.length <= CONTEXT_ATTACHMENT_TEXT_LIMIT) {
+    return { content: normalized, truncated: false }
+  }
+  return {
+    content: normalized.slice(0, CONTEXT_ATTACHMENT_TEXT_LIMIT),
+    truncated: true
+  }
+}
+
+interface ExtractedAttachmentContent {
+  content?: string
+  truncated?: boolean
+  note?: string
+}
+
+async function extractPdfAttachmentText(path: string): Promise<ExtractedAttachmentContent> {
+  const ab = await window.lt.fs.readBytes(path)
+  const loadingTask = pdfjs.getDocument({
+    data: new Uint8Array(ab),
+    worker: createAgentPdfWorker()
+  })
+  let doc: PDFDocumentProxy | null = null
+  try {
+    doc = await loadingTask.promise
+    const pages: string[] = []
+    let collected = ''
+    let truncated = false
+    for (let pageNo = 1; pageNo <= doc.numPages; pageNo += 1) {
+      const page = await doc.getPage(pageNo)
+      const textContent = await page.getTextContent()
+      const pageText = textContent.items
+        .map((item) => {
+          const value = (item as { str?: unknown }).str
+          return typeof value === 'string' ? value : ''
+        })
+        .filter(Boolean)
+        .join(' ')
+        .replace(/\s+/g, ' ')
+        .trim()
+      if (!pageText) continue
+      pages.push(`[page ${pageNo}]\n${pageText}`)
+      collected = pages.join('\n\n')
+      if (collected.length > CONTEXT_ATTACHMENT_TEXT_LIMIT) {
+        truncated = true
+        break
+      }
+    }
+    const clipped = clipAttachmentContent(collected)
+    return {
+      content: clipped.content,
+      truncated: truncated || clipped.truncated,
+      note: clipped.content ? undefined : 'PDF에서 추출 가능한 텍스트를 찾지 못했습니다.'
+    }
+  } finally {
+    await loadingTask.destroy().catch(() => {})
+    doc?.destroy()
+  }
+}
+
+async function extractContextAttachmentContent(path: string): Promise<ExtractedAttachmentContent> {
+  const ext = pathExtension(path)
+  try {
+    if (ext === '.pdf') return await extractPdfAttachmentText(path)
+    if (ext === '.hwp' || ext === '.hwpx') {
+      const hwp = await window.lt.fs.readHwpText(path)
+      if (!hwp.ok) return { note: hwp.error || 'HWP/HWPX 본문을 추출하지 못했습니다.' }
+      const clipped = clipAttachmentContent(hwp.text)
+      return {
+        content: clipped.content,
+        truncated: clipped.truncated,
+        note: clipped.content ? undefined : 'HWP/HWPX에서 추출 가능한 텍스트를 찾지 못했습니다.'
+      }
+    }
+    const read = await window.lt.fs.readText(path)
+    if (read.kind !== 'text') {
+      return { note: '지원하지 않는 바이너리 파일이라 본문을 자동 첨부하지 못했습니다.' }
+    }
+    const clipped = clipAttachmentContent(read.text)
+    return {
+      content: clipped.content,
+      truncated: read.truncated || clipped.truncated,
+      note: clipped.content ? undefined : '텍스트 파일이 비어 있습니다.'
+    }
+  } catch (e) {
+    return { note: `본문 자동 추출 실패: ${e instanceof Error ? e.message : String(e)}` }
+  }
 }
 
 function fileLikeClipboardType(type: string): boolean {
@@ -414,12 +533,18 @@ function attachmentReferenceText(attachment: AgentAttachment): string {
 }
 
 function attachmentTitle(attachment: AgentAttachment): string {
+  const access =
+    attachment.access === 'context-only'
+      ? '질문 첨부 본문으로 전달됨'
+      : attachment.access === 'workspace-path'
+        ? '작업공간 경로로 전달됨'
+        : undefined
   const detail = attachment.text
     ? attachment.text.length > 500
       ? `${attachment.text.slice(0, 500)}...`
       : attachment.text
     : undefined
-  return [attachment.path, detail].filter(Boolean).join('\n\n') || attachment.label
+  return [attachment.path, access, detail].filter(Boolean).join('\n\n') || attachment.label
 }
 
 function normalizeAgentAttachments(value: unknown): AgentAttachment[] {
@@ -441,7 +566,11 @@ function normalizeAgentAttachments(value: unknown): AgentAttachment[] {
           kind,
           label,
           path: stringValue(attachment.path),
-          text: stringValue(attachment.text)
+          origin: attachmentOrigin(attachment.origin),
+          access: attachmentAccess(attachment.access),
+          text: stringValue(attachment.text),
+          content: stringValue(attachment.content),
+          contentTruncated: attachment.contentTruncated === true
         }
       ]
     })
@@ -1030,6 +1159,47 @@ function renderMarkdown(text: string): string {
   })
 }
 
+function codeLanguageLabel(pre: HTMLPreElement): string | undefined {
+  const code = pre.querySelector('code')
+  const language = code?.className.match(/(?:^|\s)language-([^\s]+)/)?.[1]
+  return language ? language.replace(/^plaintext$/i, 'text') : undefined
+}
+
+function renderMarkdownForDisplay(text: string): string {
+  const host = document.createElement('div')
+  host.innerHTML = renderMarkdown(text)
+  const codeBlocks = Array.from(host.querySelectorAll('pre'))
+  codeBlocks.forEach((pre, index) => {
+    if (!(pre instanceof HTMLPreElement) || pre.closest('.agent-code-block')) return
+    const wrap = document.createElement('div')
+    wrap.className = 'agent-code-block'
+    wrap.dataset.codeBlockId = String(index)
+
+    const toolbar = document.createElement('div')
+    toolbar.className = 'agent-code-toolbar'
+    const language = codeLanguageLabel(pre)
+    if (language) {
+      const label = document.createElement('span')
+      label.className = 'agent-code-language'
+      label.textContent = language
+      toolbar.appendChild(label)
+    }
+
+    const button = document.createElement('button')
+    button.type = 'button'
+    button.className = 'agent-code-copy-btn'
+    button.title = '코드 복사'
+    button.setAttribute('aria-label', '코드 복사')
+    button.textContent = '복사'
+    toolbar.appendChild(button)
+
+    pre.replaceWith(wrap)
+    wrap.appendChild(toolbar)
+    wrap.appendChild(pre)
+  })
+  return host.innerHTML
+}
+
 function markdownToPlainText(markdown: string): string {
   const host = document.createElement('div')
   host.style.position = 'fixed'
@@ -1040,6 +1210,24 @@ function markdownToPlainText(markdown: string): string {
   const text = host.innerText.trim()
   host.remove()
   return text
+}
+
+function markdownPreviewText(markdown: string): string {
+  const host = document.createElement('div')
+  host.innerHTML = renderMarkdown(markdown)
+  return (host.textContent ?? '').trim()
+}
+
+function latestGeneratedPreview(items: TimelineItem[]): string {
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    const item = items[index]
+    if (item.kind === 'user') continue
+    const source = item.text ?? item.title ?? ''
+    const text = (item.kind === 'assistant' ? markdownPreviewText(source) : source).replace(/\s+/g, ' ').trim()
+    if (!text) continue
+    return text.length > TIMELINE_PREVIEW_LIMIT ? `${text.slice(0, TIMELINE_PREVIEW_LIMIT)}...` : text
+  }
+  return ''
 }
 
 function richClipboardHtml(markdown: string): string {
@@ -1122,13 +1310,44 @@ async function copyAgentOutput(markdown: string, mode: AgentCopyMode): Promise<v
   await navigator.clipboard.writeText(mode === 'markdown' ? markdown : markdownToPlainText(markdown))
 }
 
-function MarkdownMessage({ text, streaming }: { text: string; streaming?: boolean }): JSX.Element {
-  const html = useMemo(() => renderMarkdown(text), [text])
+function MarkdownMessage({
+  text,
+  streaming,
+  onCopyCode
+}: {
+  text: string
+  streaming?: boolean
+  onCopyCode: (code: string) => Promise<boolean>
+}): JSX.Element {
+  const html = useMemo(() => renderMarkdownForDisplay(text), [text])
 
-  const openLink = (event: MouseEvent<HTMLDivElement>): void => {
-    const target = event.target instanceof Element ? event.target.closest('a') : null
-    if (!(target instanceof HTMLAnchorElement)) return
-    const href = target.href
+  const copyCode = async (button: HTMLButtonElement): Promise<void> => {
+    const block = button.closest('.agent-code-block')
+    const code = block?.querySelector('pre code')?.textContent ?? block?.querySelector('pre')?.textContent
+    if (!code) return
+    const previous = button.textContent ?? '복사'
+    const copied = await onCopyCode(code)
+    if (!copied) return
+    button.textContent = '복사됨'
+    button.disabled = true
+    window.setTimeout(() => {
+      button.textContent = previous
+      button.disabled = false
+    }, 1200)
+  }
+
+  const onClick = (event: MouseEvent<HTMLDivElement>): void => {
+    const target = event.target instanceof Element ? event.target : null
+    const copyButton = target?.closest('button.agent-code-copy-btn')
+    if (copyButton instanceof HTMLButtonElement) {
+      event.preventDefault()
+      event.stopPropagation()
+      void copyCode(copyButton)
+      return
+    }
+    const link = target?.closest('a')
+    if (!(link instanceof HTMLAnchorElement)) return
+    const href = link.href
     if (!href) return
     event.preventDefault()
     void window.lt.app.openExternal(href)
@@ -1138,7 +1357,7 @@ function MarkdownMessage({ text, streaming }: { text: string; streaming?: boolea
     <div className="agent-md-wrap">
       <div
         className="md-body agent-md-body"
-        onClick={openLink}
+        onClick={onClick}
         dangerouslySetInnerHTML={{ __html: html }}
       />
       {streaming && <span className="agent-stream-caret" aria-hidden="true" />}
@@ -1178,8 +1397,10 @@ export default function AgentPanel({
   const [dialogResponses, setDialogResponses] = useState<Record<string, string>>({})
   const [attachments, setAttachments] = useState<AgentAttachment[]>([])
   const [attachmentDropOver, setAttachmentDropOver] = useState(false)
+  const [showNewOutputNotice, setShowNewOutputNotice] = useState(false)
   const createdRef = useRef(false)
   const scrollRef = useRef<HTMLDivElement>(null)
+  const shouldFollowTimelineRef = useRef(true)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const modeMenuRef = useRef<HTMLDivElement>(null)
   const openedAuthUrlsRef = useRef<Set<string>>(new Set())
@@ -1240,10 +1461,31 @@ export default function AgentPanel({
     [input]
   )
 
+  const latestOutputPreview = useMemo(
+    () => (showNewOutputNotice ? latestGeneratedPreview(items) : ''),
+    [items, showNewOutputNotice]
+  )
+
   const showTransientFeedback = useCallback((message: string): void => {
     setCopyFeedback(message)
     if (copyFeedbackTimerRef.current) clearTimeout(copyFeedbackTimerRef.current)
     copyFeedbackTimerRef.current = setTimeout(() => setCopyFeedback(''), 1400)
+  }, [])
+
+  const scrollTimelineToBottom = useCallback((): void => {
+    const timeline = scrollRef.current
+    if (!timeline) return
+    shouldFollowTimelineRef.current = true
+    timeline.scrollTo({ top: timeline.scrollHeight })
+    setShowNewOutputNotice(false)
+  }, [])
+
+  const updateTimelineFollowState = useCallback((): void => {
+    const timeline = scrollRef.current
+    if (!timeline) return
+    const atBottom = isTimelineNearBottom(timeline)
+    shouldFollowTimelineRef.current = atBottom
+    if (atBottom) setShowNewOutputNotice(false)
   }, [])
 
   useEffect(() => {
@@ -1368,10 +1610,14 @@ export default function AgentPanel({
     return () => window.removeEventListener(SETTINGS_UPDATED_EVENT, onSettingsUpdated)
   }, [])
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!visible) return
-    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight })
-  }, [items, visible])
+    if (shouldFollowTimelineRef.current) {
+      scrollTimelineToBottom()
+      return
+    }
+    setShowNewOutputNotice(items.length > 0)
+  }, [items, scrollTimelineToBottom, visible])
 
   useEffect(
     () => () => {
@@ -1469,20 +1715,37 @@ export default function AgentPanel({
       const sameRemote = remote && ssh && profileId && remote.profileId === profileId
       const readablePath = sameRemote ? remote.path : path
       const stat = await window.lt.fs.stat(path).catch(() => null)
+      const access: AgentAttachment['access'] =
+        sameRemote || (!remote && !ssh) ? 'workspace-path' : 'context-only'
+      const extracted =
+        access === 'context-only' && stat?.ok && !stat.isDir
+          ? await extractContextAttachmentContent(path)
+          : undefined
       const notes = [
+        access === 'context-only'
+          ? '이 첨부는 현재 질문과 함께 전달된 참고 파일입니다. 원격 작업공간 경로로 읽으려 하지 말고 첨부 본문을 기준으로 검토하세요.'
+          : undefined,
         sameRemote ? `앱 원격 URI: ${path}` : undefined,
         remote && !sameRemote
           ? '주의: 이 파일은 Legal Terminal 원격 URI입니다. 같은 SSH 프로필의 Agent가 아니면 Claude가 직접 읽지 못할 수 있습니다.'
           : undefined,
         !remote && ssh
           ? '주의: 이 파일은 로컬 경로입니다. 현재 Agent가 원격에서 실행 중이면 원격 서버에 같은 파일이 있어야 Claude가 직접 읽을 수 있습니다.'
-          : undefined
+          : undefined,
+        stat?.ok && stat.isDir && access === 'context-only'
+          ? '폴더는 본문을 자동 첨부하지 않습니다. 필요한 파일을 개별 첨부하세요.'
+          : undefined,
+        extracted?.note
       ].filter((note): note is string => Boolean(note))
       return {
         kind: stat?.ok && stat.isDir ? 'folder' : 'file',
         label: fileNameFromPath(readablePath),
         path: readablePath,
-        text: notes.length ? notes.join('\n') : undefined
+        origin: remote ? 'remote' : 'local',
+        access,
+        text: notes.length ? notes.join('\n') : undefined,
+        content: extracted?.content,
+        contentTruncated: extracted?.truncated
       }
     },
     [profileId, ssh]
@@ -1492,7 +1755,13 @@ export default function AgentPanel({
     (paths: string[], source: 'drop' | 'paste'): void => {
       const unique = uniqueStrings(paths)
       if (unique.length === 0 || authActive) return
-      void Promise.all(unique.map(attachmentForPath))
+      void (async () => {
+        const nextAttachments: AgentAttachment[] = []
+        for (const path of unique) {
+          nextAttachments.push(await attachmentForPath(path))
+        }
+        return nextAttachments
+      })()
         .then((nextAttachments) => {
           setAttachments((current) => {
             return appendUniqueAttachments(current, nextAttachments)
@@ -1767,6 +2036,19 @@ export default function AgentPanel({
     }
   }
 
+  const copyCodeBlock = async (code: string): Promise<boolean> => {
+    try {
+      await navigator.clipboard.writeText(code)
+      setCopyFeedback('코드 복사됨')
+      if (copyFeedbackTimerRef.current) clearTimeout(copyFeedbackTimerRef.current)
+      copyFeedbackTimerRef.current = setTimeout(() => setCopyFeedback(''), 1200)
+      return true
+    } catch {
+      setError('코드를 클립보드에 복사할 수 없습니다.')
+      return false
+    }
+  }
+
   const copySelection = (event: ClipboardEvent<HTMLDivElement>): void => {
     const selection = window.getSelection()
     const timeline = scrollRef.current
@@ -1948,42 +2230,43 @@ export default function AgentPanel({
         </div>
       </header>
 
-      <div className="agent-timeline" ref={scrollRef} onCopy={copySelection}>
-        {items.length === 0 && <div className="agent-empty">Claude Agent</div>}
-        {items.map((item) => {
-          if (item.kind === 'process') {
-            const expanded = expandedProcessIds.has(item.id)
-            const steps = item.processSteps ?? []
-            return (
-              <section key={item.id} className={`agent-card process ${item.status ?? ''}`}>
-                <button
-                  type="button"
-                  className="agent-process-row"
-                  aria-expanded={expanded}
-                  onClick={() => toggleProcess(item.id)}
-                >
-                  <span className={`agent-process-chevron ${expanded ? 'expanded' : ''}`}>›</span>
-                  <span className="agent-process-title">{item.title ?? '작업 과정'}</span>
-                  <span className="agent-process-summary">{item.text ?? '진행 중'}</span>
-                  <span className="agent-process-count">{steps.length}</span>
-                </button>
-                {expanded && (
-                  <div className="agent-process-details">
-                    {steps.map((step) => (
-                      <div key={step.id} className={`agent-process-step ${step.status ?? ''}`}>
-                        <div className="agent-process-step-head">
-                          <span>{step.title}</span>
-                          {step.status && <span>{step.status}</span>}
+      <div className="agent-timeline-wrap">
+        <div className="agent-timeline" ref={scrollRef} onScroll={updateTimelineFollowState} onCopy={copySelection}>
+          {items.length === 0 && <div className="agent-empty">Claude Agent</div>}
+          {items.map((item) => {
+            if (item.kind === 'process') {
+              const expanded = expandedProcessIds.has(item.id)
+              const steps = item.processSteps ?? []
+              return (
+                <section key={item.id} className={`agent-card process ${item.status ?? ''}`}>
+                  <button
+                    type="button"
+                    className="agent-process-row"
+                    aria-expanded={expanded}
+                    onClick={() => toggleProcess(item.id)}
+                  >
+                    <span className={`agent-process-chevron ${expanded ? 'expanded' : ''}`}>›</span>
+                    <span className="agent-process-title">{item.title ?? '작업 과정'}</span>
+                    <span className="agent-process-summary">{item.text ?? '진행 중'}</span>
+                    <span className="agent-process-count">{steps.length}</span>
+                  </button>
+                  {expanded && (
+                    <div className="agent-process-details">
+                      {steps.map((step) => (
+                        <div key={step.id} className={`agent-process-step ${step.status ?? ''}`}>
+                          <div className="agent-process-step-head">
+                            <span>{step.title}</span>
+                            {step.status && <span>{step.status}</span>}
+                          </div>
+                          {step.text && <pre className="agent-process-step-text">{step.text}</pre>}
                         </div>
-                        {step.text && <pre className="agent-process-step-text">{step.text}</pre>}
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </section>
-            )
-          }
-          if (item.kind === 'dialog') {
+                      ))}
+                    </div>
+                  )}
+                </section>
+              )
+            }
+            if (item.kind === 'dialog') {
             const questions = item.questions ?? []
             const dialogId = item.dialogId ?? item.id
             const waiting = item.status === 'waiting'
@@ -2133,7 +2416,11 @@ export default function AgentPanel({
               {item.kind !== 'diff' &&
                 item.text &&
                 (item.kind === 'assistant' ? (
-                  <MarkdownMessage text={item.text} streaming={item.status === 'streaming'} />
+                  <MarkdownMessage
+                    text={item.text}
+                    streaming={item.status === 'streaming'}
+                    onCopyCode={copyCodeBlock}
+                  />
                 ) : (
                   <pre className="agent-card-text">{item.text}</pre>
                 ))}
@@ -2185,6 +2472,21 @@ export default function AgentPanel({
             </section>
           )
         })}
+        </div>
+        {showNewOutputNotice && (
+          <button
+            type="button"
+            className="agent-new-output-button"
+            title="맨 아래로 이동"
+            aria-label={latestOutputPreview ? `새 응답: ${latestOutputPreview}. 맨 아래로 이동` : '새 응답으로 이동'}
+            onClick={scrollTimelineToBottom}
+          >
+            <span className="agent-new-output-arrow" aria-hidden="true">↓</span>
+            <span className="agent-new-output-text">
+              {latestOutputPreview ? `새 응답 · ${latestOutputPreview}` : '새 응답'}
+            </span>
+          </button>
+        )}
       </div>
 
       {remoteCliUnavailable && (

@@ -13,8 +13,12 @@ export interface AgentAttachment {
   kind: 'file' | 'folder' | 'selection' | 'pdf-page-range' | 'terminal-snippet'
   label: string
   path?: string
+  origin?: 'local' | 'remote'
+  access?: 'workspace-path' | 'context-only'
   range?: { startLine?: number; endLine?: number; startPage?: number; endPage?: number }
   text?: string
+  content?: string
+  contentTruncated?: boolean
 }
 
 export interface AgentCreateOptions {
@@ -29,6 +33,17 @@ export interface AgentCreateOptions {
   disallowedTools?: string[]
   source?: AgentSource
   ssh?: AgentSshConn
+}
+
+export interface AgentWorktreeForkInput {
+  cwd: string
+  branchName?: string
+}
+
+export interface AgentWorktreeForkResult extends AgentCommandResult {
+  path?: string
+  root?: string
+  branchName?: string
 }
 
 export interface AgentSendInput {

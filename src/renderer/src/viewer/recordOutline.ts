@@ -31,6 +31,9 @@ const DATE_RE = /\d{4}\.\d{2}\.\d{2}/
 const DATE_LENIENT = /(\d{4})\.\s*(\d{1,2})\.\s*(\d{1,2})/ // 2024.03.01 / 2024. 3. 1
 const CASE_RE = /\d{4}[가-힣]{1,5}\d{1,6}/ // 2025느합1050, 2024가단5369527
 const EVID_RE = /(?:^|[\s_\-–—(（])([갑을])\s*제?\s*(\d+(?:-\d+)?)\s*호?증?(?=$|[\s_\-–—()（）.])/
+const RECORD_SEQUENCE_RE = /^\s*(\d{1,6})\s*$/
+const FALLBACK_SORT_KEY_OFFSET = 1_000_000_000
+const FALLBACK_SORT_KEY_BUCKET = 1_000_000
 
 function nfc(v: string): string {
   return v.normalize('NFC')
@@ -47,6 +50,25 @@ function byDate(a: OutlineItem, b: OutlineItem): number {
   return da - db || a.sortKey - b.sortKey
 }
 const COURT_RE = /([가-힣]+법원)/
+
+function recordSequence(tokens: string[], dateIdx: number): number {
+  const candidates = [dateIdx > 0 ? tokens[dateIdx - 1] : undefined, tokens[2]]
+  for (const candidate of candidates) {
+    const m = candidate?.match(RECORD_SEQUENCE_RE)
+    if (m) return parseInt(m[1], 10)
+  }
+  return 0
+}
+
+function documentPriority(item: OutlineItem): number {
+  if (item.category !== 'document') return 1
+  return /(?:^|[_\s|(（-])소장(?:$|[_\s|)）-])/.test(item.rawTitle) ? 0 : 1
+}
+
+function ensureSortKey(item: OutlineItem, index: number): void {
+  if (item.sortKey !== 0) return
+  item.sortKey = FALLBACK_SORT_KEY_OFFSET + documentPriority(item) * FALLBACK_SORT_KEY_BUCKET + index
+}
 
 interface FlatNode {
   title: string
@@ -149,6 +171,7 @@ function classify(title: string): OutlineItem {
   const date = dateM ? dateM[0] : ''
   const dateIdx = dateM ? tokens.findIndex((t) => DATE_RE.test(t)) : -1
   const docType = dateIdx >= 0 && tokens[dateIdx + 1] ? tokens[dateIdx + 1] : tokens[2] ?? '문서'
+  const sequence = recordSequence(tokens, dateIdx)
 
   const em = title.match(EVID_RE)
   const isEvidence = tokens.some((t) => t === '서증' || t === '서증서류') || /_서증_/.test(title) || !!em
@@ -160,7 +183,7 @@ function classify(title: string): OutlineItem {
   let category: Category = 'document'
   let label = ''
   let evidencePrefix: string | undefined
-  let sortKey = 0
+  let sortKey = sequence
 
   if (isEvidence) {
     category = 'evidence'
@@ -220,7 +243,7 @@ export function parseRecordFiles(files: { name: string; path: string }[]): Parse
     const item = classify(nameNoExt)
     item.path = f.path
     item.page = 0
-    if (item.sortKey === 0) item.sortKey = i
+    ensureSortKey(item, i)
     if (item.category === 'evidence') evidences.push(item)
     else if (item.category === 'attachment') attachments.push(item)
     else documents.push(item)
@@ -249,7 +272,7 @@ export async function parseRecordOutline(doc: PDFDocumentProxy): Promise<ParsedR
     if (!caseNo) caseNo = title.match(CASE_RE)?.[0]
     const item = classify(title)
     item.page = n.page
-    if (item.sortKey === 0) item.sortKey = i
+    ensureSortKey(item, i)
     if (item.category === 'evidence') evidences.push(item)
     else if (item.category === 'attachment') attachments.push(item)
     else documents.push(item)

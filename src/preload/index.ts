@@ -70,7 +70,7 @@ interface TerminalTabPayload {
 interface DocumentTabPayload {
   id?: string
   title: string
-  kind?: 'markdown' | 'mdview' | 'file' | 'pdf' | 'image' | 'hwp' | 'csv' | 'settings'
+  kind?: 'markdown' | 'mdview' | 'file' | 'pdf' | 'image' | 'hwp' | 'csv' | 'settings' | 'hearing'
   path?: string
   side?: 'left' | 'right'
 }
@@ -85,6 +85,10 @@ type TabPayload =
     }
   | { kind: 'terminal'; tab: TerminalTabPayload }
 
+interface NewWindowOptions {
+  tabs?: TabPayload[]
+}
+
 interface TabMoveResult {
   action: 'moved' | 'none'
   removeSource?: boolean
@@ -93,7 +97,7 @@ interface TabMoveResult {
 interface WorkspaceDocTabPayload {
   id: string
   title: string
-  kind: 'markdown' | 'mdview' | 'file' | 'pdf' | 'image' | 'hwp' | 'csv' | 'settings'
+  kind: 'markdown' | 'mdview' | 'file' | 'pdf' | 'image' | 'hwp' | 'csv' | 'settings' | 'hearing'
   path?: string
   side?: 'left' | 'right'
 }
@@ -300,8 +304,12 @@ interface AgentAttachment {
   kind: 'file' | 'folder' | 'selection' | 'pdf-page-range' | 'terminal-snippet'
   label: string
   path?: string
+  origin?: 'local' | 'remote'
+  access?: 'workspace-path' | 'context-only'
   range?: { startLine?: number; endLine?: number; startPage?: number; endPage?: number }
   text?: string
+  content?: string
+  contentTruncated?: boolean
 }
 
 interface AgentCreateOptions {
@@ -316,6 +324,17 @@ interface AgentCreateOptions {
   disallowedTools?: string[]
   source?: 'local' | 'ssh'
   ssh?: SshConn
+}
+
+interface AgentWorktreeForkInput {
+  cwd: string
+  branchName?: string
+}
+
+interface AgentWorktreeForkResult extends AgentCommandResult {
+  path?: string
+  root?: string
+  branchName?: string
 }
 
 interface AgentSendInput {
@@ -355,7 +374,7 @@ const api = {
       versions: { electron: string; node: string; chrome: string }
     }> => ipcRenderer.invoke('app:info'),
     openExternal: (url: string): Promise<void> => ipcRenderer.invoke('app:openExternal', url),
-    newWindow: (): Promise<void> => ipcRenderer.invoke('window:new'),
+    newWindow: (opts?: NewWindowOptions): Promise<void> => ipcRenderer.invoke('window:new', opts),
     closeWindow: (): Promise<void> => ipcRenderer.invoke('window:close'),
     setWindowTitle: (title: string): Promise<void> =>
       ipcRenderer.invoke('app:setWindowTitle', title),
@@ -414,6 +433,18 @@ const api = {
       source: string
     ): Promise<{ ok: boolean; path?: string; count?: number; canceled?: boolean; error?: string }> =>
       ipcRenderer.invoke('fs:download', source),
+    autoDownloadRecords: (
+      source: string
+    ): Promise<{
+      ok: boolean
+      path?: string
+      count?: number
+      downloaded?: number
+      skipped?: number
+      failed?: number
+      inProgress?: boolean
+      error?: string
+    }> => ipcRenderer.invoke('fs:autoDownloadRecords', source),
     move: (src: string, destDir: string): Promise<{ ok: boolean; path?: string; error?: string }> =>
       ipcRenderer.invoke('fs:move', { src, destDir }),
     rename: (
@@ -575,6 +606,8 @@ const api = {
   agent: {
     create: (opts: AgentCreateOptions): Promise<AgentCommandResult> =>
       ipcRenderer.invoke('agent:create', opts),
+    worktreeFork: (input: AgentWorktreeForkInput): Promise<AgentWorktreeForkResult> =>
+      ipcRenderer.invoke('agent:worktreeFork', input),
     send: (sessionId: string, input: AgentSendInput): Promise<AgentCommandResult> =>
       ipcRenderer.invoke('agent:send', { sessionId, input }),
     mcpStatus: (sessionId: string): Promise<AgentCommandResult> =>

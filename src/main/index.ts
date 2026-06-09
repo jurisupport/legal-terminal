@@ -1,5 +1,6 @@
 import { app, BrowserWindow, shell, ipcMain, dialog, screen, Menu, clipboard } from 'electron'
 import { spawn } from 'child_process'
+import { createHash } from 'crypto'
 import { request } from 'https'
 import { join, basename, dirname, extname, resolve, sep, posix } from 'path'
 import { readdir, readFile, stat, writeFile, copyFile, rm, mkdir, rename, cp, chmod } from 'fs/promises'
@@ -236,6 +237,41 @@ async function writeMacTerminalScript(command: string): Promise<string> {
   return scriptPath
 }
 
+async function writeWindowsTerminalScript(command: string): Promise<string> {
+  const id = Date.now()
+  const scriptPath = join(app.getPath('temp'), `legal-terminal-update-${id}.ps1`)
+  const launcherPath = join(app.getPath('temp'), `legal-terminal-update-${id}.cmd`)
+  const script = [
+    `$ErrorActionPreference = 'Stop'`,
+    command,
+    `Write-Host ''`,
+    `Write-Host '[legal-terminal] update command finished. You can close this window.'`
+  ].join('\n')
+  const launcher = [
+    '@echo off',
+    `powershell.exe -NoExit -ExecutionPolicy Bypass -File "%~dp0${basename(scriptPath)}"`
+  ].join('\r\n')
+
+  await writeFile(scriptPath, `${script}\n`, 'utf8')
+  await writeFile(launcherPath, `${launcher}\r\n`, 'utf8')
+  return launcherPath
+}
+
+async function launchWindowsTerminalCommand(command: string): Promise<void> {
+  const launcherPath = await writeWindowsTerminalScript(command)
+  const openError = await shell.openPath(launcherPath)
+  if (!openError) return
+
+  try {
+    await launchDetached('cmd.exe', ['/d', '/s', '/c', 'start', 'legal-terminal update', launcherPath], {
+      windowsHide: false
+    })
+  } catch (error) {
+    const fallbackReason = error instanceof Error ? error.message : String(error)
+    throw new Error(`ShellExecute failed: ${openError}; cmd fallback failed: ${fallbackReason}`)
+  }
+}
+
 async function launchTerminalCommand(command: string): Promise<void> {
   if (process.platform === 'darwin') {
     const scriptPath = await writeMacTerminalScript(command)
@@ -244,11 +280,7 @@ async function launchTerminalCommand(command: string): Promise<void> {
   }
 
   if (process.platform === 'win32') {
-    return launchDetached(
-      'powershell.exe',
-      ['-NoExit', '-ExecutionPolicy', 'Bypass', '-Command', command],
-      { windowsHide: false }
-    )
+    return launchWindowsTerminalCommand(command)
   }
 
   throw new Error(`Unsupported update terminal platform: ${process.platform}`)
@@ -451,9 +483,36 @@ function createWindow(setMain = true, opts?: { docOnly?: boolean; termOnly?: boo
   return win
 }
 
+interface TabPayload {
+  kind?: 'doc' | 'terminal'
+  path?: string
+  title?: string
+  side?: 'left' | 'right'
+  tab?: unknown
+}
+interface NewWindowOptions {
+  tabs?: TabPayload[]
+}
+interface TabMoveResult {
+  action: 'moved' | 'none'
+  removeSource?: boolean
+}
+interface TabDropTarget {
+  side?: 'left' | 'right'
+}
+let pendingTabDrag: {
+  payload: TabPayload
+  sourceWindowId: number | null
+  completed?: TabMoveResult
+} | null = null
+// 새 창은 렌더러가 준비되기 전이라 페이로드를 큐잉했다가 'tabs:ready' 때 전달.
+const pendingReceive = new Map<number, TabPayload[]>()
+
 // 새 창 (새 작업환경)
-ipcMain.handle('window:new', () => {
-  createWindow(false)
+ipcMain.handle('window:new', (_e, opts?: NewWindowOptions) => {
+  const win = createWindow(false)
+  const tabs = Array.isArray(opts?.tabs) ? opts.tabs.filter(Boolean) : []
+  if (tabs.length) pendingReceive.set(win.webContents.id, tabs)
 })
 
 ipcMain.handle('window:close', (e) => {
@@ -482,27 +541,6 @@ ipcMain.handle('claude:ask', (_e, payload: string) => {
 })
 
 // ── 탭 드래그(창 간 이동/찢기) 조율 ──
-interface TabPayload {
-  kind?: 'doc' | 'terminal'
-  path?: string
-  title?: string
-  side?: 'left' | 'right'
-  tab?: unknown
-}
-interface TabMoveResult {
-  action: 'moved' | 'none'
-  removeSource?: boolean
-}
-interface TabDropTarget {
-  side?: 'left' | 'right'
-}
-let pendingTabDrag: {
-  payload: TabPayload
-  sourceWindowId: number | null
-  completed?: TabMoveResult
-} | null = null
-// 새 창은 렌더러가 준비되기 전이라 페이로드를 큐잉했다가 'tabs:ready' 때 전달.
-const pendingReceive = new Map<number, TabPayload[]>()
 
 ipcMain.handle('tabs:beginDrag', (e, payload: TabPayload) => {
   pendingTabDrag = { payload, sourceWindowId: BrowserWindow.fromWebContents(e.sender)?.id ?? null }
@@ -1264,6 +1302,112 @@ function remoteBasename(uri: string): string {
   return posix.basename(path) || 'download'
 }
 
+interface AutoDownloadRecordsResult {
+  ok: boolean
+  path?: string
+  count?: number
+  downloaded?: number
+  skipped?: number
+  failed?: number
+  inProgress?: boolean
+  error?: string
+}
+
+const recordsAutoDownloadInFlight = new Map<string, Promise<AutoDownloadRecordsResult>>()
+
+function safeLocalPathSegment(value: string, fallback = 'download'): string {
+  const cleaned = value
+    .normalize('NFC')
+    .replace(/[<>:"/\\|?*\x00-\x1f]/g, '_')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/[. ]+$/g, '')
+  return (cleaned || fallback).slice(0, 120)
+}
+
+function autoRecordsCacheDir(sourceUri: string): string {
+  const { path } = parseRemote(sourceUri)
+  const leaf = safeLocalPathSegment(posix.basename(path) || '소송기록', '소송기록')
+  const hash = createHash('sha1').update(sourceUri.normalize('NFC')).digest('hex').slice(0, 10)
+  return join(app.getPath('downloads'), 'legal-terminal', '소송기록', `${leaf}-${hash}`)
+}
+
+function localPathForRemoteRecord(destRoot: string, sourceUri: string, fileUri: string): string {
+  const source = parseRemote(sourceUri)
+  const file = parseRemote(fileUri)
+  const sourceRoot = source.path.replace(/\/+$/, '') || '/'
+  const rel =
+    source.profileId === file.profileId && file.path.startsWith(sourceRoot + '/')
+      ? file.path.slice(sourceRoot.length + 1)
+      : posix.basename(file.path)
+  const parts = rel.split('/').filter(Boolean).map((p) => safeLocalPathSegment(p))
+  return join(destRoot, ...(parts.length ? parts : [safeLocalPathSegment(posix.basename(file.path))]))
+}
+
+async function hasUsableLocalCopy(path: string): Promise<boolean> {
+  try {
+    const st = await stat(path)
+    return st.isFile() && st.size > 0
+  } catch {
+    return false
+  }
+}
+
+async function writeRecordCopy(dest: string, data: Buffer): Promise<void> {
+  await mkdir(dirname(dest), { recursive: true })
+  const tmp = join(dirname(dest), `.${basename(dest)}.${Date.now()}.tmp`)
+  await writeFile(tmp, data)
+  await rename(tmp, dest)
+}
+
+async function autoDownloadRemoteRecords(sourceUri: string): Promise<AutoDownloadRecordsResult> {
+  if (!isRemote(sourceUri)) {
+    return { ok: false, error: '원격 소송기록 폴더만 자동 다운로드할 수 있습니다.' }
+  }
+  const key = sourceUri.normalize('NFC')
+  const destRoot = autoRecordsCacheDir(sourceUri)
+  if (recordsAutoDownloadInFlight.has(key)) {
+    return { ok: true, path: destRoot, inProgress: true, downloaded: 0, skipped: 0 }
+  }
+
+  const task = (async (): Promise<AutoDownloadRecordsResult> => {
+    await mkdir(destRoot, { recursive: true })
+    const files = await rfsListPdfs(sourceUri)
+    let downloaded = 0
+    let skipped = 0
+    let failed = 0
+    for (const file of files) {
+      const dest = localPathForRemoteRecord(destRoot, sourceUri, file.path)
+      if (await hasUsableLocalCopy(dest)) {
+        skipped += 1
+        continue
+      }
+      try {
+        await writeRecordCopy(dest, await rfsReadBytes(file.path))
+        downloaded += 1
+      } catch {
+        failed += 1
+      }
+    }
+    return {
+      ok: failed === 0 || downloaded > 0 || skipped > 0,
+      path: destRoot,
+      count: files.length,
+      downloaded,
+      skipped,
+      failed,
+      error: failed > 0 ? `소송기록 PDF ${failed}개를 다운로드하지 못했습니다.` : undefined
+    }
+  })()
+
+  recordsAutoDownloadInFlight.set(key, task)
+  try {
+    return await task
+  } finally {
+    recordsAutoDownloadInFlight.delete(key)
+  }
+}
+
 async function downloadRemoteToLocal(srcUri: string, destPath: string): Promise<number> {
   const st = await rfsStat(srcUri)
   if (!st.isDir) {
@@ -1481,6 +1625,14 @@ ipcMain.handle('fs:download', async (_e, source: string) => {
     if (r.canceled || !r.filePath) return { ok: true, canceled: true }
     const count = await downloadRemoteToLocal(source, r.filePath)
     return { ok: true, path: r.filePath, count }
+  } catch (e) {
+    return { ok: false, error: String(e) }
+  }
+})
+
+ipcMain.handle('fs:autoDownloadRecords', async (_e, source: string) => {
+  try {
+    return await autoDownloadRemoteRecords(source)
   } catch (e) {
     return { ok: false, error: String(e) }
   }

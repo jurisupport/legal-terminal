@@ -56,7 +56,8 @@ export default function UpcomingHearings({
   sshProfiles = [],
   defaultOpenProfileId,
   onBrief,
-  onDraft
+  onDraft,
+  onHearingRecord
 }: {
   nonce?: number
   onPick: (c: JsCase) => void
@@ -65,6 +66,7 @@ export default function UpcomingHearings({
   defaultOpenProfileId?: string
   onBrief: (c: JsCase) => void
   onDraft: (c: JsCase) => void
+  onHearingRecord?: (c: JsCase) => void
 }): JSX.Element {
   const [rows, setRows] = useState<Row[] | null>(null)
   const [hasTok, setHasTok] = useState(true)
@@ -215,6 +217,7 @@ export default function UpcomingHearings({
           defaultOpenProfileId={defaultOpenProfileId}
           onBrief={onBrief}
           onDraft={onDraft}
+          onHearingRecord={onHearingRecord}
         />
       )}
     </>

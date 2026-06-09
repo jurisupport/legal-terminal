@@ -21,6 +21,7 @@ export default function CaseContextMenu({
   defaultOpenProfileId,
   onBrief,
   onDraft,
+  onHearingRecord,
   onDetail
 }: {
   menu: CaseContextMenuState
@@ -31,6 +32,7 @@ export default function CaseContextMenu({
   defaultOpenProfileId?: string
   onBrief: (c: JsCase) => void
   onDraft: (c: JsCase) => void
+  onHearingRecord?: (c: JsCase) => void
   onDetail?: (c: JsCase) => void
 }): JSX.Element {
   const defaultOpenProfile = defaultOpenProfileId
@@ -39,6 +41,7 @@ export default function CaseContextMenu({
   const remoteMenuProfiles = sshProfiles.filter((p) => p.id !== defaultOpenProfile?.id)
   const c = menu.c
   const items: MenuItem[] = [
+    ...(onHearingRecord ? ([['📝 기일 기록 시작', () => onHearingRecord(c)]] as MenuItem[]) : []),
     ['✳ Claude에 브리핑 요청', () => onBrief(c)],
     ['✍ 준비서면 초안 (/brief-protocol)', () => onDraft(c)],
     ...(onOpenRemote && sshProfiles.length

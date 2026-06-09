@@ -33,11 +33,17 @@ import CasesDashboard from './dashboard/CasesDashboard'
 import UpcomingHearings from './dashboard/UpcomingHearings'
 import TodosDashboard from './dashboard/TodosDashboard'
 import TodayTodos from './dashboard/TodayTodos'
+import HearingRecordPanel, {
+  buildHearingRecordPath,
+  buildHearingRecordTitle,
+  type HearingRecordCase
+} from './hearing/HearingRecordPanel'
 import { cancelIfTerminalPointerDrag } from './dragGuard'
 import type {
   AppSettings,
   AgentAttachment,
   JsCase,
+  JsHearing,
   TodoTerminalContext,
   SessionListEntry,
   SessionRememberInput,
@@ -89,6 +95,7 @@ const APP_WINDOW_TITLE = 'legal-terminal'
 const DEFAULT_MD_FONT = "'D2Coding', 'Cascadia Mono', Consolas, monospace"
 const DEFAULT_NOTIFICATION_SOUND: NotificationSound = 'chime'
 const DEFAULT_NOTIFICATION_VOLUME = 85
+const REMOTE_RECORD_AUTO_DOWNLOAD_INTERVAL_MS = 30_000
 
 const MD_FONT_OPTIONS: { label: string; value: string }[] = [
   { label: '기본값 (D2Coding 고정폭)', value: '' },
@@ -185,9 +192,23 @@ const sshConnFromProfile = (profile: SshProfile): SshConn => ({
 interface DocTab {
   id: string
   title: string
-  kind: 'welcome' | 'markdown' | 'mdview' | 'file' | 'pdf' | 'image' | 'hwp' | 'csv' | 'settings' | 'diff'
+  kind:
+    | 'welcome'
+    | 'markdown'
+    | 'mdview'
+    | 'file'
+    | 'pdf'
+    | 'image'
+    | 'hwp'
+    | 'csv'
+    | 'settings'
+    | 'diff'
+    | 'hearing'
   path?: string
   diffId?: string
+  hearingCase?: HearingRecordCase
+  hearingDrafts?: string
+  hearing?: JsHearing
   side?: DockSide
 }
 /**
@@ -368,7 +389,8 @@ const RESTORABLE_DOC_KINDS = new Set<DocTab['kind']>([
   'image',
   'hwp',
   'csv',
-  'settings'
+  'settings',
+  'hearing'
 ])
 
 const isRestorableDocKind = (value: unknown): value is DocTab['kind'] =>
@@ -448,6 +470,8 @@ const docKindStatus = (kind: DocTab['kind']): string | undefined => {
       return 'CSV'
     case 'diff':
       return '변경 비교'
+    case 'hearing':
+      return '기일 기록'
     case 'file':
       return '파일'
   }
@@ -605,6 +629,7 @@ const docKindForPath = (path: string): DocTab['kind'] => {
   if (/\.(hwp|hwpx)$/.test(lower)) return 'hwp'
   if (/\.(md|markdown)$/.test(lower)) return 'mdview'
   if (lower.endsWith('.csv')) return 'csv'
+  if (lower.endsWith('.hearing.json')) return 'hearing'
   return 'file'
 }
 
@@ -1054,6 +1079,7 @@ export default function App(): JSX.Element {
 
   // 탐색기 트리 새로고침 트리거 (드래그드롭 복사 후)
   const [treeRefresh, setTreeRefresh] = useState(0)
+  const recordsAutoDownloadInFlightRef = useRef('')
 
   // 탐색기 인라인 생성 (VS Code식: 트리에 입력칸이 떠서 이름 입력)
   const [pendingCreate, setPendingCreate] = useState<PendingCreateRequest | null>(null)
@@ -1199,8 +1225,8 @@ export default function App(): JSX.Element {
     return true
   }
 
-  const openNewWorkspaceWindow = (): void => {
-    void window.lt.app.newWindow()
+  const openNewWorkspaceWindow = (tabs?: TabPayload[]): void => {
+    void window.lt.app.newWindow(tabs?.length ? { tabs } : undefined)
   }
 
   // 단축키: Ctrl/Cmd+T 새 Agent / Ctrl/Cmd+Shift+T 새 터미널 / Ctrl/Cmd+W 탭 닫기 / Ctrl/Cmd+N 새 문서 / Ctrl/Cmd+Shift+N 새 작업환경
@@ -1337,9 +1363,14 @@ export default function App(): JSX.Element {
           ? tabs.map((t) => (t.id === tab.id ? { ...t, side: termSide(tab) } : t))
           : [...tabs, tab]
       )
+      const receivedCase = currentCaseFromTerm(tab)
       setActiveTerm(tab.id)
-      setCurrentCase(currentCaseFromTerm(tab))
+      setCurrentCase(receivedCase)
       setWorkActive(termSide(tab), termKeyOf(tab.id))
+      preloadPastSessions(tab.cwd, tab)
+      void window.lt.case
+        .addHistory({ drafts: receivedCase.drafts, records: receivedCase.records, name: receivedCase.name })
+        .then(setRecent)
       return
     }
     const payload = p.tab
@@ -1966,6 +1997,123 @@ export default function App(): JSX.Element {
     setWorkActive(side, termKeyOf(tab.id))
   }
 
+  const resolveForkResumeSessionId = async (source: TermTab): Promise<string | undefined> => {
+    if (source.resumeSessionId) return source.resumeSessionId
+    const current = await window.lt.sessions
+      .current(source.cwd, (source.createdAt ?? 0) - 3000, source.ssh)
+      .catch(() => null)
+    if (!current?.sessionId) return undefined
+    rememberSessionForTerm(source, current.sessionId, current.title)
+    setTermTabs((tabs) =>
+      tabs.map((t) =>
+        t.id === source.id
+          ? {
+              ...t,
+              resumeSessionId: current.sessionId,
+              sessionTitle: t.renamed ? t.sessionTitle : current.title ?? t.sessionTitle
+            }
+          : t
+      )
+    )
+    return current.sessionId
+  }
+
+  const openForkedAgentTab = (
+    source: TermTab,
+    opts: {
+      cwd: string
+      title: string
+      side: DockSide
+      resumeSessionId?: string
+      ssh?: SshConn
+      sshLabel?: string
+      profileId?: string
+    }
+  ): void => {
+    const tab: TermTab = {
+      ...source,
+      id: newId(),
+      title: opts.title,
+      kind: 'agent',
+      cwd: opts.cwd,
+      autoClaude: false,
+      createdAt: Date.now(),
+      resumeSessionId: opts.resumeSessionId,
+      sessionTitle: undefined,
+      renamed: true,
+      ssh: opts.ssh,
+      sshLabel: opts.sshLabel,
+      profileId: opts.profileId,
+      side: opts.side
+    }
+    setTermTabs((tabs) => [...tabs, tab])
+    setActiveTerm(tab.id)
+    setWorkActive(opts.side, termKeyOf(tab.id))
+    preloadPastSessions(tab.cwd, tab)
+  }
+
+  const forkAgentTab = async (sourceTermId: string, preferredSide?: DockSide): Promise<void> => {
+    const source = termTabsRef.current.find((t) => t.id === sourceTermId)
+    if (!source || !isAgentTab(source)) return
+    const side = preferredSide ?? termSide(source)
+    const resumeSessionId = await resolveForkResumeSessionId(source)
+    openForkedAgentTab(source, {
+      cwd: source.cwd,
+      title: `${source.title} · fork`,
+      side,
+      resumeSessionId,
+      ssh: source.ssh,
+      sshLabel: source.sshLabel,
+      profileId: source.profileId
+    })
+  }
+
+  const forkAgentWorktreeTab = async (
+    sourceTermId: string,
+    preferredSide?: DockSide
+  ): Promise<void> => {
+    const source = termTabsRef.current.find((t) => t.id === sourceTermId)
+    if (!source || !isAgentTab(source)) return
+    if (source.ssh) {
+      window.alert('원격 Agent 탭은 아직 worktree fork를 지원하지 않습니다.')
+      return
+    }
+    const side = preferredSide ?? termSide(source)
+    const [resumeSessionId, result] = await Promise.all([
+      resolveForkResumeSessionId(source),
+      window.lt.agent.worktreeFork({ cwd: source.cwd })
+    ])
+    if (!result.ok || !result.path) {
+      window.alert(result.error || 'Git worktree 생성에 실패했습니다.')
+      return
+    }
+    openForkedAgentTab(source, {
+      cwd: result.path,
+      title: `${source.title} · worktree`,
+      side,
+      resumeSessionId
+    })
+  }
+
+  const agentTabContextMenuItems = (termId: string, side: DockSide): TabBarAction[] => {
+    const tab = termTabsRef.current.find((t) => t.id === termId)
+    if (!tab || !isAgentTab(tab)) return []
+    return [
+      {
+        label: 'Fork',
+        title: '현재 Agent 세션 맥락을 같은 폴더의 새 탭으로 열기',
+        onClick: () => void forkAgentTab(termId, side)
+      },
+      {
+        label: 'Worktree Fork',
+        title: tab.ssh
+          ? '원격 Agent 탭은 아직 worktree fork를 지원하지 않습니다'
+          : 'Git worktree를 만들고 새 Agent 탭에서 열기',
+        onClick: () => void forkAgentWorktreeTab(termId, side)
+      }
+    ]
+  }
+
   // 추천 소송기록 폴더 적용 ('열기' 클릭 시)
   const applySuggested = (path?: string): void => {
     const cur = termTabs.find((t) => t.id === activeTerm)
@@ -2194,6 +2342,58 @@ export default function App(): JSX.Element {
   const activeRecordsFolder = activeTermTab?.recordsFolder ?? currentCase?.records
   const activeSuggestedRecords = activeTermTab?.suggestedRecords
   const activeSuggestedRecordOptions = activeTermTab?.suggestedRecordOptions
+  const sameCaseFolder = (left?: string, right?: string): boolean => {
+    if (!left || !right) return false
+    const clean = (value: string): string => value.replace(/[\\/]+$/, '')
+    return clean(left) === clean(right)
+  }
+  const openFolderInNewWorkspace = async (folderPath: string, folderName: string): Promise<void> => {
+    const title = folderName || pathLeaf(folderPath) || '사건'
+    const keepRecords = sameCaseFolder(folderPath, activeDraftsFolder) ? activeRecordsFolder : undefined
+    const remote = parseRemoteUri(folderPath)
+
+    if (remote) {
+      const profile = sshProfiles.find((p) => p.id === remote.profileId)
+      if (!profile) {
+        window.alert('원격 접속 프로필을 찾을 수 없어 새 작업환경을 열 수 없습니다.')
+        return
+      }
+      const resolved: { records?: string; suggestions?: FolderMatchSuggestion[] } = keepRecords
+        ? { records: keepRecords }
+        : await resolveRemoteRecords(profile, remote.path).catch(() => ({}))
+      const tab: TermTab = {
+        id: newId(),
+        title,
+        kind: 'agent',
+        cwd: remote.path,
+        recordsFolder: resolved.records,
+        suggestedRecords: resolved.records ? undefined : resolved.suggestions?.[0]?.path,
+        suggestedRecordOptions: resolved.records ? undefined : resolved.suggestions,
+        autoClaude: false,
+        createdAt: Date.now(),
+        ssh: sshConnFromProfile(profile),
+        sshLabel: profile.label,
+        profileId: profile.id,
+        side: 'right'
+      }
+      openNewWorkspaceWindow([{ kind: 'terminal', tab }])
+      return
+    }
+
+    const paired = keepRecords ? undefined : await window.lt.case.getPairing(folderPath).catch(() => undefined)
+    const tab: TermTab = {
+      id: newId(),
+      title,
+      kind: 'agent',
+      cwd: folderPath,
+      recordsFolder: keepRecords,
+      suggestedRecords: keepRecords ? undefined : paired,
+      autoClaude: false,
+      createdAt: Date.now(),
+      side: 'right'
+    }
+    openNewWorkspaceWindow([{ kind: 'terminal', tab }])
+  }
   const defaultCaseOpenProfileId = caseOpenProfileId(
     resolveCaseOpenTarget(caseOpenTarget, sshProfiles)
   )
@@ -2489,6 +2689,36 @@ export default function App(): JSX.Element {
     const timer = setInterval(() => setTreeRefresh((x) => x + 1), 5000)
     return () => clearInterval(timer)
   }, [activeDraftsFolder, activeRecordsFolder])
+
+  useEffect(() => {
+    if (!activeRecordsFolder || !isRemotePath(activeRecordsFolder)) return
+    let alive = true
+    const run = (): void => {
+      if (recordsAutoDownloadInFlightRef.current === activeRecordsFolder) return
+      recordsAutoDownloadInFlightRef.current = activeRecordsFolder
+      window.lt.fs
+        .autoDownloadRecords(activeRecordsFolder)
+        .then((r) => {
+          if (!alive || !r.ok || r.inProgress) return
+          if ((r.downloaded ?? 0) > 0) setTreeRefresh((x) => x + 1)
+        })
+        .catch(() => {})
+        .finally(() => {
+          if (recordsAutoDownloadInFlightRef.current === activeRecordsFolder) {
+            recordsAutoDownloadInFlightRef.current = ''
+          }
+        })
+    }
+    run()
+    const timer = setInterval(run, REMOTE_RECORD_AUTO_DOWNLOAD_INTERVAL_MS)
+    return () => {
+      alive = false
+      clearInterval(timer)
+      if (recordsAutoDownloadInFlightRef.current === activeRecordsFolder) {
+        recordsAutoDownloadInFlightRef.current = ''
+      }
+    }
+  }, [activeRecordsFolder])
 
   const copyPathsTo = (dir: string, paths: string[]): void => {
     if (!paths.length) return
@@ -3054,6 +3284,74 @@ export default function App(): JSX.Element {
 
   const caseRef = (c: JsCase): string => `${c.caseNumber ?? ''} ${c.caseName ?? ''}`.trim() || c.id
 
+  const hearingCaseFromJsCase = (c: JsCase): HearingRecordCase => {
+    const client = c.parties
+      .filter((p) => p.role === 'client')
+      .map((p) => p.party.name)
+      .join(', ')
+    const opponent = c.parties
+      .filter((p) => p.role === 'opponent')
+      .map((p) => p.party.name)
+      .join(', ')
+    return {
+      jsId: c.id || undefined,
+      court: c.court || undefined,
+      division: c.division || undefined,
+      caseNumber: c.caseNumber || undefined,
+      caseName: c.caseName || undefined,
+      client: client || undefined,
+      opponent: opponent || undefined,
+      partyNames: [client, opponent].filter(Boolean).join(' / ') || undefined,
+      title: caseRef(c)
+    }
+  }
+
+  const hearingCaseFromCurrent = (c: CurrentCase): HearingRecordCase => ({
+    ...c.meta,
+    title: c.name
+  })
+
+  const nearestHearing = (hearings?: JsHearing[]): JsHearing | undefined => {
+    const valid = (hearings ?? [])
+      .map((h) => ({ hearing: h, time: new Date(h.dateTime).getTime() }))
+      .filter((item) => Number.isFinite(item.time))
+      .sort((a, b) => Math.abs(a.time - Date.now()) - Math.abs(b.time - Date.now()))
+    return valid[0]?.hearing
+  }
+
+  const openHearingRecordTab = (
+    drafts: string,
+    hearingCase: HearingRecordCase,
+    hearing?: JsHearing,
+    side: DockSide = 'right'
+  ): void => {
+    const path = buildHearingRecordPath(drafts, hearingCase, hearing)
+    const existing = docTabs.find((tab) => tab.kind === 'hearing' && tab.path === path)
+    if (existing) {
+      moveDocToSide(existing.id, side)
+      return
+    }
+    const tab: DocTab = {
+      id: newId(),
+      title: buildHearingRecordTitle(hearingCase, hearing),
+      kind: 'hearing',
+      path,
+      hearingCase,
+      hearingDrafts: drafts,
+      hearing,
+      side
+    }
+    setDocTabs((tabs) => [...tabs, tab])
+    setActiveDoc(tab.id)
+    setWorkActive(side, docKey(tab.id))
+  }
+
+  const openHearingRecordForCurrent = (side: DockSide = 'right'): void => {
+    const source = currentCase ?? (activeTermTab ? currentCaseFromTerm(activeTermTab) : null)
+    if (!source?.drafts) return
+    openHearingRecordTab(source.drafts, hearingCaseFromCurrent(source), undefined, side)
+  }
+
   const resolveFolderMatch = (
     suggestions: FolderMatchSuggestion[]
   ): { records?: string; suggestions?: FolderMatchSuggestion[] } => {
@@ -3106,7 +3404,7 @@ export default function App(): JSX.Element {
     (await matchCaseFolders(root, c))[0]?.path
 
   // 좌클릭: 사건 작업환경 열기 (폴더 매칭 → 없으면 직접 지정 → 터미널/뷰어 연결)
-  const openCaseWorkspace = async (c: JsCase): Promise<void> => {
+  const openCaseWorkspace = async (c: JsCase): Promise<CurrentCase | null> => {
     const saved = c.id ? await window.lt.case.getJsPairing(c.id) : undefined
     let drafts = saved?.drafts
     let records = saved?.records
@@ -3123,7 +3421,7 @@ export default function App(): JSX.Element {
         title: `「${caseRef(c)}」 작성서류 폴더 선택`,
         defaultPath: draftsRoot
       })
-      if (!picked) return
+      if (!picked) return null
       drafts = picked.path
     }
     if (c.id) await window.lt.case.setJsPairing(c.id, drafts, records)
@@ -3151,7 +3449,8 @@ export default function App(): JSX.Element {
       opponent: opponent || undefined,
       partyNames: partyNames || undefined
     }
-    setCurrentCase({ drafts, records, name, meta })
+    const openedCase: CurrentCase = { drafts, records, name, meta }
+    setCurrentCase(openedCase)
     const existing = termTabs.find((t) => t.cwd === drafts || (t.jsId && t.jsId === c.id))
     if (existing) {
       activateTermTab(existing.id)
@@ -3173,6 +3472,13 @@ export default function App(): JSX.Element {
       createCase(drafts, name, records, suggested, meta, 'right', recordSuggestions)
     }
     setMode('explorer')
+    return openedCase
+  }
+
+  const openHearingRecordForCase = async (c: JsCase): Promise<void> => {
+    const opened = await openCaseWorkspace(c)
+    if (!opened) return
+    openHearingRecordTab(opened.drafts, hearingCaseFromJsCase(c), nearestHearing(c.hearings), 'right')
   }
 
   // 우클릭: 사건을 원격(SSH 프로필)에서 열기 — 원격 draftsRoot에서 폴더명 매칭, 실패 시 수동 선택.
@@ -3279,6 +3585,22 @@ export default function App(): JSX.Element {
       )}
       {tab?.kind === 'hwp' && <HwpView key={tab.path} path={tab.path as string} />}
       {tab?.kind === 'csv' && <CsvView key={tab.path} path={tab.path as string} />}
+      {tab?.kind === 'hearing' && (
+        <HearingRecordPanel
+          key={tab.id}
+          draftsDir={tab.hearingDrafts ?? activeDraftsFolder}
+          initialCase={tab.hearingCase ?? (currentCase ? hearingCaseFromCurrent(currentCase) : undefined)}
+          initialHearing={tab.hearing}
+          initialPath={tab.path}
+          visible={activeDoc === tab.id}
+          onSavedPath={(path, title) =>
+            setDocTabs((tabs) =>
+              tabs.map((item) => (item.id === tab.id ? { ...item, path, title } : item))
+            )
+          }
+          onOpenReport={(path, title) => openFile(path, title, 'left')}
+        />
+      )}
       {(tab?.kind === 'mdview' || tab?.kind === 'markdown') && (
         <MarkdownEditor
           key={tab.id}
@@ -3377,6 +3699,7 @@ export default function App(): JSX.Element {
       onDelete={deleteEntry}
       onPasteTo={pasteFilesTo}
       onDownload={downloadEntry}
+      onOpenWorkspaceFromFolder={openFolderInNewWorkspace}
       onPickRecords={pickRecords}
       onSyncRecords={sshProfiles.length > 0 ? openRecordsSync : undefined}
       onApplySuggested={applySuggested}
@@ -3392,6 +3715,7 @@ export default function App(): JSX.Element {
       defaultOpenProfileId={defaultCaseOpenProfileId}
       onBrief={briefCaseToClaude}
       onDraft={draftCaseWithClaude}
+      onHearingRecord={(c) => void openHearingRecordForCase(c)}
       jsNonce={jsNonce}
       todoNonce={todoNonce}
       onTodoChanged={() => setTodoNonce((n) => n + 1)}
@@ -3445,6 +3769,9 @@ export default function App(): JSX.Element {
             tabs.map((t) => (t.id === id ? { ...t, title, renamed: true } : t))
           )
         }
+        getContextMenuItems={(id) =>
+          agentTabContextMenuItems(id, termSide(termTabs.find((t) => t.id === id)))
+        }
         extraLeft={[
           {
             label: '☰',
@@ -3461,6 +3788,15 @@ export default function App(): JSX.Element {
           label: '▾',
           title: '작업 추가 메뉴',
           items: [
+            ...(currentCase
+              ? [
+                  {
+                    label: '기일 기록',
+                    title: '현재 사건의 기일 진행사항 기록',
+                    onClick: () => openHearingRecordForCurrent('right')
+                  }
+                ]
+              : []),
             {
               label: '터미널로 실행',
               title: '현재 사건을 터미널로 실행',
@@ -3578,6 +3914,7 @@ export default function App(): JSX.Element {
             defaultOpenProfileId={defaultCaseOpenProfileId}
             onBrief={briefCaseToClaude}
             onDraft={draftCaseWithClaude}
+            onHearingRecord={(c) => void openHearingRecordForCase(c)}
             onChanged={() => setJsNonce((n) => n + 1)}
           />
         </div>
@@ -3699,6 +4036,10 @@ export default function App(): JSX.Element {
               tabs.map((t) => (t.id === parsed.id ? { ...t, title, renamed: true } : t))
             )
           }}
+          getContextMenuItems={(key) => {
+            const parsed = parseWorkKey(key)
+            return parsed?.kind === 'terminal' ? agentTabContextMenuItems(parsed.id, side) : []
+          }}
           extraLeft={[
             ...(canMoveActiveTab
               ? [
@@ -3754,6 +4095,15 @@ export default function App(): JSX.Element {
                   label: '▾',
                   title: '작업 추가 메뉴',
                   items: [
+                    ...(currentCase || activeTermTab
+                      ? [
+                          {
+                            label: '기일 기록',
+                            title: '현재 사건의 기일 진행사항 기록',
+                            onClick: () => openHearingRecordForCurrent(side)
+                          }
+                        ]
+                      : []),
                     {
                       label: '터미널로 실행',
                       title: '현재 사건을 터미널로 실행',
@@ -3965,7 +4315,11 @@ export default function App(): JSX.Element {
           >
             <IconSync />
           </button>
-          <button className="activity-item" title="새 작업환경 만들기" onClick={openNewWorkspaceWindow}>
+          <button
+            className="activity-item"
+            title="새 작업환경 만들기"
+            onClick={() => openNewWorkspaceWindow()}
+          >
             <IconWorkspace />
           </button>
           <button className="activity-item" title="설정" onClick={openSettings}>
@@ -4413,6 +4767,7 @@ function DocsPanel({
   onDelete,
   onPasteTo,
   onDownload,
+  onOpenWorkspaceFromFolder,
   onPickRecords,
   onSyncRecords,
   onApplySuggested,
@@ -4428,6 +4783,7 @@ function DocsPanel({
   defaultOpenProfileId,
   onBrief,
   onDraft,
+  onHearingRecord,
   jsNonce,
   todoNonce,
   onTodoChanged,
@@ -4450,6 +4806,7 @@ function DocsPanel({
   onDelete: (path: string, name: string, isDir: boolean) => void
   onPasteTo: (dir: string) => void
   onDownload: (path: string, name: string, isDir: boolean) => void
+  onOpenWorkspaceFromFolder: (path: string, name: string) => void
   onPickRecords: () => void
   onSyncRecords?: () => void
   onApplySuggested: (path?: string) => void
@@ -4465,6 +4822,7 @@ function DocsPanel({
   defaultOpenProfileId?: string
   onBrief: (c: JsCase) => void
   onDraft: (c: JsCase) => void
+  onHearingRecord?: (c: JsCase) => void
   jsNonce: number
   todoNonce: number
   onTodoChanged: () => void
@@ -4649,6 +5007,7 @@ function DocsPanel({
               onDelete={onDelete}
               onPasteTo={onPasteTo}
               onDownload={onDownload}
+              onOpenWorkspaceFromFolder={onOpenWorkspaceFromFolder}
               pendingCreate={pendingCreate}
               sortMode={sortMode}
               filter={fileFindOpen ? fileFindQuery : ''}
@@ -4689,6 +5048,7 @@ function DocsPanel({
             defaultOpenProfileId={defaultOpenProfileId}
             onBrief={onBrief}
             onDraft={onDraft}
+            onHearingRecord={onHearingRecord}
           />
         )}
         {mode === 'todos' && <TodayTodos nonce={todoNonce} onChanged={onTodoChanged} />}
@@ -4879,6 +5239,7 @@ interface TabBarProps {
   onTearOut?: (id: string) => void
   onDragActive?: (active: boolean) => void
   onRename?: (id: string, title: string) => void
+  getContextMenuItems?: (id: string) => TabBarAction[]
 }
 
 interface TabBarAction {
@@ -4903,13 +5264,19 @@ function TabBar({
   onReorder,
   onTearOut,
   onDragActive,
-  onRename
+  onRename,
+  getContextMenuItems
 }: TabBarProps): JSX.Element {
   const scrollRef = useRef<HTMLDivElement>(null)
   const [overflow, setOverflow] = useState(false)
   const [editing, setEditing] = useState<{ id: string; value: string } | null>(null)
   const [dropHint, setDropHint] = useState(false)
   const [menuOpen, setMenuOpen] = useState(false)
+  const [tabContextMenu, setTabContextMenu] = useState<{
+    x: number
+    y: number
+    items: TabBarAction[]
+  } | null>(null)
   const dragId = useRef<string | null>(null)
   const dropHintTimer = useRef<number | null>(null)
   const menuRef = useRef<HTMLDivElement>(null)
@@ -4944,6 +5311,24 @@ function TabBar({
     document.addEventListener('mousedown', close)
     return () => document.removeEventListener('mousedown', close)
   }, [menuOpen])
+
+  useEffect(() => {
+    if (!tabContextMenu) return
+    const close = (): void => setTabContextMenu(null)
+    const closeOnEscape = (event: KeyboardEvent): void => {
+      if (event.key === 'Escape') close()
+    }
+    document.addEventListener('mousedown', close)
+    document.addEventListener('scroll', close, true)
+    document.addEventListener('keydown', closeOnEscape)
+    window.addEventListener('blur', close)
+    return () => {
+      document.removeEventListener('mousedown', close)
+      document.removeEventListener('scroll', close, true)
+      document.removeEventListener('keydown', closeOnEscape)
+      window.removeEventListener('blur', close)
+    }
+  }, [tabContextMenu])
 
   const scrollBy = (d: number): void => scrollRef.current?.scrollBy({ left: d, behavior: 'smooth' })
   const isTabDrop = (e: React.DragEvent): boolean => e.dataTransfer.types.includes(TAB_DND_TYPE)
@@ -5022,6 +5407,21 @@ function TabBar({
             key={t.id}
             className={`tab ${t.id === activeId ? 'active' : ''} ${t.attention ? 'attention' : ''} ${t.working ? 'working' : ''} ${t.question ? 'question' : ''}`}
             onClick={() => onSelect(t.id)}
+            onContextMenu={(e) => {
+              const items = getContextMenuItems?.(t.id) ?? []
+              if (items.length === 0) return
+              e.preventDefault()
+              e.stopPropagation()
+              onSelect(t.id)
+              setMenuOpen(false)
+              const menuWidth = 220
+              const menuHeight = Math.min(360, items.length * 34 + 10)
+              setTabContextMenu({
+                x: Math.max(8, Math.min(e.clientX, window.innerWidth - menuWidth - 8)),
+                y: Math.max(8, Math.min(e.clientY, window.innerHeight - menuHeight - 8)),
+                items
+              })
+            }}
             onAuxClick={(e) => closeOnMiddleClick(e, t.id)}
             title={
               t.working
@@ -5185,6 +5585,31 @@ function TabBar({
               ))}
             </div>
           )}
+        </div>
+      )}
+      {tabContextMenu && (
+        <div
+          className="tab-context-menu"
+          role="menu"
+          style={{ left: tabContextMenu.x, top: tabContextMenu.y }}
+          onMouseDown={(e) => e.stopPropagation()}
+        >
+          {tabContextMenu.items.map((item, i) => (
+            <button
+              key={i}
+              className="tab-context-menu-item"
+              role="menuitem"
+              title={item.title}
+              onClick={(e) => {
+                e.stopPropagation()
+                setTabContextMenu(null)
+                item.onClick()
+              }}
+            >
+              {item.icon && <span className="tab-menu-icon">{item.icon}</span>}
+              <span>{item.label ?? item.title}</span>
+            </button>
+          ))}
         </div>
       )}
     </div>

@@ -152,6 +152,7 @@ export default function FileTree({
   onDelete,
   onPasteTo,
   onDownload,
+  onOpenWorkspaceFromFolder,
   pendingCreate = null,
   sortMode = 'name-asc',
   onRequestCreate,
@@ -168,6 +169,7 @@ export default function FileTree({
   onDelete?: (path: string, name: string, isDir: boolean) => void
   onPasteTo?: (dir: string) => void
   onDownload?: (path: string, name: string, isDir: boolean) => void
+  onOpenWorkspaceFromFolder?: (path: string, name: string) => void
   pendingCreate?: PendingCreateRequest | null
   sortMode?: SortMode
   onRequestCreate?: (dir: string, type: 'file' | 'folder') => void
@@ -668,7 +670,7 @@ export default function FileTree({
         <ul
           className="ctx-menu"
           style={{
-            left: Math.min(menu.x, window.innerWidth - 180),
+            left: Math.min(menu.x, window.innerWidth - 240),
             top: Math.min(menu.y, window.innerHeight - 120)
           }}
           onMouseDown={(e) => e.stopPropagation()}
@@ -723,6 +725,18 @@ export default function FileTree({
               }}
             >
               다운로드
+            </li>
+          )}
+          {singleMenuEntry?.isDir && onOpenWorkspaceFromFolder && (
+            <li
+              className="ctx-item"
+              onClick={() => {
+                const { path, name } = singleMenuEntry
+                setMenu(null)
+                onOpenWorkspaceFromFolder(path, name)
+              }}
+            >
+              이 폴더로 새 작업환경 열기
             </li>
           )}
           {singleMenuEntry && onRename && (
