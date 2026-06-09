@@ -8,7 +8,7 @@ import {
 } from 'react'
 import type { JsHearing } from '../env'
 
-type SpeakerRole = 'court' | 'plaintiff' | 'defendant' | 'delegate' | 'other'
+type SpeakerRole = 'court' | 'plaintiff' | 'defendant' | 'preparation' | 'other'
 type SaveStatus = 'idle' | 'saving' | 'saved' | 'error'
 type JsSyncStatus = 'idle' | 'syncing' | 'synced' | 'error'
 
@@ -21,6 +21,7 @@ export interface HearingRecordCase {
   client?: string
   opponent?: string
   partyNames?: string
+  memo?: string
   title?: string
 }
 
@@ -96,8 +97,7 @@ const DEFAULT_SPEAKERS: HearingSpeaker[] = [
   { id: 'court', label: '재판부', role: 'court', shortcut: '1' },
   { id: 'plaintiff', label: '원고', role: 'plaintiff', shortcut: '2' },
   { id: 'defendant', label: '피고', role: 'defendant', shortcut: '3' },
-  { id: 'delegate', label: '복대리', role: 'delegate', shortcut: '4' },
-  { id: 'other', label: '기타', role: 'other', shortcut: '5' }
+  { id: 'preparation', label: '사전준비', role: 'preparation', shortcut: '4' }
 ]
 
 const RESULT_OPTIONS = ['변론종결', '속행', '추후지정', '선고기일', '조정회부']
@@ -211,6 +211,42 @@ function createInitialRecord(
   }
 }
 
+function normalizeSpeakerId(id: string | undefined): string {
+  return id === 'delegate' || id === 'other' ? 'preparation' : (id ?? 'preparation')
+}
+
+function normalizeSpeakerRole(role: string | undefined): SpeakerRole {
+  if (role === 'court' || role === 'plaintiff' || role === 'defendant' || role === 'preparation') {
+    return role
+  }
+  return 'other'
+}
+
+function normalizeSpeakers(value: unknown): HearingSpeaker[] {
+  const reserved = new Set(DEFAULT_SPEAKERS.map((speaker) => speaker.id))
+  const usedShortcuts = new Set(DEFAULT_SPEAKERS.map((speaker) => speaker.shortcut).filter(Boolean))
+  const custom = Array.isArray(value)
+    ? value
+        .filter((item): item is Partial<HearingSpeaker> => !!item && typeof item === 'object')
+        .filter((speaker) => {
+          const id = normalizeSpeakerId(speaker.id)
+          return !!speaker.id && !!speaker.label && !reserved.has(id)
+        })
+        .map((speaker): HearingSpeaker => {
+          const shortcut =
+            speaker.shortcut && !usedShortcuts.has(speaker.shortcut) ? speaker.shortcut : undefined
+          if (shortcut) usedShortcuts.add(shortcut)
+          return {
+            id: speaker.id as string,
+            label: speaker.label as string,
+            role: normalizeSpeakerRole(speaker.role),
+            shortcut
+          }
+        })
+    : []
+  return [...DEFAULT_SPEAKERS, ...custom]
+}
+
 function sanitizeRecord(
   value: unknown,
   initialCase?: HearingRecordCase,
@@ -219,9 +255,10 @@ function sanitizeRecord(
   const base = createInitialRecord(initialCase, initialHearing)
   if (!value || typeof value !== 'object') return base
   const raw = value as Partial<HearingRecordData>
-  const speakers = Array.isArray(raw.speakers) && raw.speakers.length ? raw.speakers : base.speakers
-  const activeSpeakerId = speakers.some((speaker) => speaker.id === raw.activeSpeakerId)
-    ? (raw.activeSpeakerId as string)
+  const speakers = normalizeSpeakers(raw.speakers)
+  const rawActiveSpeakerId = normalizeSpeakerId(raw.activeSpeakerId)
+  const activeSpeakerId = speakers.some((speaker) => speaker.id === rawActiveSpeakerId)
+    ? rawActiveSpeakerId
     : speakers[0]?.id || 'court'
   return {
     version: 1,
@@ -231,7 +268,12 @@ function sanitizeRecord(
     speakers,
     activeSpeakerId,
     requests: Array.isArray(raw.requests) ? raw.requests : [],
-    entries: Array.isArray(raw.entries) ? raw.entries : [],
+    entries: Array.isArray(raw.entries)
+      ? raw.entries.map((entry) => ({
+          ...entry,
+          speakerId: normalizeSpeakerId(entry.speakerId)
+        }))
+      : [],
     result: raw.result && typeof raw.result === 'object' ? raw.result : base.result,
     createdAt: typeof raw.createdAt === 'string' ? raw.createdAt : base.createdAt,
     updatedAt: typeof raw.updatedAt === 'string' ? raw.updatedAt : base.updatedAt,
@@ -263,6 +305,7 @@ function buildReport(record: HearingRecordData): string {
   ]
     .filter(Boolean)
     .join('\n')
+  const caseMemo = record.case.memo?.trim()
   const requests = record.requests.length
     ? record.requests
         .map((request) => {
@@ -275,7 +318,7 @@ function buildReport(record: HearingRecordData): string {
     ? record.entries
         .map((entry) => {
           const speaker = speakerMap.get(entry.speakerId)
-          return `- ${formatTime(entry.createdAt)} ${speaker?.label ?? '기타'}: ${entry.text}`
+          return `- ${formatTime(entry.createdAt)} ${speaker?.label ?? '사전준비'}: ${entry.text}`
         })
         .join('\n')
     : '- 기록 없음'
@@ -289,6 +332,7 @@ function buildReport(record: HearingRecordData): string {
     '## 1. 사건',
     caseLine || record.case.title || '사건 정보 없음',
     parties,
+    caseMemo ? `메모:\n${caseMemo}` : undefined,
     '',
     '## 2. 기일',
     `- 일시: ${hearingDateLabel(record.hearing)}`,
@@ -332,8 +376,6 @@ export default function HearingRecordPanel({
   const [recordPath, setRecordPath] = useState(initialPath)
   const [draft, setDraft] = useState('')
   const [requestDraft, setRequestDraft] = useState('')
-  const [newSpeakerOpen, setNewSpeakerOpen] = useState(false)
-  const [newSpeakerName, setNewSpeakerName] = useState('')
   const [readerOpen, setReaderOpen] = useState(false)
   const [savedRecords, setSavedRecords] = useState<SavedRecordSummary[] | null>(null)
   const [saveStatus, setSaveStatus] = useState<SaveStatus>('idle')
@@ -344,6 +386,9 @@ export default function HearingRecordPanel({
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const saveTimer = useRef<number | null>(null)
   const loadedPathRef = useRef<string | undefined>(undefined)
+  const latestRecordRef = useRef(record)
+  const hasContentRef = useRef(false)
+  const lastSavedSourceStampRef = useRef('')
 
   const speakers = record.speakers
   const activeSpeaker =
@@ -358,6 +403,14 @@ export default function HearingRecordPanel({
     !!record.result.opponentSubmission ||
     !!record.result.nextDate ||
     !!record.result.nextActions?.length
+
+  useEffect(() => {
+    latestRecordRef.current = record
+  }, [record])
+
+  useEffect(() => {
+    hasContentRef.current = hasContent
+  }, [hasContent])
 
   const focusInput = useCallback((): void => {
     if (!visible) return
@@ -381,14 +434,16 @@ export default function HearingRecordPanel({
   }, [draftsDir])
 
   const saveRecord = useCallback(
-    async (targetRecord = record): Promise<string> => {
+    async (targetRecord = latestRecordRef.current): Promise<string> => {
       setSaveStatus('saving')
-      setSaveMessage('저장 중')
+        setSaveMessage('자동저장 중')
       try {
         let nextPath = recordPath
         if (!nextPath) {
           await ensureRecordDir()
           nextPath = buildHearingRecordPath(draftsDir as string, targetRecord.case, targetRecord.hearing)
+        } else if (draftsDir) {
+          await ensureRecordDir()
         }
         const payload: HearingRecordData = {
           ...targetRecord,
@@ -396,9 +451,10 @@ export default function HearingRecordPanel({
         }
         const result = await window.lt.fs.writeText(nextPath, JSON.stringify(payload, null, 2))
         if (!result.ok) throw new Error(result.error || '저장 실패')
+        lastSavedSourceStampRef.current = targetRecord.updatedAt
         setRecordPath(nextPath)
         setSaveStatus('saved')
-        setSaveMessage('저장됨')
+        setSaveMessage('자동저장됨')
         setLastSavedAt(new Date().toISOString())
         onSavedPath?.(nextPath, buildHearingRecordTitle(payload.case, payload.hearing))
         return nextPath
@@ -408,7 +464,7 @@ export default function HearingRecordPanel({
         throw error
       }
     },
-    [draftsDir, ensureRecordDir, onSavedPath, record, recordPath]
+    [draftsDir, ensureRecordDir, onSavedPath, recordPath]
   )
 
   const loadFromPath = useCallback(
@@ -417,6 +473,7 @@ export default function HearingRecordPanel({
         const read = await window.lt.fs.readText(path)
         const parsed = JSON.parse(read.text) as unknown
         const next = sanitizeRecord(parsed, initialCase, initialHearing)
+        lastSavedSourceStampRef.current = next.updatedAt
         setRecord(next)
         setRecordPath(path)
         loadedPathRef.current = path
@@ -429,7 +486,7 @@ export default function HearingRecordPanel({
         setRecord(createInitialRecord(initialCase, initialHearing))
         setRecordPath(path)
         setSaveStatus('idle')
-        setSaveMessage('새 기록')
+        setSaveMessage('새 기록 · 입력하면 자동저장')
       }
     },
     [initialCase, initialHearing, onSavedPath]
@@ -452,14 +509,40 @@ export default function HearingRecordPanel({
 
   useEffect(() => {
     if (!hasContent || (!draftsDir && !recordPath)) return
+    if (lastSavedSourceStampRef.current === record.updatedAt) return
     if (saveTimer.current) window.clearTimeout(saveTimer.current)
+    setSaveStatus('idle')
+    setSaveMessage('자동저장 대기')
     saveTimer.current = window.setTimeout(() => {
-      void saveRecord().catch(() => {})
+      saveTimer.current = null
+      void saveRecord(latestRecordRef.current).catch(() => {})
     }, 900)
     return () => {
       if (saveTimer.current) window.clearTimeout(saveTimer.current)
     }
   }, [draftsDir, hasContent, record, recordPath, saveRecord])
+
+  const flushAutoSave = useCallback((): void => {
+    if (saveTimer.current) {
+      window.clearTimeout(saveTimer.current)
+      saveTimer.current = null
+    }
+    if (!hasContentRef.current || (!draftsDir && !recordPath)) return
+    void saveRecord(latestRecordRef.current).catch(() => {})
+  }, [draftsDir, recordPath, saveRecord])
+
+  useEffect(() => {
+    const flushWhenHidden = (): void => {
+      if (document.visibilityState === 'hidden') flushAutoSave()
+    }
+    window.addEventListener('beforeunload', flushAutoSave)
+    document.addEventListener('visibilitychange', flushWhenHidden)
+    return () => {
+      window.removeEventListener('beforeunload', flushAutoSave)
+      document.removeEventListener('visibilitychange', flushWhenHidden)
+      flushAutoSave()
+    }
+  }, [flushAutoSave])
 
   const setActiveSpeaker = (speakerId: string): void => {
     touch((current) => ({ ...current, activeSpeakerId: speakerId }))
@@ -511,27 +594,6 @@ export default function HearingRecordPanel({
   const markNextRequestSpoken = (): void => {
     const next = record.requests.find((request) => !request.spoken)
     if (next) toggleRequestSpoken(next.id)
-  }
-
-  const addSpeaker = (): void => {
-    const label = newSpeakerName.trim()
-    if (!label) return
-    const used = new Set(speakers.map((speaker) => speaker.shortcut).filter(Boolean))
-    const shortcut = Array.from({ length: 9 }, (_, i) => String(i + 1)).find((key) => !used.has(key))
-    const speaker: HearingSpeaker = {
-      id: newId('speaker'),
-      label,
-      role: 'other',
-      shortcut
-    }
-    touch((current) => ({
-      ...current,
-      speakers: [...current.speakers, speaker],
-      activeSpeakerId: speaker.id
-    }))
-    setNewSpeakerName('')
-    setNewSpeakerOpen(false)
-    focusInput()
   }
 
   const setResultPatch = (patch: Partial<HearingResult>): void => {
@@ -760,6 +822,7 @@ export default function HearingRecordPanel({
   }
 
   const sortedEntries = useMemo(() => record.entries, [record.entries])
+  const caseMemo = record.case.memo?.trim()
 
   return (
     <div className="hearing-panel">
@@ -784,54 +847,12 @@ export default function HearingRecordPanel({
         </div>
       </div>
 
-      <div className="hearing-speaker-bar">
-        {speakers.map((speaker) => (
-          <button
-            key={speaker.id}
-            className={`hearing-speaker-btn ${speaker.id === record.activeSpeakerId ? 'on' : ''} ${roleClass(speaker.role)}`}
-            title={`${speaker.label}${speaker.shortcut ? ` · ${speaker.shortcut}` : ''}`}
-            onClick={() => setActiveSpeaker(speaker.id)}
-          >
-            <span>{speaker.label}</span>
-            {speaker.shortcut && <kbd>{speaker.shortcut}</kbd>}
-          </button>
-        ))}
-        <button
-          className="hearing-speaker-btn add"
-          title="화자 추가"
-          onClick={() => {
-            setNewSpeakerOpen((open) => !open)
-            window.requestAnimationFrame(() => focusInput())
-          }}
-        >
-          +
-        </button>
-      </div>
-
       {(saveMessage || jsMessage || recordPath) && (
         <div className="hearing-status-row">
           <span className={`hearing-save-status st-${saveStatus}`}>{saveMessage || '대기'}</span>
           {lastSavedAt && <span>{formatTime(lastSavedAt)} 저장</span>}
           {recordPath && <span className="hearing-path">{recordPath}</span>}
           {jsMessage && <span className={`hearing-js-status st-${jsStatus}`}>{jsMessage}</span>}
-        </div>
-      )}
-
-      {newSpeakerOpen && (
-        <div className="hearing-inline-form">
-          <input
-            value={newSpeakerName}
-            onChange={(event) => setNewSpeakerName(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.key === 'Enter') addSpeaker()
-              if (event.key === 'Escape') setNewSpeakerOpen(false)
-            }}
-            placeholder="화자 이름"
-            autoFocus
-          />
-          <button className="hearing-small-btn" onClick={addSpeaker}>
-            추가
-          </button>
         </div>
       )}
 
@@ -874,6 +895,15 @@ export default function HearingRecordPanel({
       )}
 
       <div className="hearing-body">
+        {caseMemo && (
+          <section className="hearing-section hearing-case-memo">
+            <div className="hearing-section-head">
+              <span>사건 메모</span>
+            </div>
+            <div className="hearing-case-memo-text">{caseMemo}</div>
+          </section>
+        )}
+
         <section className="hearing-section">
           <div className="hearing-section-head">
             <span>오늘 요청할 사항</span>
@@ -931,7 +961,7 @@ export default function HearingRecordPanel({
                   <div key={entry.id} className={`hearing-message ${roleClass(speaker?.role)}`}>
                     <div className="hearing-message-meta">
                       <span>{formatTime(entry.createdAt)}</span>
-                      <strong>{speaker?.label ?? '기타'}</strong>
+                      <strong>{speaker?.label ?? '사전준비'}</strong>
                     </div>
                     <div className="hearing-message-bubble">{entry.text}</div>
                   </div>
@@ -985,10 +1015,21 @@ export default function HearingRecordPanel({
       </div>
 
       <div className="hearing-composer">
-        <div className={`hearing-current-speaker ${roleClass(activeSpeaker?.role)}`}>
-          <span>{activeSpeaker?.label ?? '화자'}</span>
-          {activeSpeaker?.shortcut && <kbd>{activeSpeaker.shortcut}</kbd>}
-        </div>
+        <label className={`hearing-current-speaker ${roleClass(activeSpeaker?.role)}`}>
+          <span className="sr-only">화자</span>
+          <select
+            value={record.activeSpeakerId}
+            title="화자 선택"
+            onChange={(event) => setActiveSpeaker(event.target.value)}
+          >
+            {speakers.map((speaker) => (
+              <option key={speaker.id} value={speaker.id}>
+                {speaker.shortcut ? `${speaker.shortcut}. ` : ''}
+                {speaker.label}
+              </option>
+            ))}
+          </select>
+        </label>
         <textarea
           ref={inputRef}
           value={draft}

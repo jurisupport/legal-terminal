@@ -232,6 +232,7 @@ interface TermTab {
   client?: string
   opponent?: string
   partyNames?: string
+  memo?: string
   sessionTitle?: string // claude 세션 제목(ai-title) — transcript에서 자동 반영
   renamed?: boolean // 사용자가 직접 이름 변경 → 자동 반영 중단
   createdAt?: number // 세션 시작 시각 — 이 이후의 transcript만 현재 세션으로 매칭
@@ -265,6 +266,28 @@ const parseWorkKey = (key: string): { kind: WorkTabKind; id: string } | null => 
   const kind = key.slice(0, split)
   if (kind !== 'doc' && kind !== 'terminal') return null
   return { kind, id: key.slice(split + 1) }
+}
+const workKeysForSide = (
+  docs: readonly DocTab[],
+  terms: readonly TermTab[],
+  side: DockSide
+): WorkTabKey[] => [
+  ...docs.filter((tab) => docSide(tab) === side).map((tab) => docKey(tab.id)),
+  ...terms.filter((tab) => termSide(tab) === side).map((tab) => termKeyOf(tab.id))
+]
+const resolveActiveWorkKey = (
+  keys: readonly WorkTabKey[],
+  activeKey: string
+): WorkTabKey | '' =>
+  keys.some((key) => key === activeKey) ? (activeKey as WorkTabKey) : (keys[0] ?? '')
+const nextWorkKeyAfterClose = (
+  keys: readonly WorkTabKey[],
+  closedKey: WorkTabKey
+): WorkTabKey | '' => {
+  const idx = keys.findIndex((key) => key === closedKey)
+  const next = keys.filter((key) => key !== closedKey)
+  if (next.length === 0) return ''
+  return next[Math.min(idx < 0 ? 0 : idx, next.length - 1)]
 }
 
 const resolveClaudeTargetTab = (
@@ -368,6 +391,7 @@ interface CaseMeta {
   client?: string
   opponent?: string
   partyNames?: string
+  memo?: string
 }
 interface CurrentCase {
   drafts: string
@@ -1127,6 +1151,61 @@ export default function App(): JSX.Element {
   const setWorkActive = useCallback((side: DockSide, key: WorkTabKey): void => {
     setActiveWork((active) => ({ ...active, [side]: key }))
   }, [])
+  const focusWorkTargetSoon = useCallback((side: DockSide, key: WorkTabKey | ''): void => {
+    window.requestAnimationFrame(() => {
+      const pane = Array.from(document.querySelectorAll<HTMLElement>('.work-pane[data-work-side]')).find(
+        (el) => datasetSide(el.dataset.workSide) === side
+      )
+      if (!pane) return
+      const active = document.activeElement
+      if (active instanceof Element && pane.contains(active)) return
+
+      const parsed = parseWorkKey(key)
+      if (parsed?.kind === 'doc') {
+        const doc = Array.from(pane.querySelectorAll<HTMLElement>('[data-doc-id]')).find(
+          (el) => el.dataset.docId === parsed.id
+        )
+        doc?.focus({ preventScroll: true })
+        return
+      }
+      if (parsed?.kind === 'terminal') {
+        const term = Array.from(pane.querySelectorAll<HTMLElement>('[data-term-id]')).find(
+          (el) => el.dataset.termId === parsed.id
+        )
+        const tab = termTabsRef.current.find((item) => item.id === parsed.id)
+        if (isAgentTab(tab)) term?.focus({ preventScroll: true })
+        return
+      }
+
+      pane.focus({ preventScroll: true })
+    })
+  }, [])
+  const activateWorkKeyAfterClose = useCallback(
+    (side: DockSide, key: WorkTabKey | ''): void => {
+      setActiveWork((active) => ({ ...active, [side]: key }))
+      const parsed = parseWorkKey(key)
+      if (parsed?.kind === 'doc') {
+        setActiveDoc(parsed.id)
+        focusWorkTargetSoon(side, key)
+        return
+      }
+      if (parsed?.kind === 'terminal') {
+        setActiveTerm(parsed.id)
+        const tab = termTabsRef.current.find((item) => item.id === parsed.id)
+        if (isAgentTab(tab)) {
+          focusWorkTargetSoon(side, key)
+        } else {
+          setTermFocusNonce((current) => ({
+            ...current,
+            [parsed.id]: (current[parsed.id] ?? 0) + 1
+          }))
+        }
+        return
+      }
+      focusWorkTargetSoon(side, key)
+    },
+    [focusWorkTargetSoon]
+  )
   const focusedWorkSide = (element = document.activeElement as HTMLElement | null): DockSide | undefined =>
     datasetSide(closestHTMLElement(element, '[data-work-side]')?.dataset.workSide)
   const focusedTermId = (element = document.activeElement as HTMLElement | null): string | undefined =>
@@ -1203,12 +1282,21 @@ export default function App(): JSX.Element {
       )
     )
   const closeDoc = (id: string): boolean => {
+    const tab = docTabs.find((t) => t.id === id)
+    if (!tab) return false
     // 저장 안 된 새 문서면 확인 (경로 있는 문서는 자동저장되므로 그냥 닫음)
     if (
       dirtyDocs.has(id) &&
       !window.confirm('저장하지 않은 새 문서입니다. 닫으면 내용이 사라집니다. 닫을까요?')
     )
       return false
+    const side = docSide(tab)
+    const closingKey = docKey(id)
+    const sideKeys = workKeysForSide(docTabs, termTabs, side)
+    const nextKey =
+      resolveActiveWorkKey(sideKeys, activeWork[side]) === closingKey
+        ? nextWorkKeyAfterClose(sideKeys, closingKey)
+        : undefined
     setDirtyDocs((s) => {
       if (!s.has(id)) return s
       const n = new Set(s)
@@ -1222,6 +1310,7 @@ export default function App(): JSX.Element {
       return n
     })
     setDocTabs((tabs) => closeTab(tabs, id, activeDoc, setActiveDoc))
+    if (nextKey !== undefined) activateWorkKeyAfterClose(side, nextKey)
     return true
   }
 
@@ -1344,7 +1433,8 @@ export default function App(): JSX.Element {
         caseName: t.caseName,
         client: t.client,
         opponent: t.opponent,
-        partyNames: t.partyNames
+        partyNames: t.partyNames,
+        memo: t.memo
       },
       ssh: t.ssh,
       sshLabel: t.sshLabel,
@@ -2140,6 +2230,14 @@ export default function App(): JSX.Element {
   }
 
   const removeTermTab = (id: string): void => {
+    const tab = termTabs.find((t) => t.id === id)
+    const side = termSide(tab)
+    const closingKey = termKeyOf(id)
+    const sideKeys = workKeysForSide(docTabs, termTabs, side)
+    const nextKey =
+      tab && resolveActiveWorkKey(sideKeys, activeWork[side]) === closingKey
+        ? nextWorkKeyAfterClose(sideKeys, closingKey)
+        : undefined
     setTermTabs((tabs) => closeTab(tabs, id, activeTerm, setActiveTerm))
     setTermBracketedPasteMode((m) => {
       if (!(id in m)) return m
@@ -2159,9 +2257,11 @@ export default function App(): JSX.Element {
       n.delete(id)
       return n
     })
+    if (nextKey !== undefined) activateWorkKeyAfterClose(side, nextKey)
   }
   const closeTerm = (id: string): boolean => {
     const tab = termTabs.find((t) => t.id === id)
+    if (!tab) return false
     if (isAgentTab(tab)) window.lt.agent.close(id)
     else window.lt.pty.kill(id)
     removeTermTab(id)
@@ -3283,6 +3383,26 @@ export default function App(): JSX.Element {
   }
 
   const caseRef = (c: JsCase): string => `${c.caseNumber ?? ''} ${c.caseName ?? ''}`.trim() || c.id
+  const loadCaseDetail = async (c: JsCase): Promise<JsCase> => {
+    if (!c.id) return c
+    try {
+      const result = await window.lt.js.getCase(c.id)
+      const detail =
+        result.ok && result.case && typeof result.case === 'object'
+          ? (result.case as Partial<JsCase>)
+          : null
+      if (!detail) return c
+      return {
+        ...c,
+        ...detail,
+        parties: Array.isArray(detail.parties) ? detail.parties : c.parties,
+        hearings: Array.isArray(detail.hearings) ? detail.hearings : c.hearings,
+        memo: detail.memo ?? c.memo
+      } as JsCase
+    } catch {
+      return c
+    }
+  }
 
   const hearingCaseFromJsCase = (c: JsCase): HearingRecordCase => {
     const client = c.parties
@@ -3302,6 +3422,7 @@ export default function App(): JSX.Element {
       client: client || undefined,
       opponent: opponent || undefined,
       partyNames: [client, opponent].filter(Boolean).join(' / ') || undefined,
+      memo: c.memo?.trim() || undefined,
       title: caseRef(c)
     }
   }
@@ -3404,7 +3525,8 @@ export default function App(): JSX.Element {
     (await matchCaseFolders(root, c))[0]?.path
 
   // 좌클릭: 사건 작업환경 열기 (폴더 매칭 → 없으면 직접 지정 → 터미널/뷰어 연결)
-  const openCaseWorkspace = async (c: JsCase): Promise<CurrentCase | null> => {
+  const openCaseWorkspace = async (c: JsCase, detailLoaded = false): Promise<CurrentCase | null> => {
+    if (!detailLoaded) c = await loadCaseDetail(c)
     const saved = c.id ? await window.lt.case.getJsPairing(c.id) : undefined
     let drafts = saved?.drafts
     let records = saved?.records
@@ -3447,7 +3569,8 @@ export default function App(): JSX.Element {
       caseName: c.caseName || undefined,
       client: client || undefined,
       opponent: opponent || undefined,
-      partyNames: partyNames || undefined
+      partyNames: partyNames || undefined,
+      memo: c.memo?.trim() || undefined
     }
     const openedCase: CurrentCase = { drafts, records, name, meta }
     setCurrentCase(openedCase)
@@ -3476,9 +3599,10 @@ export default function App(): JSX.Element {
   }
 
   const openHearingRecordForCase = async (c: JsCase): Promise<void> => {
-    const opened = await openCaseWorkspace(c)
+    const detail = await loadCaseDetail(c)
+    const opened = await openCaseWorkspace(detail, true)
     if (!opened) return
-    openHearingRecordTab(opened.drafts, hearingCaseFromJsCase(c), nearestHearing(c.hearings), 'right')
+    openHearingRecordTab(opened.drafts, hearingCaseFromJsCase(detail), nearestHearing(detail.hearings), 'right')
   }
 
   // 우클릭: 사건을 원격(SSH 프로필)에서 열기 — 원격 draftsRoot에서 폴더명 매칭, 실패 시 수동 선택.
@@ -3489,6 +3613,7 @@ export default function App(): JSX.Element {
     caseData: JsCase
   } | null>(null)
   const openCaseRemote = async (c: JsCase, profile: SshProfile): Promise<void> => {
+    c = await loadCaseDetail(c)
     const court = c.court || ''
     const client = c.parties
       .filter((p) => p.role === 'client')
@@ -3509,7 +3634,8 @@ export default function App(): JSX.Element {
       caseName: c.caseName || undefined,
       client: client || undefined,
       opponent: opponent || undefined,
-      partyNames: partyNames || undefined
+      partyNames: partyNames || undefined,
+      memo: c.memo?.trim() || undefined
     }
     // 원격 작성서류 루트에서 폴더명(사건번호/당사자) 자동 매칭
     let matchedUri: string | undefined
@@ -3992,7 +4118,7 @@ export default function App(): JSX.Element {
     const canMoveActiveTab = !!activeKey
 
     return (
-      <div className={`work-pane work-${side}`} key={side} data-work-side={side}>
+      <div className={`work-pane work-${side}`} key={side} data-work-side={side} tabIndex={-1}>
         <TabBar
           tabs={workTabs}
           activeId={activeKey}

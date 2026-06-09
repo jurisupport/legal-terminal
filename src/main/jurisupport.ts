@@ -184,6 +184,7 @@ export interface JsCase {
   division: string | null
   caseType: string | null
   status: string
+  memo?: string | null
   parties: JsParty[]
   hearings: JsHearing[]
   updatedAt?: string
@@ -266,14 +267,37 @@ export interface ListCasesParams {
   caseType?: string
 }
 
+function normalizeCase(value: unknown): JsCase | null {
+  const obj = asObject(value)
+  if (!obj) return null
+  const id = stringFrom(obj.id) ?? stringFrom(obj.caseId) ?? stringFrom(obj.case_id)
+  if (!id) return null
+  return {
+    ...(obj as unknown as JsCase),
+    id,
+    memo:
+      stringFrom(obj.memo) ??
+      stringFrom(obj.notes) ??
+      stringFrom(obj.description) ??
+      stringFrom(obj.content) ??
+      null
+  }
+}
+
+function normalizeCases(value: unknown): JsCase[] {
+  return Array.isArray(value)
+    ? value.map(normalizeCase).filter((item): item is JsCase => item !== null)
+    : []
+}
+
 function normalizeCaseList(r: unknown): JsCase[] {
-  if (Array.isArray(r)) return r as JsCase[]
+  if (Array.isArray(r)) return normalizeCases(r)
   if (!r || typeof r !== 'object') return []
 
   const obj = r as Record<string, unknown>
   for (const key of ['cases', 'items', 'data', 'results']) {
     const value = obj[key]
-    if (Array.isArray(value)) return value as JsCase[]
+    if (Array.isArray(value)) return normalizeCases(value)
   }
   return []
 }
@@ -723,7 +747,14 @@ export async function listCases(params: ListCasesParams = {}): Promise<JsCase[]>
 
 export async function getCase(id: string): Promise<JsCase | null> {
   const r = await callTool('get_case', { id })
-  return (r as JsCase) ?? null
+  const obj = asObject(r)
+  if (obj) {
+    for (const key of ['case', 'item', 'data', 'result']) {
+      const nested = normalizeCase(obj[key])
+      if (nested) return nested
+    }
+  }
+  return normalizeCase(r)
 }
 
 async function listTodoPage(params: ListTodosParams): Promise<JsTodo[]> {

@@ -55,6 +55,7 @@ export interface TerminalTabPayload {
   client?: string
   opponent?: string
   partyNames?: string
+  memo?: string
   sessionTitle?: string
   renamed?: boolean
   createdAt?: number
@@ -312,6 +313,7 @@ export interface JsCase {
   division: string | null
   caseType: string | null
   status: string
+  memo?: string | null
   parties: JsParty[]
   hearings: JsHearing[]
   updatedAt?: string

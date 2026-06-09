@@ -57,6 +57,7 @@ interface TerminalTabPayload {
   client?: string
   opponent?: string
   partyNames?: string
+  memo?: string
   sessionTitle?: string
   renamed?: boolean
   createdAt?: number

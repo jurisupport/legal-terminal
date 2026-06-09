@@ -176,6 +176,18 @@ function quotePowerShellString(value: string): string {
   return `'${value.replace(/'/g, `''`)}'`
 }
 
+function windowsPowerShellPath(): string {
+  const systemRoot = process.env['SystemRoot'] || process.env['WINDIR']
+  return systemRoot
+    ? join(systemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
+    : 'powershell.exe'
+}
+
+function windowsCmdPath(): string {
+  const comspec = process.env['ComSpec']
+  return comspec && comspec.trim() ? comspec : 'cmd.exe'
+}
+
 function updateInstallCommand(latestVersion: string): string | null {
   if (process.platform === 'darwin') {
     return [
@@ -240,35 +252,43 @@ async function writeMacTerminalScript(command: string): Promise<string> {
 async function writeWindowsTerminalScript(command: string): Promise<string> {
   const id = Date.now()
   const scriptPath = join(app.getPath('temp'), `legal-terminal-update-${id}.ps1`)
-  const launcherPath = join(app.getPath('temp'), `legal-terminal-update-${id}.cmd`)
   const script = [
     `$ErrorActionPreference = 'Stop'`,
     command,
     `Write-Host ''`,
     `Write-Host '[legal-terminal] update command finished. You can close this window.'`
   ].join('\n')
-  const launcher = [
-    '@echo off',
-    `powershell.exe -NoExit -ExecutionPolicy Bypass -File "%~dp0${basename(scriptPath)}"`
-  ].join('\r\n')
 
   await writeFile(scriptPath, `${script}\n`, 'utf8')
-  await writeFile(launcherPath, `${launcher}\r\n`, 'utf8')
-  return launcherPath
+  return scriptPath
+}
+
+function windowsUpdatePowerShellArgs(scriptPath: string): string[] {
+  return ['-NoProfile', '-NoExit', '-ExecutionPolicy', 'Bypass', '-File', scriptPath]
 }
 
 async function launchWindowsTerminalCommand(command: string): Promise<void> {
-  const launcherPath = await writeWindowsTerminalScript(command)
-  const openError = await shell.openPath(launcherPath)
-  if (!openError) return
+  const scriptPath = await writeWindowsTerminalScript(command)
+  const powershell = windowsPowerShellPath()
 
   try {
-    await launchDetached('cmd.exe', ['/d', '/s', '/c', 'start', 'legal-terminal update', launcherPath], {
-      windowsHide: false
-    })
+    await launchDetached(powershell, windowsUpdatePowerShellArgs(scriptPath), { windowsHide: false })
+    return
   } catch (error) {
-    const fallbackReason = error instanceof Error ? error.message : String(error)
-    throw new Error(`ShellExecute failed: ${openError}; cmd fallback failed: ${fallbackReason}`)
+    const primaryReason = error instanceof Error ? error.message : String(error)
+    try {
+      await launchDetached(
+        windowsCmdPath(),
+        ['/d', '/c', 'start', 'legal-terminal update', powershell, ...windowsUpdatePowerShellArgs(scriptPath)],
+        { windowsHide: false }
+      )
+    } catch (fallbackError) {
+      const fallbackReason =
+        fallbackError instanceof Error ? fallbackError.message : String(fallbackError)
+      throw new Error(
+        `PowerShell launch failed: ${primaryReason}; cmd fallback failed: ${fallbackReason}`
+      )
+    }
   }
 }
 

@@ -201,6 +201,7 @@ export default function CasesDashboard({
           const client = partyNames(c.parties, 'client')
           const opponent = partyNames(c.parties, 'opponent')
           const det = detail[c.id]
+          const memo = (det?.memo ?? c.memo)?.trim()
           return (
             <div
               key={c.id}
@@ -228,6 +229,11 @@ export default function CasesDashboard({
                 <div className="case-parties">
                   {client && <span className="pty pty-client">의뢰인 {client}</span>}
                   {opponent && <span className="pty pty-opp">상대 {opponent}</span>}
+                </div>
+              )}
+              {memo && (
+                <div className="case-memo" title={memo}>
+                  {memo}
                 </div>
               )}
               {h && (
