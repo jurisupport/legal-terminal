@@ -1,4 +1,11 @@
-import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type ReactNode
+} from 'react'
 import Terminal from './terminal/Terminal'
 import AgentPanel, {
   DiffPreview,
@@ -61,6 +68,10 @@ import type {
 
 type Mode = 'explorer' | 'cases' | 'viewer' | 'todos'
 type DockSide = 'left' | 'right'
+
+function isComposingInputKeyEvent(event: ReactKeyboardEvent<HTMLInputElement>): boolean {
+  return event.nativeEvent.isComposing || event.key === 'Process' || event.keyCode === 229
+}
 
 interface ActivityItem {
   id: Mode
@@ -2989,21 +3000,22 @@ export default function App(): JSX.Element {
   }
 
   // 파일/폴더 삭제 (확인은 FileTree에서 받음) — 삭제 후 트리 새로고침 + 해당 문서 탭 닫기
-  const deleteEntry = (path: string): void => {
-    window.lt.fs.delete(path).then((r) => {
-      if (!r.ok) {
-        if (r.error) window.alert('삭제 실패: ' + r.error)
-        return
-      }
-      setTreeRefresh((n) => n + 1)
-      // 삭제된 파일(또는 폴더 하위)을 열어둔 문서 탭이 있으면 닫는다
-      setDocTabs((tabs) => {
-        const dead = tabs.filter((t) => t.path && (t.path === path || t.path.startsWith(path + '/') || t.path.startsWith(path + '\\')))
-        if (dead.length === 0) return tabs
-        let next = tabs
-        for (const d of dead) next = closeTab(next, d.id, activeDoc, setActiveDoc)
-        return next
-      })
+  const deleteEntry = async (path: string): Promise<void> => {
+    const r = await window.lt.fs.delete(path)
+    if (!r.ok) {
+      if (r.error) window.alert('삭제 실패: ' + r.error)
+      return
+    }
+    setTreeRefresh((n) => n + 1)
+    // 삭제된 파일(또는 폴더 하위)을 열어둔 문서 탭이 있으면 닫는다
+    setDocTabs((tabs) => {
+      const dead = tabs.filter(
+        (t) => t.path && (t.path === path || t.path.startsWith(path + '/') || t.path.startsWith(path + '\\'))
+      )
+      if (dead.length === 0) return tabs
+      let next = tabs
+      for (const d of dead) next = closeTab(next, d.id, activeDoc, setActiveDoc)
+      return next
     })
   }
 
@@ -4929,7 +4941,7 @@ function DocsPanel({
   onDropTo: (dir: string, files: FileList) => void
   onMove: (src: string, destDir: string) => void
   onRename: (path: string, name: string) => void
-  onDelete: (path: string, name: string, isDir: boolean) => void
+  onDelete: (path: string, name: string, isDir: boolean) => void | Promise<void>
   onPasteTo: (dir: string) => void
   onDownload: (path: string, name: string, isDir: boolean) => void
   onOpenWorkspaceFromFolder: (path: string, name: string) => void
@@ -5406,6 +5418,7 @@ function TabBar({
   const dragId = useRef<string | null>(null)
   const dropHintTimer = useRef<number | null>(null)
   const menuRef = useRef<HTMLDivElement>(null)
+  const renameDone = useRef(false)
   const draggable = !!onTearOut
   const extraLeftItems = extraLeft ? (Array.isArray(extraLeft) ? extraLeft : [extraLeft]) : []
   const extraItems = extra ? (Array.isArray(extra) ? extra : [extra]) : []
@@ -5487,6 +5500,16 @@ function TabBar({
     e.stopPropagation()
     onClose(id)
   }
+  const startRename = (id: string, value: string): void => {
+    renameDone.current = false
+    setEditing({ id, value })
+  }
+  const finishRename = (id: string, fallbackTitle: string, commit: boolean): void => {
+    if (!editing || editing.id !== id || renameDone.current) return
+    renameDone.current = true
+    if (commit) onRename?.(id, editing.value.trim() || fallbackTitle)
+    setEditing(null)
+  }
 
   return (
     <div
@@ -5558,7 +5581,7 @@ function TabBar({
                     ? `${t.tooltip ?? t.title}\n✓ 완료`
                     : (t.tooltip ?? t.title)
             }
-            draggable={draggable}
+            draggable={draggable && editing?.id !== t.id}
             onDragStart={
               draggable
                 ? (e) => {
@@ -5608,7 +5631,7 @@ function TabBar({
               onRename && t.renamable
                 ? (e) => {
                     e.stopPropagation()
-                    setEditing({ id: t.id, value: t.title })
+                    startRename(t.id, t.title)
                   }
                 : undefined
             }
@@ -5633,18 +5656,22 @@ function TabBar({
                 className="tab-rename"
                 autoFocus
                 value={editing.value}
+                onMouseDown={(e) => e.stopPropagation()}
                 onClick={(e) => e.stopPropagation()}
+                onDoubleClick={(e) => e.stopPropagation()}
                 onChange={(e) => setEditing({ id: t.id, value: e.target.value })}
                 onKeyDown={(e) => {
+                  e.stopPropagation()
+                  if (isComposingInputKeyEvent(e)) return
                   if (e.key === 'Enter') {
-                    onRename?.(t.id, editing.value.trim() || t.title)
-                    setEditing(null)
-                  } else if (e.key === 'Escape') setEditing(null)
+                    e.preventDefault()
+                    finishRename(t.id, t.title, true)
+                  } else if (e.key === 'Escape') {
+                    e.preventDefault()
+                    finishRename(t.id, t.title, false)
+                  }
                 }}
-                onBlur={() => {
-                  onRename?.(t.id, editing.value.trim() || t.title)
-                  setEditing(null)
-                }}
+                onBlur={() => finishRename(t.id, t.title, true)}
               />
             ) : (
               <span className="tab-title">{t.title}</span>

@@ -180,6 +180,41 @@ async function listRemoteOneDriveEntries(
   })
 }
 
+async function deleteRemoteOneDrivePath(profileId: string, cloudPath: string): Promise<void> {
+  const profile = await getProfile(profileId)
+  const script = [
+    remoteRcloneBootstrap(),
+    `cloud=${shq(cloudPath)}`,
+    [
+      '"$rclone_bin" deletefile "$cloud" --retries=1 --low-level-retries=1 && exit 0',
+      'file_status=$?',
+      '"$rclone_bin" purge "$cloud" --retries=1 --low-level-retries=1 && exit 0',
+      'purge_status=$?',
+      'echo "rclone deletefile failed: $file_status; purge failed: $purge_status" >&2',
+      'exit "$purge_status"'
+    ].join('\n')
+  ].join('\n')
+
+  await new Promise<void>((resolve, reject) => {
+    const errs: Buffer[] = []
+    const proc = spawn(sshBin, [...sshArgs(profile), script], { windowsHide: true })
+    const timer = setTimeout(() => {
+      proc.kill()
+      reject(new Error('rclone delete timed out'))
+    }, RCLONE_READ_TIMEOUT_MS)
+    proc.stderr.on('data', (chunk: Buffer) => errs.push(chunk))
+    proc.on('error', (err) => {
+      clearTimeout(timer)
+      reject(new Error(`rclone delete 실행 실패: ${err.message}`))
+    })
+    proc.on('close', (code) => {
+      clearTimeout(timer)
+      if (code === 0) resolve()
+      else reject(new Error(Buffer.concat(errs).toString('utf8').trim() || `rclone 종료 코드 ${code}`))
+    })
+  })
+}
+
 async function listRemoteOneDrivePdfs(
   profileId: string,
   cloudPath: string,
@@ -969,9 +1004,29 @@ export async function rfsRename(
 // 파일/폴더 삭제 (폴더는 재귀). lstat로 심볼릭 링크는 따라가지 않고 unlink.
 export async function rfsDelete(uri: string): Promise<void> {
   const { profileId, path } = parseRemote(uri)
-  const sftp = await getSftp(profileId)
-  await removeRec(sftp, path)
-  noteRemoteLocalMutation(posix.dirname(path))
+  const cloudPath = oneDriveCloudPath(path)
+  let localError: unknown
+  try {
+    const sftp = await getSftp(profileId)
+    const actualPath = await resolveRemotePath(sftp, path)
+    await removeRec(sftp, actualPath)
+    noteRemoteLocalMutation(posix.dirname(actualPath))
+    noteRemoteLocalMutation(actualPath)
+    return
+  } catch (e) {
+    localError = e
+    if (!cloudPath) throw e
+  }
+
+  try {
+    await deleteRemoteOneDrivePath(profileId, cloudPath)
+    noteRemoteLocalMutation(posix.dirname(path))
+    noteRemoteLocalMutation(path)
+  } catch (cloudError) {
+    const localMessage = localError instanceof Error ? localError.message : String(localError)
+    const cloudMessage = cloudError instanceof Error ? cloudError.message : String(cloudError)
+    throw new Error(`OneDrive 삭제 실패: ${cloudMessage}\n로컬 삭제 오류: ${localMessage}`)
+  }
 }
 
 async function removeRec(sftp: SFTPWrapper, path: string): Promise<void> {

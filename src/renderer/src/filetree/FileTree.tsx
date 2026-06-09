@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react'
 import { cancelIfTerminalPointerDrag } from '../dragGuard'
 
 export interface Entry {
@@ -106,6 +106,10 @@ function pathKey(path: string): string {
   return trimmed || path
 }
 
+function isComposingKeyEvent(event: ReactKeyboardEvent<HTMLInputElement>): boolean {
+  return event.nativeEvent.isComposing || event.key === 'Process' || event.keyCode === 229
+}
+
 function createTargetDir(pendingCreate: PendingCreateRequest | null, fallback: string): string {
   return pendingCreate?.dir ?? fallback
 }
@@ -166,7 +170,7 @@ export default function FileTree({
   onDropTo?: (dir: string, files: FileList) => void
   onMove?: (src: string, destDir: string) => void
   onRename?: (path: string, name: string) => void
-  onDelete?: (path: string, name: string, isDir: boolean) => void
+  onDelete?: (path: string, name: string, isDir: boolean) => void | Promise<void>
   onPasteTo?: (dir: string) => void
   onDownload?: (path: string, name: string, isDir: boolean) => void
   onOpenWorkspaceFromFolder?: (path: string, name: string) => void
@@ -288,7 +292,7 @@ export default function FileTree({
     return paths.length ? paths : [entry.path]
   }
 
-  const deleteEntries = (targets: Entry[]): void => {
+  const deleteEntries = async (targets: Entry[]): Promise<void> => {
     if (!onDelete || !targets.length) return
     const unique = uniqueStrings(targets.map((entry) => entry.path))
       .map((path) => targets.find((entry) => entry.path === path))
@@ -299,7 +303,7 @@ export default function FileTree({
         ? `'${unique[0].name}'${unique[0].isDir ? ' 폴더' : ''}을(를) 삭제할까요?`
         : `선택한 ${unique.length}개 항목을 삭제할까요?`
     if (!window.confirm(label)) return
-    for (const entry of unique) onDelete(entry.path, entry.name, entry.isDir)
+    await Promise.all(unique.map((entry) => onDelete(entry.path, entry.name, entry.isDir)))
     clearSelection()
   }
 
@@ -456,7 +460,7 @@ export default function FileTree({
     if (e.key === 'Delete' && onDelete && selectedPaths.size > 0) {
       e.preventDefault()
       e.stopPropagation()
-      deleteEntries(selectedVisibleEntries())
+      void deleteEntries(selectedVisibleEntries())
     }
   }
 
@@ -756,7 +760,7 @@ export default function FileTree({
               className="ctx-item"
               onClick={() => {
                 setMenu(null)
-                deleteEntries(menuEntries)
+                void deleteEntries(menuEntries)
               }}
             >
               {menuEntries.length > 1 ? `삭제 (${menuEntries.length}개)` : '삭제'}
@@ -1093,8 +1097,14 @@ function RenameEntryInput({
       onChange={(e) => setValue(e.target.value)}
       onKeyDown={(e) => {
         e.stopPropagation()
-        if (e.key === 'Enter') commit()
-        else if (e.key === 'Escape') cancel()
+        if (isComposingKeyEvent(e)) return
+        if (e.key === 'Enter') {
+          e.preventDefault()
+          commit()
+        } else if (e.key === 'Escape') {
+          e.preventDefault()
+          cancel()
+        }
       }}
       onBlur={commit}
     />
@@ -1159,8 +1169,14 @@ function CreateEntryRow({
           onChange={(e) => setValue(e.target.value)}
           onKeyDown={(e) => {
             e.stopPropagation()
-            if (e.key === 'Enter') commit()
-            else if (e.key === 'Escape') cancel()
+            if (isComposingKeyEvent(e)) return
+            if (e.key === 'Enter') {
+              e.preventDefault()
+              commit()
+            } else if (e.key === 'Escape') {
+              e.preventDefault()
+              cancel()
+            }
           }}
           onBlur={commit}
         />
