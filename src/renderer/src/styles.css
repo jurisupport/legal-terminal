@@ -3670,7 +3670,7 @@ body {
   right: 8px;
   bottom: calc(100% - 4px);
   z-index: 20;
-  max-height: max(220px, calc(var(--agent-font-size, 13px) * 16));
+  max-height: min(70vh, max(320px, calc(var(--agent-font-size, 13px) * 24)));
   overflow-y: auto;
   border: 1px solid var(--border);
   border-radius: 4px;
