@@ -160,6 +160,11 @@ body {
   min-width: 0;
   max-width: 100%;
 }
+.work-content > .term-pane {
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+}
 
 /* ── 액티비티바 ── */
 .activitybar {
@@ -1893,11 +1898,16 @@ body {
 .term-stack {
   flex: 1;
   min-height: 0;
+  min-width: 0;
   position: relative;
+  overflow: hidden;
 }
 .term-pane {
   position: absolute;
   inset: 0;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
 }
 .terminal-surface {
   position: relative;
@@ -1920,8 +1930,11 @@ body {
   width: 100%;
   height: 100%;
   min-height: 0;
+  min-width: 0;
+  max-width: 100%;
   display: grid;
   grid-template-rows: auto minmax(0, 1fr) auto auto;
+  overflow: hidden;
   background: #181818;
   color: var(--fg);
   font-size: var(--agent-font-size, 13px);
@@ -1942,6 +1955,7 @@ body {
 }
 .agent-head {
   min-height: max(42px, calc(var(--agent-font-size, 13px) * 3.2));
+  min-width: 0;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -1973,10 +1987,13 @@ body {
   text-overflow: ellipsis;
 }
 .agent-head-actions {
-  flex: 0 0 auto;
+  min-width: 0;
+  flex: 0 1 auto;
   display: flex;
   align-items: center;
   gap: 6px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
 }
 .agent-mode-menu {
   position: relative;
@@ -2068,13 +2085,16 @@ body {
 }
 .agent-timeline-wrap {
   min-height: 0;
+  min-width: 0;
   position: relative;
   overflow: hidden;
 }
 .agent-timeline {
   height: 100%;
   min-height: 0;
+  min-width: 0;
   overflow-y: auto;
+  overflow-x: hidden;
   padding: 10px;
   -webkit-user-select: text;
   user-select: text;
@@ -2125,6 +2145,9 @@ body {
   font-size: var(--agent-font-size, 13px);
 }
 .agent-card {
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
   margin: 0 0 8px;
   padding: 8px 9px;
   border: 1px solid var(--border);
@@ -2288,10 +2311,12 @@ body {
 }
 .agent-card-head > span:first-child {
   min-width: 0;
+  flex: 1 1 140px;
   overflow-wrap: anywhere;
 }
 .agent-card-head-right {
-  flex: 0 0 auto;
+  min-width: 0;
+  flex: 1 1 180px;
   display: inline-flex;
   align-items: center;
   flex-wrap: wrap;
@@ -3053,8 +3078,11 @@ body {
   }
 }
 .agent-copy-actions {
+  min-width: 0;
   display: inline-flex;
   align-items: center;
+  flex-wrap: wrap;
+  justify-content: flex-end;
   gap: 4px;
 }
 .agent-copy-actions button {
@@ -3074,6 +3102,7 @@ body {
   background: rgba(255, 255, 255, 0.07);
 }
 .agent-queue-actions {
+  min-width: 0;
   display: inline-flex;
   flex-wrap: wrap;
   justify-content: flex-end;
@@ -3109,6 +3138,7 @@ body {
 }
 .agent-card-text,
 .agent-card-input {
+  max-width: 100%;
   margin: 7px 0 0;
   white-space: pre-wrap;
   word-break: break-word;
@@ -3125,6 +3155,7 @@ body {
 .agent-md-wrap {
   margin-top: 7px;
   min-width: 0;
+  max-width: 100%;
   overflow-x: auto;
   color: #d6d6d6;
   cursor: text;
@@ -3132,6 +3163,7 @@ body {
   user-select: text;
 }
 .agent-md-body {
+  min-width: 0;
   max-width: none;
   margin: 0;
   padding: 0;
@@ -3180,12 +3212,16 @@ body {
   margin: 0.14em 0;
 }
 .agent-md-body pre {
+  max-width: 100%;
   max-height: 260px;
+  overflow: auto;
   margin: 0.55em 0;
   padding: 9px 10px;
   font-size: 0.92em;
 }
 .agent-md-body .agent-code-block {
+  min-width: 0;
+  max-width: 100%;
   margin: 0.55em 0;
   overflow: hidden;
   border: 1px solid var(--border);
@@ -3242,6 +3278,7 @@ body {
 }
 .agent-md-body table {
   min-width: 100%;
+  max-width: 100%;
   font-size: 0.92em;
 }
 .agent-md-body th,
@@ -3482,6 +3519,8 @@ body {
   justify-content: flex-end;
 }
 .agent-attachments {
+  min-width: 0;
+  max-width: 100%;
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
@@ -3507,12 +3546,15 @@ body {
   font-size: var(--agent-small-font-size);
 }
 .agent-attachment-pending {
+  flex: 1 1 160px;
   min-width: 0;
   max-width: 100%;
   display: inline-flex;
   align-items: stretch;
 }
 .agent-attachment-chip.insertable {
+  flex: 1 1 auto;
+  min-width: 0;
   border-top-right-radius: 0;
   border-bottom-right-radius: 0;
   cursor: pointer;
@@ -3591,6 +3633,7 @@ body {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  flex-wrap: wrap;
   gap: 8px;
   border: 1px solid #6c609f;
   border-radius: 4px;
@@ -3613,6 +3656,8 @@ body {
 }
 .agent-prompt {
   position: relative;
+  min-width: 0;
+  max-width: 100%;
   padding: 8px;
   border-top: 1px solid var(--border);
   background: #202020;
@@ -3679,6 +3724,7 @@ body {
 }
 .agent-prompt textarea {
   width: 100%;
+  min-width: 0;
   min-height: var(--agent-input-min-height);
   max-height: max(160px, calc(var(--agent-font-size, 13px) * 10));
   resize: vertical;
@@ -3720,9 +3766,11 @@ body {
   box-shadow: 0 0 0 1px rgba(14, 99, 156, 0.35);
 }
 .agent-prompt-actions {
+  min-width: 0;
   display: flex;
   justify-content: space-between;
   align-items: center;
+  flex-wrap: wrap;
   gap: 8px;
   margin-top: 7px;
 }
@@ -3734,6 +3782,8 @@ body {
   background: var(--bg);
 }
 .agent-working-actions {
+  min-width: 0;
+  flex: 1 1 220px;
   display: flex;
   justify-content: flex-end;
   flex-wrap: wrap;
