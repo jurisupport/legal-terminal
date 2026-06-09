@@ -3681,7 +3681,7 @@ body {
   width: 100%;
   min-height: max(42px, calc(var(--agent-font-size, 13px) * 3.2));
   display: grid;
-  grid-template-columns: 104px minmax(0, 1fr);
+  grid-template-columns: minmax(92px, 30%) minmax(0, 1fr);
   align-items: center;
   gap: 10px;
   padding: 7px 9px;
@@ -3702,6 +3702,8 @@ body {
 .agent-slash-command {
   color: #dcdcaa;
   font: var(--agent-small-font-size)/1.2 var(--font-mono);
+  overflow: hidden;
+  text-overflow: ellipsis;
   white-space: nowrap;
 }
 .agent-slash-detail {

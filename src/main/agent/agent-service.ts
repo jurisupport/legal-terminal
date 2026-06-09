@@ -26,6 +26,7 @@ import type {
   AgentPermissionMode,
   AgentPermissionRequest,
   AgentSendInput,
+  AgentSlashCommand,
   AgentSshConn,
   AgentSource,
   AgentWorktreeForkInput,
@@ -63,6 +64,8 @@ interface AgentSession {
   source: AgentSource
   ssh?: AgentSshConn
   authStatus?: AgentAuthStatus
+  commandProbe?: AbortController
+  slashCommands?: AgentSlashCommand[]
   viewers: Map<number, WebContents>
   pendingPermissions: Map<string, PendingPermission>
   pendingDialogs: Map<string, PendingDialog>
@@ -353,8 +356,52 @@ function stringValue(value: unknown): string | undefined {
   return typeof value === 'string' ? value : undefined
 }
 
+function stringArrayValue(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : []
+}
+
 function unknownArray(value: unknown): unknown[] {
   return Array.isArray(value) ? value : []
+}
+
+function normalizeSlashCommandName(value: string): string | undefined {
+  const trimmed = value.trim()
+  if (!trimmed) return undefined
+  const name = trimmed.split(/\s+/, 1)[0]
+  return name.startsWith('/') ? name : `/${name}`
+}
+
+function normalizeAgentSlashCommands(value: unknown): AgentSlashCommand[] {
+  const seen = new Set<string>()
+  return unknownArray(value)
+    .map((item): AgentSlashCommand | undefined => {
+      if (typeof item === 'string') {
+        const name = normalizeSlashCommandName(item)
+        return name ? { name } : undefined
+      }
+
+      const record = asRecord(item)
+      const name = normalizeSlashCommandName(stringValue(record?.name) ?? '')
+      if (!record || !name) return undefined
+      const description = stringValue(record.description)
+      const argumentHint = stringValue(record.argumentHint)
+      const aliases = stringArrayValue(record.aliases)
+        .map((alias) => normalizeSlashCommandName(alias))
+        .filter((alias): alias is string => Boolean(alias))
+      return {
+        name,
+        ...(description ? { description } : {}),
+        ...(argumentHint ? { argumentHint } : {}),
+        ...(aliases.length > 0 ? { aliases } : {})
+      }
+    })
+    .filter((command): command is AgentSlashCommand => {
+      if (!command) return false
+      const key = command.name.toLowerCase()
+      if (seen.has(key)) return false
+      seen.add(key)
+      return true
+    })
 }
 
 async function* waitForAbort(signal: AbortSignal): AsyncGenerator<never, void, unknown> {
@@ -905,13 +952,22 @@ function handleSystemMessage(session: AgentSession, message: Record<string, unkn
   if (subtype === 'init') {
     const claudeSessionId = stringValue(message.session_id)
     if (claudeSessionId) session.resumeSessionId = claudeSessionId
+    const slashCommands = normalizeAgentSlashCommands(message.slash_commands)
+    if (slashCommands.length > 0) session.slashCommands = slashCommands
     emit(session, {
       type: 'session:init',
       sessionId: session.id,
       title: session.title,
       cwd: stringValue(message.cwd) ?? session.cwd,
-      source: session.source
+      source: session.source,
+      ...(slashCommands.length > 0 ? { slashCommands } : {})
     })
+    return
+  }
+  if (subtype === 'commands_changed') {
+    const commands = normalizeAgentSlashCommands(message.commands)
+    session.slashCommands = commands
+    emit(session, { type: 'session:commands', sessionId: session.id, commands })
     return
   }
   if (subtype === 'status') {
@@ -1425,15 +1481,63 @@ export async function createAgentWorktreeFork(
   }
 }
 
+function prefetchLocalSlashCommands(session: AgentSession): void {
+  if (session.source !== 'local' || session.running || session.commandProbe) return
+
+  const abortController = new AbortController()
+  session.commandProbe = abortController
+  let diagnostic: ReturnType<typeof query> | undefined
+
+  void (async () => {
+    try {
+      diagnostic = query({
+        prompt: waitForAbort(abortController.signal),
+        options: {
+          abortController,
+          cwd: session.cwd,
+          model: session.model,
+          tools: [],
+          pathToClaudeCodeExecutable: packagedClaudeAgentSdkExecutable(),
+          permissionMode: 'dontAsk',
+          includeHookEvents: false,
+          includePartialMessages: false,
+          env: cleanEnv()
+        }
+      })
+      const init = await withTimeout(diagnostic.initializationResult(), '명령 목록 초기화', 15000)
+      if (abortController.signal.aborted || sessions.get(session.id) !== session) return
+      const commands = normalizeAgentSlashCommands(init.commands)
+      if (commands.length === 0) return
+      session.slashCommands = commands
+      emit(session, { type: 'session:commands', sessionId: session.id, commands })
+    } catch {
+      /* Slash commands are progressive enhancement; the agent still works without them. */
+    } finally {
+      diagnostic?.close()
+      abortController.abort()
+      if (session.commandProbe === abortController) session.commandProbe = undefined
+    }
+  })()
+}
+
 export function createAgentSession(opts: AgentCreateOptions, webContents: WebContents): AgentCommandResult {
   const existing = sessions.get(opts.id)
   if (existing) {
     attach(existing, webContents)
+    emit(existing, {
+      type: 'session:init',
+      sessionId: existing.id,
+      title: existing.title,
+      cwd: existing.cwd,
+      source: existing.source,
+      ...(existing.slashCommands?.length ? { slashCommands: existing.slashCommands } : {})
+    })
     if (existing.authStatus) {
       emit(existing, { type: 'auth:status', sessionId: existing.id, state: existing.authStatus })
     } else {
       refreshAgentAuthStatus(existing)
     }
+    prefetchLocalSlashCommands(existing)
     return { ok: true }
   }
   if (!opts.cwd) return { ok: false, error: 'Agent 세션 cwd가 필요합니다.' }
@@ -1469,6 +1573,7 @@ export function createAgentSession(opts: AgentCreateOptions, webContents: WebCon
   emit(session, { type: 'session:init', sessionId: session.id, title: session.title, cwd: session.cwd, source: session.source })
   emit(session, { type: 'status', sessionId: session.id, status: 'idle' })
   refreshAgentAuthStatus(session)
+  prefetchLocalSlashCommands(session)
   return { ok: true }
 }
 
@@ -1525,6 +1630,8 @@ function interruptForImmediateInstruction(session: AgentSession): void {
   rejectPendingPermissions(session, '사용자가 바로 지시하기로 현재 작업을 중단했습니다.')
   cancelPendingDialogs(session)
   session.running?.abort()
+  session.commandProbe?.abort()
+  session.commandProbe = undefined
   session.remoteProcess?.kill()
 }
 
@@ -1597,6 +1704,8 @@ function startNextQueuedMessage(session: AgentSession): void {
 }
 
 function startAgentTurn(session: AgentSession, input: AgentSendInput): void {
+  session.commandProbe?.abort()
+  session.commandProbe = undefined
   if (input.permissionMode) session.permissionMode = input.permissionMode
   const sessionId = session.id
   const messageId = randomUUID()

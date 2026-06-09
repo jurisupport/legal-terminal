@@ -159,7 +159,10 @@ interface SlashCommand {
   label: string
   description: string
   mode?: AgentPermissionMode
-  expand: (rest: string) => string
+  argumentHint?: string
+  aliases?: string[]
+  source?: 'app' | 'claude'
+  expand?: (rest: string) => string
 }
 
 const modeLabels: { value: AgentPermissionMode; label: string; title: string }[] = [
@@ -259,12 +262,76 @@ function expandSlashInput(text: string): { text: string; mode?: AgentPermissionM
   const match = text.match(/^(\/[^\s]+)(?:\s+([\s\S]*))?$/)
   if (!match) return { text }
   const command = slashCommands.find((item) => item.name === match[1].toLowerCase())
-  if (!command) return { text }
+  if (!command?.expand) return { text }
   return { text: command.expand((match[2] ?? '').trim()), mode: command.mode }
 }
 
 function slashCommandName(text: string): string | undefined {
   return text.match(/^(\/[^\s]+)/)?.[1].toLowerCase()
+}
+
+function normalizeSlashCommandName(value: string): string | undefined {
+  const trimmed = value.trim()
+  if (!trimmed) return undefined
+  const name = trimmed.split(/\s+/, 1)[0]
+  return name.startsWith('/') ? name : `/${name}`
+}
+
+function runtimeSlashCommandLabel(name: string): string {
+  return name.replace(/^\//, '')
+}
+
+function runtimeSlashCommandDescription(command: SlashCommand): string {
+  const description = command.description.trim()
+  if (command.argumentHint) return `${description} ${command.argumentHint}`.trim()
+  return description || 'Claude Code 명령'
+}
+
+function runtimeSlashCommandsFromEvent(value: unknown): SlashCommand[] {
+  if (!Array.isArray(value)) return []
+
+  const seen = new Set<string>()
+  return value
+    .map((item): SlashCommand | undefined => {
+      if (typeof item === 'string') {
+        const name = normalizeSlashCommandName(item)
+        return name ? { name, label: runtimeSlashCommandLabel(name), description: 'Claude Code 명령', source: 'claude' } : undefined
+      }
+
+      const record = asRecord(item)
+      const name = normalizeSlashCommandName(stringValue(record?.name) ?? '')
+      if (!record || !name) return undefined
+      const description = stringValue(record.description) ?? ''
+      const argumentHint = stringValue(record.argumentHint)
+      const aliases = stringArray(record.aliases)
+        .map((alias) => normalizeSlashCommandName(alias))
+        .filter((alias): alias is string => Boolean(alias))
+      return {
+        name,
+        label: runtimeSlashCommandLabel(name),
+        description: description || 'Claude Code 명령',
+        ...(argumentHint ? { argumentHint } : {}),
+        ...(aliases.length > 0 ? { aliases } : {}),
+        source: 'claude'
+      }
+    })
+    .filter((command): command is SlashCommand => {
+      if (!command) return false
+      const key = command.name.toLowerCase()
+      if (seen.has(key)) return false
+      seen.add(key)
+      return true
+    })
+}
+
+function mergeSlashCommands(appCommands: SlashCommand[], runtimeCommands: SlashCommand[]): SlashCommand[] {
+  const merged = new Map<string, SlashCommand>()
+  for (const command of appCommands) merged.set(command.name.toLowerCase(), { ...command, source: 'app' })
+  for (const command of runtimeCommands) {
+    const key = command.name.toLowerCase()
+    if (!merged.has(key)) merged.set(key, command)
+  }
+  return [...merged.values()]
 }
 
 const asRecord = (value: unknown): Record<string, unknown> | null =>
@@ -1385,6 +1452,7 @@ export default function AgentPanel({
   const [status, setStatus] = useState<AgentPanelStatus>('idle')
   const [error, setError] = useState('')
   const [slashIndex, setSlashIndex] = useState(0)
+  const [runtimeSlashCommands, setRuntimeSlashCommands] = useState<SlashCommand[]>([])
   const [authActive, setAuthActive] = useState(false)
   const [authStatus, setAuthStatus] = useState<AgentAuthStatus>(ssh ? 'checking' : 'unavailable')
   const [authStatusMessage, setAuthStatusMessage] = useState('')
@@ -1402,6 +1470,7 @@ export default function AgentPanel({
   const scrollRef = useRef<HTMLDivElement>(null)
   const shouldFollowTimelineRef = useRef(true)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
+  const slashMenuRef = useRef<HTMLDivElement>(null)
   const modeMenuRef = useRef<HTMLDivElement>(null)
   const openedAuthUrlsRef = useRef<Set<string>>(new Set())
   const copyFeedbackTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -1491,6 +1560,12 @@ export default function AgentPanel({
   useEffect(() => {
     const off = window.lt.agent.onEvent((event) => {
       if (eventSessionId(event) !== id) return
+      if (event.type === 'session:init' && event.slashCommands) {
+        setRuntimeSlashCommands(runtimeSlashCommandsFromEvent(event.slashCommands))
+      }
+      if (event.type === 'session:commands') {
+        setRuntimeSlashCommands(runtimeSlashCommandsFromEvent(event.commands))
+      }
       if (event.type === 'auth:started') setAuthActive(true)
       if (event.type === 'auth:done') setAuthActive(false)
       if (event.type === 'auth:status') {
@@ -1685,23 +1760,39 @@ export default function AgentPanel({
     if (!/^\/[^\s]*$/.test(trimmed)) return ''
     return trimmed.toLowerCase()
   }, [input])
+  const allSlashCommands = useMemo(
+    () => mergeSlashCommands(slashCommands, runtimeSlashCommands),
+    [runtimeSlashCommands]
+  )
   const slashMatches = useMemo(() => {
     if (!slashToken) return []
     const query = slashToken.slice(1)
-    return slashCommands
-      .filter(
-        (command) =>
-          command.name.slice(1).startsWith(query) ||
-          command.label.toLowerCase().includes(query) ||
-          command.description.toLowerCase().includes(query)
-      )
-      .slice(0, 7)
-  }, [slashToken])
+    return allSlashCommands.filter((command) => {
+      const haystack = [
+        command.name.slice(1),
+        ...((command.aliases ?? []).map((alias) => alias.replace(/^\//, ''))),
+        command.label,
+        command.description,
+        command.argumentHint ?? ''
+      ].join(' ').toLowerCase()
+      return haystack.includes(query)
+    })
+  }, [allSlashCommands, slashToken])
   const showSlashMenu = slashMatches.length > 0 && !authActive
 
   useEffect(() => {
     setSlashIndex(0)
   }, [slashToken])
+
+  useEffect(() => {
+    setSlashIndex((current) => (slashMatches.length === 0 ? 0 : Math.min(current, slashMatches.length - 1)))
+  }, [slashMatches.length])
+
+  useLayoutEffect(() => {
+    if (!showSlashMenu) return
+    const active = slashMenuRef.current?.querySelector<HTMLElement>('[data-active="true"]')
+    active?.scrollIntoView({ block: 'nearest', inline: 'nearest' })
+  }, [showSlashMenu, slashIndex, slashMatches])
 
   const applySlashCommand = (command: SlashCommand): void => {
     if (command.mode) setMode(command.mode)
@@ -2516,14 +2607,17 @@ export default function AgentPanel({
 
       <footer className="agent-prompt">
         {showSlashMenu && (
-          <div className="agent-slash-menu" role="listbox" aria-label="Slash commands">
+          <div ref={slashMenuRef} className="agent-slash-menu" role="listbox" aria-label="Slash commands">
             {slashMatches.map((command, index) => (
               <button
                 key={command.name}
                 type="button"
+                id={`agent-slash-${id}-${index}`}
                 className={`agent-slash-item ${index === slashIndex ? 'active' : ''}`}
+                data-active={index === slashIndex ? 'true' : undefined}
                 role="option"
                 aria-selected={index === slashIndex}
+                title={`${command.name}${command.argumentHint ? ` ${command.argumentHint}` : ''}`}
                 onMouseDown={(e) => {
                   e.preventDefault()
                   applySlashCommand(command)
@@ -2532,7 +2626,7 @@ export default function AgentPanel({
                 <span className="agent-slash-command">{command.name}</span>
                 <span className="agent-slash-detail">
                   <span className="agent-slash-label">{command.label}</span>
-                  <span className="agent-slash-desc">{command.description}</span>
+                  <span className="agent-slash-desc">{runtimeSlashCommandDescription(command)}</span>
                 </span>
               </button>
             ))}

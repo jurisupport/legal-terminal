@@ -127,6 +127,13 @@ export interface AgentDiffProposal {
   gitDiff?: unknown
 }
 
+export interface AgentSlashCommand {
+  name: string
+  description?: string
+  argumentHint?: string
+  aliases?: string[]
+}
+
 export type AgentStatus =
   | 'idle'
   | 'working'
@@ -136,7 +143,15 @@ export type AgentStatus =
   | 'error'
 
 export type AgentEvent =
-  | { type: 'session:init'; sessionId: string; title?: string; cwd: string; source: AgentSource }
+  | {
+      type: 'session:init'
+      sessionId: string
+      title?: string
+      cwd: string
+      source: AgentSource
+      slashCommands?: AgentSlashCommand[]
+    }
+  | { type: 'session:commands'; sessionId: string; commands: AgentSlashCommand[] }
   | { type: 'message:user'; sessionId: string; messageId: string; text: string; attachments: AgentAttachment[] }
   | { type: 'message:assistant_start'; sessionId: string; messageId: string }
   | { type: 'message:assistant_delta'; sessionId: string; messageId: string; text: string }
