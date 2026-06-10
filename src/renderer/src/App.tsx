@@ -70,6 +70,7 @@ import type {
 
 type Mode = 'explorer' | 'cases' | 'viewer' | 'todos'
 type DockSide = 'left' | 'right'
+type RecentCase = { drafts: string; records?: string; name: string; ts: number }
 
 function isComposingInputKeyEvent(event: ReactKeyboardEvent<HTMLInputElement>): boolean {
   return event.nativeEvent.isComposing || event.key === 'Process' || event.keyCode === 229
@@ -1190,6 +1191,7 @@ export default function App(): JSX.Element {
   // SSH 접속 프로필 + 접속 선택/원격 폴더 선택 모달 상태
   const [sshProfiles, setSshProfiles] = useState<SshProfile[]>([])
   const [connMenu, setConnMenu] = useState(false)
+  const [newCaseOpen, setNewCaseOpen] = useState(false)
   const [remotePick, setRemotePick] = useState<SshProfile | null>(null)
   const [recordsPick, setRecordsPick] = useState<{
     profile: SshProfile
@@ -1224,9 +1226,7 @@ export default function App(): JSX.Element {
   const [cropRatio, setCropRatio] = useState(0.05)
 
   // 최근 사건 히스토리
-  const [recent, setRecent] = useState<{ drafts: string; records?: string; name: string; ts: number }[]>(
-    []
-  )
+  const [recent, setRecent] = useState<RecentCase[]>([])
 
   // 탐색기 트리 새로고침 트리거 (드래그드롭 복사 후)
   const [treeRefresh, setTreeRefresh] = useState(0)
@@ -1529,11 +1529,17 @@ export default function App(): JSX.Element {
     return true
   }
 
-  const openNewWorkspaceWindow = (tabs?: TabPayload[]): void => {
-    void window.lt.app.newWindow(tabs?.length ? { tabs } : undefined)
+  const openNewCaseLauncher = (): void => {
+    setCaseTabsOpen(false)
+    setNewCaseOpen(true)
   }
 
-  // 단축키: Ctrl/Cmd+T 새 Agent / Ctrl/Cmd+Shift+T 새 터미널 / Ctrl/Cmd+W 탭 닫기 / Ctrl/Cmd+N 새 문서 / Ctrl/Cmd+Shift+N 새 작업환경
+  const openBlankWorkspaceWindow = (): void => {
+    setNewCaseOpen(false)
+    void window.lt.app.newWindow()
+  }
+
+  // 단축키: Ctrl/Cmd+T 새 Agent / Ctrl/Cmd+Shift+T 새 터미널 / Ctrl/Cmd+W 탭 닫기 / Ctrl/Cmd+N 새 문서 / Ctrl/Cmd+Shift+N 새 사건
   useEffect(() => {
     const onKey = (e: KeyboardEvent): void => {
       const activeEl = document.activeElement as HTMLElement | null
@@ -1586,7 +1592,7 @@ export default function App(): JSX.Element {
       } else if (isKey('n', 'KeyN') && e.shiftKey) {
         e.preventDefault()
         e.stopPropagation()
-        openNewWorkspaceWindow()
+        openNewCaseLauncher()
       } else if (isKey('o', 'KeyO') && e.shiftKey) {
         e.preventDefault()
         e.stopPropagation()
@@ -3113,6 +3119,26 @@ export default function App(): JSX.Element {
     applyWorkspaceLoadResult(await window.lt.workspace.importFile())
   }
 
+  const openCaseListFromLauncher = (): void => {
+    setNewCaseOpen(false)
+    setMode('cases')
+  }
+
+  const openFolderFromLauncher = (): void => {
+    setNewCaseOpen(false)
+    void openConnOrLocal()
+  }
+
+  const openSavedWorkspaceFromLauncher = (): void => {
+    setNewCaseOpen(false)
+    void restoreWorkspace(false)
+  }
+
+  const openRecentFromLauncher = (entry: RecentCase): void => {
+    setNewCaseOpen(false)
+    void openRecent(entry)
+  }
+
   useEffect(() => {
     if (!isRemotePath(activeDraftsFolder) && !isRemotePath(activeRecordsFolder)) return
     const timer = setInterval(() => setTreeRefresh((x) => x + 1), 5000)
@@ -4305,7 +4331,7 @@ export default function App(): JSX.Element {
       onNewFolder={newFolder}
       onNewFile={newFile}
       onSync={sshProfiles.length > 0 ? openSync : undefined}
-      onOpenWorkspace={() => void openConnOrLocal()}
+      onOpenWorkspace={openNewCaseLauncher}
       onOpenCase={openCaseDefault}
       onOpenLocalCase={openCaseWorkspace}
       onOpenRemote={openCaseRemote}
@@ -4435,10 +4461,10 @@ export default function App(): JSX.Element {
           ) : (
             <Empty
               label="사건 폴더를 열어 시작하세요 (작성문서 또는 사건기록 폴더)"
-              actionLabel="사건 폴더 열기"
-              onAction={() => void openConnOrLocal()}
-              secondaryLabel="새 작업환경 만들기"
-              onSecondary={openNewWorkspaceWindow}
+              actionLabel="새 사건 추가"
+              onAction={openNewCaseLauncher}
+              secondaryLabel="작성서류 폴더 열기"
+              onSecondary={() => void openConnOrLocal()}
             />
           ))}
         {termTabs.map((t) => (
@@ -4758,8 +4784,8 @@ export default function App(): JSX.Element {
               ) : (
                 <Empty
                   label="오른쪽에 열린 탭이 없습니다"
-                  actionLabel="작업환경 시작"
-                  onAction={() => void openConnOrLocal()}
+                  actionLabel="새 사건 추가"
+                  onAction={openNewCaseLauncher}
                 />
               )
             ) : (
@@ -4937,13 +4963,18 @@ export default function App(): JSX.Element {
                 ))
               )}
             </div>
+            <div className="case-tabs-actions">
+              <button className="case-tabs-add" type="button" onClick={openNewCaseLauncher}>
+                + 새 사건
+              </button>
+            </div>
           </div>
         )}
         <div className="activitybar-bottom">
           <button
             className="activity-item"
-            title="새 작업환경 만들기"
-            onClick={() => openNewWorkspaceWindow()}
+            title={`새 사건 추가 (${platform === 'darwin' ? '⌘⇧N' : 'Ctrl+Shift+N'})`}
+            onClick={openNewCaseLauncher}
           >
             <IconWorkspace />
           </button>
@@ -4985,6 +5016,18 @@ export default function App(): JSX.Element {
 
       <SelectionAsk onAsk={askClaude} />
       <SelectionMenu onAsk={askClaude} />
+
+      {newCaseOpen && (
+        <NewCaseLauncher
+          recent={recent}
+          onCases={openCaseListFromLauncher}
+          onFolder={openFolderFromLauncher}
+          onSavedWorkspace={openSavedWorkspaceFromLauncher}
+          onRecent={openRecentFromLauncher}
+          onNewWindow={openBlankWorkspaceWindow}
+          onClose={() => setNewCaseOpen(false)}
+        />
+      )}
 
       {workspacePick && (
         <WorkspacePicker
@@ -5545,9 +5588,9 @@ function DocsPanel({
             <div className="sidebar-header-main">
               <span className="sidebar-title">{title}</span>
               <span className="header-actions explorer-actions">
-                <button className="tool-btn" title="새 작업환경 열기" onClick={onOpenWorkspace}>
+                <button className="tool-btn" title="새 사건 추가" onClick={onOpenWorkspace}>
                   <IconWorkspace size={15} />
-                  <span className="sr-only">새 작업환경 열기</span>
+                  <span className="sr-only">새 사건 추가</span>
                 </button>
                 <button className="tool-btn" title="새 파일" disabled={!draftsFolder} onClick={onNewFile}>
                   <IconNewFile size={15} />
@@ -7631,6 +7674,92 @@ function SshProfilesEditor(): JSX.Element {
           }}
         />
       )}
+    </div>
+  )
+}
+
+function NewCaseLauncher({
+  recent,
+  onCases,
+  onFolder,
+  onSavedWorkspace,
+  onRecent,
+  onNewWindow,
+  onClose
+}: {
+  recent: RecentCase[]
+  onCases: () => void
+  onFolder: () => void
+  onSavedWorkspace: () => void
+  onRecent: (entry: RecentCase) => void
+  onNewWindow: () => void
+  onClose: () => void
+}): JSX.Element {
+  const visibleRecent = recent.slice(0, 4)
+  const recentSub = (entry: RecentCase): string =>
+    [isRemotePath(entry.drafts) ? '원격' : '로컬', entry.records ? '기록 연결' : undefined, pathLeaf(entry.drafts)]
+      .filter(Boolean)
+      .join(' · ')
+
+  return (
+    <div className="modal-overlay" onMouseDown={onClose}>
+      <div className="modal new-case-launcher" onMouseDown={(e) => e.stopPropagation()}>
+        <div className="modal-title">새 사건</div>
+        <div className="new-case-options">
+          <button className="new-case-row" type="button" onClick={onCases}>
+            <span className="new-case-row-icon">
+              <IconCases size={20} />
+            </span>
+            <span className="new-case-row-main">
+              <span className="new-case-row-title">사건 목록</span>
+              <span className="new-case-row-sub">JuriSupport 사건에서 선택</span>
+            </span>
+          </button>
+          <button className="new-case-row" type="button" onClick={onFolder}>
+            <span className="new-case-row-icon">
+              <IconWorkspace size={20} />
+            </span>
+            <span className="new-case-row-main">
+              <span className="new-case-row-title">작성서류 폴더</span>
+              <span className="new-case-row-sub">로컬 또는 원격 폴더 선택</span>
+            </span>
+          </button>
+          <button className="new-case-row" type="button" onClick={onSavedWorkspace}>
+            <span className="new-case-row-icon">
+              <IconSync size={20} />
+            </span>
+            <span className="new-case-row-main">
+              <span className="new-case-row-title">저장된 작업환경</span>
+              <span className="new-case-row-sub">스냅샷 복원</span>
+            </span>
+          </button>
+        </div>
+        {visibleRecent.length > 0 && (
+          <div className="new-case-recent">
+            <div className="new-case-section-title">최근 사건</div>
+            {visibleRecent.map((entry) => (
+              <button
+                key={`${entry.drafts}:${entry.ts}`}
+                className="new-case-recent-row"
+                type="button"
+                title={entry.drafts}
+                onClick={() => onRecent(entry)}
+              >
+                <span className="new-case-row-title">{entry.name}</span>
+                <span className="new-case-row-sub">{recentSub(entry)}</span>
+              </button>
+            ))}
+          </div>
+        )}
+        <div className="modal-actions">
+          <button className="header-btn" type="button" onClick={onNewWindow}>
+            빈 새 윈도우
+          </button>
+          <button className="header-btn" type="button" onClick={onClose}>
+            닫기
+          </button>
+        </div>
+      </div>
     </div>
   )
 }
