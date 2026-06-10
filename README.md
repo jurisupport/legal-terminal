@@ -40,7 +40,7 @@ curl -fsSL https://raw.githubusercontent.com/jurisupport/legal-terminal/main/ins
 
 ## 이번 업데이트
 
-최신 릴리스: [v0.1.68](https://github.com/jurisupport/legal-terminal/releases/tag/v0.1.68)
+최신 릴리스: [v0.1.69](https://github.com/jurisupport/legal-terminal/releases/tag/v0.1.69)
 
 - **SSH 기본 열기 안정화**: 설정에서 사건 기본 열기를 SSH 프로필로 지정하면, 다가오는 기일·사건 목록·할일 카드 클릭이 모두 해당 SSH 프로필을 따릅니다.
 - **우클릭 fallback 강화**: 사건 우클릭 메뉴에 로컬 열기와 모든 SSH 프로필 열기가 항상 표시됩니다. 기본 SSH 프로필에는 `(기본)` 표시가 붙습니다.
