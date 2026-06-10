@@ -10,8 +10,24 @@ permissions:
   contents: write # Release 생성/업로드 권한
 
 jobs:
+  create-release:
+    name: Create GitHub release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ensure release exists
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          title="${tag#v}"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            exit 0
+          fi
+          gh release create "$tag" --title "$title" --notes "Automated release $tag"
+
   build-macos:
     name: macOS (${{ matrix.arch }})
+    needs: create-release
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -43,10 +59,11 @@ jobs:
       - name: Package & publish macOS
         run: npx electron-builder --mac ${{ matrix.mac_targets }} --${{ matrix.arch }} --publish always
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
 
   build-windows:
     name: Windows (x64)
+    needs: create-release
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -67,4 +84,4 @@ jobs:
       - name: Package & publish Windows
         run: npx electron-builder --win --publish always
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
