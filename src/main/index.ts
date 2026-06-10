@@ -6,6 +6,7 @@ import { join, basename, dirname, extname, resolve, sep, posix } from 'path'
 import { readdir, readFile, stat, writeFile, copyFile, rm, mkdir, rename, cp } from 'fs/promises'
 import { existsSync, type Dirent } from 'fs'
 import { fileURLToPath } from 'url'
+import { inflateRawSync } from 'zlib'
 import { getSettings, setSettings, type Settings } from './settings'
 import {
   getPairing,
@@ -71,6 +72,7 @@ import { disposeAgentSessions, registerAgentIpc } from './agent/agent-service'
 let mainWindow: BrowserWindow | null = null
 let updateCheckStarted = false
 const dockBounceByWindow = new Map<number, number>()
+const forceClosingWindowIds = new Set<number>()
 const GITHUB_PROJECT_URL = 'https://github.com/jurisupport/legal-terminal'
 const DEFAULT_WINDOW_TITLE = 'legal-terminal'
 
@@ -240,9 +242,17 @@ function createWindow(setMain = true, opts?: { docOnly?: boolean; termOnly?: boo
 
   if (setMain) mainWindow = win
 
+  let closeGuardReady = false
+
   win.on('focus', () => stopWindowAttention(win))
+  win.on('close', (event) => {
+    if (!closeGuardReady || forceClosingWindowIds.has(win.id) || win.webContents.isDestroyed()) return
+    event.preventDefault()
+    win.webContents.send('app:closeWindowRequested')
+  })
   win.on('closed', () => {
     stopWindowAttention(win)
+    forceClosingWindowIds.delete(win.id)
     if (mainWindow === win) mainWindow = null
   })
 
@@ -273,7 +283,10 @@ function createWindow(setMain = true, opts?: { docOnly?: boolean; termOnly?: boo
     if (setMain && !detached) scheduleUpdateCheck(win)
   }
   win.on('ready-to-show', revealWindow)
-  win.webContents.once('did-finish-load', () => setTimeout(revealWindow, 0))
+  win.webContents.once('did-finish-load', () => {
+    closeGuardReady = true
+    setTimeout(revealWindow, 0)
+  })
   setTimeout(revealWindow, 3000)
 
   win.webContents.setWindowOpenHandler((details) => {
@@ -327,6 +340,13 @@ ipcMain.handle('window:new', (_e, opts?: NewWindowOptions) => {
 ipcMain.handle('window:close', (e) => {
   const win = BrowserWindow.fromWebContents(e.sender)
   if (win && !win.isDestroyed()) win.close()
+})
+
+ipcMain.handle('window:forceClose', (e) => {
+  const win = BrowserWindow.fromWebContents(e.sender)
+  if (!win || win.isDestroyed()) return
+  forceClosingWindowIds.add(win.id)
+  win.close()
 })
 
 ipcMain.on('app:requestAttention', (e, payload?: { reason?: 'done' | 'question' }) => {
@@ -687,12 +707,197 @@ const TEXT_EXT = new Set([
   '.js', '.ts', '.tsx', '.css', '.py', '.sh', '.ini', '.toml'
 ])
 const MAX_TEXT_BYTES = 2 * 1024 * 1024 // 2MB 초과 텍스트는 잘라서 안내
+const DOCUMENT_DRAFT_DIR = 'document-drafts'
 const LOCAL_CLOUD_READ_TIMEOUT_MS = 45_000
 const LOCAL_CLOUD_HYDRATE_TIMEOUT_MS = 180_000
 const LOCAL_CLOUD_FOLDER_HYDRATE_TIMEOUT_MS = 8_000
 const LOCAL_CLOUD_FOLDER_HYDRATE_KICK_MS = 2_000
 const localPrefetching = new Set<string>()
 const localPrefetchedAt = new Map<string, number>()
+
+interface DocumentDraftInput {
+  path?: string
+  draftId?: string
+}
+
+interface DocumentDraftSaveInput extends DocumentDraftInput {
+  title?: string
+  content: string
+}
+
+interface DocumentDraftEntry {
+  key: string
+  path?: string
+  draftId?: string
+  title: string
+  content: string
+  savedAt: string
+}
+
+function documentDraftRoot(): string {
+  return join(app.getPath('userData'), DOCUMENT_DRAFT_DIR)
+}
+
+function documentDraftKey(input: DocumentDraftInput): string {
+  const source = input.path ? `path:${input.path}` : `draft:${input.draftId ?? 'untitled'}`
+  return createHash('sha256').update(source).digest('hex')
+}
+
+function documentDraftPath(input: DocumentDraftInput): string {
+  return join(documentDraftRoot(), `${documentDraftKey(input)}.json`)
+}
+
+function normalizeDocumentDraft(raw: unknown, key: string): DocumentDraftEntry | null {
+  if (!raw || typeof raw !== 'object') return null
+  const item = raw as Partial<DocumentDraftEntry>
+  if (typeof item.content !== 'string') return null
+  return {
+    key,
+    path: typeof item.path === 'string' ? item.path : undefined,
+    draftId: typeof item.draftId === 'string' ? item.draftId : undefined,
+    title: typeof item.title === 'string' && item.title.trim() ? item.title : '무제.md',
+    content: item.content,
+    savedAt: typeof item.savedAt === 'string' ? item.savedAt : new Date(0).toISOString()
+  }
+}
+
+async function saveDocumentDraft(input: DocumentDraftSaveInput): Promise<DocumentDraftEntry> {
+  const key = documentDraftKey(input)
+  const entry: DocumentDraftEntry = {
+    key,
+    path: input.path,
+    draftId: input.draftId,
+    title: input.title?.trim() || (input.path ? basename(input.path) : '무제.md'),
+    content: input.content,
+    savedAt: new Date().toISOString()
+  }
+  const root = documentDraftRoot()
+  await mkdir(root, { recursive: true })
+  const file = join(root, `${key}.json`)
+  const tmp = join(root, `.${key}.${Date.now()}.tmp`)
+  await writeFile(tmp, JSON.stringify(entry), 'utf8')
+  await rename(tmp, file)
+  return entry
+}
+
+async function loadDocumentDraft(input: DocumentDraftInput): Promise<DocumentDraftEntry | null> {
+  try {
+    const key = documentDraftKey(input)
+    const raw = JSON.parse(await readFile(documentDraftPath(input), 'utf8')) as unknown
+    return normalizeDocumentDraft(raw, key)
+  } catch {
+    return null
+  }
+}
+
+async function deleteDocumentDraft(input: DocumentDraftInput): Promise<void> {
+  await rm(documentDraftPath(input), { force: true })
+}
+
+async function listDocumentDrafts(): Promise<DocumentDraftEntry[]> {
+  try {
+    const root = documentDraftRoot()
+    const files = await readdir(root, { withFileTypes: true })
+    const drafts = await Promise.all(
+      files
+        .filter((entry) => entry.isFile() && entry.name.endsWith('.json'))
+        .map(async (entry) => {
+          const key = entry.name.slice(0, -'.json'.length)
+          try {
+            const raw = JSON.parse(await readFile(join(root, entry.name), 'utf8')) as unknown
+            return normalizeDocumentDraft(raw, key)
+          } catch {
+            return null
+          }
+        })
+    )
+    return drafts
+      .filter((entry): entry is DocumentDraftEntry => !!entry)
+      .sort((a, b) => b.savedAt.localeCompare(a.savedAt))
+  } catch {
+    return []
+  }
+}
+
+interface ZipEntry {
+  name: string
+  compression: number
+  compressedSize: number
+  localHeaderOffset: number
+}
+
+function findZipEndOfCentralDirectory(buf: Buffer): number {
+  const min = Math.max(0, buf.length - 0xffff - 22)
+  for (let i = buf.length - 22; i >= min; i -= 1) {
+    if (buf.readUInt32LE(i) === 0x06054b50) return i
+  }
+  throw new Error('DOCX ZIP 중앙 디렉터리를 찾지 못했습니다.')
+}
+
+function readZipEntries(buf: Buffer): ZipEntry[] {
+  const eocd = findZipEndOfCentralDirectory(buf)
+  const count = buf.readUInt16LE(eocd + 10)
+  const centralOffset = buf.readUInt32LE(eocd + 16)
+  const entries: ZipEntry[] = []
+  let offset = centralOffset
+  for (let i = 0; i < count; i += 1) {
+    if (offset + 46 > buf.length || buf.readUInt32LE(offset) !== 0x02014b50) break
+    const compression = buf.readUInt16LE(offset + 10)
+    const compressedSize = buf.readUInt32LE(offset + 20)
+    const nameLength = buf.readUInt16LE(offset + 28)
+    const extraLength = buf.readUInt16LE(offset + 30)
+    const commentLength = buf.readUInt16LE(offset + 32)
+    const localHeaderOffset = buf.readUInt32LE(offset + 42)
+    const name = buf.toString('utf8', offset + 46, offset + 46 + nameLength)
+    entries.push({ name, compression, compressedSize, localHeaderOffset })
+    offset += 46 + nameLength + extraLength + commentLength
+  }
+  return entries
+}
+
+function readZipEntry(buf: Buffer, entry: ZipEntry): Buffer {
+  const offset = entry.localHeaderOffset
+  if (offset + 30 > buf.length || buf.readUInt32LE(offset) !== 0x04034b50) {
+    throw new Error(`DOCX 항목을 읽지 못했습니다: ${entry.name}`)
+  }
+  const nameLength = buf.readUInt16LE(offset + 26)
+  const extraLength = buf.readUInt16LE(offset + 28)
+  const dataStart = offset + 30 + nameLength + extraLength
+  const data = buf.subarray(dataStart, dataStart + entry.compressedSize)
+  if (entry.compression === 0) return Buffer.from(data)
+  if (entry.compression === 8) return inflateRawSync(data)
+  throw new Error(`지원하지 않는 DOCX 압축 방식입니다: ${entry.compression}`)
+}
+
+function decodeXmlEntities(value: string): string {
+  return value.replace(/&(#x[0-9a-f]+|#\d+|amp|lt|gt|quot|apos);/gi, (match, entity: string) => {
+    if (entity[0] === '#') {
+      const code = entity[1]?.toLowerCase() === 'x'
+        ? Number.parseInt(entity.slice(2), 16)
+        : Number.parseInt(entity.slice(1), 10)
+      return Number.isFinite(code) ? String.fromCodePoint(code) : match
+    }
+    return ({ amp: '&', lt: '<', gt: '>', quot: '"', apos: "'" } as Record<string, string>)[
+      entity.toLowerCase()
+    ] ?? match
+  })
+}
+
+function extractDocxText(buf: Buffer): string {
+  const entries = readZipEntries(buf)
+  const documentEntry = entries.find((entry) => entry.name === 'word/document.xml')
+  if (!documentEntry) throw new Error('DOCX 본문(word/document.xml)을 찾지 못했습니다.')
+  const xml = readZipEntry(buf, documentEntry).toString('utf8')
+  const out: string[] = []
+  const tokenRe = /<w:t\b[^>]*>([\s\S]*?)<\/w:t>|<w:tab\b[^>]*\/>|<w:br\b[^>]*\/>|<\/w:tc>|<\/w:p>/g
+  let match: RegExpExecArray | null
+  while ((match = tokenRe.exec(xml))) {
+    if (match[1] !== undefined) out.push(decodeXmlEntities(match[1]))
+    else if (match[0].startsWith('<w:tab') || match[0] === '</w:tc>') out.push('\t')
+    else out.push('\n')
+  }
+  return out.join('').replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim()
+}
 
 function isLikelyLocalOneDrivePath(filePath: string): boolean {
   if (process.platform !== 'darwin') return false
@@ -1392,6 +1597,49 @@ ipcMain.handle('fs:readHwpText', async (_e, filePath: string) => {
     return { ok: true, text: extractHwpText(buf, ext) }
   } catch (e) {
     return { ok: false, text: '', error: 'HWP/HWPX 파싱 실패: ' + String(e) }
+  }
+})
+
+ipcMain.handle('fs:readDocxText', async (_e, filePath: string) => {
+  try {
+    const buf = isRemote(filePath) ? await rfsReadBytes(filePath) : await readLocalBytes(filePath)
+    return { ok: true, text: extractDocxText(buf) }
+  } catch (e) {
+    return { ok: false, text: '', error: 'DOCX 텍스트 추출 실패: ' + String(e) }
+  }
+})
+
+ipcMain.handle('fs:saveDocumentDraft', async (_e, input: DocumentDraftSaveInput) => {
+  try {
+    const entry = await saveDocumentDraft(input)
+    return { ok: true, entry }
+  } catch (e) {
+    return { ok: false, error: String(e) }
+  }
+})
+
+ipcMain.handle('fs:loadDocumentDraft', async (_e, input: DocumentDraftInput) => {
+  try {
+    return { ok: true, draft: await loadDocumentDraft(input) }
+  } catch (e) {
+    return { ok: false, draft: null, error: String(e) }
+  }
+})
+
+ipcMain.handle('fs:listDocumentDrafts', async () => {
+  try {
+    return { ok: true, drafts: await listDocumentDrafts() }
+  } catch (e) {
+    return { ok: false, drafts: [], error: String(e) }
+  }
+})
+
+ipcMain.handle('fs:deleteDocumentDraft', async (_e, input: DocumentDraftInput) => {
+  try {
+    await deleteDocumentDraft(input)
+    return { ok: true }
+  } catch (e) {
+    return { ok: false, error: String(e) }
   }
 })
 

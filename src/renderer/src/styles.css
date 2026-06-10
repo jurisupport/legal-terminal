@@ -1490,6 +1490,15 @@ body {
   flex-shrink: 0;
   animation: dot-pulse 1.4s ease-in-out infinite;
 }
+.tab-dirty {
+  color: #e0a85c;
+  font-size: 8px;
+  margin-right: 2px;
+  flex-shrink: 0;
+}
+.tab.dirty:not(.active) {
+  background: rgba(224, 168, 92, 0.1);
+}
 .tab.attention:not(.active) {
   background: rgba(92, 211, 138, 0.12);
 }
@@ -2893,6 +2902,11 @@ body {
 .hearing-message.speaker-other {
   align-self: flex-start;
 }
+.hearing-message.speaker-preparation {
+  width: 100%;
+  max-width: 100%;
+  align-self: stretch;
+}
 .hearing-message.speaker-defendant {
   align-self: flex-end;
 }
@@ -4163,7 +4177,8 @@ body {
   min-height: 0;
   overflow: auto;
   display: flex;
-  justify-content: center;
+  align-items: flex-start;
+  justify-content: flex-start;
   padding: 16px;
   cursor: grab;
   outline: none;
@@ -4180,12 +4195,15 @@ body {
 .pdf-password {
   width: min(360px, 100%);
   align-self: center;
-  margin-top: 72px;
+  margin: 72px auto 0;
   padding: 18px;
   background: var(--bg-alt);
   border: 1px solid var(--border);
   border-radius: 6px;
   cursor: default;
+}
+.pdf-loading {
+  margin: 72px auto 0;
 }
 .pdf-password-title {
   color: var(--fg);
@@ -4234,7 +4252,9 @@ body {
 }
 .pdf-page {
   position: relative;
+  flex: 0 0 auto;
   align-self: flex-start;
+  margin: 0 auto;
   overflow: hidden;
   box-shadow: 0 2px 12px rgba(0, 0, 0, 0.5);
   background: #fff;

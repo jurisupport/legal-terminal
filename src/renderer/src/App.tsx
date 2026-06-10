@@ -211,6 +211,7 @@ interface DocTab {
     | 'pdf'
     | 'image'
     | 'hwp'
+    | 'docx'
     | 'csv'
     | 'settings'
     | 'diff'
@@ -322,6 +323,7 @@ const remoteUri = (profileId: string, p: string): string =>
   'ssh://' + profileId + (p.startsWith('/') ? p : '/' + p)
 
 const isRemotePath = (p?: string): p is string => !!p && p.startsWith('ssh://')
+const REMOTE_FILE_CHANGED_EVENT = 'lt:remote-file-changed'
 const parseRemoteUri = (uri: string): { profileId: string; path: string } | null => {
   if (!isRemotePath(uri)) return null
   const rest = uri.slice('ssh://'.length)
@@ -384,10 +386,22 @@ function useRemoteFileVersion(path?: string, intervalMs = 2500): number {
         })
         .catch(() => {})
     }
+    const onRemoteFileChanged = (event: Event): void => {
+      const detail = (event as CustomEvent<{ paths?: unknown }>).detail
+      const paths = Array.isArray(detail?.paths)
+        ? detail.paths.filter((item): item is string => typeof item === 'string')
+        : []
+      if (!paths.includes(path)) return
+      sigRef.current = ''
+      setVersion((v) => v + 1)
+      tick()
+    }
     tick()
+    window.addEventListener(REMOTE_FILE_CHANGED_EVENT, onRemoteFileChanged)
     const timer = setInterval(tick, intervalMs)
     return () => {
       alive = false
+      window.removeEventListener(REMOTE_FILE_CHANGED_EVENT, onRemoteFileChanged)
       clearInterval(timer)
     }
   }, [path, intervalMs])
@@ -423,6 +437,7 @@ const RESTORABLE_DOC_KINDS = new Set<DocTab['kind']>([
   'pdf',
   'image',
   'hwp',
+  'docx',
   'csv',
   'settings',
   'hearing'
@@ -501,6 +516,8 @@ const docKindStatus = (kind: DocTab['kind']): string | undefined => {
       return '이미지'
     case 'hwp':
       return 'HWP'
+    case 'docx':
+      return 'DOCX'
     case 'csv':
       return 'CSV'
     case 'diff':
@@ -662,6 +679,7 @@ const docKindForPath = (path: string): DocTab['kind'] => {
   if (lower.endsWith('.pdf')) return 'pdf'
   if (/\.(png|jpe?g|gif|webp|bmp|svg|ico|tiff?|avif)$/.test(lower)) return 'image'
   if (/\.(hwp|hwpx)$/.test(lower)) return 'hwp'
+  if (lower.endsWith('.docx')) return 'docx'
   if (/\.(md|markdown)$/.test(lower)) return 'mdview'
   if (lower.endsWith('.csv')) return 'csv'
   if (lower.endsWith('.hearing.json')) return 'hearing'
@@ -1046,8 +1064,10 @@ export default function App(): JSX.Element {
   )
   const [agentDiffs, setAgentDiffs] = useState<Record<string, AgentDiffOpenRequest>>({})
   const [activeDoc, setActiveDoc] = useState<string>(() => (docOnly ? '' : 'doc-welcome'))
-  // 닫으면 내용이 사라지는 문서(저장 안 된 새 문서) id 집합 — 닫기 전 확인용
+  // 실제 파일에 저장되지 않은 변경사항이 있는 문서 id 집합 — 닫기 전 확인용
   const [dirtyDocs, setDirtyDocs] = useState<Set<string>>(new Set())
+  const docTabsRef = useRef<DocTab[]>(docTabs)
+  const dirtyDocsRef = useRef<Set<string>>(dirtyDocs)
 
   const [termTabs, setTermTabs] = useState<TermTab[]>([])
   const [activeTerm, setActiveTerm] = useState<string>('')
@@ -1059,6 +1079,7 @@ export default function App(): JSX.Element {
   const termTabsRef = useRef<TermTab[]>([])
   const selectionAttachmentSeqRef = useRef(0)
   const rememberedSessionsRef = useRef<Set<string>>(new Set())
+  const forceWindowCloseRef = useRef(false)
   const [activeWork, setActiveWork] = useState<Record<DockSide, string>>({
     left: docOnly ? '' : docKey('doc-welcome'),
     right: ''
@@ -1145,6 +1166,8 @@ export default function App(): JSX.Element {
     return () => window.removeEventListener(SETTINGS_UPDATED_EVENT, onSettingsUpdated)
   }, [])
 
+  docTabsRef.current = docTabs
+  dirtyDocsRef.current = dirtyDocs
   termTabsRef.current = termTabs
   useEffect(() => {
     const killWindowTerms = (): void => {
@@ -1153,15 +1176,66 @@ export default function App(): JSX.Element {
         else window.lt.pty.kill(t.id)
       }
     }
-    window.addEventListener('beforeunload', killWindowTerms)
-    return () => window.removeEventListener('beforeunload', killWindowTerms)
+    const beforeUnload = (event: BeforeUnloadEvent): void => {
+      if (!forceWindowCloseRef.current && dirtyDocsRef.current.size > 0) {
+        event.preventDefault()
+        event.returnValue = ''
+        return
+      }
+      killWindowTerms()
+    }
+    window.addEventListener('beforeunload', beforeUnload)
+    return () => window.removeEventListener('beforeunload', beforeUnload)
   }, [])
 
   useEffect(() => window.lt.app.onCloseActiveTab(() => closeActiveTabRef.current()), [])
-
+  useEffect(
+    () =>
+      window.lt.app.onCloseWindowRequest(() => {
+        if (!confirmCloseDirtyDocs('window')) return
+        forceWindowCloseRef.current = true
+        void window.lt.app.forceCloseWindow()
+      }),
+    []
+  )
   const setWorkActive = useCallback((side: DockSide, key: WorkTabKey): void => {
     setActiveWork((active) => ({ ...active, [side]: key }))
   }, [])
+
+  useEffect(() => {
+    let alive = true
+    window.lt.fs
+      .listDocumentDrafts()
+      .then((result) => {
+        if (!alive || !result.ok) return
+        const drafts = (result.drafts ?? []).filter((draft) => !draft.path && draft.content.trim())
+        if (drafts.length === 0) return
+        if (!window.confirm(`임시저장된 새 문서 ${drafts.length}개가 있습니다. 복구 탭을 열까요?`)) return
+        const used = new Set(docTabsRef.current.map((tab) => tab.id))
+        const created = drafts.map((draft): DocTab => {
+          let id = draft.draftId || newId()
+          if (used.has(id)) id = newId()
+          used.add(id)
+          return {
+            id,
+            title: draft.title || '무제.md',
+            kind: 'mdview',
+            side: 'left'
+          }
+        })
+        setDocTabs((tabs) => [...tabs, ...created.filter((tab) => !tabs.some((item) => item.id === tab.id))])
+        const first = created[0]
+        if (first) {
+          setActiveDoc(first.id)
+          setWorkActive('left', docKey(first.id))
+        }
+      })
+      .catch(() => {})
+    return () => {
+      alive = false
+    }
+  }, [setWorkActive])
+
   const focusWorkTargetSoon = useCallback((side: DockSide, key: WorkTabKey | ''): void => {
     window.requestAnimationFrame(() => {
       const pane = Array.from(document.querySelectorAll<HTMLElement>('.work-pane[data-work-side]')).find(
@@ -1269,6 +1343,23 @@ export default function App(): JSX.Element {
     else moveTermToSide(parsed.id, side)
   }
 
+  const dirtyDocTitles = (ids = dirtyDocsRef.current): string[] =>
+    docTabsRef.current
+      .filter((tab) => ids.has(tab.id))
+      .map((tab) => tab.title || tab.path?.split(/[\\/]/).pop() || '문서')
+
+  const confirmCloseDirtyDocs = (scope: 'tab' | 'window', title?: string): boolean => {
+    const names = scope === 'tab' && title ? [title] : dirtyDocTitles()
+    if (names.length === 0) return true
+    const shown = names.slice(0, 5).map((name) => `- ${name}`)
+    const more = names.length > shown.length ? `\n- 외 ${names.length - shown.length}개` : ''
+    const target = scope === 'tab' ? '이 문서' : '이 창'
+    return window.confirm(
+      `저장하지 않은 변경사항이 있습니다.\n\n${shown.join('\n')}${more}\n\n` +
+        `변경사항은 실제 파일에 저장되지 않았고, 복구용 임시저장본만 남아 있습니다.\n${target}을 닫을까요?`
+    )
+  }
+
   // ── 본문(문서) 탭 ──
   // 활성 사건 폴더가 있으면 거기에 실제 파일을 만들어 연다(VS Code식). 없으면 메모리 스크래치.
   const addDoc = (side: DockSide = 'left'): void => {
@@ -1292,15 +1383,11 @@ export default function App(): JSX.Element {
         t.id === id ? { ...t, path, title: path.split(/[\\/]/).pop() ?? t.title } : t
       )
     )
-  const closeDoc = (id: string): boolean => {
+  const closeDoc = (id: string, opts: { confirmDirty?: boolean } = {}): boolean => {
     const tab = docTabs.find((t) => t.id === id)
     if (!tab) return false
-    // 저장 안 된 새 문서면 확인 (경로 있는 문서는 자동저장되므로 그냥 닫음)
-    if (
-      dirtyDocs.has(id) &&
-      !window.confirm('저장하지 않은 새 문서입니다. 닫으면 내용이 사라집니다. 닫을까요?')
-    )
-      return false
+    const confirmDirty = opts.confirmDirty ?? true
+    if (confirmDirty && dirtyDocs.has(id) && !confirmCloseDirtyDocs('tab', tab.title)) return false
     const side = docSide(tab)
     const closingKey = docKey(id)
     const sideKeys = workKeysForSide(docTabs, termTabs, side)
@@ -3293,6 +3380,28 @@ export default function App(): JSX.Element {
     sendClaude(prompt)
   }
 
+  const summarizeHearingReportWithClaude = (path: string, title: string): void => {
+    void (async () => {
+      const filePrompt = await buildFreshFilePrompt(path, title, activeTermTab)
+      sendClaude(
+        [
+          filePrompt,
+          '위 기일 결과 보고서를 읽고 바로 사용할 수 있게 정리해줘.',
+          '',
+          '정리 형식:',
+          '1. 핵심 결론',
+          '2. 재판부 지시사항',
+          '3. 상대방 주장/제출사항',
+          '4. 우리 쪽 후속 조치',
+          '5. 다음 기일까지 확인할 쟁점',
+          '',
+          '기록에 없는 내용은 추측하지 말고 "확인 필요"로 표시해줘.'
+        ].join('\n'),
+        { displayText: `「${title}」 보고서를 Claude에 정리 요청했습니다.` }
+      )
+    })()
+  }
+
   // ── 사건 대시보드 동작 ──
   // 토큰 변경 등으로 좌측 '다가오는 기일' 패널을 새로고침하기 위한 nonce
   const [jsNonce, setJsNonce] = useState(0)
@@ -3353,7 +3462,7 @@ export default function App(): JSX.Element {
   }
   const detachDocAfterMove = (id: string): void => {
     const shouldCloseWindow = docOnly && docTabs.length <= 1
-    if (closeDoc(id) && shouldCloseWindow) closeCurrentWindowSoon()
+    if (closeDoc(id, { confirmDirty: false }) && shouldCloseWindow) closeCurrentWindowSoon()
   }
   const detachTermAfterMove = (id: string): void => {
     const shouldCloseWindow = termOnly && termTabs.length <= 1
@@ -3480,7 +3589,7 @@ export default function App(): JSX.Element {
   }
 
   const openHearingRecordForCurrent = (side: DockSide = 'right'): void => {
-    const source = currentCase ?? (activeTermTab ? currentCaseFromTerm(activeTermTab) : null)
+    const source = activeTermTab ? currentCaseFromTerm(activeTermTab) : currentCase
     if (!source?.drafts) return
     openHearingRecordTab(source.drafts, hearingCaseFromCurrent(source), undefined, side)
   }
@@ -3722,6 +3831,7 @@ export default function App(): JSX.Element {
         />
       )}
       {tab?.kind === 'hwp' && <HwpView key={tab.path} path={tab.path as string} />}
+      {tab?.kind === 'docx' && <DocxView key={tab.path} path={tab.path as string} />}
       {tab?.kind === 'csv' && <CsvView key={tab.path} path={tab.path as string} />}
       {tab?.kind === 'hearing' && (
         <HearingRecordPanel
@@ -3737,6 +3847,7 @@ export default function App(): JSX.Element {
             )
           }
           onOpenReport={(path, title) => openFile(path, title, 'left')}
+          onSummarizeReport={summarizeHearingReportWithClaude}
         />
       )}
       {(tab?.kind === 'mdview' || tab?.kind === 'markdown') && (
@@ -3744,6 +3855,7 @@ export default function App(): JSX.Element {
           key={tab.id}
           title={tab.title}
           path={tab.path}
+          draftId={tab.id}
           defaultDir={draftsRoot}
           onPath={(p) => setDocPath(tab.id, p)}
           onAsk={(savedPath) => askClaude('', { docPath: savedPath })}
@@ -3804,8 +3916,9 @@ export default function App(): JSX.Element {
         title: t.title,
         tooltip: t.path,
         path: t.path,
+        dirty: dirtyDocs.has(t.id),
         renamable: t.kind === 'mdview' || t.kind === 'markdown',
-        dragPayload: docTabDragPayload(t, docSide(t))
+        dragPayload: dirtyDocs.has(t.id) ? undefined : docTabDragPayload(t, docSide(t))
       }))}
       activeId={activeDoc}
       onSelect={activateDocTab}
@@ -4087,8 +4200,9 @@ export default function App(): JSX.Element {
         title: t.title,
         tooltip: t.path,
         path: t.path,
+        dirty: dirtyDocs.has(t.id),
         renamable: t.kind === 'mdview' || t.kind === 'markdown',
-        dragPayload: docTabDragPayload(t, side)
+        dragPayload: dirtyDocs.has(t.id) ? undefined : docTabDragPayload(t, side)
       })),
       ...terms.map((t) => ({
         id: termKeyOf(t.id),
@@ -4159,7 +4273,7 @@ export default function App(): JSX.Element {
           onTearOut={(key) => {
             const parsed = parseWorkKey(key)
             if (!parsed) return
-            if (parsed.kind === 'doc') closeDoc(parsed.id)
+            if (parsed.kind === 'doc') closeDoc(parsed.id, { confirmDirty: false })
             else detachTerm(parsed.id)
           }}
           onDragActive={setTabDragging}
@@ -5354,6 +5468,7 @@ interface TabBarProps {
     attention?: boolean
     working?: boolean
     question?: boolean
+    dirty?: boolean
     renamable?: boolean
   }[]
   activeId: string
@@ -5554,7 +5669,7 @@ function TabBar({
         {tabs.map((t) => (
           <div
             key={t.id}
-            className={`tab ${t.id === activeId ? 'active' : ''} ${t.attention ? 'attention' : ''} ${t.working ? 'working' : ''} ${t.question ? 'question' : ''}`}
+            className={`tab ${t.id === activeId ? 'active' : ''} ${t.attention ? 'attention' : ''} ${t.working ? 'working' : ''} ${t.question ? 'question' : ''} ${t.dirty ? 'dirty' : ''}`}
             onClick={() => onSelect(t.id)}
             onContextMenu={(e) => {
               const items = getContextMenuItems?.(t.id) ?? []
@@ -5579,6 +5694,8 @@ function TabBar({
                   ? `${t.tooltip ?? t.title}\n❓ 확인/질문 대기`
                   : t.attention
                     ? `${t.tooltip ?? t.title}\n✓ 완료`
+                    : t.dirty
+                      ? `${t.tooltip ?? t.title}\n저장하지 않은 변경사항`
                     : (t.tooltip ?? t.title)
             }
             draggable={draggable && editing?.id !== t.id}
@@ -5643,6 +5760,10 @@ function TabBar({
             ) : t.question ? (
               <span className="tab-q" title="확인/질문 대기">
                 ❓
+              </span>
+            ) : t.dirty ? (
+              <span className="tab-dirty" title="저장하지 않은 변경사항">
+                ●
               </span>
             ) : (
               t.attention && (
@@ -6247,6 +6368,33 @@ function HwpView({ path }: { path: string }): JSX.Element {
     }
   }, [path, remoteVersion])
   if (state.loading) return <div className="welcome"><p className="muted">HWP/HWPX 텍스트 추출 중…</p></div>
+  if (state.err) return <div className="welcome"><p className="muted">{state.err}</p></div>
+  return <TextDoc text={state.text} />
+}
+
+/** DOCX — Word 본문 텍스트만 추출해 표시 */
+function DocxView({ path }: { path: string }): JSX.Element {
+  const remoteVersion = useRemoteFileVersion(path)
+  const [state, setState] = useState<{ loading: boolean; text: string; err: string }>({
+    loading: true,
+    text: '',
+    err: ''
+  })
+  useEffect(() => {
+    let alive = true
+    setState({ loading: true, text: '', err: '' })
+    window.lt.fs
+      .readDocxText(path)
+      .then((r) => {
+        if (!alive) return
+        setState({ loading: false, text: r.text, err: r.ok ? '' : r.error || '추출 실패' })
+      })
+      .catch((e) => alive && setState({ loading: false, text: '', err: String(e) }))
+    return () => {
+      alive = false
+    }
+  }, [path, remoteVersion])
+  if (state.loading) return <div className="welcome"><p className="muted">DOCX 텍스트 추출 중…</p></div>
   if (state.err) return <div className="welcome"><p className="muted">{state.err}</p></div>
   return <TextDoc text={state.text} />
 }

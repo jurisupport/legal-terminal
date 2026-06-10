@@ -40,6 +40,7 @@ const PROMPT_HISTORY_LIMIT = 100
 const CONTEXT_ATTACHMENT_TEXT_LIMIT = 160_000
 const TIMELINE_BOTTOM_THRESHOLD = 36
 const TIMELINE_PREVIEW_LIMIT = 78
+const REMOTE_FILE_CHANGED_EVENT = 'lt:remote-file-changed'
 
 const clampAgentFontSize = (value: number | undefined): number => {
   if (typeof value !== 'number' || !Number.isFinite(value)) return DEFAULT_AGENT_FONT_SIZE
@@ -146,6 +147,7 @@ export interface DiffView {
   hunks: DiffHunkView[]
   additions: number
   deletions: number
+  revertEdits?: DiffEdit[]
 }
 
 export interface AgentDiffOpenRequest {
@@ -242,6 +244,7 @@ const agentStatusLabels: Record<AgentPanelStatus, string> = {
 
 function timelineStatusLabel(item: TimelineItem): string | undefined {
   if (item.kind === 'diff' && item.status === 'applied') return '적용됨'
+  if (item.kind === 'diff' && item.status === 'reverted') return '되돌림'
   if (item.kind !== 'queue') return item.status
   if (item.status === 'queued') return '대기'
   if (item.status === 'priority') return '바로 지시 대기'
@@ -383,6 +386,29 @@ function parseRemoteUri(uri: string): { profileId: string; path: string } | null
   const slash = rest.indexOf('/')
   if (slash < 0) return { profileId: rest, path: '/' }
   return { profileId: rest.slice(0, slash), path: rest.slice(slash) }
+}
+
+function remoteUri(profileId: string, path: string): string {
+  return 'ssh://' + profileId + (path.startsWith('/') ? path : '/' + path)
+}
+
+function normalizeRemotePath(path: string): string {
+  const absolute = path.startsWith('/')
+  const parts: string[] = []
+  for (const part of path.split('/')) {
+    if (!part || part === '.') continue
+    if (part === '..') parts.pop()
+    else parts.push(part)
+  }
+  return `${absolute ? '/' : ''}${parts.join('/')}` || (absolute ? '/' : '.')
+}
+
+function agentFilePathForApp(path: string | undefined, cwd: string, profileId?: string, ssh?: SshConn): string | undefined {
+  if (!path) return undefined
+  if (path.startsWith('ssh://')) return path
+  if (!ssh || !profileId) return path
+  const remotePath = path.startsWith('/') ? path : `${cwd.replace(/\/+$/, '')}/${path}`
+  return remoteUri(profileId, normalizeRemotePath(remotePath))
 }
 
 function createAgentPdfWorker(): pdfjs.PDFWorker {
@@ -775,6 +801,8 @@ function diffViewFromParts(args: {
   newString?: string
   edits?: DiffEdit[]
 }): DiffView | undefined {
+  const reversibleEdits = (args.edits?.length ? args.edits : [{ oldString: args.oldString, newString: args.newString }])
+    .filter((edit) => edit.oldString !== undefined && edit.newString !== undefined && edit.newString.length > 0)
   const patchHunks = normalizePatchHunks(args.structuredPatch)
   if (patchHunks.length > 0) {
     const hunks = patchHunks.map((hunk, index) => ({
@@ -784,7 +812,12 @@ function diffViewFromParts(args: {
       rows: rowsFromPatchHunk(hunk)
     }))
     const stats = diffLineStats(hunks)
-    return { filePath: args.filePath, hunks, ...stats }
+    return {
+      filePath: args.filePath,
+      hunks,
+      ...stats,
+      ...(reversibleEdits.length > 0 ? { revertEdits: reversibleEdits } : {})
+    }
   }
 
   const edits = args.edits?.length ? args.edits : [{ oldString: args.oldString, newString: args.newString }]
@@ -796,7 +829,12 @@ function diffViewFromParts(args: {
     .filter((hunk) => hunk.rows.length > 0)
   if (hunks.length === 0) return undefined
   const stats = diffLineStats(hunks)
-  return { filePath: args.filePath, hunks, ...stats }
+  return {
+    filePath: args.filePath,
+    hunks,
+    ...stats,
+    ...(reversibleEdits.length > 0 ? { revertEdits: reversibleEdits } : {})
+  }
 }
 
 function diffViewFromRecord(record: Record<string, unknown> | null): DiffView | undefined {
@@ -1466,6 +1504,7 @@ export default function AgentPanel({
   const [attachments, setAttachments] = useState<AgentAttachment[]>([])
   const [attachmentDropOver, setAttachmentDropOver] = useState(false)
   const [showNewOutputNotice, setShowNewOutputNotice] = useState(false)
+  const [revertingDiffIds, setRevertingDiffIds] = useState<Set<string>>(new Set())
   const createdRef = useRef(false)
   const scrollRef = useRef<HTMLDivElement>(null)
   const shouldFollowTimelineRef = useRef(true)
@@ -1479,6 +1518,16 @@ export default function AgentPanel({
   const promptHistoryRef = useRef<string[]>([])
   const promptHistoryIndexRef = useRef<number | null>(null)
   const promptHistoryDraftRef = useRef('')
+
+  const focusPrompt = useCallback((position?: number): void => {
+    window.requestAnimationFrame(() => {
+      const textarea = textareaRef.current
+      if (!textarea) return
+      const caret = Math.max(0, Math.min(position ?? textarea.value.length, textarea.value.length))
+      textarea.focus()
+      textarea.setSelectionRange(caret, caret)
+    })
+  }, [])
 
   const resetPromptHistoryCursor = useCallback((): void => {
     promptHistoryIndexRef.current = null
@@ -1519,15 +1568,10 @@ export default function AgentPanel({
       const nextInput = nextIndex === null ? promptHistoryDraftRef.current : history[nextIndex]
       if (nextIndex === null) promptHistoryDraftRef.current = ''
       setInput(nextInput)
-      window.requestAnimationFrame(() => {
-        const textarea = textareaRef.current
-        if (!textarea) return
-        textarea.focus()
-        textarea.setSelectionRange(nextInput.length, nextInput.length)
-      })
+      focusPrompt(nextInput.length)
       return true
     },
-    [input]
+    [focusPrompt, input]
   )
 
   const latestOutputPreview = useMemo(
@@ -1588,6 +1632,14 @@ export default function AgentPanel({
           void window.lt.app.openExternal(url)
         }
       }
+      if (event.type === 'diff:applied') {
+        const changedPath = agentFilePathForApp(stringValue(event.filePath), cwd, profileId, ssh)
+        if (changedPath) {
+          window.dispatchEvent(
+            new CustomEvent(REMOTE_FILE_CHANGED_EVENT, { detail: { paths: [changedPath] } })
+          )
+        }
+      }
       if (event.type !== 'raw') setItems((prev) => reduceTimeline(prev, event))
       if (event.type === 'status') {
         const next = stringValue(event.status)
@@ -1609,7 +1661,7 @@ export default function AgentPanel({
       }
     })
     return off
-  }, [id, onStatus])
+  }, [cwd, id, onStatus, profileId, ssh])
 
   useEffect(() => {
     if (createdRef.current) return
@@ -1795,9 +1847,11 @@ export default function AgentPanel({
   }, [showSlashMenu, slashIndex, slashMatches])
 
   const applySlashCommand = (command: SlashCommand): void => {
+    resetPromptHistoryCursor()
     if (command.mode) setMode(command.mode)
-    setInput(`${command.name} `)
-    window.requestAnimationFrame(() => textareaRef.current?.focus())
+    const nextInput = `${command.name} `
+    setInput(nextInput)
+    focusPrompt(nextInput.length)
   }
 
   const attachmentForPath = useCallback(
@@ -1895,10 +1949,10 @@ export default function AgentPanel({
     showTransientFeedback(`${parts.join(', ')} 추가됨`)
 
     if (pending.some((request) => request.focusPrompt)) {
-      window.requestAnimationFrame(() => textareaRef.current?.focus())
+      focusPrompt()
     }
     onAttachmentRequestsHandled?.(pending.map((request) => request.id))
-  }, [attachmentRequests, onAttachmentRequestsHandled, showTransientFeedback])
+  }, [attachmentRequests, focusPrompt, onAttachmentRequestsHandled, resetPromptHistoryCursor, showTransientFeedback])
 
   const removeAttachment = (index: number): void => {
     setAttachments((current) => current.filter((_, itemIndex) => itemIndex !== index))
@@ -1911,13 +1965,7 @@ export default function AgentPanel({
       const separator = current.length === 0 || /\s$/.test(current) ? '' : ' '
       return `${current}${separator}${reference}`
     })
-    window.requestAnimationFrame(() => {
-      const textarea = textareaRef.current
-      if (!textarea) return
-      textarea.focus()
-      const end = textarea.value.length
-      textarea.setSelectionRange(end, end)
-    })
+    focusPrompt()
   }
 
   const send = async (delivery?: AgentSendDelivery): Promise<void> => {
@@ -1991,6 +2039,54 @@ export default function AgentPanel({
       })
     },
     [onOpenDiff]
+  )
+
+  const canRevertDiff = (diff: DiffView | undefined): boolean =>
+    !!diff?.filePath && (diff.revertEdits?.length ?? 0) > 0
+
+  const revertDiffItem = useCallback(
+    async (item: TimelineItem): Promise<void> => {
+      if (!item.diff || !canRevertDiff(item.diff)) return
+      const path = agentFilePathForApp(item.diff.filePath, cwd, profileId, ssh)
+      const edits = item.diff.revertEdits ?? []
+      if (!path || edits.length === 0) return
+      if (!window.confirm(`${fileNameFromPath(path)} 변경을 되돌릴까요?`)) return
+
+      setRevertingDiffIds((current) => new Set(current).add(item.id))
+      setError('')
+      try {
+        const read = await window.lt.fs.readText(path)
+        if (read.kind !== 'text' || read.truncated) {
+          throw new Error('텍스트 파일만 자동으로 되돌릴 수 있습니다.')
+        }
+        let next = read.text
+        for (const edit of edits) {
+          if (edit.oldString === undefined || edit.newString === undefined || edit.newString.length === 0) {
+            throw new Error('자동 되돌리기에 필요한 변경 전후 텍스트가 부족합니다.')
+          }
+          const index = next.indexOf(edit.newString)
+          if (index < 0) throw new Error('현재 파일에서 되돌릴 변경 내용을 찾지 못했습니다.')
+          next = `${next.slice(0, index)}${edit.oldString}${next.slice(index + edit.newString.length)}`
+        }
+        const result = await window.lt.fs.writeText(path, next)
+        if (!result.ok) throw new Error(result.error ?? '파일 저장 실패')
+        window.dispatchEvent(new CustomEvent(REMOTE_FILE_CHANGED_EVENT, { detail: { paths: [path] } }))
+        setItems((current) =>
+          current.map((candidate) =>
+            candidate.id === item.id ? { ...candidate, status: 'reverted' } : candidate
+          )
+        )
+      } catch (e) {
+        setError(e instanceof Error ? e.message : String(e))
+      } finally {
+        setRevertingDiffIds((current) => {
+          const next = new Set(current)
+          next.delete(item.id)
+          return next
+        })
+      }
+    },
+    [cwd, profileId, ssh]
   )
 
   const resolvePermission = async (
@@ -2440,6 +2536,8 @@ export default function AgentPanel({
           }
           const cardStatus = timelineStatusLabel(item)
           const waitingQueue = isWaitingQueueItem(item)
+          const revertingDiff = revertingDiffIds.has(item.id)
+          const showRevertDiff = item.kind === 'diff' && item.status === 'applied' && canRevertDiff(item.diff)
           return (
             <section key={item.id} className={`agent-card ${item.kind} ${item.status ?? ''}`}>
               <div className="agent-card-head">
@@ -2490,15 +2588,28 @@ export default function AgentPanel({
                   {cardStatus && <span className="agent-card-status">{cardStatus}</span>}
                 </span>
               </div>
-              {item.kind === 'diff' && item.diff && onOpenDiff && (
+              {item.kind === 'diff' && item.diff && (onOpenDiff || showRevertDiff) && (
                 <div className="agent-card-actions">
-                  <button
-                    type="button"
-                    title="변경 전후 비교를 문서 탭에서 열기"
-                    onClick={() => openDiffFromItem(item)}
-                  >
-                    비교 보기
-                  </button>
+                  {onOpenDiff && (
+                    <button
+                      type="button"
+                      title="변경 전후 비교를 문서 탭에서 열기"
+                      onClick={() => openDiffFromItem(item)}
+                    >
+                      비교 보기
+                    </button>
+                  )}
+                  {showRevertDiff && (
+                    <button
+                      type="button"
+                      className="danger"
+                      disabled={revertingDiff}
+                      title="이 변경을 적용 전 텍스트로 되돌리기"
+                      onClick={() => void revertDiffItem(item)}
+                    >
+                      {revertingDiff ? '되돌리는 중' : '되돌리기'}
+                    </button>
+                  )}
                 </div>
               )}
               {item.kind === 'diff' && !item.diff && item.text && (

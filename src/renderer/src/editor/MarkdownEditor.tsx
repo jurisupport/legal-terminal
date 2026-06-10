@@ -268,11 +268,12 @@ function restoreViewport(view: EditorView, bookmark: ViewportBookmark, changes: 
 
 /**
  * 마크다운 편집기 (CodeMirror 6). 서식(라이브 프리뷰)·원본 두 모드 모두 편집 가능.
- * path가 있으면 입력 후 자동 저장. path 없으면 Ctrl+S/저장으로 다른 이름 저장 후 자동 저장.
+ * 입력 후 자동 작업은 복구용 임시저장만 수행한다. 실제 파일 저장은 Ctrl+S/저장 버튼에서만 한다.
  */
 export default function MarkdownEditor({
   title,
   path,
+  draftId,
   defaultDir,
   onPath,
   onAsk,
@@ -281,11 +282,12 @@ export default function MarkdownEditor({
 }: {
   title?: string
   path?: string
+  draftId: string
   defaultDir?: string
   onPath?: (path: string) => void
   onAsk?: (savedPath?: string) => void
   onSendToJuriSupport?: (doc: MarkdownDocumentPayload) => void
-  // 닫으면 데이터가 사라질 위험(저장 안 된 새 문서에 내용 있음)을 알린다
+  // 실제 파일에 저장되지 않은 변경사항이 있으면 닫기 전 알린다
   onDirty?: (dirty: boolean) => void
 }): JSX.Element {
   const onDirtyRef = useRef(onDirty)
@@ -294,8 +296,11 @@ export default function MarkdownEditor({
   const viewRef = useRef<EditorView | null>(null)
   const previewComp = useRef(new Compartment())
   const pathRef = useRef<string | undefined>(path)
+  const titleRef = useRef(title)
+  const draftIdRef = useRef(draftId)
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const savedRef = useRef(!!path)
+  const savedContentRef = useRef('')
   const localDirtyRef = useRef(false)
   const applyingRemoteRef = useRef(false)
   const remoteSigRef = useRef('')
@@ -308,6 +313,9 @@ export default function MarkdownEditor({
   const [preview, setPreview] = useState(true)
   const [err, setErr] = useState('')
   const [saveError, setSaveError] = useState('')
+  const [dirty, setDirty] = useState(false)
+  const [draftSaving, setDraftSaving] = useState(false)
+  const [draftSaved, setDraftSaved] = useState(false)
   const [remoteApplied, setRemoteApplied] = useState(false)
   const [saved, setSaved] = useState(!!path)
   const [findOpen, setFindOpen] = useState(false)
@@ -391,12 +399,36 @@ export default function MarkdownEditor({
     })
   }
 
-  const markSaved = (targetPath: string): void => {
+  const draftIdentity = (targetPath = pathRef.current): { path?: string; draftId: string } => ({
+    path: targetPath,
+    draftId: draftIdRef.current
+  })
+
+  const deleteDraft = (targetPath = pathRef.current): void => {
+    void window.lt.fs.deleteDocumentDraft(draftIdentity(targetPath)).catch(() => {})
+  }
+
+  const deleteScratchDraft = (): void => {
+    void window.lt.fs.deleteDocumentDraft({ draftId: draftIdRef.current }).catch(() => {})
+  }
+
+  const setDirtyState = (value: boolean): void => {
+    localDirtyRef.current = value
+    setDirty(value)
+    onDirtyRef.current?.(value)
+  }
+
+  const markSaved = (targetPath: string, content: string): void => {
+    savedContentRef.current = content
     localDirtyRef.current = false
+    setDirty(false)
     setSaveError('')
+    setDraftSaved(false)
+    setDraftSaving(false)
     setSavedState(true)
     onDirtyRef.current?.(false)
     refreshSavedSignature(targetPath)
+    deleteDraft(targetPath)
   }
 
   const saveAsNow = (): Promise<string | undefined> => {
@@ -407,12 +439,15 @@ export default function MarkdownEditor({
       saveTimer.current = null
     }
     const content = v.state.doc.toString()
+    const previousPath = pathRef.current
     setSaveError('')
     return window.lt.fs.saveAs(content, saveAsDefaultPath(pathRef.current, defaultDir, title)).then((r) => {
       if (r.ok && r.path) {
         pathRef.current = r.path
         onPath?.(r.path)
-        markSaved(r.path)
+        markSaved(r.path, content)
+        if (previousPath && previousPath !== r.path) deleteDraft(previousPath)
+        if (!previousPath) deleteScratchDraft()
         return r.path
       }
       if (r.error) setSaveError(r.error)
@@ -440,14 +475,55 @@ export default function MarkdownEditor({
         setSavedState(false)
         return undefined
       }
-      markSaved(targetPath)
+      markSaved(targetPath, content)
       return targetPath
     })
   }
-  const scheduleSave = (): void => {
-    if (!pathRef.current) return // 새 문서는 Ctrl+S(다른 이름 저장) 때만
+  const saveDraftNow = (updateState = true): Promise<void> => {
+    const v = viewRef.current
+    if (!v || !localDirtyRef.current) return Promise.resolve()
+    const content = v.state.doc.toString()
+    if (!content && !pathRef.current) {
+      deleteDraft()
+      if (updateState) {
+        setDraftSaved(false)
+        setDraftSaving(false)
+      }
+      return Promise.resolve()
+    }
+    if (updateState) setDraftSaving(true)
+    return window.lt.fs
+      .saveDocumentDraft({
+        ...draftIdentity(),
+        title: titleRef.current,
+        content
+      })
+      .then((r) => {
+        if (!r.ok) {
+          if (updateState) {
+            setSaveError(r.error ? `임시저장 실패: ${r.error}` : '임시저장 실패')
+            setDraftSaved(false)
+          }
+          return
+        }
+        if (updateState) {
+          setSaveError('')
+          setDraftSaved(true)
+        }
+      })
+      .catch((e) => {
+        if (updateState) {
+          setSaveError(`임시저장 실패: ${String(e)}`)
+          setDraftSaved(false)
+        }
+      })
+      .finally(() => {
+        if (updateState) setDraftSaving(false)
+      })
+  }
+  const scheduleDraftSave = (): void => {
     if (saveTimer.current) clearTimeout(saveTimer.current)
-    saveTimer.current = setTimeout(saveNow, 700)
+    saveTimer.current = setTimeout(() => void saveDraftNow(), 700)
   }
 
   useEffect(() => {
@@ -458,16 +534,40 @@ export default function MarkdownEditor({
   }, [path])
 
   useEffect(() => {
+    titleRef.current = title
+  }, [title])
+
+  useEffect(() => {
     let alive = true
     setErr('')
     const init = pathRef.current ? window.lt.fs.readText(pathRef.current) : Promise.resolve({ text: '' })
     Promise.all([init, window.lt.settings.get()])
-      .then(([r, s]) => {
+      .then(async ([r, s]) => {
         if (!alive || !hostRef.current) return
+        const baseText = (r as { text: string }).text
+        let docText = baseText
+        let restoredDraft = false
+        const draftResult = await window.lt.fs.loadDocumentDraft(draftIdentity()).catch(() => null)
+        if (!alive || !hostRef.current) return
+        const draft = draftResult?.ok ? draftResult.draft : null
+        if (draft && draft.content !== baseText) {
+          const shouldRestore = pathRef.current
+            ? window.confirm(
+                `이 문서의 임시저장본이 있습니다.\n\n${draft.title}\n임시저장 시각: ${new Date(draft.savedAt).toLocaleString('ko-KR')}\n\n가져올까요?`
+              )
+            : true
+          if (shouldRestore) {
+            docText = draft.content
+            restoredDraft = true
+          } else {
+            deleteDraft()
+          }
+        }
+        savedContentRef.current = baseText
         const family = s.mdFont || DEFAULT_MD_FONT
         const size = s.mdFontSize || 14
         const state = EditorState.create({
-          doc: (r as { text: string }).text,
+          doc: docText,
           extensions: [
             history(),
             drawSelection(),
@@ -499,15 +599,26 @@ export default function MarkdownEditor({
               if (u.selectionSet || u.docChanged || u.viewportChanged) emitEditorSelectionOverlay(u.view)
               if (u.docChanged) {
                 if (applyingRemoteRef.current) {
-                  localDirtyRef.current = false
+                  savedContentRef.current = u.state.doc.toString()
+                  setDirtyState(false)
                   setSavedState(true)
                   return
                 }
-                localDirtyRef.current = true
-                setSavedState(false)
-                scheduleSave()
-                // 경로 없는(스크래치) 문서에 내용이 있으면 닫을 때 사라짐 → dirty
-                onDirtyRef.current?.(!pathRef.current && u.state.doc.length > 0)
+                const current = u.state.doc.toString()
+                const nextDirty = current !== savedContentRef.current
+                setDirtyState(nextDirty)
+                setSavedState(!nextDirty && !!pathRef.current)
+                if (nextDirty) {
+                  setDraftSaved(false)
+                  scheduleDraftSave()
+                } else {
+                  if (saveTimer.current) {
+                    clearTimeout(saveTimer.current)
+                    saveTimer.current = null
+                  }
+                  setDraftSaved(false)
+                  deleteDraft()
+                }
                 if (findOpenRef.current) {
                   window.setTimeout(
                     () => applyFindRef.current(findQueryRef.current, findIndexRef.current),
@@ -518,15 +629,20 @@ export default function MarkdownEditor({
             })
           ]
         })
-        localDirtyRef.current = false
-        setSavedState(!!pathRef.current)
+        setDirtyState(restoredDraft)
+        setDraftSaved(restoredDraft)
+        setSavedState(!restoredDraft && !!pathRef.current)
         viewRef.current = new EditorView({ state, parent: hostRef.current })
         viewRef.current.focus()
       })
       .catch((e) => alive && setErr(String(e)))
     return () => {
       alive = false
-      if (pathRef.current) void saveNow()
+      if (saveTimer.current) {
+        clearTimeout(saveTimer.current)
+        saveTimer.current = null
+      }
+      if (localDirtyRef.current) void saveDraftNow(false)
       if (remoteAppliedTimer.current) clearTimeout(remoteAppliedTimer.current)
       viewRef.current?.destroy()
       viewRef.current = null
@@ -559,7 +675,8 @@ export default function MarkdownEditor({
               const next = r.text
               const current = v.state.doc.toString()
               if (next === current) {
-                localDirtyRef.current = false
+                savedContentRef.current = next
+                setDirtyState(false)
                 setSavedState(true)
                 return
               }
@@ -584,8 +701,11 @@ export default function MarkdownEditor({
               } finally {
                 applyingRemoteRef.current = false
               }
-              localDirtyRef.current = false
+              savedContentRef.current = next
+              setDirtyState(false)
               setSavedState(true)
+              setDraftSaved(false)
+              deleteDraft()
               pulseRemoteApplied()
             })
             .catch(() => {})
@@ -630,10 +750,14 @@ export default function MarkdownEditor({
     ? '저장 실패'
     : remoteApplied
       ? '외부 수정 반영됨'
-      : saved
-        ? '저장됨'
-        : pathRef.current
-          ? '저장 중…'
+      : dirty
+        ? draftSaving
+          ? '임시저장 중…'
+          : draftSaved
+            ? '임시저장됨 (Ctrl+S로 저장)'
+            : '변경됨 (Ctrl+S로 저장)'
+        : saved
+          ? '저장됨'
           : '미저장 (Ctrl+S)'
   const isProofOfContentPrint = printLayout === 'proof-of-content'
   const printLayoutTitle = isProofOfContentPrint
@@ -717,10 +841,13 @@ export default function MarkdownEditor({
               className="tb-btn"
               title="이 문서에 대해 Claude에 물어보기"
               onClick={() => {
-                void saveNow().then((savedPath) => {
-                  if (pathRef.current && !savedPath) return
-                  onAsk(savedPath ?? pathRef.current)
-                })
+                if (localDirtyRef.current) {
+                  const ok = window.confirm(
+                    '저장하지 않은 변경사항은 실제 파일에 저장되지 않았습니다.\n현재 저장본 기준으로 Claude에 물어볼까요?'
+                  )
+                  if (!ok) return
+                }
+                onAsk(pathRef.current)
               }}
             >
               ✳ Claude

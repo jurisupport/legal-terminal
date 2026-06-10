@@ -413,8 +413,8 @@ function remoteDirCacheKey(profileId: string, path: string): string {
   return `${profileId}\0${normalizeRemoteDirPath(path)}`
 }
 
-function remoteFileCacheKey(profileId: string, path: string): string {
-  return `${profileId}\0${path.normalize('NFC')}`
+function remoteFileCacheKey(profileId: string, path: string, signature?: string): string {
+  return `${profileId}\0${path.normalize('NFC')}${signature ? `\0${signature}` : ''}`
 }
 
 function cloneEntries(entries: Entry[]): Entry[] {
@@ -473,14 +473,34 @@ function cacheFilePathMatches(path: string, base: string): boolean {
   return path === base || path.startsWith(base.endsWith('/') ? base : base + '/')
 }
 
+function remoteFileCachePathFromKey(key: string): string {
+  const first = key.indexOf('\0')
+  const pathWithSignature = first >= 0 ? key.slice(first + 1) : key
+  const second = pathWithSignature.indexOf('\0')
+  return second >= 0 ? pathWithSignature.slice(0, second) : pathWithSignature
+}
+
 function invalidateRemoteFileContentCache(profileId: string, path: string): void {
   const normalized = path.normalize('NFC')
   invalidateRemoteFileCache(REMOTE_FILE_CACHE_NAMESPACE, (key) => {
     const tab = key.indexOf('\0')
     const keyProfileId = tab >= 0 ? key.slice(0, tab) : key
-    const keyPath = tab >= 0 ? key.slice(tab + 1) : ''
+    const keyPath = remoteFileCachePathFromKey(key)
     return keyProfileId === profileId && cacheFilePathMatches(keyPath, normalized)
   })
+}
+
+function remoteFileStatSignature(st: { size?: number; mtime?: number }): string {
+  return `${st.size ?? 0}:${st.mtime ?? 0}`
+}
+
+function sftpStat(
+  sftp: SFTPWrapper,
+  path: string
+): Promise<{ size: number; mtime?: number; isDirectory: () => boolean }> {
+  return new Promise((resolve, reject) =>
+    sftp.stat(path, (err, st) => (err ? reject(err) : resolve(st as never)))
+  )
 }
 
 export function clearRemoteDirCache(): void {
@@ -610,13 +630,6 @@ function statIsDir(sftp: SFTPWrapper, path: string): Promise<boolean> {
 
 export async function rfsReadBytes(uri: string): Promise<Buffer> {
   const { profileId, path } = parseRemote(uri)
-  const cacheKey = remoteFileCacheKey(profileId, path)
-  const cached = await readRemoteFileCache(REMOTE_FILE_CACHE_NAMESPACE, cacheKey)
-  if (cached) return cached
-  const remember = (data: Buffer): Buffer => {
-    rememberRemoteFileCache(REMOTE_FILE_CACHE_NAMESPACE, cacheKey, data)
-    return data
-  }
   const sftp = await getSftp(profileId)
   let actualPath: string
   try {
@@ -626,6 +639,14 @@ export async function rfsReadBytes(uri: string): Promise<Buffer> {
     if (!cloudPath) throw e
     await materializeRemoteOneDriveFile(profileId, cloudPath, path)
     actualPath = await resolveRemotePath(sftp, path)
+  }
+  const st = await sftpStat(sftp, actualPath)
+  const cacheKey = remoteFileCacheKey(profileId, actualPath, remoteFileStatSignature(st))
+  const cached = await readRemoteFileCache(REMOTE_FILE_CACHE_NAMESPACE, cacheKey)
+  if (cached) return cached
+  const remember = (data: Buffer): Buffer => {
+    rememberRemoteFileCache(REMOTE_FILE_CACHE_NAMESPACE, cacheKey, data)
+    return data
   }
   if (isLikelyOneDrivePath(actualPath)) {
     const cloudPath = oneDriveCloudPath(actualPath)
@@ -1019,7 +1040,15 @@ export async function rfsWriteText(uri: string, content: string): Promise<void> 
     sftp.writeFile(path, content, { encoding: 'utf8' }, (err) => (err ? reject(err) : resolve()))
   )
   invalidateRemoteDirCache(profileId, posix.dirname(path))
-  rememberRemoteFileCache(REMOTE_FILE_CACHE_NAMESPACE, remoteFileCacheKey(profileId, path), Buffer.from(content))
+  invalidateRemoteFileContentCache(profileId, path)
+  const st = await sftpStat(sftp, path).catch(() => undefined)
+  if (st) {
+    rememberRemoteFileCache(
+      REMOTE_FILE_CACHE_NAMESPACE,
+      remoteFileCacheKey(profileId, path, remoteFileStatSignature(st)),
+      Buffer.from(content)
+    )
+  }
   noteRemoteLocalMutation(posix.dirname(path))
 }
 
@@ -1036,7 +1065,15 @@ export async function rfsWriteBytes(
     sftp.writeFile(full, data, (err) => (err ? reject(err) : resolve()))
   )
   invalidateRemoteDirCache(profileId, path)
-  rememberRemoteFileCache(REMOTE_FILE_CACHE_NAMESPACE, remoteFileCacheKey(profileId, full), data)
+  invalidateRemoteFileContentCache(profileId, full)
+  const st = await sftpStat(sftp, full).catch(() => undefined)
+  if (st) {
+    rememberRemoteFileCache(
+      REMOTE_FILE_CACHE_NAMESPACE,
+      remoteFileCacheKey(profileId, full, remoteFileStatSignature(st)),
+      data
+    )
+  }
   noteRemoteLocalMutation(path)
   return makeRemote(profileId, full)
 }
@@ -1094,7 +1131,15 @@ export async function rfsCreateFile(
     sftp.writeFile(full, content, { encoding: 'utf8' }, (err) => (err ? reject(err) : resolve()))
   )
   invalidateRemoteDirCache(profileId, path)
-  rememberRemoteFileCache(REMOTE_FILE_CACHE_NAMESPACE, remoteFileCacheKey(profileId, full), Buffer.from(content))
+  invalidateRemoteFileContentCache(profileId, full)
+  const st = await sftpStat(sftp, full).catch(() => undefined)
+  if (st) {
+    rememberRemoteFileCache(
+      REMOTE_FILE_CACHE_NAMESPACE,
+      remoteFileCacheKey(profileId, full, remoteFileStatSignature(st)),
+      Buffer.from(content)
+    )
+  }
   noteRemoteLocalMutation(path)
   return makeRemote(profileId, full)
 }

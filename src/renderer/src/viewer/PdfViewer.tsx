@@ -334,7 +334,7 @@ export default function PdfViewer({
     setCustomScale((s) => Math.max(0.1, Math.min(6, +(s * factor).toFixed(3))))
   }, [])
 
-  // 휠: Ctrl+휠=줌, 그 외=페이지 넘김 (viewer-windows). 네이티브 비-passive 리스너로 preventDefault.
+  // 휠: Ctrl+휠=줌, 확대 시 가로/세로 스크롤, 끝에서는 페이지 넘김.
   useEffect(() => {
     const wrap = wrapRef.current
     if (!wrap) return
@@ -344,9 +344,31 @@ export default function PdfViewer({
         zoomBy(e.deltaY < 0 ? 1.1 : 1 / 1.1)
         return
       }
+
+      const horizontalDelta = e.shiftKey && Math.abs(e.deltaX) < Math.abs(e.deltaY) ? e.deltaY : e.deltaX
+      const hasHorizontalIntent = Math.abs(horizontalDelta) > 0.5 && Math.abs(horizontalDelta) >= Math.abs(e.deltaY)
+      const canScrollX = wrap.scrollWidth > wrap.clientWidth + 1
+
+      if (hasHorizontalIntent) {
+        e.preventDefault()
+        if (canScrollX) wrap.scrollLeft += horizontalDelta
+        return
+      }
+
+      const canScrollY = wrap.scrollHeight > wrap.clientHeight + 1
+      if (canScrollY && Math.abs(e.deltaY) > 0.5) {
+        const maxTop = wrap.scrollHeight - wrap.clientHeight
+        const nextTop = Math.max(0, Math.min(maxTop, wrap.scrollTop + e.deltaY))
+        if (nextTop !== wrap.scrollTop) {
+          e.preventDefault()
+          wrap.scrollTop = nextTop
+          return
+        }
+      }
+
       e.preventDefault()
       if (e.deltaY < 0) goPrev()
-      else goNext()
+      else if (e.deltaY > 0) goNext()
     }
     wrap.addEventListener('wheel', onWheel, { passive: false })
     return () => wrap.removeEventListener('wheel', onWheel)

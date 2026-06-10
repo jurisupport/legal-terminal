@@ -75,7 +75,7 @@ interface TerminalTabPayload {
 interface DocumentTabPayload {
   id?: string
   title: string
-  kind?: 'markdown' | 'mdview' | 'file' | 'pdf' | 'image' | 'hwp' | 'csv' | 'settings' | 'hearing'
+  kind?: 'markdown' | 'mdview' | 'file' | 'pdf' | 'image' | 'hwp' | 'docx' | 'csv' | 'settings' | 'hearing'
   path?: string
   side?: 'left' | 'right'
 }
@@ -102,9 +102,23 @@ interface TabMoveResult {
 interface WorkspaceDocTabPayload {
   id: string
   title: string
-  kind: 'markdown' | 'mdview' | 'file' | 'pdf' | 'image' | 'hwp' | 'csv' | 'settings' | 'hearing'
+  kind: 'markdown' | 'mdview' | 'file' | 'pdf' | 'image' | 'hwp' | 'docx' | 'csv' | 'settings' | 'hearing'
   path?: string
   side?: 'left' | 'right'
+}
+
+interface DocumentDraftIdentity {
+  path?: string
+  draftId?: string
+}
+
+interface DocumentDraftEntry {
+  key: string
+  path?: string
+  draftId?: string
+  title: string
+  content: string
+  savedAt: string
 }
 
 interface WorkspaceSnapshot {
@@ -383,6 +397,7 @@ const api = {
     openExternal: (url: string): Promise<void> => ipcRenderer.invoke('app:openExternal', url),
     newWindow: (opts?: NewWindowOptions): Promise<void> => ipcRenderer.invoke('window:new', opts),
     closeWindow: (): Promise<void> => ipcRenderer.invoke('window:close'),
+    forceCloseWindow: (): Promise<void> => ipcRenderer.invoke('window:forceClose'),
     setWindowTitle: (title: string): Promise<void> =>
       ipcRenderer.invoke('app:setWindowTitle', title),
     requestAttention: (reason?: 'done' | 'question'): void =>
@@ -391,6 +406,11 @@ const api = {
       const listener = (): void => cb()
       ipcRenderer.on('app:closeActiveTab', listener)
       return () => ipcRenderer.removeListener('app:closeActiveTab', listener)
+    },
+    onCloseWindowRequest: (cb: () => void): (() => void) => {
+      const listener = (): void => cb()
+      ipcRenderer.on('app:closeWindowRequested', listener)
+      return () => ipcRenderer.removeListener('app:closeWindowRequested', listener)
     }
   },
   dialog: {
@@ -426,6 +446,10 @@ const api = {
       filePath: string
     ): Promise<{ ok: boolean; text: string; error?: string }> =>
       ipcRenderer.invoke('fs:readHwpText', filePath),
+    readDocxText: (
+      filePath: string
+    ): Promise<{ ok: boolean; text: string; error?: string }> =>
+      ipcRenderer.invoke('fs:readDocxText', filePath),
     writeText: (path: string, content: string): Promise<{ ok: boolean; error?: string }> =>
       ipcRenderer.invoke('fs:writeText', { path, content }),
     saveAs: (
@@ -433,6 +457,23 @@ const api = {
       defaultPath?: string
     ): Promise<{ ok: boolean; path?: string; error?: string }> =>
       ipcRenderer.invoke('fs:saveAs', { content, defaultPath }),
+    saveDocumentDraft: (
+      identity: DocumentDraftIdentity & { title?: string; content: string }
+    ): Promise<{ ok: boolean; entry?: DocumentDraftEntry; error?: string }> =>
+      ipcRenderer.invoke('fs:saveDocumentDraft', identity),
+    loadDocumentDraft: (
+      identity: DocumentDraftIdentity
+    ): Promise<{ ok: boolean; draft?: DocumentDraftEntry | null; error?: string }> =>
+      ipcRenderer.invoke('fs:loadDocumentDraft', identity),
+    listDocumentDrafts: (): Promise<{
+      ok: boolean
+      drafts?: DocumentDraftEntry[]
+      error?: string
+    }> => ipcRenderer.invoke('fs:listDocumentDrafts'),
+    deleteDocumentDraft: (
+      identity: DocumentDraftIdentity
+    ): Promise<{ ok: boolean; error?: string }> =>
+      ipcRenderer.invoke('fs:deleteDocumentDraft', identity),
     copyInto: (destDir: string, srcPaths: string[]): Promise<{ copied: string[] }> =>
       ipcRenderer.invoke('fs:copyInto', { destDir, srcPaths }),
     clipboardFiles: (): Promise<{ paths: string[]; formats: string[] }> =>

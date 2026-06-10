@@ -73,7 +73,7 @@ export interface TerminalTabPayload {
 export interface DocumentTabPayload {
   id?: string
   title: string
-  kind?: 'markdown' | 'mdview' | 'file' | 'pdf' | 'image' | 'hwp' | 'csv' | 'settings' | 'hearing'
+  kind?: 'markdown' | 'mdview' | 'file' | 'pdf' | 'image' | 'hwp' | 'docx' | 'csv' | 'settings' | 'hearing'
   path?: string
   side?: 'left' | 'right'
 }
@@ -100,9 +100,23 @@ export interface TabMoveResult {
 export interface WorkspaceDocTabPayload {
   id: string
   title: string
-  kind: 'markdown' | 'mdview' | 'file' | 'pdf' | 'image' | 'hwp' | 'csv' | 'settings' | 'hearing'
+  kind: 'markdown' | 'mdview' | 'file' | 'pdf' | 'image' | 'hwp' | 'docx' | 'csv' | 'settings' | 'hearing'
   path?: string
   side?: 'left' | 'right'
+}
+
+export interface DocumentDraftIdentity {
+  path?: string
+  draftId?: string
+}
+
+export interface DocumentDraftEntry {
+  key: string
+  path?: string
+  draftId?: string
+  title: string
+  content: string
+  savedAt: string
 }
 
 export interface WorkspaceSnapshot {
@@ -444,9 +458,11 @@ export interface LtApi {
     openExternal: (url: string) => Promise<void>
     newWindow: (opts?: NewWindowOptions) => Promise<void>
     closeWindow: () => Promise<void>
+    forceCloseWindow: () => Promise<void>
     setWindowTitle: (title: string) => Promise<void>
     requestAttention: (reason?: 'done' | 'question') => void
     onCloseActiveTab: (cb: () => void) => () => void
+    onCloseWindowRequest: (cb: () => void) => () => void
   }
   dialog: {
     openCase: () => Promise<{ path: string; name: string } | null>
@@ -472,11 +488,24 @@ export interface LtApi {
     ) => Promise<{ name: string; path: string; isDir: boolean; mtimeMs?: number }[]>
     readBytes: (filePath: string) => Promise<ArrayBuffer>
     readHwpText: (filePath: string) => Promise<{ ok: boolean; text: string; error?: string }>
+    readDocxText: (filePath: string) => Promise<{ ok: boolean; text: string; error?: string }>
     writeText: (path: string, content: string) => Promise<{ ok: boolean; error?: string }>
     saveAs: (
       content: string,
       defaultPath?: string
     ) => Promise<{ ok: boolean; path?: string; error?: string }>
+    saveDocumentDraft: (
+      identity: DocumentDraftIdentity & { title?: string; content: string }
+    ) => Promise<{ ok: boolean; entry?: DocumentDraftEntry; error?: string }>
+    loadDocumentDraft: (
+      identity: DocumentDraftIdentity
+    ) => Promise<{ ok: boolean; draft?: DocumentDraftEntry | null; error?: string }>
+    listDocumentDrafts: () => Promise<{
+      ok: boolean
+      drafts?: DocumentDraftEntry[]
+      error?: string
+    }>
+    deleteDocumentDraft: (identity: DocumentDraftIdentity) => Promise<{ ok: boolean; error?: string }>
     copyInto: (destDir: string, srcPaths: string[]) => Promise<{ copied: string[] }>
     move: (src: string, destDir: string) => Promise<{ ok: boolean; path?: string; error?: string }>
     rename: (path: string, name: string) => Promise<{ ok: boolean; path?: string; error?: string }>

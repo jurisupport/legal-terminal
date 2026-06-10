@@ -42,7 +42,8 @@ function buildRows(cases: JsCase[]): Row[] {
       out.push({ c, when: d, h })
     }
   }
-  const cutoff = Date.now() - 86400000 // 어제까지 포함(오늘 기일 표시)
+  const today = new Date()
+  const cutoff = new Date(today.getFullYear(), today.getMonth(), today.getDate()).getTime()
   return out
     .filter((x) => x.when.getTime() >= cutoff)
     .sort(compareRows)
@@ -74,6 +75,13 @@ export default function UpcomingHearings({
   const [loading, setLoading] = useState(false)
   const [reloadNonce, setReloadNonce] = useState(0)
   const [menu, setMenu] = useState<CaseContextMenuState | null>(null)
+  const defaultOpenProfile = defaultOpenProfileId
+    ? sshProfiles.find((p) => p.id === defaultOpenProfileId)
+    : undefined
+  const openDefault = (c: JsCase): void => {
+    if (defaultOpenProfile && onOpenRemote) onOpenRemote(c, defaultOpenProfile)
+    else onPick(c)
+  }
 
   useEffect(() => {
     let alive = true
@@ -185,13 +193,15 @@ export default function UpcomingHearings({
             <li
               key={rowKey(r, i)}
               className="agenda-row"
-              onClick={() => onPick(r.c)}
+              onClick={() => openDefault(r.c)}
               onContextMenu={(e) => {
                 e.preventDefault()
                 e.stopPropagation()
                 setMenu({ x: e.clientX, y: e.clientY, c: r.c })
               }}
-              title={`${r.c.caseNumber ?? ''} ${r.c.caseName ?? ''}\n클릭 → 작업환경 열기 · 우클릭 → 메뉴`}
+              title={`${r.c.caseNumber ?? ''} ${r.c.caseName ?? ''}\n클릭 → ${
+                defaultOpenProfile ? `${defaultOpenProfile.label}에서 열기` : '작업환경 열기'
+              } · 우클릭 → 메뉴`}
             >
               <span className={`agenda-date ${isSoon(r.when) ? 'soon' : ''}`}>
                 {r.when.getMonth() + 1}/{r.when.getDate()}

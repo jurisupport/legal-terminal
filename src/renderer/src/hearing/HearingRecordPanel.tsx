@@ -91,6 +91,7 @@ export interface HearingRecordPanelProps {
   visible?: boolean
   onSavedPath?: (path: string, title: string) => void
   onOpenReport?: (path: string, title: string) => void
+  onSummarizeReport?: (path: string, title: string) => void
 }
 
 const DEFAULT_SPEAKERS: HearingSpeaker[] = [
@@ -368,7 +369,8 @@ export default function HearingRecordPanel({
   initialPath,
   visible = true,
   onSavedPath,
-  onOpenReport
+  onOpenReport,
+  onSummarizeReport
 }: HearingRecordPanelProps): JSX.Element {
   const [record, setRecord] = useState<HearingRecordData>(() =>
     createInitialRecord(initialCase, initialHearing)
@@ -767,13 +769,21 @@ export default function HearingRecordPanel({
     if (next) void loadSavedRecords()
   }
 
+  const writeReport = async (): Promise<{ path: string; title: string }> => {
+    const path = await saveRecord()
+    const reportPath = buildHearingReportPath(draftsDir, record, path)
+    const result = await window.lt.fs.writeText(reportPath, buildReport(record))
+    if (!result.ok) throw new Error(result.error || '보고서 저장 실패')
+    return {
+      path: reportPath,
+      title: reportPath.split(/[\\/]/).pop() || '기일 결과 보고.md'
+    }
+  }
+
   const generateReport = async (): Promise<void> => {
     try {
-      const path = await saveRecord()
-      const reportPath = buildHearingReportPath(draftsDir, record, path)
-      const result = await window.lt.fs.writeText(reportPath, buildReport(record))
-      if (!result.ok) throw new Error(result.error || '보고서 저장 실패')
-      onOpenReport?.(reportPath, reportPath.split(/[\\/]/).pop() || '기일 결과 보고.md')
+      const report = await writeReport()
+      onOpenReport?.(report.path, report.title)
       setSaveStatus('saved')
       setSaveMessage('보고서 생성됨')
     } catch (error) {
@@ -782,9 +792,22 @@ export default function HearingRecordPanel({
     }
   }
 
+  const summarizeReport = async (): Promise<void> => {
+    try {
+      const report = await writeReport()
+      onOpenReport?.(report.path, report.title)
+      onSummarizeReport?.(report.path, report.title)
+      setSaveStatus('saved')
+      setSaveMessage('Claude에 정리 요청함')
+    } catch (error) {
+      setSaveStatus('error')
+      setSaveMessage(error instanceof Error ? error.message : String(error))
+    }
+  }
+
   const syncToJuriSupport = async (): Promise<void> => {
     setJsStatus('syncing')
-    setJsMessage('JuriSupport 반영 중')
+    setJsMessage('JuriSupport 할일 생성 중')
     try {
       await saveRecord()
       const title = [
@@ -814,7 +837,7 @@ export default function HearingRecordPanel({
         jsSync: { syncedAt, todoId: result.todo?.id }
       }))
       setJsStatus('synced')
-      setJsMessage(result.todo?.id ? `할일 #${result.todo.id}로 반영됨` : 'JuriSupport에 반영됨')
+      setJsMessage(result.todo?.id ? `JuriSupport 할일 #${result.todo.id} 생성됨` : 'JuriSupport 할일로 반영됨')
     } catch (error) {
       setJsStatus('error')
       setJsMessage(error instanceof Error ? error.message : String(error))
@@ -841,7 +864,18 @@ export default function HearingRecordPanel({
           <button className="hearing-primary-btn" onClick={() => void generateReport()}>
             보고서
           </button>
-          <button className="hearing-small-btn" onClick={() => void syncToJuriSupport()}>
+          <button
+            className="hearing-small-btn"
+            title="보고서를 저장한 뒤 Claude Agent에 정리 요청"
+            onClick={() => void summarizeReport()}
+          >
+            Claude 정리
+          </button>
+          <button
+            className="hearing-small-btn"
+            title="보고서 내용을 JuriSupport 사건의 완료된 할일로 생성"
+            onClick={() => void syncToJuriSupport()}
+          >
             JS 반영
           </button>
         </div>
