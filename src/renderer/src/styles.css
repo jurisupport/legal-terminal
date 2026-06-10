@@ -1682,6 +1682,10 @@ body {
 .toast:hover {
   background: #333;
 }
+.toast.document-change {
+  border-color: #54745e;
+  border-left-color: #8bd49c;
+}
 .toast-icon {
   font-size: 18px;
   flex-shrink: 0;

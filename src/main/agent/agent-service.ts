@@ -541,7 +541,13 @@ function emitDialogRequest(
   session: AgentSession,
   dialog: Omit<AgentDialogRequest, 'sessionId'>
 ): AgentDialogRequest {
-  const fullDialog: AgentDialogRequest = { ...dialog, sessionId: session.id }
+  const previous = session.dialogs.get(dialog.dialogId)
+  const fullDialog: AgentDialogRequest = {
+    ...previous,
+    ...dialog,
+    sessionId: session.id,
+    blocking: previous?.blocking === true || dialog.blocking
+  }
   session.dialogs.set(fullDialog.dialogId, fullDialog)
   emit(session, { type: 'dialog:request', sessionId: session.id, dialog: fullDialog })
   emit(session, { type: 'status', sessionId: session.id, status: 'waiting_user' })
@@ -622,7 +628,7 @@ function requestUserDialog(
   request: UserDialogRequest,
   signal: AbortSignal
 ): Promise<UserDialogResult> {
-  const dialogId = randomUUID()
+  const dialogId = request.toolUseID ?? randomUUID()
   const dialog = makeQuestionDialog(session, {
     dialogId,
     dialogKind: request.dialogKind,
@@ -1889,6 +1895,7 @@ function renderPrompt(input: AgentSendInput): string {
       : input.text
   if (attachments.length === 0) return text
   const hasContextOnly = attachments.some((attachment) => attachment.access === 'context-only')
+  const hasFolder = attachments.some((attachment) => attachment.kind === 'folder')
   const renderedAttachments = attachments
     .map((attachment, index) => {
       const parts = [`${index + 1}. ${attachment.kind}: ${attachment.label}`]
@@ -1911,10 +1918,17 @@ function renderPrompt(input: AgentSendInput): string {
       return parts.join('\n   ')
     })
     .join('\n')
-  const rules = hasContextOnly
-    ? '\nContext-only attachments are embedded in this prompt. Treat source_path as informational only; do not try to read it from the remote workspace. Review the embedded content field instead.'
-    : ''
-  const block = `[legal-terminal attachments]${rules}\n${renderedAttachments}`
+  const rules = [
+    hasContextOnly
+      ? 'Context-only attachments are embedded in this prompt. Treat source_path as informational only; do not try to read it from the remote workspace. Review the embedded content field instead.'
+      : undefined,
+    hasFolder
+      ? 'Folder attachments include only a bounded top-level listing. Do not recursively scan an attached folder unless the user explicitly asks or the task clearly requires it.'
+      : undefined
+  ]
+    .filter(Boolean)
+    .join('\n')
+  const block = `[legal-terminal attachments]${rules ? `\n${rules}` : ''}\n${renderedAttachments}`
   return text ? `${text}\n\n${block}` : block
 }
 

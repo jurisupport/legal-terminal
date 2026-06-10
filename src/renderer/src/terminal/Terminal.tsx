@@ -247,7 +247,8 @@ export default function Terminal({
   onBracketedPasteModeChange,
   todoContext,
   onTodoChanged,
-  onCycleTab
+  onCycleTab,
+  onCyclePageTab
 }: {
   id: string
   cwd?: string
@@ -266,6 +267,7 @@ export default function Terminal({
   todoContext?: TodoTerminalContext
   onTodoChanged?: () => void
   onCycleTab?: (dir: number) => void
+  onCyclePageTab?: (dir: number) => void
 }): JSX.Element {
   const hostRef = useRef<HTMLDivElement>(null)
   const termRef = useRef<XTerm | null>(null)
@@ -290,6 +292,8 @@ export default function Terminal({
   onTodoChangedRef.current = onTodoChanged
   const onCycleRef = useRef(onCycleTab)
   onCycleRef.current = onCycleTab
+  const onCyclePageRef = useRef(onCyclePageTab)
+  onCyclePageRef.current = onCyclePageTab
   const findOpenRef = useRef(false)
   const findQueryRef = useRef('')
   const findIndexRef = useRef(-1)
@@ -538,6 +542,13 @@ export default function Terminal({
           return false
         }
         const primary = isMac ? e.metaKey && !e.ctrlKey : e.ctrlKey
+        const pageCycleShortcut = (k === 'pageup' || k === 'pagedown') && !e.altKey && (primary || e.ctrlKey)
+        if (pageCycleShortcut) {
+          e.stopPropagation()
+          const cycle = onCyclePageRef.current ?? onCycleRef.current
+          cycle?.(k === 'pageup' ? -1 : 1)
+          return false
+        }
         const macCtrlT = isMac && e.ctrlKey && !e.metaKey && k === 't'
         if (!primary && !macCtrlT) return true
         if (k === 't' && !e.altKey) {
@@ -561,12 +572,6 @@ export default function Terminal({
           // Ctrl/Cmd+Tab / Ctrl/Cmd+Shift+Tab: 터미널 탭 순환
           e.stopPropagation()
           onCycleRef.current?.(e.shiftKey ? -1 : 1)
-          return false
-        }
-        if (k === 'pageup' || k === 'pagedown') {
-          // Ctrl/Cmd+PageUp/PageDown: 터미널 탭 이동
-          e.stopPropagation()
-          onCycleRef.current?.(k === 'pageup' ? -1 : 1)
           return false
         }
         if (k === 'f' && !e.shiftKey && !e.altKey) {

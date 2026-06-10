@@ -38,6 +38,7 @@ const FONT_SIZE_MIN = 8
 const FONT_SIZE_MAX = 32
 const PROMPT_HISTORY_LIMIT = 100
 const CONTEXT_ATTACHMENT_TEXT_LIMIT = 160_000
+const FOLDER_ATTACHMENT_ENTRY_LIMIT = 120
 const TIMELINE_BOTTOM_THRESHOLD = 36
 const TIMELINE_PREVIEW_LIMIT = 78
 const REMOTE_FILE_CHANGED_EVENT = 'lt:remote-file-changed'
@@ -63,6 +64,7 @@ interface AgentPanelProps {
   onStatus?: (status: AgentRunStatus) => void
   onOpenTerminal?: () => void
   onOpenDiff?: (request: AgentDiffOpenRequest) => void
+  onOpenFile?: (path: string, title?: string) => void
 }
 
 export interface AgentAttachmentRequest {
@@ -80,6 +82,7 @@ interface TimelineItem {
   diff?: DiffView
   attachments?: AgentAttachment[]
   status?: string
+  filePath?: string
   requestId?: string
   dialogId?: string
   questions?: AgentDialogQuestion[]
@@ -439,6 +442,31 @@ interface ExtractedAttachmentContent {
   content?: string
   truncated?: boolean
   note?: string
+}
+
+async function extractFolderAttachmentContent(path: string): Promise<ExtractedAttachmentContent> {
+  try {
+    const entries = await window.lt.fs.list(path)
+    const visible = entries.slice(0, FOLDER_ATTACHMENT_ENTRY_LIMIT)
+    const lines = visible.map((entry) => `${entry.isDir ? 'dir ' : 'file'}\t${entry.name}`)
+    const omitted = entries.length - visible.length
+    const summary = [
+      `Folder listing for ${path}`,
+      `Total entries: ${entries.length}`,
+      omitted > 0 ? `Showing first ${visible.length}; ${omitted} omitted.` : undefined,
+      '',
+      ...lines
+    ]
+      .filter((line): line is string => line !== undefined)
+      .join('\n')
+    return {
+      content: summary,
+      truncated: omitted > 0,
+      note: omitted > 0 ? `폴더 항목이 많아 상위 ${visible.length}개만 첨부했습니다.` : undefined
+    }
+  } catch (e) {
+    return { note: `폴더 목록 자동 첨부 실패: ${e instanceof Error ? e.message : String(e)}` }
+  }
 }
 
 async function extractPdfAttachmentText(path: string): Promise<ExtractedAttachmentContent> {
@@ -852,6 +880,16 @@ function diffTitle(prefix: string, filePath?: string): string {
   return filePath ? `${prefix} · ${filePath.split(/[\\/]/).pop()}` : prefix
 }
 
+function diffFallbackText(oldString?: string, newString?: string): string | undefined {
+  const text = [
+    oldString !== undefined ? `- ${oldString}` : undefined,
+    newString !== undefined ? `+ ${newString}` : undefined
+  ]
+    .filter(Boolean)
+    .join('\n')
+  return text || undefined
+}
+
 const upsertItem = (
   items: TimelineItem[],
   id: string,
@@ -1107,34 +1145,54 @@ function reduceTimeline(items: TimelineItem[], event: AgentEvent): TimelineItem[
     const oldString = stringValue(proposal?.oldString)
     const newString = stringValue(proposal?.newString)
     const diff = diffViewFromRecord(proposal)
-    return [
-      ...items,
-      {
+    return upsertItem(
+      items,
+      id,
+      () => ({
         id,
         kind: 'diff',
         title: diffTitle('변경 제안', filePath),
-        text: diff
-          ? undefined
-          : [oldString && `- ${oldString}`, newString && `+ ${newString}`].filter(Boolean).join('\n'),
+        filePath,
+        text: diff ? undefined : diffFallbackText(oldString, newString),
         diff
-      }
-    ]
+      }),
+      (item) => ({
+        ...item,
+        title: diffTitle('변경 제안', filePath),
+        filePath: filePath ?? item.filePath,
+        text: diff ? undefined : diffFallbackText(oldString, newString) ?? item.text,
+        diff: diff ?? item.diff
+      })
+    )
   }
   if (event.type === 'diff:applied') {
     const id = stringValue(event.proposalId)
     if (!id) return items
     const filePath = stringValue(event.filePath)
+    const oldString = stringValue(event.oldString)
+    const newString = stringValue(event.newString)
     const diff = diffViewFromRecord(event)
-    return items.map((item) =>
-      item.id === id
-        ? {
-            ...item,
-            title: filePath ? diffTitle('변경 적용', filePath) : item.title,
-            status: 'applied',
-            text: diff ? undefined : item.text,
-            diff: diff ?? item.diff
-          }
-        : item
+    const fallbackText = diffFallbackText(oldString, newString)
+    return upsertItem(
+      items,
+      id,
+      () => ({
+        id,
+        kind: 'diff',
+        title: diffTitle('변경 적용', filePath),
+        status: 'applied',
+        filePath,
+        text: diff ? undefined : fallbackText,
+        diff
+      }),
+      (item) => ({
+        ...item,
+        title: filePath ? diffTitle('변경 적용', filePath) : item.title,
+        status: 'applied',
+        filePath: filePath ?? item.filePath,
+        text: diff ? undefined : fallbackText ?? item.text,
+        diff: diff ?? item.diff
+      })
     )
   }
   if (event.type === 'error') {
@@ -1482,7 +1540,8 @@ export default function AgentPanel({
   onAttachmentRequestsHandled,
   onStatus,
   onOpenTerminal,
-  onOpenDiff
+  onOpenDiff,
+  onOpenFile
 }: AgentPanelProps): JSX.Element {
   const [items, setItems] = useState<TimelineItem[]>([])
   const [input, setInput] = useState('')
@@ -1862,10 +1921,13 @@ export default function AgentPanel({
       const stat = await window.lt.fs.stat(path).catch(() => null)
       const access: AgentAttachment['access'] =
         sameRemote || (!remote && !ssh) ? 'workspace-path' : 'context-only'
+      const isDir = stat?.ok && stat.isDir
       const extracted =
-        access === 'context-only' && stat?.ok && !stat.isDir
-          ? await extractContextAttachmentContent(path)
-          : undefined
+        stat?.ok && isDir
+          ? await extractFolderAttachmentContent(path)
+          : access === 'context-only' && stat?.ok
+            ? await extractContextAttachmentContent(path)
+            : undefined
       const notes = [
         access === 'context-only'
           ? '이 첨부는 현재 질문과 함께 전달된 참고 파일입니다. 원격 작업공간 경로로 읽으려 하지 말고 첨부 본문을 기준으로 검토하세요.'
@@ -1877,13 +1939,13 @@ export default function AgentPanel({
         !remote && ssh
           ? '주의: 이 파일은 로컬 경로입니다. 현재 Agent가 원격에서 실행 중이면 원격 서버에 같은 파일이 있어야 Claude가 직접 읽을 수 있습니다.'
           : undefined,
-        stat?.ok && stat.isDir && access === 'context-only'
-          ? '폴더는 본문을 자동 첨부하지 않습니다. 필요한 파일을 개별 첨부하세요.'
+        isDir
+          ? '폴더 첨부는 상위 목록 요약만 전달합니다. 필요한 파일 본문은 개별 첨부하거나 명시적으로 읽으세요.'
           : undefined,
         extracted?.note
       ].filter((note): note is string => Boolean(note))
       return {
-        kind: stat?.ok && stat.isDir ? 'folder' : 'file',
+        kind: isDir ? 'folder' : 'file',
         label: fileNameFromPath(readablePath),
         path: readablePath,
         origin: remote ? 'remote' : 'local',
@@ -2039,6 +2101,16 @@ export default function AgentPanel({
       })
     },
     [onOpenDiff]
+  )
+
+  const openFileFromItem = useCallback(
+    (item: TimelineItem): void => {
+      if (!onOpenFile) return
+      const path = agentFilePathForApp(item.diff?.filePath ?? item.filePath, cwd, profileId, ssh)
+      if (!path) return
+      onOpenFile(path, fileNameFromPath(path))
+    },
+    [cwd, onOpenFile, profileId, ssh]
   )
 
   const canRevertDiff = (diff: DiffView | undefined): boolean =>
@@ -2538,6 +2610,8 @@ export default function AgentPanel({
           const waitingQueue = isWaitingQueueItem(item)
           const revertingDiff = revertingDiffIds.has(item.id)
           const showRevertDiff = item.kind === 'diff' && item.status === 'applied' && canRevertDiff(item.diff)
+          const showOpenChangedFile =
+            item.kind === 'diff' && !!onOpenFile && !!(item.diff?.filePath ?? item.filePath)
           return (
             <section key={item.id} className={`agent-card ${item.kind} ${item.status ?? ''}`}>
               <div className="agent-card-head">
@@ -2588,15 +2662,25 @@ export default function AgentPanel({
                   {cardStatus && <span className="agent-card-status">{cardStatus}</span>}
                 </span>
               </div>
-              {item.kind === 'diff' && item.diff && (onOpenDiff || showRevertDiff) && (
+              {item.kind === 'diff' &&
+                (Boolean(item.diff && onOpenDiff) || showOpenChangedFile || showRevertDiff) && (
                 <div className="agent-card-actions">
-                  {onOpenDiff && (
+                  {item.diff && onOpenDiff && (
                     <button
                       type="button"
                       title="변경 전후 비교를 문서 탭에서 열기"
                       onClick={() => openDiffFromItem(item)}
                     >
                       비교 보기
+                    </button>
+                  )}
+                  {showOpenChangedFile && (
+                    <button
+                      type="button"
+                      title="변경된 문서를 문서 탭에서 열기"
+                      onClick={() => openFileFromItem(item)}
+                    >
+                      문서 열기
                     </button>
                   )}
                   {showRevertDiff && (
@@ -2612,6 +2696,7 @@ export default function AgentPanel({
                   )}
                 </div>
               )}
+              {item.kind === 'diff' && item.diff && <DiffPreview diff={item.diff} />}
               {item.kind === 'diff' && !item.diff && item.text && (
                 <pre className="agent-card-text">{item.text}</pre>
               )}

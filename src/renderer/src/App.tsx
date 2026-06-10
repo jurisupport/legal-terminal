@@ -226,6 +226,14 @@ interface DocTab {
   hearing?: JsHearing
   side?: DockSide
 }
+
+interface ChangedDocumentToast {
+  key: number
+  path: string
+  title: string
+  changedAt: number
+}
+
 /**
  * 터미널 1개 = 사건 1개.
  * cwd = 작성서류 폴더(claude 작업·탐색기 기준). recordsFolder = 소송기록 폴더(뷰어 기준, 별도 지정).
@@ -1159,6 +1167,8 @@ export default function App(): JSX.Element {
   const [activeDoc, setActiveDoc] = useState<string>(() => (docOnly ? '' : 'doc-welcome'))
   // 실제 파일에 저장되지 않은 변경사항이 있는 문서 id 집합 — 닫기 전 확인용
   const [dirtyDocs, setDirtyDocs] = useState<Set<string>>(new Set())
+  const [changedDocumentToasts, setChangedDocumentToasts] = useState<ChangedDocumentToast[]>([])
+  const changedDocumentToastSeq = useRef(0)
   const docTabsRef = useRef<DocTab[]>(docTabs)
   const dirtyDocsRef = useRef<Set<string>>(dirtyDocs)
 
@@ -1348,14 +1358,14 @@ export default function App(): JSX.Element {
     }
   }, [setWorkActive])
 
-  const focusWorkTargetSoon = useCallback((side: DockSide, key: WorkTabKey | ''): void => {
+  const focusWorkTargetSoon = useCallback((side: DockSide, key: WorkTabKey | '', force = false): void => {
     window.requestAnimationFrame(() => {
       const pane = Array.from(document.querySelectorAll<HTMLElement>('.work-pane[data-work-side]')).find(
         (el) => datasetSide(el.dataset.workSide) === side
       )
       if (!pane) return
       const active = document.activeElement
-      if (active instanceof Element && pane.contains(active)) return
+      if (!force && active instanceof Element && pane.contains(active)) return
 
       const parsed = parseWorkKey(key)
       if (parsed?.kind === 'doc') {
@@ -1550,19 +1560,35 @@ export default function App(): JSX.Element {
       const isPlus = e.key === '+' || e.key === '=' || e.code === 'Equal' || e.code === 'NumpadAdd'
       const isZero = e.key === '0' || e.code === 'Digit0' || e.code === 'Numpad0'
       const termId = focusedTermId(activeEl)
+      const docId = focusedDocId(activeEl)
       const workSideForShortcut = focusedWorkSide(activeEl)
       const workTabForShortcut = workSideForShortcut ? parseWorkKey(activeWork[workSideForShortcut]) : null
+      const resolvedWorkKeyForShortcut = workSideForShortcut
+        ? resolveActiveWorkKey(
+            workKeysForSide(docTabs, termTabs, workSideForShortcut),
+            activeWork[workSideForShortcut]
+          )
+        : ''
+      const sourceWorkKeyForShortcut =
+        termId ? termKeyOf(termId) : docId ? docKey(docId) : resolvedWorkKeyForShortcut || undefined
       const sourceTermId =
         termId ?? (workTabForShortcut?.kind === 'terminal' ? workTabForShortcut.id : activeTerm)
       const termSideForShortcut =
         workSideForShortcut ?? termSide(termTabs.find((t) => t.id === sourceTermId))
       const primary = platform === 'darwin' ? e.metaKey && !e.ctrlKey : e.ctrlKey
+      const pageCycleShortcut = (k === 'pageup' || k === 'pagedown') && !e.altKey && (primary || e.ctrlKey)
       const macCtrlTInWorkArea =
         platform === 'darwin' && !!(termId || workSideForShortcut) && e.ctrlKey && !e.metaKey && isT
       if (primary && e.altKey && !e.shiftKey && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) {
         e.preventDefault()
         e.stopPropagation()
         cycleCaseTab(e.key === 'ArrowLeft' ? -1 : 1)
+        return
+      }
+      if (pageCycleShortcut) {
+        e.preventDefault()
+        e.stopPropagation()
+        cycleWorkTab(k === 'pageup' ? -1 : 1, workSideForShortcut, sourceWorkKeyForShortcut)
         return
       }
       if ((!primary && !macCtrlTInWorkArea) || e.altKey) return
@@ -1607,12 +1633,6 @@ export default function App(): JSX.Element {
         e.stopPropagation()
         if (termId) cycleTerm(e.shiftKey ? -1 : 1, termId)
         else cycleDoc(e.shiftKey ? -1 : 1)
-      } else if (k === 'pageup' || k === 'pagedown') {
-        // Ctrl/Cmd+PageUp/PageDown: Agent/터미널 포커스면 작업 탭, 아니면 문서 탭 이동
-        e.preventDefault()
-        e.stopPropagation()
-        if (termId) cycleTerm(k === 'pageup' ? -1 : 1, termId)
-        else cycleDoc(k === 'pageup' ? -1 : 1)
       }
     }
     window.addEventListener('keydown', onKey)
@@ -1642,6 +1662,36 @@ export default function App(): JSX.Element {
     setDocTabs((t) => [...t, tab])
     setActiveDoc(tab.id)
     setWorkActive(side, docKey(tab.id))
+  }
+
+  useEffect(() => {
+    const onDocumentChanged = (event: Event): void => {
+      const detail = (event as CustomEvent<{ paths?: unknown }>).detail
+      const paths = Array.isArray(detail?.paths)
+        ? detail.paths.filter((item): item is string => typeof item === 'string')
+        : []
+      if (paths.length === 0) return
+      setChangedDocumentToasts((current) => {
+        const changed = new Set(paths)
+        const next = paths.map((path) => ({
+          key: ++changedDocumentToastSeq.current,
+          path,
+          title: fileNameFromPath(path),
+          changedAt: Date.now()
+        }))
+        return [...next, ...current.filter((toast) => !changed.has(toast.path))].slice(0, 6)
+      })
+    }
+    window.addEventListener(REMOTE_FILE_CHANGED_EVENT, onDocumentChanged)
+    return () => window.removeEventListener(REMOTE_FILE_CHANGED_EVENT, onDocumentChanged)
+  }, [])
+
+  const dismissChangedDocumentToast = (key: number): void =>
+    setChangedDocumentToasts((items) => items.filter((item) => item.key !== key))
+
+  const openChangedDocumentToast = (toast: ChangedDocumentToast): void => {
+    dismissChangedDocumentToast(toast.key)
+    openFile(toast.path, toast.title, 'left')
   }
 
   // 이미지 뷰어: 같은 폴더의 정렬순 이전/다음 이미지로 현재 탭에서 이동
@@ -2618,6 +2668,47 @@ export default function App(): JSX.Element {
     const i = scoped.findIndex((t) => t.id === activeDoc)
     const ni = (((i < 0 ? 0 : i) + dir) % scoped.length + scoped.length) % scoped.length
     activateDocTab(scoped[ni].id)
+  }
+  const activateWorkTab = (side: DockSide, key: WorkTabKey): void => {
+    const parsed = parseWorkKey(key)
+    if (parsed?.kind === 'doc') {
+      activateDocTab(parsed.id)
+      focusWorkTargetSoon(side, key, true)
+      return
+    }
+    if (parsed?.kind === 'terminal') {
+      const tab = termTabs.find((t) => t.id === parsed.id)
+      selectTerm(parsed.id)
+      if (isAgentTab(tab)) focusWorkTargetSoon(side, key, true)
+      else {
+        setTermFocusNonce((current) => ({
+          ...current,
+          [parsed.id]: (current[parsed.id] ?? 0) + 1
+        }))
+      }
+    }
+  }
+  const cycleWorkTab = (dir: number, side?: DockSide, sourceKey?: WorkTabKey): void => {
+    const fallbackSide =
+      side ??
+      (sourceKey
+        ? (() => {
+            const parsed = parseWorkKey(sourceKey)
+            if (parsed?.kind === 'doc') return docSide(docTabs.find((t) => t.id === parsed.id))
+            if (parsed?.kind === 'terminal') return termSide(termTabs.find((t) => t.id === parsed.id))
+            return undefined
+          })()
+        : undefined) ??
+      docSide(docTabs.find((t) => t.id === activeDoc))
+    const scoped = workKeysForSide(docTabs, termTabs, fallbackSide)
+    if (scoped.length < 2) return
+    const activeKey =
+      sourceKey && scoped.includes(sourceKey)
+        ? sourceKey
+        : resolveActiveWorkKey(scoped, activeWork[fallbackSide])
+    const i = scoped.findIndex((key) => key === activeKey)
+    const ni = (((i < 0 ? 0 : i) + dir) % scoped.length + scoped.length) % scoped.length
+    activateWorkTab(fallbackSide, scoped[ni])
   }
 
   // 활성 사건(또는 마지막 사건)에 소송기록 폴더를 지정/탐색 → 뷰어 연결 + 페어링 기억.
@@ -4499,6 +4590,7 @@ export default function App(): JSX.Element {
                 onStatus={(s) => onTermStatus(t.id, s)}
                 onOpenTerminal={() => addTermSame(termSide(t), t.id, { reuseAgentTab: true })}
                 onOpenDiff={openAgentDiff}
+                onOpenFile={(path, title) => openFile(path, title ?? fileNameFromPath(path), 'left')}
               />
             ) : (
               <Terminal
@@ -4519,6 +4611,7 @@ export default function App(): JSX.Element {
                 onTodoChanged={() => setTodoNonce((n) => n + 1)}
                 onNewAgent={() => addAgentSame(termSide(t), t.id)}
                 onCycleTab={(dir) => cycleTerm(dir, t.id)}
+                onCyclePageTab={(dir) => cycleWorkTab(dir, termSide(t), termKeyOf(t.id))}
               />
             )}
           </div>
@@ -4838,6 +4931,7 @@ export default function App(): JSX.Element {
                   onStatus={(s) => onTermStatus(t.id, s)}
                   onOpenTerminal={() => addTermSame(side, t.id, { reuseAgentTab: true })}
                   onOpenDiff={openAgentDiff}
+                  onOpenFile={(path, title) => openFile(path, title ?? fileNameFromPath(path), 'left')}
                 />
               ) : (
                 <Terminal
@@ -4858,6 +4952,7 @@ export default function App(): JSX.Element {
                   onTodoChanged={() => setTodoNonce((n) => n + 1)}
                   onNewAgent={() => addAgentSame(side, t.id)}
                   onCycleTab={(dir) => cycleTerm(dir, t.id)}
+                  onCyclePageTab={(dir) => cycleWorkTab(dir, side, termKeyOf(t.id))}
                 />
               )}
             </div>
@@ -5140,8 +5235,33 @@ export default function App(): JSX.Element {
       )}
 
       {/* claude 질문/확인 대기 팝업 */}
-      {toasts.length > 0 && (
+      {(changedDocumentToasts.length > 0 || toasts.length > 0) && (
         <div className="toasts">
+          {changedDocumentToasts.map((t) => (
+            <div
+              key={t.key}
+              className="toast document-change"
+              onClick={() => openChangedDocumentToast(t)}
+              title={t.path}
+            >
+              <span className="toast-icon">↻</span>
+              <span className="toast-body">
+                <b>{t.title}</b>
+                <span className="toast-sub">
+                  문서가 변경됨 · 클릭하여 열기 · {new Date(t.changedAt).toLocaleTimeString('ko-KR')}
+                </span>
+              </span>
+              <button
+                className="toast-x"
+                onClick={(e) => {
+                  e.stopPropagation()
+                  dismissChangedDocumentToast(t.key)
+                }}
+              >
+                ×
+              </button>
+            </div>
+          ))}
           {toasts.map((t) => (
             <div
               key={t.key}

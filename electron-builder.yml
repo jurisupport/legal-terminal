@@ -6,6 +6,10 @@ directories:
   output: dist
   buildResources: build
 
+extraResources:
+  - from: build/icon.png
+    to: icon.png
+
 files:
   - out/**
   - package.json
@@ -22,6 +26,7 @@ afterPack: build/afterPack.cjs
 npmRebuild: false
 
 mac:
+  icon: build/icon.icns
   category: public.app-category.productivity
   target:
     - dmg
@@ -34,6 +39,7 @@ mac:
   artifactName: legal-terminal-mac-${arch}.${ext}
 
 win:
+  icon: build/icon.ico
   target:
     - target: nsis
       arch: [x64]

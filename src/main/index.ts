@@ -76,6 +76,18 @@ const forceClosingWindowIds = new Set<number>()
 const GITHUB_PROJECT_URL = 'https://github.com/jurisupport/legal-terminal'
 const DEFAULT_WINDOW_TITLE = 'legal-terminal'
 
+function getAppIconPath(): string | undefined {
+  const iconPath = app.isPackaged
+    ? join(process.resourcesPath, 'icon.png')
+    : join(__dirname, '../../build/icon.png')
+  return existsSync(iconPath) ? iconPath : undefined
+}
+
+function applyDockIcon(): void {
+  const iconPath = getAppIconPath()
+  if (iconPath && process.platform === 'darwin' && app.dock) app.dock.setIcon(iconPath)
+}
+
 interface GitHubRelease {
   tag_name?: string
 }
@@ -232,6 +244,7 @@ function createWindow(setMain = true, opts?: { docOnly?: boolean; termOnly?: boo
     backgroundColor: '#1e1e1e',
     autoHideMenuBar: true,
     title: DEFAULT_WINDOW_TITLE,
+    icon: getAppIconPath(),
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
       sandbox: false,
@@ -1887,6 +1900,7 @@ app.on('before-quit', () => {
 })
 
 app.whenReady().then(() => {
+  applyDockIcon()
   // 기본 메뉴 제거 — 기본 메뉴가 Ctrl+W를 '창 닫기'에 바인딩해 터미널 Ctrl+W가 창을 닫는 문제 방지.
   // (메뉴바는 autoHideMenuBar로 이미 숨겨져 있어 UX 변화 없음. Ctrl+W는 렌더러에서 탭 닫기로 처리.)
   Menu.setApplicationMenu(null)
