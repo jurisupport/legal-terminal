@@ -79,10 +79,10 @@ interface ActivityItem {
   Icon: (props: { size?: number }) => JSX.Element
 }
 const ACTIVITY: ActivityItem[] = [
-  { id: 'explorer', label: '탐색기', Icon: IconExplorer },
   { id: 'cases', label: '사건', Icon: IconCases },
-  { id: 'todos', label: '할일', Icon: IconTodos },
-  { id: 'viewer', label: '기록뷰어', Icon: IconViewer }
+  { id: 'explorer', label: '탐색기', Icon: IconExplorer },
+  { id: 'viewer', label: '기록뷰어', Icon: IconViewer },
+  { id: 'todos', label: '할일', Icon: IconTodos }
 ]
 
 const SORT_OPTIONS: { value: SortMode; label: string; title: string }[] = [
@@ -4578,6 +4578,13 @@ export default function App(): JSX.Element {
         <div className="activitybar-bottom">
           <button
             className="activity-item"
+            title="새 작업환경 만들기"
+            onClick={() => openNewWorkspaceWindow()}
+          >
+            <IconWorkspace />
+          </button>
+          <button
+            className="activity-item"
             title="작업환경 저장 (Shift: 파일로 내보내기)"
             onClick={(e) => void saveWorkspace(e.shiftKey)}
           >
@@ -4589,13 +4596,6 @@ export default function App(): JSX.Element {
             onClick={(e) => void restoreWorkspace(e.shiftKey)}
           >
             <IconSync />
-          </button>
-          <button
-            className="activity-item"
-            title="새 작업환경 만들기"
-            onClick={() => openNewWorkspaceWindow()}
-          >
-            <IconWorkspace />
           </button>
           <button className="activity-item" title="설정" onClick={openSettings}>
             <IconSettings />
