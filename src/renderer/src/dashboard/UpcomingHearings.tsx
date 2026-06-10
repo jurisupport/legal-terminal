@@ -53,6 +53,7 @@ function buildRows(cases: JsCase[]): Row[] {
 export default function UpcomingHearings({
   nonce = 0,
   onPick,
+  onOpenWorkspace,
   onOpenRemote,
   sshProfiles = [],
   defaultOpenProfileId,
@@ -62,6 +63,7 @@ export default function UpcomingHearings({
 }: {
   nonce?: number
   onPick: (c: JsCase) => void
+  onOpenWorkspace?: (c: JsCase) => void
   onOpenRemote?: (c: JsCase, profile: SshProfile) => void
   sshProfiles?: SshProfile[]
   defaultOpenProfileId?: string
@@ -78,10 +80,6 @@ export default function UpcomingHearings({
   const defaultOpenProfile = defaultOpenProfileId
     ? sshProfiles.find((p) => p.id === defaultOpenProfileId)
     : undefined
-  const openDefault = (c: JsCase): void => {
-    if (defaultOpenProfile && onOpenRemote) onOpenRemote(c, defaultOpenProfile)
-    else onPick(c)
-  }
 
   useEffect(() => {
     let alive = true
@@ -193,7 +191,7 @@ export default function UpcomingHearings({
             <li
               key={rowKey(r, i)}
               className="agenda-row"
-              onClick={() => openDefault(r.c)}
+              onClick={() => onPick(r.c)}
               onContextMenu={(e) => {
                 e.preventDefault()
                 e.stopPropagation()
@@ -221,7 +219,7 @@ export default function UpcomingHearings({
         <CaseContextMenu
           menu={menu}
           onClose={() => setMenu(null)}
-          onOpenWorkspace={onPick}
+          onOpenWorkspace={onOpenWorkspace ?? onPick}
           onOpenRemote={onOpenRemote}
           sshProfiles={sshProfiles}
           defaultOpenProfileId={defaultOpenProfileId}

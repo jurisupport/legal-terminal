@@ -332,6 +332,7 @@ export default function TodosDashboard({
   nonce = 0,
   onChanged,
   onOpenWorkspace,
+  onOpenDefault,
   onOpenRemote,
   sshProfiles = [],
   defaultOpenProfileId,
@@ -342,6 +343,7 @@ export default function TodosDashboard({
   nonce?: number
   onChanged?: () => void
   onOpenWorkspace?: (c: JsCase) => void
+  onOpenDefault?: (c: JsCase) => void
   onOpenRemote?: (c: JsCase, profile: SshProfile) => void
   sshProfiles?: SshProfile[]
   defaultOpenProfileId?: string
@@ -375,7 +377,12 @@ export default function TodosDashboard({
 
   const openDefault = (todo: JsTodo): void => {
     const c = todoToCase(todo)
-    if (!c || !onOpenWorkspace) return
+    if (!c) return
+    if (onOpenDefault) {
+      onOpenDefault(c)
+      return
+    }
+    if (!onOpenWorkspace) return
     if (defaultOpenProfile && onOpenRemote) onOpenRemote(c, defaultOpenProfile)
     else onOpenWorkspace(c)
   }

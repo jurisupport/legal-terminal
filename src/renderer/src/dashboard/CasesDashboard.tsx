@@ -25,6 +25,7 @@ const openExt = (url: string): void => void window.lt.app.openExternal(url)
 /** JuriSupport(본체) 사건 대시보드. 좌클릭=작업환경 열기, 우클릭=컨텍스트 메뉴. */
 export default function CasesDashboard({
   onOpenWorkspace,
+  onOpenDefault,
   onOpenRemote,
   sshProfiles = [],
   defaultOpenProfileId,
@@ -34,6 +35,7 @@ export default function CasesDashboard({
   onChanged
 }: {
   onOpenWorkspace: (c: JsCase) => void
+  onOpenDefault?: (c: JsCase) => void
   onOpenRemote?: (c: JsCase, profile: SshProfile) => void
   sshProfiles?: SshProfile[]
   defaultOpenProfileId?: string
@@ -55,6 +57,10 @@ export default function CasesDashboard({
     ? sshProfiles.find((p) => p.id === defaultOpenProfileId)
     : undefined
   const openDefault = (c: JsCase): void => {
+    if (onOpenDefault) {
+      onOpenDefault(c)
+      return
+    }
     if (defaultOpenProfile && onOpenRemote) onOpenRemote(c, defaultOpenProfile)
     else onOpenWorkspace(c)
   }

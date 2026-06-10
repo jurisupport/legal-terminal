@@ -3775,6 +3775,26 @@ export default function App(): JSX.Element {
     }
   }
 
+  const openCaseDefault = (c: JsCase): void => {
+    void (async () => {
+      let profiles = sshProfiles
+      let target = resolveCaseOpenTarget(caseOpenTarget, profiles)
+      try {
+        const settings = await window.lt.settings.get()
+        profiles = settings.sshProfiles ?? []
+        target = resolveCaseOpenTarget(settings.caseOpenTarget, profiles)
+        setSshProfiles(profiles)
+        setCaseOpenTarget(target)
+      } catch {
+        // 현재 렌더의 설정 state로 폴백한다.
+      }
+      const profileId = caseOpenProfileId(target)
+      const profile = profileId ? profiles.find((p) => p.id === profileId) : undefined
+      if (profile) await openCaseRemote(c, profile)
+      else await openCaseWorkspace(c)
+    })()
+  }
+
   // 우클릭: Claude에 사건 브리핑 요청
   const briefCaseToClaude = (c: JsCase): void => {
     const idPart = c.id ? `(JuriSupport id: ${c.id})` : ''
@@ -3960,7 +3980,8 @@ export default function App(): JSX.Element {
       onNewFile={newFile}
       onSync={sshProfiles.length > 0 ? openSync : undefined}
       onOpenWorkspace={() => void openConnOrLocal()}
-      onOpenCase={openCaseWorkspace}
+      onOpenCase={openCaseDefault}
+      onOpenLocalCase={openCaseWorkspace}
       onOpenRemote={openCaseRemote}
       sshProfiles={sshProfiles}
       defaultOpenProfileId={defaultCaseOpenProfileId}
@@ -4160,6 +4181,7 @@ export default function App(): JSX.Element {
         <div className="work-pane work-left" key="cases" data-work-side="left">
           <CasesDashboard
             onOpenWorkspace={openCaseWorkspace}
+            onOpenDefault={openCaseDefault}
             onOpenRemote={openCaseRemote}
             sshProfiles={sshProfiles}
             defaultOpenProfileId={defaultCaseOpenProfileId}
@@ -4179,6 +4201,7 @@ export default function App(): JSX.Element {
             nonce={todoNonce}
             onChanged={() => setTodoNonce((n) => n + 1)}
             onOpenWorkspace={openCaseWorkspace}
+            onOpenDefault={openCaseDefault}
             onOpenRemote={openCaseRemote}
             sshProfiles={sshProfiles}
             defaultOpenProfileId={defaultCaseOpenProfileId}
@@ -5030,6 +5053,7 @@ function DocsPanel({
   onSync,
   onOpenWorkspace,
   onOpenCase,
+  onOpenLocalCase,
   onOpenRemote,
   sshProfiles = [],
   defaultOpenProfileId,
@@ -5069,6 +5093,7 @@ function DocsPanel({
   onSync?: () => void
   onOpenWorkspace: () => void
   onOpenCase: (c: JsCase) => void
+  onOpenLocalCase: (c: JsCase) => void
   onOpenRemote?: (c: JsCase, profile: SshProfile) => void
   sshProfiles?: SshProfile[]
   defaultOpenProfileId?: string
@@ -5295,6 +5320,7 @@ function DocsPanel({
           <UpcomingHearings
             nonce={jsNonce}
             onPick={onOpenCase}
+            onOpenWorkspace={onOpenLocalCase}
             onOpenRemote={onOpenRemote}
             sshProfiles={sshProfiles}
             defaultOpenProfileId={defaultOpenProfileId}
