@@ -33,6 +33,18 @@ export function IconCases({ size = 22 }: IconProps): JSX.Element {
   )
 }
 
+export function IconCaseTabs({ size = 22 }: IconProps): JSX.Element {
+  return (
+    <svg {...base(size)}>
+      <path d="M4 5h7l2 2h7v11a2 2 0 0 1-2 2H4z" />
+      <path d="M4 10h16" />
+      <path d="M8 14h8" />
+      <path d="M8 17h5" />
+      <path d="M7 5V3h8v4" />
+    </svg>
+  )
+}
+
 export function IconTodos({ size = 22 }: IconProps): JSX.Element {
   return (
     <svg {...base(size)}>

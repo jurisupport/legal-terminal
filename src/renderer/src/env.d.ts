@@ -118,6 +118,29 @@ export interface WorkspaceDocTabPayload {
   side?: 'left' | 'right'
 }
 
+export interface WorkspaceCaseTabPayload {
+  id: string
+  name: string
+  drafts: string
+  records?: string
+  meta?: {
+    jsId?: string
+    court?: string
+    caseNumber?: string
+    caseName?: string
+    client?: string
+    opponent?: string
+    partyNames?: string
+    memo?: string
+  }
+  ssh?: SshConn
+  sshLabel?: string
+  profileId?: string
+  remotePath?: string
+  activeTermId?: string
+  updatedAt?: number
+}
+
 export interface DocumentDraftIdentity {
   path?: string
   draftId?: string
@@ -140,8 +163,10 @@ export interface WorkspaceSnapshot {
   mode: 'explorer' | 'cases' | 'viewer' | 'todos'
   docs: WorkspaceDocTabPayload[]
   terminals: TerminalTabPayload[]
+  caseTabs?: WorkspaceCaseTabPayload[]
   activeDoc?: string
   activeTerm?: string
+  activeCaseTabId?: string
   activeWork?: { left?: string; right?: string }
   currentCase?: unknown
   crop?: { on: boolean; ratio: number }
