@@ -26,6 +26,19 @@ export interface FsListOptions {
   refresh?: boolean
 }
 
+export interface FileSignature {
+  size: number
+  mtimeMs?: number
+}
+
+export interface FsWriteTextOptions {
+  expected?: FileSignature
+}
+
+export type FsWriteTextResult =
+  | { ok: true; stat?: FileSignature }
+  | { ok: false; error?: string; conflict?: boolean; stat?: FileSignature }
+
 export interface FolderMatchSuggestion {
   path: string
   name: string
@@ -489,7 +502,11 @@ export interface LtApi {
     readBytes: (filePath: string) => Promise<ArrayBuffer>
     readHwpText: (filePath: string) => Promise<{ ok: boolean; text: string; error?: string }>
     readDocxText: (filePath: string) => Promise<{ ok: boolean; text: string; error?: string }>
-    writeText: (path: string, content: string) => Promise<{ ok: boolean; error?: string }>
+    writeText: (
+      path: string,
+      content: string,
+      options?: FsWriteTextOptions
+    ) => Promise<FsWriteTextResult>
     saveAs: (
       content: string,
       defaultPath?: string
@@ -523,6 +540,7 @@ export interface LtApi {
       kind: 'text' | 'binary'
       text: string
       size: number
+      mtimeMs?: number
       truncated?: boolean
     }>
     stat: (

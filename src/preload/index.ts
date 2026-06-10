@@ -28,6 +28,19 @@ interface FsListOptions {
   refresh?: boolean
 }
 
+interface FileSignature {
+  size: number
+  mtimeMs?: number
+}
+
+interface FsWriteTextOptions {
+  expected?: FileSignature
+}
+
+type FsWriteTextResult =
+  | { ok: true; stat?: FileSignature }
+  | { ok: false; error?: string; conflict?: boolean; stat?: FileSignature }
+
 interface FolderMatchSuggestion {
   path: string
   name: string
@@ -450,8 +463,12 @@ const api = {
       filePath: string
     ): Promise<{ ok: boolean; text: string; error?: string }> =>
       ipcRenderer.invoke('fs:readDocxText', filePath),
-    writeText: (path: string, content: string): Promise<{ ok: boolean; error?: string }> =>
-      ipcRenderer.invoke('fs:writeText', { path, content }),
+    writeText: (
+      path: string,
+      content: string,
+      options?: FsWriteTextOptions
+    ): Promise<FsWriteTextResult> =>
+      ipcRenderer.invoke('fs:writeText', { path, content, ...options }),
     saveAs: (
       content: string,
       defaultPath?: string
@@ -521,6 +538,7 @@ const api = {
       kind: 'text' | 'binary'
       text: string
       size: number
+      mtimeMs?: number
       truncated?: boolean
     }> => ipcRenderer.invoke('fs:readText', filePath),
     stat: (

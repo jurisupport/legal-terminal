@@ -37,6 +37,11 @@ interface TextReplacement {
   insert: string
 }
 
+interface FileSignature {
+  size: number
+  mtimeMs?: number
+}
+
 interface PositionBookmark {
   line: number
   column: number
@@ -163,6 +168,15 @@ function findMinimalReplacement(current: string, next: string): TextReplacement 
   }
 
   return { from: prefix, to: currentSuffix, insert: next.slice(prefix, nextSuffix) }
+}
+
+function fileSignatureOf(value: { size: number; mtimeMs?: number }): FileSignature {
+  return { size: value.size, mtimeMs: value.mtimeMs }
+}
+
+function sameFileSignature(a?: FileSignature | null, b?: FileSignature | null): boolean {
+  if (!a || !b) return false
+  return a.size === b.size && Math.abs((a.mtimeMs ?? 0) - (b.mtimeMs ?? 0)) < 1
 }
 
 function bookmarkPosition(state: EditorState, pos: number): PositionBookmark {
@@ -303,7 +317,7 @@ export default function MarkdownEditor({
   const savedContentRef = useRef('')
   const localDirtyRef = useRef(false)
   const applyingRemoteRef = useRef(false)
-  const remoteSigRef = useRef('')
+  const remoteSigRef = useRef<FileSignature | null>(null)
   const remoteAppliedTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const findOpenRef = useRef(false)
   const findQueryRef = useRef('')
@@ -395,7 +409,7 @@ export default function MarkdownEditor({
 
   const refreshSavedSignature = (targetPath: string): void => {
     window.lt.fs.stat(targetPath).then((s) => {
-      if (s.ok && pathRef.current === targetPath) remoteSigRef.current = `${s.size}:${s.mtimeMs ?? 0}`
+      if (s.ok && pathRef.current === targetPath) remoteSigRef.current = fileSignatureOf(s)
     })
   }
 
@@ -418,7 +432,7 @@ export default function MarkdownEditor({
     onDirtyRef.current?.(value)
   }
 
-  const markSaved = (targetPath: string, content: string): void => {
+  const markSaved = (targetPath: string, content: string, signature?: FileSignature): void => {
     savedContentRef.current = content
     localDirtyRef.current = false
     setDirty(false)
@@ -427,8 +441,50 @@ export default function MarkdownEditor({
     setDraftSaving(false)
     setSavedState(true)
     onDirtyRef.current?.(false)
-    refreshSavedSignature(targetPath)
+    if (signature) remoteSigRef.current = signature
+    else refreshSavedSignature(targetPath)
     deleteDraft(targetPath)
+  }
+
+  const prepareSaveTarget = async (
+    targetPath: string,
+    content: string
+  ): Promise<
+    | { action: 'write'; expected?: FileSignature }
+    | { action: 'already-saved'; signature: FileSignature }
+    | { action: 'cancel' }
+  > => {
+    const expected = remoteSigRef.current
+    const currentStat = await window.lt.fs.stat(targetPath).catch(() => null)
+    if (!currentStat?.ok) return { action: 'write', expected: expected ?? undefined }
+
+    const current = fileSignatureOf(currentStat)
+    if (!expected || sameFileSignature(current, expected)) {
+      remoteSigRef.current = current
+      return { action: 'write', expected: current }
+    }
+
+    const latest = await window.lt.fs.readText(targetPath).catch(() => null)
+    if (latest?.kind === 'text' && !latest.truncated) {
+      if (latest.text === savedContentRef.current) {
+        remoteSigRef.current = current
+        return { action: 'write', expected: current }
+      }
+      if (latest.text === content) return { action: 'already-saved', signature: current }
+    }
+
+    const overwrite = window.confirm(
+      '이 파일은 에디터에서 연 뒤 외부에서 변경되었습니다.\n\n현재 화면의 내용으로 덮어쓰면 외부 변경사항이 사라질 수 있습니다.\n그래도 덮어쓸까요?'
+    )
+    if (!overwrite) {
+      setSaveError('파일이 외부에서 변경되어 저장을 취소했습니다. 최신 내용을 다시 확인한 뒤 저장하세요.')
+      setSavedState(false)
+      void saveDraftNow(false)
+      return { action: 'cancel' }
+    }
+
+    remoteSigRef.current = current
+    return { action: 'write', expected: current }
   }
 
   const saveAsNow = (): Promise<string | undefined> => {
@@ -455,9 +511,9 @@ export default function MarkdownEditor({
     })
   }
 
-  const saveNow = (): Promise<string | undefined> => {
+  const saveNow = async (): Promise<string | undefined> => {
     const v = viewRef.current
-    if (!v) return Promise.resolve(undefined)
+    if (!v) return undefined
     if (!pathRef.current) {
       return saveAsNow()
     }
@@ -468,16 +524,25 @@ export default function MarkdownEditor({
     const targetPath = pathRef.current
     const content = v.state.doc.toString()
     setSaveError('')
-    return window.lt.fs.writeText(targetPath, content).then((r) => {
-      if (pathRef.current !== targetPath) return undefined
-      if (!r.ok) {
-        setSaveError(r.error ?? '저장 실패')
-        setSavedState(false)
-        return undefined
-      }
-      markSaved(targetPath, content)
+    const prepared = await prepareSaveTarget(targetPath, content)
+    if (pathRef.current !== targetPath || prepared.action === 'cancel') return undefined
+    if (prepared.action === 'already-saved') {
+      markSaved(targetPath, content, prepared.signature)
       return targetPath
-    })
+    }
+    const result = await window.lt.fs.writeText(targetPath, content, { expected: prepared.expected })
+    if (pathRef.current !== targetPath) return undefined
+    if (!result.ok) {
+      setSaveError(
+        result.conflict
+          ? '파일이 외부에서 변경되어 저장하지 않았습니다. 최신 내용을 다시 확인한 뒤 저장하세요.'
+          : (result.error ?? '저장 실패')
+      )
+      setSavedState(false)
+      return undefined
+    }
+    markSaved(targetPath, content, result.stat)
+    return targetPath
   }
   const saveDraftNow = (updateState = true): Promise<void> => {
     const v = viewRef.current
@@ -540,7 +605,9 @@ export default function MarkdownEditor({
   useEffect(() => {
     let alive = true
     setErr('')
-    const init = pathRef.current ? window.lt.fs.readText(pathRef.current) : Promise.resolve({ text: '' })
+    const init = pathRef.current
+      ? window.lt.fs.readText(pathRef.current)
+      : Promise.resolve({ ext: '', kind: 'text' as const, text: '', size: 0, mtimeMs: undefined })
     Promise.all([init, window.lt.settings.get()])
       .then(async ([r, s]) => {
         if (!alive || !hostRef.current) return
@@ -564,6 +631,12 @@ export default function MarkdownEditor({
           }
         }
         savedContentRef.current = baseText
+        if (pathRef.current) {
+          remoteSigRef.current = fileSignatureOf({
+            size: r.size,
+            mtimeMs: r.mtimeMs
+          })
+        }
         const family = s.mdFont || DEFAULT_MD_FONT
         const size = s.mdFontSize || 14
         const state = EditorState.create({
@@ -659,22 +732,22 @@ export default function MarkdownEditor({
         .stat(currentPath)
         .then((s) => {
           if (!alive || !s.ok) return
-          const sig = `${s.size}:${s.mtimeMs ?? 0}`
+          const sig = fileSignatureOf(s)
           if (!remoteSigRef.current) {
             remoteSigRef.current = sig
             return
           }
-          if (sig === remoteSigRef.current) return
+          if (sameFileSignature(sig, remoteSigRef.current)) return
           window.lt.fs
             .readText(currentPath)
             .then((r) => {
               if (!alive || r.kind !== 'text' || r.truncated) return
               const v = viewRef.current
-              remoteSigRef.current = sig
               if (!v) return
               const next = r.text
               const current = v.state.doc.toString()
               if (next === current) {
+                remoteSigRef.current = sig
                 savedContentRef.current = next
                 setDirtyState(false)
                 setSavedState(true)
@@ -702,6 +775,7 @@ export default function MarkdownEditor({
                 applyingRemoteRef.current = false
               }
               savedContentRef.current = next
+              remoteSigRef.current = sig
               setDirtyState(false)
               setSavedState(true)
               setDraftSaved(false)

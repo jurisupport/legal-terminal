@@ -734,6 +734,25 @@ interface DocumentDraftEntry {
   savedAt: string
 }
 
+interface FileSignature {
+  size: number
+  mtimeMs?: number
+}
+
+function fileSignatureOf(value: { size: number; mtimeMs?: number }): FileSignature {
+  return { size: value.size, mtimeMs: value.mtimeMs }
+}
+
+function sameFileSignature(a?: FileSignature, b?: FileSignature): boolean {
+  if (!a || !b) return false
+  return a.size === b.size && Math.abs((a.mtimeMs ?? 0) - (b.mtimeMs ?? 0)) < 1
+}
+
+async function statFileSignature(filePath: string): Promise<FileSignature> {
+  if (isRemote(filePath)) return fileSignatureOf(await rfsStat(filePath))
+  return fileSignatureOf(await stat(filePath))
+}
+
 function documentDraftRoot(): string {
   return join(app.getPath('userData'), DOCUMENT_DRAFT_DIR)
 }
@@ -1782,11 +1801,22 @@ ipcMain.handle('fs:saveAs', async (_e, p: { content: string; defaultPath?: strin
   }
 })
 
-ipcMain.handle('fs:writeText', async (_e, p: { path: string; content: string }) => {
+ipcMain.handle('fs:writeText', async (_e, p: { path: string; content: string; expected?: FileSignature }) => {
   try {
+    if (p.expected) {
+      const current = await statFileSignature(p.path)
+      if (!sameFileSignature(current, p.expected)) {
+        return {
+          ok: false,
+          conflict: true,
+          stat: current,
+          error: '파일이 외부에서 변경되어 저장을 중단했습니다.'
+        }
+      }
+    }
     if (isRemote(p.path)) await rfsWriteText(p.path, p.content)
     else await writeFile(p.path, p.content, 'utf8')
-    return { ok: true }
+    return { ok: true, stat: await statFileSignature(p.path).catch(() => undefined) }
   } catch (e) {
     return { ok: false, error: String(e) }
   }
@@ -1809,7 +1839,7 @@ ipcMain.handle('fs:readText', async (_e, filePath: string) => {
   const ext = extname(filePath).toLowerCase()
   if (isRemote(filePath)) {
     const st = await rfsStat(filePath)
-    if (!TEXT_EXT.has(ext)) return { ext, kind: 'binary' as const, text: '', size: st.size }
+    if (!TEXT_EXT.has(ext)) return { ext, kind: 'binary' as const, text: '', size: st.size, mtimeMs: st.mtimeMs }
     const buf = await rfsReadBytes(filePath)
     const decoded = decodeTextBuffer(buf, MAX_TEXT_BYTES)
     return {
@@ -1817,12 +1847,13 @@ ipcMain.handle('fs:readText', async (_e, filePath: string) => {
       kind: 'text' as const,
       text: decoded.text,
       size: st.size,
+      mtimeMs: st.mtimeMs,
       truncated: decoded.truncated
     }
   }
   const info = await stat(filePath)
   if (!TEXT_EXT.has(ext)) {
-    return { ext, kind: 'binary' as const, text: '', size: info.size }
+    return { ext, kind: 'binary' as const, text: '', size: info.size, mtimeMs: info.mtimeMs }
   }
   const buf = await readLocalBytes(filePath)
   const decoded = decodeTextBuffer(buf, MAX_TEXT_BYTES)
@@ -1831,6 +1862,7 @@ ipcMain.handle('fs:readText', async (_e, filePath: string) => {
     kind: 'text' as const,
     text: decoded.text,
     size: info.size,
+    mtimeMs: info.mtimeMs,
     truncated: decoded.truncated
   }
 })
