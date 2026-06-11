@@ -40,11 +40,11 @@ curl -fsSL https://raw.githubusercontent.com/jurisupport/legal-terminal/main/ins
 
 ## 이번 업데이트
 
-최신 릴리스: [v0.1.71](https://github.com/jurisupport/legal-terminal/releases/tag/v0.1.71)
+최신 릴리스: [v0.1.72](https://github.com/jurisupport/legal-terminal/releases/tag/v0.1.72)
 
-- **SSH 기본 열기 안정화**: 설정에서 사건 기본 열기를 SSH 프로필로 지정하면, 다가오는 기일·사건 목록·할일 카드 클릭이 모두 해당 SSH 프로필을 따릅니다.
-- **우클릭 fallback 강화**: 사건 우클릭 메뉴에 로컬 열기와 모든 SSH 프로필 열기가 항상 표시됩니다. 기본 SSH 프로필에는 `(기본)` 표시가 붙습니다.
-- **다가오는 기일 정리**: 지난 날짜 기일이 남지 않도록 오늘 00:00 이후 기일만 표시합니다.
+- **사건별 하위 탭 분리**: 사건 A에서 연 문서·터미널·Agent 탭은 사건 A 안에서만 보이고, 사건 B로 섞이지 않습니다.
+- **전체 사건탭 복원**: 스냅샷을 복원하면 여러 사건탭과 각 사건의 하위 탭 상태가 함께 돌아옵니다.
+- **사건탭 우클릭 닫기**: 사건탭 목록에서 우클릭으로 해당 사건탭과 그 안의 하위 탭을 닫을 수 있습니다.
 
 ## 처음 쓰는 순서
 
