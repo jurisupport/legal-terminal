@@ -21,6 +21,8 @@ import { writeMarkdownDataTransfer } from '../markdownClipboard'
 
 const DEFAULT_MD_FONT = "'D2Coding', 'Cascadia Mono', Consolas, monospace"
 const DEFAULT_UNTITLED_NAME = '무제.md'
+const EXTERNAL_FILE_POLL_MS = 2500
+const CLAUDE_DRAFT_FILE_POLL_MS = 750
 export const TEXT_SELECTION_OVERLAY_EVENT = 'lt:text-selection-overlay'
 
 export interface TextSelectionOverlayDetail {
@@ -168,6 +170,10 @@ function claudeDraftFileName(currentPath?: string, title?: string): string {
   const dot = safe.lastIndexOf('.')
   const stem = dot > 0 ? safe.slice(0, dot) : safe
   return `${stem}.claude-draft.md`
+}
+
+function isClaudeDraftPath(value?: string): boolean {
+  return !!value && /\.claude-draft(?: \(\d+\))?\.md$/i.test(fileNameOf(value) ?? '')
 }
 
 function findMinimalReplacement(current: string, next: string): TextReplacement | null {
@@ -852,7 +858,10 @@ export default function MarkdownEditor({
         .catch(() => {})
     }
     tick()
-    const timer = setInterval(tick, 2500)
+    const timer = setInterval(
+      tick,
+      isClaudeDraftPath(pathRef.current) ? CLAUDE_DRAFT_FILE_POLL_MS : EXTERNAL_FILE_POLL_MS
+    )
     return () => {
       alive = false
       clearInterval(timer)

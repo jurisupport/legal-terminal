@@ -4888,7 +4888,13 @@ export default function App(): JSX.Element {
           draftId={tab.id}
           defaultDir={draftsRoot}
           onPath={(p) => setDocPath(tab.id, p)}
-          onAsk={(draftPath, meta) => askClaude('', { docPath: draftPath, ...meta })}
+          onAsk={(draftPath, meta) => {
+            if (draftPath) {
+              setTreeRefresh((current) => current + 1)
+              openFile(draftPath, fileNameFromPath(draftPath), docSide(tab), caseIdForDoc(tab))
+            }
+            askClaude('', { docPath: draftPath, ...meta })
+          }}
           onSendToJuriSupport={sendMarkdownToJuriSupport}
           onSaveHandler={(handler) => {
             if (handler) markdownSaveHandlersRef.current.set(tab.id, handler)
