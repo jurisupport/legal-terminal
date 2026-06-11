@@ -40,8 +40,9 @@ curl -fsSL https://raw.githubusercontent.com/jurisupport/legal-terminal/main/ins
 
 ## 이번 업데이트
 
-최신 릴리스: [v0.1.77](https://github.com/jurisupport/legal-terminal/releases/tag/v0.1.77)
+최신 릴리스: [v0.1.78](https://github.com/jurisupport/legal-terminal/releases/tag/v0.1.78)
 
+- **사건탭 완료 배지**: 터미널 작업 완료 토스트 대신 왼쪽 사건탭 숫자 배지와 사건탭 목록에 완료 작업 수를 표시합니다.
 - **사건탭 업데이트 배지**: Agent가 문서를 수정하면 별도 알림 대신 사건탭에 업데이트 숫자와 반짝임으로 표시합니다.
 - **HWP/HWPX Markdown 추출 및 HWPX 직접 내보내기**: 본문과 표를 Markdown으로 볼 수 있고, Markdown 문서는 PDF/HWPX로 저장할 수 있습니다.
 - **닫기 전 저장 흐름 개선**: 저장하지 않은 Markdown 문서가 있으면 창 닫기 전에 저장하거나 버릴 수 있습니다.

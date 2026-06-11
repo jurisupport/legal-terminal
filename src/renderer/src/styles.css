@@ -220,6 +220,12 @@ body {
   animation: case-tab-icon-sparkle 1.35s ease-in-out infinite;
   filter: drop-shadow(0 0 6px rgba(245, 200, 76, 0.55));
 }
+.activity-item.case-tabs-trigger.has-done {
+  color: #fff;
+}
+.activity-item.case-tabs-trigger.has-done svg {
+  filter: drop-shadow(0 0 6px rgba(92, 211, 138, 0.48));
+}
 .activity-badge.update {
   background: #f5c84c;
   color: #1f1800;
@@ -227,6 +233,13 @@ body {
     0 0 0 2px #252526,
     0 0 10px rgba(245, 200, 76, 0.55);
   animation: case-update-badge-pop 1.35s ease-in-out infinite;
+}
+.activity-badge.done {
+  background: #5cd38a;
+  color: #082113;
+  box-shadow:
+    0 0 0 2px #252526,
+    0 0 10px rgba(92, 211, 138, 0.45);
 }
 .case-tabs-flyout {
   position: absolute;
@@ -305,11 +318,19 @@ body {
   box-shadow: inset 2px 0 0 #f5c84c;
   animation: case-tab-row-sparkle 1.6s ease-in-out infinite;
 }
+.case-tab-row.has-done {
+  border-color: rgba(92, 211, 138, 0.5);
+  background: rgba(92, 211, 138, 0.1);
+  box-shadow: inset 2px 0 0 #5cd38a;
+}
 .case-tab-row:hover {
   background: rgba(255, 255, 255, 0.06);
 }
 .case-tab-row.has-updates:hover {
   background: rgba(245, 200, 76, 0.15);
+}
+.case-tab-row.has-done:hover {
+  background: rgba(92, 211, 138, 0.15);
 }
 .case-tab-row.active {
   background: color-mix(in srgb, var(--accent) 22%, transparent);
@@ -318,6 +339,10 @@ body {
 .case-tab-row.active.has-updates {
   background: color-mix(in srgb, #f5c84c 18%, var(--accent) 16%);
   border-color: rgba(245, 200, 76, 0.72);
+}
+.case-tab-row.active.has-done {
+  background: color-mix(in srgb, #5cd38a 16%, var(--accent) 16%);
+  border-color: rgba(92, 211, 138, 0.66);
 }
 .case-tab-row-main {
   min-width: 0;

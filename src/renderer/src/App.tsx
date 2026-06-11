@@ -2599,6 +2599,7 @@ export default function App(): JSX.Element {
     setActiveTerm(tab.id)
     setWorkActive(side, termKeyOf(tab.id))
     registerCaseTabFromTerm(tab)
+    preloadPastSessions(tab.cwd, tab)
   }
 
   // ＋T / 터미널로 실행: 같은 사건에서 PTY 터미널(claude 자동 실행)을 연다.
@@ -2952,7 +2953,7 @@ export default function App(): JSX.Element {
     })
   }
 
-  // 터미널 작업 상태(진행중/완료/질문대기). 완료·질문 전이에서 알림을 띄운다.
+  // 터미널 작업 상태(진행중/완료/질문대기). 완료는 사건탭 배지로, 질문은 토스트로 알린다.
   const onTermStatus = (id: string, status: TermRunStatus): void => {
     setTermStatus((m) => {
       const n = new Map(m)
@@ -2966,21 +2967,23 @@ export default function App(): JSX.Element {
         n.delete(id)
         return n
       })
+      dismissToastForTerm(id)
     } else {
       playNotificationSound(notificationSound, notificationVolume)
       window.lt.app.requestAttention(status)
       const bg = id !== activeTermRef.current
       if (bg) setTermAttention((s) => new Set(s).add(id))
-      pushToast(id, status)
+      if (status === 'question') pushToast(id, status)
+      else dismissToastForTerm(id)
     }
   }
   const onTermBracketedPasteMode = (id: string, enabled: boolean): void => {
     setTermBracketedPasteMode((m) => (m[id] === enabled ? m : { ...m, [id]: enabled }))
   }
 
-  // 완료/질문 알림 팝업(토스트)
+  // 질문/확인 대기 팝업(토스트)
   const toastSeq = useRef(0)
-  const pushToast = (termId: string, status: Exclude<TermRunStatus, 'working'>): void => {
+  const pushToast = (termId: string, status: 'question'): void => {
     const t = termTabs.find((x) => x.id === termId)
     const key = ++toastSeq.current
     setToasts((ts) => [
@@ -2989,6 +2992,8 @@ export default function App(): JSX.Element {
     ])
     setTimeout(() => setToasts((ts) => ts.filter((x) => x.key !== key)), 12000)
   }
+  const dismissToastForTerm = (termId: string): void =>
+    setToasts((ts) => ts.filter((x) => x.termId !== termId))
   const dismissToast = (key: number): void => setToasts((ts) => ts.filter((x) => x.key !== key))
 
   // Ctrl+Tab: 같은 종류 탭 순환 (터미널끼리 / 문서끼리)
@@ -4236,7 +4241,7 @@ export default function App(): JSX.Element {
     key: number
     termId: string
     title: string
-    status: Exclude<TermRunStatus, 'working'>
+    status: 'question'
   }[]>([])
 
   const termsForCaseTab = (tab: CaseWorkspaceTab): TermTab[] =>
@@ -4254,8 +4259,8 @@ export default function App(): JSX.Element {
     const documentUpdateCount = documentUpdates?.paths.length ?? 0
     const working = terms.some((term) => termStatus.get(term.id) === 'working')
     const question = terms.some((term) => termStatus.get(term.id) === 'question')
-    const doneAgentCount = terms.filter(
-      (term) => isAgentTab(term) && termAttention.has(term.id) && termStatus.get(term.id) === 'done'
+    const doneTaskCount = terms.filter(
+      (term) => termAttention.has(term.id) && termStatus.get(term.id) === 'done'
     ).length
     const active =
       tab.id === activeCaseTabId ||
@@ -4269,18 +4274,35 @@ export default function App(): JSX.Element {
       active,
       documentUpdateCount,
       documentUpdateLatestAt: documentUpdates?.latestAt,
-      doneAgentCount,
+      doneTaskCount,
       status: documentUpdateCount
         ? `업데이트 ${documentUpdateCount}개`
         : question
           ? '확인 대기'
           : working
             ? '작업 중'
+            : doneTaskCount
+              ? `완료 ${doneTaskCount}개`
             : tabCount
               ? `${tabCount}개 탭`
               : '탭 닫힘'
     }
   })
+  const totalCaseDoneTaskCount = caseTabRows.reduce((sum, row) => sum + row.doneTaskCount, 0)
+  const totalCaseNoticeCount = totalCaseDocumentUpdateCount + totalCaseDoneTaskCount
+  const caseTabsShortcut = platform === 'darwin' ? '⌘0' : 'Ctrl+0'
+  const caseTabActivityTitle =
+    totalCaseNoticeCount > 0
+      ? `사건탭 · ${[
+          totalCaseDocumentUpdateCount > 0 ? `업데이트 ${totalCaseDocumentUpdateCount}개` : undefined,
+          totalCaseDoneTaskCount > 0 ? `완료 작업 ${totalCaseDoneTaskCount}개` : undefined
+        ]
+          .filter(Boolean)
+          .join(' · ')} (${caseTabsShortcut})`
+      : `사건탭 (${caseTabsShortcut})`
+  const caseTabActivityBadgeClass =
+    totalCaseDocumentUpdateCount > 0 ? 'update' : totalCaseDoneTaskCount > 0 ? 'done' : ''
+  const caseTabActivityBadgeCount = totalCaseNoticeCount > 0 ? totalCaseNoticeCount : caseTabs.length
   const caseTabTitle = (tab: CaseWorkspaceTab): string =>
     [
       tab.meta?.court ? abbrevCourt(tab.meta.court) : undefined,
@@ -4312,8 +4334,10 @@ export default function App(): JSX.Element {
       docs.find((doc) => doc.id === activeDoc) ||
       docs[0]
     const source = currentCaseFromCaseTab(tab)
+    const pastSessionSource = preferred ?? currentCaseSessionSource(source, sshProfiles)
     setCurrentCase(source)
     setActiveCaseTabId(tab.id)
+    preloadPastSessions(pastSessionSource?.cwd, pastSessionSource)
     setCaseTabs((tabs) =>
       upsertCaseTab(tabs, {
         ...tab,
@@ -5667,18 +5691,14 @@ export default function App(): JSX.Element {
           <button
             className={`activity-item case-tabs-trigger ${caseTabsOpen ? 'active' : ''} ${
               totalCaseDocumentUpdateCount > 0 ? 'has-updates' : ''
-            }`}
-            title={
-              totalCaseDocumentUpdateCount > 0
-                ? `사건탭 · 업데이트 ${totalCaseDocumentUpdateCount}개 (${platform === 'darwin' ? '⌘0' : 'Ctrl+0'})`
-                : `사건탭 (${platform === 'darwin' ? '⌘0' : 'Ctrl+0'})`
-            }
+            } ${totalCaseDocumentUpdateCount === 0 && totalCaseDoneTaskCount > 0 ? 'has-done' : ''}`}
+            title={caseTabActivityTitle}
             onClick={() => setCaseTabsOpen((open) => !open)}
           >
             <IconCaseTabs />
-            {(totalCaseDocumentUpdateCount > 0 || caseTabs.length > 0) && (
-              <span className={`activity-badge ${totalCaseDocumentUpdateCount > 0 ? 'update' : ''}`}>
-                {totalCaseDocumentUpdateCount > 0 ? totalCaseDocumentUpdateCount : caseTabs.length}
+            {caseTabActivityBadgeCount > 0 && (
+              <span className={`activity-badge ${caseTabActivityBadgeClass}`}>
+                {caseTabActivityBadgeCount}
               </span>
             )}
           </button>
@@ -5695,12 +5715,14 @@ export default function App(): JSX.Element {
               {caseTabRows.length === 0 ? (
                 <div className="case-tabs-empty">열린 사건탭 없음</div>
               ) : (
-                caseTabRows.map(({ tab, active, status, doneAgentCount, documentUpdateCount, documentUpdateLatestAt }) => (
+                caseTabRows.map(({ tab, active, status, doneTaskCount, documentUpdateCount, documentUpdateLatestAt }) => (
                   <button
                     key={tab.id}
-                    className={`case-tab-row ${active ? 'active' : ''} ${documentUpdateCount > 0 ? 'has-updates' : ''}`}
+                    className={`case-tab-row ${active ? 'active' : ''} ${documentUpdateCount > 0 ? 'has-updates' : ''} ${
+                      documentUpdateCount === 0 && doneTaskCount > 0 ? 'has-done' : ''
+                    }`}
                     title={`${caseTabTitle(tab)}${documentUpdateCount > 0 ? ` · 업데이트 ${documentUpdateCount}개` : ''}${
-                      doneAgentCount > 0 ? ` · 완료 Agent ${doneAgentCount}개` : ''
+                      doneTaskCount > 0 ? ` · 완료 작업 ${doneTaskCount}개` : ''
                     }\n${caseTabSubtitle(tab)}${
                       documentUpdateLatestAt
                         ? `\n최근 업데이트 ${new Date(documentUpdateLatestAt).toLocaleTimeString('ko-KR')}`
@@ -5729,13 +5751,13 @@ export default function App(): JSX.Element {
                             {documentUpdateCount}
                           </span>
                         )}
-                        {doneAgentCount > 0 && (
+                        {doneTaskCount > 0 && (
                           <span
                             className="case-tab-row-done-badge"
-                            title={`완료된 Agent ${doneAgentCount}개`}
-                            aria-label={`완료된 Agent ${doneAgentCount}개`}
+                            title={`완료된 작업 ${doneTaskCount}개`}
+                            aria-label={`완료된 작업 ${doneTaskCount}개`}
                           >
-                            {doneAgentCount}
+                            {doneTaskCount}
                           </span>
                         )}
                       </span>
@@ -5946,9 +5968,7 @@ export default function App(): JSX.Element {
       {/* claude 질문/확인 대기 팝업 */}
       {toasts.length > 0 && (
         <div className="toasts">
-          {toasts.map((t) => {
-            const waiting = t.status === 'question'
-            return (
+          {toasts.map((t) => (
             <div
               key={t.key}
               className="toast"
@@ -5957,12 +5977,10 @@ export default function App(): JSX.Element {
                 dismissToast(t.key)
               }}
             >
-              <span className="toast-icon">{waiting ? '?' : '✓'}</span>
+              <span className="toast-icon">?</span>
               <span className="toast-body">
                 <b>{t.title}</b>
-                <span className="toast-sub">
-                  {waiting ? 'claude가 확인/입력을 기다립니다' : '터미널 작업이 완료되었습니다'} · 클릭하여 이동
-                </span>
+                <span className="toast-sub">claude가 확인/입력을 기다립니다 · 클릭하여 이동</span>
               </span>
               <button
                 className="toast-x"
@@ -5974,8 +5992,7 @@ export default function App(): JSX.Element {
                 ×
               </button>
             </div>
-            )
-          })}
+          ))}
         </div>
       )}
     </div>
