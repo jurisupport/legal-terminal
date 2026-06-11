@@ -4,6 +4,7 @@ const XML_VERSION = '1.31'
 const MIME_TYPE = 'application/hwp+zip'
 const APP_XML_TYPE = 'application/xml'
 const APP_TEXT_TYPE = 'text/xml'
+const APP_RDF_TYPE = 'application/rdf+xml'
 const PACKAGE_TYPE = 'application/hwpml-package+xml'
 
 const NS = {
@@ -24,6 +25,7 @@ const NS = {
 interface ZipEntryInput {
   name: string
   data: Buffer
+  mediaType?: string
 }
 
 interface MarkdownParagraph {
@@ -474,9 +476,9 @@ function contentXml(title: string): string {
     '<dc:identifier id="uid">legal-terminal-md-to-hwpx</dc:identifier>',
     '</opf:metadata>',
     '<opf:manifest>',
-    `<opf:item id="header" href="header.xml" media-type="${APP_XML_TYPE}" />`,
-    `<opf:item id="section0" href="section0.xml" media-type="${APP_XML_TYPE}" />`,
-    `<opf:item id="settings" href="../settings.xml" media-type="${APP_TEXT_TYPE}" />`,
+    `<opf:item id="header" href="Contents/header.xml" media-type="${APP_XML_TYPE}" />`,
+    `<opf:item id="section0" href="Contents/section0.xml" media-type="${APP_XML_TYPE}" />`,
+    `<opf:item id="settings" href="settings.xml" media-type="${APP_TEXT_TYPE}" />`,
     '</opf:manifest>',
     '<opf:spine>',
     '<opf:itemref idref="section0" linear="yes" />',
@@ -488,20 +490,29 @@ function contentXml(title: string): string {
 function containerXml(): string {
   return [
     '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
-    `<container xmlns="${NS.ocf}">`,
-    '<rootfiles>',
-    `<rootfile full-path="Contents/content.hpf" media-type="${PACKAGE_TYPE}" />`,
-    '</rootfiles>',
-    '</container>'
+    `<ocf:container xmlns:ocf="${NS.ocf}">`,
+    '<ocf:rootfiles>',
+    `<ocf:rootfile full-path="Contents/content.hpf" media-type="${PACKAGE_TYPE}" />`,
+    `<ocf:rootfile full-path="Preview/PrvText.txt" media-type="${APP_TEXT_TYPE}" />`,
+    `<ocf:rootfile full-path="META-INF/container.rdf" media-type="${APP_RDF_TYPE}" />`,
+    '</ocf:rootfiles>',
+    '</ocf:container>'
   ].join('\n')
 }
 
-function manifestXml(): string {
+function manifestXml(entries: ZipEntryInput[]): string {
+  const fileEntries = entries
+    .filter((entry) => entry.name !== 'META-INF/manifest.xml' && entry.mediaType)
+    .map(
+      (entry) =>
+        `<odf:file-entry odf:full-path="${escapeXml(entry.name)}" odf:media-type="${escapeXml(entry.mediaType ?? '')}" />`
+    )
+
   return [
     '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
-    `<manifest:manifest xmlns:manifest="${NS.manifest}">`,
-    `<manifest:file-entry manifest:full-path="/" manifest:media-type="${MIME_TYPE}" />`,
-    '</manifest:manifest>'
+    `<odf:manifest xmlns:odf="${NS.manifest}">`,
+    ...fileEntries,
+    '</odf:manifest>'
   ].join('\n')
 }
 
@@ -530,17 +541,24 @@ function textEntry(value: string): Buffer {
 
 export function createHwpxFromMarkdown(markdown: string, title = '문서'): Buffer {
   const blocks = markdownBlocks(markdown)
+  const entriesWithoutManifest: ZipEntryInput[] = [
+    { name: 'mimetype', data: textEntry(MIME_TYPE), mediaType: MIME_TYPE },
+    { name: 'version.xml', data: textEntry(versionXml()), mediaType: APP_TEXT_TYPE },
+    { name: 'settings.xml', data: textEntry(settingsXml()), mediaType: APP_TEXT_TYPE },
+    { name: 'Contents/content.hpf', data: textEntry(contentXml(title)), mediaType: APP_TEXT_TYPE },
+    { name: 'Contents/header.xml', data: textEntry(headerXml()), mediaType: APP_XML_TYPE },
+    { name: 'Contents/section0.xml', data: textEntry(sectionXml(blocks)), mediaType: APP_XML_TYPE },
+    { name: 'META-INF/container.xml', data: textEntry(containerXml()), mediaType: APP_TEXT_TYPE },
+    { name: 'META-INF/container.rdf', data: textEntry(rdfXml(title)), mediaType: APP_RDF_TYPE },
+    { name: 'Preview/PrvText.txt', data: textEntry(previewText(markdown)), mediaType: APP_TEXT_TYPE }
+  ]
   const entries: ZipEntryInput[] = [
-    { name: 'mimetype', data: textEntry(MIME_TYPE) },
-    { name: 'version.xml', data: textEntry(versionXml()) },
-    { name: 'settings.xml', data: textEntry(settingsXml()) },
-    { name: 'Contents/content.hpf', data: textEntry(contentXml(title)) },
-    { name: 'Contents/header.xml', data: textEntry(headerXml()) },
-    { name: 'Contents/section0.xml', data: textEntry(sectionXml(blocks)) },
-    { name: 'META-INF/container.xml', data: textEntry(containerXml()) },
-    { name: 'META-INF/manifest.xml', data: textEntry(manifestXml()) },
-    { name: 'META-INF/container.rdf', data: textEntry(rdfXml(title)) },
-    { name: 'Preview/PrvText.txt', data: textEntry(previewText(markdown)) }
+    ...entriesWithoutManifest,
+    {
+      name: 'META-INF/manifest.xml',
+      data: textEntry(manifestXml(entriesWithoutManifest)),
+      mediaType: APP_TEXT_TYPE
+    }
   ]
   return createZip(entries)
 }
