@@ -219,6 +219,7 @@ interface DocTab {
     | 'settings'
     | 'diff'
     | 'hearing'
+  caseTabId?: string
   path?: string
   diffId?: string
   hearingCase?: HearingRecordCase
@@ -242,6 +243,7 @@ interface TermTab {
   id: string
   title: string
   kind?: 'terminal' | 'agent'
+  caseTabId?: string
   cwd: string
   recordsFolder?: string
   suggestedRecords?: string // 페어링으로 추천된 소송기록 폴더 (사용자가 '열기' 눌러야 적용)
@@ -887,6 +889,7 @@ const toWorkspaceDoc = (tab: DocTab): WorkspaceDocTabPayload | null => {
     id: tab.id,
     title: tab.title,
     kind: tab.kind as WorkspaceDocTabPayload['kind'],
+    caseTabId: tab.caseTabId,
     path: tab.path,
     side: docSide(tab)
   }
@@ -899,6 +902,7 @@ const toDocTab = (tab: WorkspaceDocTabPayload): DocTab | null => {
     id: tab.id || `file-${++docSeq}`,
     title: tab.title || tab.path?.split(/[\\/]/).pop() || '문서',
     kind: normalizeDocKind(tab.kind, tab.path),
+    caseTabId: tab.caseTabId,
     path: tab.path,
     side: tab.side ?? 'left'
   }
@@ -910,6 +914,7 @@ const docTabDragPayload = (tab: DocTab, side: DockSide = docSide(tab)): TabPaylo
     id: tab.id,
     title: tab.title,
     kind: normalizeDocKind(tab.kind, tab.path) as DocumentTabPayload['kind'],
+    caseTabId: tab.caseTabId,
     path: tab.path,
     side
   }
@@ -950,6 +955,35 @@ const caseIdentityKey = (source: CurrentCase): string => {
 }
 
 const caseTabId = (source: CurrentCase): string => `case-${safeHash(caseIdentityKey(source))}`
+
+const pathMatchesCasePrefix = (path: string, prefix?: string): boolean => {
+  if (!prefix) return false
+  const cleanPath = path.replace(/[\\/]+$/, '')
+  const cleanPrefix = prefix.replace(/[\\/]+$/, '')
+  return cleanPath === cleanPrefix || cleanPath.startsWith(`${cleanPrefix}/`) || cleanPath.startsWith(`${cleanPrefix}\\`)
+}
+
+const caseTabPathPrefixes = (tab: CaseWorkspaceTab): string[] => {
+  const prefixes = [tab.drafts, tab.records, tab.remotePath]
+  if (tab.profileId && tab.remotePath) prefixes.push(remoteUri(tab.profileId, tab.remotePath))
+  return prefixes.filter((path): path is string => !!path)
+}
+
+const inferCaseTabIdForPath = (
+  path: string | undefined,
+  tabs: readonly CaseWorkspaceTab[]
+): string | undefined => {
+  if (!path) return undefined
+  let best: { id: string; length: number } | undefined
+  for (const tab of tabs) {
+    for (const prefix of caseTabPathPrefixes(tab)) {
+      if (!pathMatchesCasePrefix(path, prefix)) continue
+      const length = prefix.replace(/[\\/]+$/, '').length
+      if (!best || length > best.length) best = { id: tab.id, length }
+    }
+  }
+  return best?.id
+}
 
 const caseTabFromCurrentCase = (
   source: CurrentCase,
@@ -994,7 +1028,9 @@ const upsertCaseTab = (
         sshLabel: incoming.sshLabel ?? existing.sshLabel,
         profileId: incoming.profileId ?? existing.profileId,
         remotePath: incoming.remotePath ?? existing.remotePath,
+        activeDocId: incoming.activeDocId ?? existing.activeDocId,
         activeTermId: incoming.activeTermId ?? existing.activeTermId,
+        activeWork: incoming.activeWork ?? existing.activeWork,
         updatedAt: incoming.updatedAt ?? Date.now()
       }
     : incoming
@@ -1016,6 +1052,14 @@ const sanitizeCaseWorkspaceTab = (value: unknown): CaseWorkspaceTab | null => {
   return {
     ...caseTabFromCurrentCase(source, typeof raw.activeTermId === 'string' ? raw.activeTermId : undefined),
     id,
+    activeDocId: typeof raw.activeDocId === 'string' ? raw.activeDocId : undefined,
+    activeWork:
+      raw.activeWork && typeof raw.activeWork === 'object'
+        ? {
+            left: typeof raw.activeWork.left === 'string' ? raw.activeWork.left : undefined,
+            right: typeof raw.activeWork.right === 'string' ? raw.activeWork.right : undefined
+          }
+        : undefined,
     updatedAt: typeof raw.updatedAt === 'number' ? raw.updatedAt : Date.now()
   }
 }
@@ -1177,6 +1221,11 @@ export default function App(): JSX.Element {
   const [caseTabs, setCaseTabs] = useState<CaseWorkspaceTab[]>([])
   const [activeCaseTabId, setActiveCaseTabId] = useState<string>('')
   const [caseTabsOpen, setCaseTabsOpen] = useState(false)
+  const [caseTabContextMenu, setCaseTabContextMenu] = useState<{
+    x: number
+    y: number
+    tabId: string
+  } | null>(null)
   const [agentAttachmentRequests, setAgentAttachmentRequests] = useState<Record<string, AgentAttachmentRequest[]>>({})
   const [termFocusNonce, setTermFocusNonce] = useState<Record<string, number>>({})
   const [termBracketedPasteMode, setTermBracketedPasteMode] = useState<Record<string, boolean>>({})
@@ -1320,6 +1369,23 @@ export default function App(): JSX.Element {
       window.removeEventListener('keydown', closeFromKey)
     }
   }, [caseTabsOpen])
+  useEffect(() => {
+    if (!caseTabContextMenu) return
+    const close = (): void => setCaseTabContextMenu(null)
+    const closeFromKey = (event: KeyboardEvent): void => {
+      if (event.key === 'Escape') close()
+    }
+    document.addEventListener('mousedown', close)
+    document.addEventListener('scroll', close, true)
+    window.addEventListener('keydown', closeFromKey)
+    window.addEventListener('blur', close)
+    return () => {
+      document.removeEventListener('mousedown', close)
+      document.removeEventListener('scroll', close, true)
+      window.removeEventListener('keydown', closeFromKey)
+      window.removeEventListener('blur', close)
+    }
+  }, [caseTabContextMenu])
   const setWorkActive = useCallback((side: DockSide, key: WorkTabKey): void => {
     setActiveWork((active) => ({ ...active, [side]: key }))
   }, [])
@@ -1426,32 +1492,54 @@ export default function App(): JSX.Element {
     closestHTMLElement(element, '[data-doc-id]')?.dataset.docId
   const activateDocTab = (id: string): void => {
     const tab = docTabs.find((t) => t.id === id)
+    if (tab?.caseTabId) setActiveCaseTabId(tab.caseTabId)
     setActiveDoc(id)
-    setWorkActive(docSide(tab), docKey(id))
+    const side = docSide(tab)
+    const key = docKey(id)
+    setWorkActive(side, key)
+    updateCaseTabActivity(tab?.caseTabId ?? activeCaseTabId, {
+      activeDocId: id,
+      activeWork: { ...activeWork, [side]: key }
+    })
   }
   const openAgentDiff = useCallback(
     (request: AgentDiffOpenRequest): void => {
       const id = `agent-diff-${request.id}`
+      const caseTabIdValue = currentCaseTabIdForNewTab(termTabs.find((t) => t.id === activeTerm))
       setAgentDiffs((diffs) => ({ ...diffs, [request.id]: request }))
       setDocTabs((tabs) => {
         const existing = tabs.find((tab) => tab.kind === 'diff' && tab.diffId === request.id)
         if (existing) {
           return tabs.map((tab) =>
-            tab.id === existing.id ? { ...tab, title: request.title, side: 'left' } : tab
+            tab.id === existing.id ? { ...tab, title: request.title, caseTabId: caseTabIdValue, side: 'left' } : tab
           )
         }
-        return [...tabs, { id, title: request.title, kind: 'diff', diffId: request.id, side: 'left' }]
+        return [
+          ...tabs,
+          { id, title: request.title, kind: 'diff', diffId: request.id, caseTabId: caseTabIdValue, side: 'left' }
+        ]
       })
       setMode('explorer')
       setActiveDoc(id)
       setWorkActive('left', docKey(id))
+      updateCaseTabActivity(caseTabIdValue, {
+        activeDocId: id,
+        activeWork: { ...activeWork, left: docKey(id) }
+      })
     },
-    [setWorkActive]
+    [activeTerm, activeWork, setWorkActive, termTabs]
   )
   const activateTermTab = (id: string): void => {
     const tab = termTabs.find((t) => t.id === id)
+    if (tab?.caseTabId) setActiveCaseTabId(tab.caseTabId)
     setActiveTerm(id)
-    setWorkActive(termSide(tab), termKeyOf(id))
+    const side = termSide(tab)
+    const key = termKeyOf(id)
+    setWorkActive(side, key)
+    updateCaseTabActivity(tab?.caseTabId ?? activeCaseTabId, {
+      activeTermId: id,
+      activeWork: { ...activeWork, [side]: key }
+    })
   }
   const moveDocToSide = (id: string, side: DockSide): void => {
     setDocTabs((tabs) => tabs.map((t) => (t.id === id ? { ...t, side } : t)))
@@ -1499,7 +1587,13 @@ export default function App(): JSX.Element {
       return
     }
     const n = ++docSeq
-    const tab: DocTab = { id: `doc-${n}`, title: `새 문서 ${n}.md`, kind: 'mdview', side }
+    const tab: DocTab = {
+      id: `doc-${n}`,
+      title: `새 문서 ${n}.md`,
+      kind: 'mdview',
+      caseTabId: currentCaseTabIdForNewTab(),
+      side
+    }
     setDocTabs((t) => [...t, tab])
     setActiveDoc(tab.id)
     setWorkActive(side, docKey(tab.id))
@@ -1517,7 +1611,7 @@ export default function App(): JSX.Element {
     if (confirmDirty && dirtyDocs.has(id) && !confirmCloseDirtyDocs('tab', tab.title)) return false
     const side = docSide(tab)
     const closingKey = docKey(id)
-    const sideKeys = workKeysForSide(docTabs, termTabs, side)
+    const sideKeys = workKeysForSide(visibleDocTabs, visibleTermTabs, side)
     const nextKey =
       resolveActiveWorkKey(sideKeys, activeWork[side]) === closingKey
         ? nextWorkKeyAfterClose(sideKeys, closingKey)
@@ -1565,7 +1659,7 @@ export default function App(): JSX.Element {
       const workTabForShortcut = workSideForShortcut ? parseWorkKey(activeWork[workSideForShortcut]) : null
       const resolvedWorkKeyForShortcut = workSideForShortcut
         ? resolveActiveWorkKey(
-            workKeysForSide(docTabs, termTabs, workSideForShortcut),
+            workKeysForSide(visibleDocTabs, visibleTermTabs, workSideForShortcut),
             activeWork[workSideForShortcut]
           )
         : ''
@@ -1652,16 +1746,21 @@ export default function App(): JSX.Element {
   }
 
   const openFile = (path: string, name: string, side: DockSide = 'left'): void => {
-    const existing = docTabs.find((t) => t.path === path)
+    const caseTabIdValue = currentCaseTabIdForNewTab()
+    const existing = docTabs.find((t) => t.path === path && caseIdForDoc(t) === caseTabIdValue)
     if (existing) {
       activateDocTab(existing.id)
       return
     }
     const kind = docKindForPath(path)
-    const tab: DocTab = { id: `file-${++docSeq}`, title: name, kind, path, side }
+    const tab: DocTab = { id: `file-${++docSeq}`, title: name, kind, caseTabId: caseTabIdValue, path, side }
     setDocTabs((t) => [...t, tab])
     setActiveDoc(tab.id)
     setWorkActive(side, docKey(tab.id))
+    updateCaseTabActivity(caseTabIdValue, {
+      activeDocId: tab.id,
+      activeWork: { ...activeWork, [side]: docKey(tab.id) }
+    })
   }
 
   useEffect(() => {
@@ -1746,20 +1845,62 @@ export default function App(): JSX.Element {
     return tab
   }
 
-  const registerCaseTabFromTerm = (tab: TermTab): CaseWorkspaceTab =>
-    registerCaseTab(currentCaseFromTerm(tab), tab.id)
+  const registerCaseTabFromTerm = (term: TermTab): CaseWorkspaceTab => {
+    const source = currentCaseFromTerm(term)
+    const tab: CaseWorkspaceTab = {
+      ...caseTabFromCurrentCase(source, term.id),
+      id: term.caseTabId ?? caseTabId(source)
+    }
+    setCaseTabs((tabs) => upsertCaseTab(tabs, tab))
+    setActiveCaseTabId(tab.id)
+    return tab
+  }
+
+  const caseIdForTerm = (term: TermTab): string => term.caseTabId ?? caseTabId(currentCaseFromTerm(term))
+  const caseIdForDoc = (doc: DocTab): string | undefined =>
+    doc.caseTabId ?? inferCaseTabIdForPath(doc.path, caseTabs)
+  const currentCaseTabIdForNewTab = (source?: TermTab): string | undefined =>
+    source?.caseTabId || activeCaseTabId || (currentCase ? caseTabId(currentCase) : undefined)
+  const visibleInActiveCase = (caseTabIdValue?: string): boolean =>
+    !activeCaseTabId || caseTabIdValue === activeCaseTabId
+  const isSharedDocTab = (tab: DocTab): boolean => tab.kind === 'settings'
+  const isDocVisibleInActiveCase = (tab: DocTab): boolean =>
+    isSharedDocTab(tab) || visibleInActiveCase(caseIdForDoc(tab))
+  const updateCaseTabActivity = (
+    caseTabIdValue: string | undefined,
+    patch: Partial<Pick<CaseWorkspaceTab, 'activeDocId' | 'activeTermId' | 'activeWork'>>
+  ): void => {
+    if (!caseTabIdValue) return
+    setCaseTabs((tabs) =>
+      tabs.map((tab) =>
+        tab.id === caseTabIdValue
+          ? {
+              ...tab,
+              ...patch,
+              activeWork: patch.activeWork ?? tab.activeWork,
+              updatedAt: Date.now()
+            }
+          : tab
+      )
+    )
+  }
 
   // 다른 창에서 찢겨/이동돼 온 탭 수신 → 문서 또는 터미널 열기.
   const receiveTabRef = useRef<(p: TabPayload) => void>(() => {})
   receiveTabRef.current = (p) => {
     if (p.kind === 'terminal') {
-      const tab = { ...(p.tab as TermTab), side: (p.tab as TermTab).side ?? 'right' }
+      const rawTab = p.tab as TermTab
+      const receivedCase = currentCaseFromTerm(rawTab)
+      const tab = {
+        ...rawTab,
+        caseTabId: rawTab.caseTabId ?? caseTabId(receivedCase),
+        side: rawTab.side ?? 'right'
+      }
       setTermTabs((tabs) =>
         tabs.some((t) => t.id === tab.id)
           ? tabs.map((t) => (t.id === tab.id ? { ...t, side: termSide(tab) } : t))
           : [...tabs, tab]
       )
-      const receivedCase = currentCaseFromTerm(tab)
       setActiveTerm(tab.id)
       setCurrentCase(receivedCase)
       registerCaseTab(receivedCase, tab.id)
@@ -1781,8 +1922,9 @@ export default function App(): JSX.Element {
     const kind = normalizeDocKind(rawKind, path)
     if (!path && kind !== 'settings') return
     const title = payload?.title ?? p.title ?? pathLeaf(path) ?? '문서'
+    const caseTabIdValue = payload?.caseTabId ?? currentCaseTabIdForNewTab()
     const existing = path
-      ? docTabs.find((t) => t.path === path)
+      ? docTabs.find((t) => t.path === path && caseIdForDoc(t) === caseTabIdValue)
       : payload?.id
         ? docTabs.find((t) => t.id === payload.id)
         : undefined
@@ -1793,7 +1935,7 @@ export default function App(): JSX.Element {
       return
     }
     const id = payload?.id && !docTabs.some((t) => t.id === payload.id) ? payload.id : `file-${++docSeq}`
-    const tab: DocTab = { id, title, kind, path, side }
+    const tab: DocTab = { id, title, kind, caseTabId: caseTabIdValue, path, side }
     setDocTabs((tabs) => [...tabs, tab])
     setActiveDoc(tab.id)
     setWorkActive(side, docKey(tab.id))
@@ -1926,10 +2068,13 @@ export default function App(): JSX.Element {
     side: DockSide = 'right',
     suggestedOptions?: FolderMatchSuggestion[]
   ): void => {
+    const source: CurrentCase = { drafts, records, name, meta: caseMeta }
+    const caseTabIdValue = caseTabId(source)
     const tab: TermTab = {
       id: newId(),
       title: name,
       kind,
+      caseTabId: caseTabIdValue,
       cwd: drafts,
       recordsFolder: records,
       suggestedRecords: suggested,
@@ -2004,10 +2149,22 @@ export default function App(): JSX.Element {
     const title = name || remotePath.replace(/\/+$/, '').split('/').pop() || profile.label
     const draftsUri = remoteUri(profile.id, remotePath)
     const ssh = sshConnFromProfile(profile)
+    const source: CurrentCase = {
+      drafts: draftsUri,
+      records,
+      name: title,
+      meta,
+      ssh,
+      sshLabel: profile.label,
+      profileId: profile.id,
+      remotePath
+    }
+    const caseTabIdValue = caseTabId(source)
     const tab: TermTab = {
       id: newId(),
       title,
       kind,
+      caseTabId: caseTabIdValue,
       cwd: remotePath,
       recordsFolder: records,
       autoClaude: kind === 'terminal',
@@ -2021,16 +2178,6 @@ export default function App(): JSX.Element {
     setTermTabs((t) => [...t, tab])
     setActiveTerm(tab.id)
     setWorkActive(side, termKeyOf(tab.id))
-    const source: CurrentCase = {
-      drafts: draftsUri,
-      records,
-      name: title,
-      meta,
-      ssh,
-      sshLabel: profile.label,
-      profileId: profile.id,
-      remotePath
-    }
     setCurrentCase(source)
     registerCaseTab(source, tab.id)
     preloadPastSessions(tab.cwd, tab)
@@ -2246,6 +2393,7 @@ export default function App(): JSX.Element {
       id: newId(),
       title: title ? title : base?.name ?? cwd.split(/[\\/]/).pop() ?? '세션',
       kind: 'agent',
+      caseTabId: source?.caseTabId ?? (base ? caseTabId(base) : currentCaseTabIdForNewTab(source)),
       cwd,
       recordsFolder: base?.records ?? source?.recordsFolder,
       autoClaude: false,
@@ -2350,6 +2498,7 @@ export default function App(): JSX.Element {
     const tab: TermTab = {
       id: newId(),
       title: cur.title,
+      caseTabId: cur.caseTabId,
       cwd: cur.cwd,
       recordsFolder: cur.recordsFolder,
       suggestedRecords: cur.suggestedRecords,
@@ -2390,6 +2539,7 @@ export default function App(): JSX.Element {
       id: newId(),
       title,
       kind: 'agent',
+      caseTabId: cur?.caseTabId ?? currentCaseTabIdForNewTab(cur),
       cwd,
       recordsFolder: cur?.recordsFolder ?? currentCase?.records,
       autoClaude: false,
@@ -2548,7 +2698,7 @@ export default function App(): JSX.Element {
       )
     )
     setCurrentCase((c) => (c ? { ...c, records: rec } : c))
-    registerCaseTab(currentCaseFromTerm({ ...cur, recordsFolder: rec }), cur.id)
+    registerCaseTabFromTerm({ ...cur, recordsFolder: rec })
     const drafts = historyDraftsForTerm(cur)
     window.lt.case.setPairing(drafts, rec)
     window.lt.case.addHistory({ drafts, records: rec, name: cur.title }).then(setRecent)
@@ -2558,7 +2708,7 @@ export default function App(): JSX.Element {
     const tab = termTabs.find((t) => t.id === id)
     const side = termSide(tab)
     const closingKey = termKeyOf(id)
-    const sideKeys = workKeysForSide(docTabs, termTabs, side)
+    const sideKeys = workKeysForSide(visibleDocTabs, visibleTermTabs, side)
     const nextKey =
       tab && resolveActiveWorkKey(sideKeys, activeWork[side]) === closingKey
         ? nextWorkKeyAfterClose(sideKeys, closingKey)
@@ -2604,7 +2754,11 @@ export default function App(): JSX.Element {
     if (tab) {
       const nextCase = currentCaseFromTerm(tab)
       setCurrentCase(nextCase)
-      registerCaseTab(nextCase, tab.id)
+      registerCaseTabFromTerm(tab)
+      updateCaseTabActivity(caseIdForTerm(tab), {
+        activeTermId: tab.id,
+        activeWork: { ...activeWork, [termSide(tab)]: termKeyOf(tab.id) }
+      })
     }
     setTermAttention((s) => {
       if (!s.has(id)) return s
@@ -2654,7 +2808,7 @@ export default function App(): JSX.Element {
   const cycleTerm = (dir: number, sourceTermId = activeTerm): void => {
     const cur = termTabs.find((t) => t.id === sourceTermId)
     const side = termSide(cur)
-    const scoped = termTabs.filter((t) => termSide(t) === side)
+    const scoped = visibleTermTabs.filter((t) => termSide(t) === side)
     if (scoped.length < 2) return
     const i = scoped.findIndex((t) => t.id === sourceTermId)
     const ni = (((i < 0 ? 0 : i) + dir) % scoped.length + scoped.length) % scoped.length
@@ -2663,7 +2817,7 @@ export default function App(): JSX.Element {
   const cycleDoc = (dir: number): void => {
     const cur = docTabs.find((t) => t.id === activeDoc)
     const side = docSide(cur)
-    const scoped = docTabs.filter((t) => docSide(t) === side)
+    const scoped = visibleDocTabs.filter((t) => docSide(t) === side)
     if (scoped.length < 2) return
     const i = scoped.findIndex((t) => t.id === activeDoc)
     const ni = (((i < 0 ? 0 : i) + dir) % scoped.length + scoped.length) % scoped.length
@@ -2694,13 +2848,13 @@ export default function App(): JSX.Element {
       (sourceKey
         ? (() => {
             const parsed = parseWorkKey(sourceKey)
-            if (parsed?.kind === 'doc') return docSide(docTabs.find((t) => t.id === parsed.id))
-            if (parsed?.kind === 'terminal') return termSide(termTabs.find((t) => t.id === parsed.id))
+            if (parsed?.kind === 'doc') return docSide(visibleDocTabs.find((t) => t.id === parsed.id))
+            if (parsed?.kind === 'terminal') return termSide(visibleTermTabs.find((t) => t.id === parsed.id))
             return undefined
           })()
         : undefined) ??
-      docSide(docTabs.find((t) => t.id === activeDoc))
-    const scoped = workKeysForSide(docTabs, termTabs, fallbackSide)
+      docSide(visibleDocTabs.find((t) => t.id === activeDoc))
+    const scoped = workKeysForSide(visibleDocTabs, visibleTermTabs, fallbackSide)
     if (scoped.length < 2) return
     const activeKey =
       sourceKey && scoped.includes(sourceKey)
@@ -2778,7 +2932,7 @@ export default function App(): JSX.Element {
     }
     // 터미널 유무와 무관하게 현재 사건 컨텍스트에도 반영(뷰어가 이걸 참조)
     setCurrentCase((c) => (c ? { ...c, records: r.path } : c))
-    if (cur) registerCaseTab(currentCaseFromTerm({ ...cur, recordsFolder: r.path }), cur.id)
+    if (cur) registerCaseTabFromTerm({ ...cur, recordsFolder: r.path })
     else if (currentCase) registerCaseTab({ ...currentCase, records: r.path })
     if (draftsForPair) {
       window.lt.case.setPairing(draftsForPair, r.path)
@@ -2806,8 +2960,10 @@ export default function App(): JSX.Element {
     setPdfRecord(null)
   }
 
-  const activeDocTab = docTabs.find((t) => t.id === activeDoc)
-  const activeTermTab = termTabs.find((t) => t.id === activeTerm)
+  const visibleDocTabs = docTabs.filter(isDocVisibleInActiveCase)
+  const visibleTermTabs = termTabs.filter((term) => visibleInActiveCase(caseIdForTerm(term)))
+  const activeDocTab = visibleDocTabs.find((t) => t.id === activeDoc)
+  const activeTermTab = visibleTermTabs.find((t) => t.id === activeTerm)
   // 활성 터미널이 있으면 그 사건, 없으면(터미널 다 닫힘) 마지막 사건 컨텍스트 유지
   // 원격 탭의 작성서류 폴더는 ssh:// URI로 변환(패널·탐색기용). 터미널은 plain cwd를 그대로 씀.
   const activeDraftsFolder =
@@ -2852,12 +3008,13 @@ export default function App(): JSX.Element {
         side: 'right'
       }
       const source = currentCaseFromTerm(tab)
-      setTermTabs((tabs) => [...tabs, tab])
-      setActiveTerm(tab.id)
+      const nextTab = { ...tab, caseTabId: caseTabId(source) }
+      setTermTabs((tabs) => [...tabs, nextTab])
+      setActiveTerm(nextTab.id)
       setCurrentCase(source)
-      setWorkActive('right', termKeyOf(tab.id))
-      registerCaseTab(source, tab.id)
-      preloadPastSessions(tab.cwd, tab)
+      setWorkActive('right', termKeyOf(nextTab.id))
+      registerCaseTab(source, nextTab.id)
+      preloadPastSessions(nextTab.cwd, nextTab)
       void window.lt.case.addHistory({
         drafts: source.drafts,
         records: source.records,
@@ -2879,12 +3036,13 @@ export default function App(): JSX.Element {
       side: 'right'
     }
     const source = currentCaseFromTerm(tab)
-    setTermTabs((tabs) => [...tabs, tab])
-    setActiveTerm(tab.id)
+    const nextTab = { ...tab, caseTabId: caseTabId(source) }
+    setTermTabs((tabs) => [...tabs, nextTab])
+    setActiveTerm(nextTab.id)
     setCurrentCase(source)
-    setWorkActive('right', termKeyOf(tab.id))
-    registerCaseTab(source, tab.id)
-    preloadPastSessions(tab.cwd, tab)
+    setWorkActive('right', termKeyOf(nextTab.id))
+    registerCaseTab(source, nextTab.id)
+    preloadPastSessions(nextTab.cwd, nextTab)
     void window.lt.case.addHistory({
       drafts: source.drafts,
       records: source.records,
@@ -2969,27 +3127,49 @@ export default function App(): JSX.Element {
     `「${attachment.label}」 선택 부분에 대해 `
 
   const buildWorkspaceSnapshot = async (): Promise<WorkspaceSnapshot> => {
-    const docs = docTabs.map(toWorkspaceDoc).filter((t): t is WorkspaceDocTabPayload => !!t)
+    const docs = docTabs
+      .map((tab) => toWorkspaceDoc({ ...tab, caseTabId: tab.caseTabId ?? caseIdForDoc(tab) }))
+      .filter((t): t is WorkspaceDocTabPayload => !!t)
     const terminals = await Promise.all(
       termTabs.map(async (t) => {
-        if (isAgentTab(t)) return { ...t, side: termSide(t) }
+        const caseTabIdValue = caseIdForTerm(t)
+        if (isAgentTab(t)) return { ...t, caseTabId: caseTabIdValue, side: termSide(t) }
         const current = await window.lt.sessions
           .current(t.cwd, (t.createdAt ?? 0) - 3000, t.ssh)
           .catch(() => null)
         if (current?.sessionId) rememberSessionForTerm(t, current.sessionId, current.title)
         return {
           ...t,
+          caseTabId: caseTabIdValue,
           side: termSide(t),
           resumeSessionId: current?.sessionId ?? t.resumeSessionId,
           sessionTitle: current?.title ?? t.sessionTitle
         }
       })
     )
+    const caseTabFromTermPayload = (term: TermTab): CaseWorkspaceTab => {
+      const source = currentCaseFromTerm(term)
+      return {
+        ...caseTabFromCurrentCase(source, term.id),
+        id: term.caseTabId ?? caseTabId(source)
+      }
+    }
+    const caseTabsWithActivity = caseTabs.map((tab) =>
+      tab.id === activeCaseTabId
+        ? {
+            ...tab,
+            activeDocId: activeDocTab && !isSharedDocTab(activeDocTab) ? activeDocTab.id : tab.activeDocId,
+            activeTermId: activeTermTab?.id ?? tab.activeTermId,
+            activeWork,
+            updatedAt: Date.now()
+          }
+        : tab
+    )
     const snapshotCaseTabs = mergeCaseTabs(
-      caseTabs,
+      caseTabsWithActivity,
       [
-        ...terminals.map((term) => caseTabFromCurrentCase(currentCaseFromTerm(term), term.id)),
-        ...(currentCase ? [caseTabFromCurrentCase(currentCase, activeTerm || undefined)] : [])
+        ...terminals.map((term) => caseTabFromTermPayload(term)),
+        ...(currentCase ? [caseTabFromCurrentCase(currentCase, activeTermTab?.id)] : [])
       ]
     )
     return {
@@ -3016,6 +3196,7 @@ export default function App(): JSX.Element {
       id: typeof t.id === 'string' && t.id ? t.id : newId(),
       title: typeof t.title === 'string' && t.title ? t.title : t.cwd.split(/[\\/]/).pop() || '세션',
       kind: t.kind === 'agent' ? 'agent' : 'terminal',
+      caseTabId: typeof t.caseTabId === 'string' ? t.caseTabId : undefined,
       cwd: t.cwd,
       recordsFolder: typeof t.recordsFolder === 'string' ? t.recordsFolder : undefined,
       suggestedRecords: typeof t.suggestedRecords === 'string' ? t.suggestedRecords : undefined,
@@ -3052,89 +3233,127 @@ export default function App(): JSX.Element {
   const restoreWorkspaceSnapshot = (snapshot: WorkspaceSnapshot): void => {
     const snapshotDocs = Array.isArray(snapshot.docs) ? snapshot.docs : []
     const snapshotTerms = Array.isArray(snapshot.terminals) ? snapshot.terminals : []
-    const nextDocs = [...docTabs]
-    const docIdMap = new Map<string, string>()
-    for (const saved of snapshotDocs) {
-      const tab = toDocTab(saved)
-      if (!tab) continue
-      const existingById = nextDocs.find((t) => t.id === tab.id)
-      const existingByPath = tab.path ? nextDocs.find((t) => t.path === tab.path) : undefined
-      const existing = existingById ?? existingByPath
-      if (existing) {
-        docIdMap.set(saved.id, existing.id)
-        continue
-      }
-      nextDocs.push(tab)
-      docIdMap.set(saved.id, tab.id)
-    }
-
-    const nextTerms = [...termTabs]
-    const termIdSet = new Set(nextTerms.map((t) => t.id))
-    for (const saved of snapshotTerms) {
-      const tab = sanitizeWorkspaceTerm(saved)
-      if (!tab || termIdSet.has(tab.id)) continue
-      nextTerms.push(tab)
-      termIdSet.add(tab.id)
-    }
-
-    setDocTabs(nextDocs)
-    setTermTabs(nextTerms)
-
-    const activeDocId =
-      (snapshot.activeDoc && docIdMap.get(snapshot.activeDoc)) ||
-      (activeDoc && nextDocs.some((t) => t.id === activeDoc) ? activeDoc : nextDocs[0]?.id ?? '')
-    const activeTermId =
-      (snapshot.activeTerm && nextTerms.some((t) => t.id === snapshot.activeTerm)
-        ? snapshot.activeTerm
-        : undefined) ||
-      (activeTerm && nextTerms.some((t) => t.id === activeTerm) ? activeTerm : nextTerms[0]?.id ?? '')
-    const activeTermTab = nextTerms.find((t) => t.id === activeTermId)
     const restoredCase = sanitizeCurrentCase(snapshot.currentCase)
     const restoredCaseTabs = Array.isArray(snapshot.caseTabs)
       ? snapshot.caseTabs
           .map(sanitizeCaseWorkspaceTab)
           .filter((tab): tab is CaseWorkspaceTab => !!tab)
       : []
+
+    const nextTerms = [...termTabs]
+    const termIdSet = new Set(nextTerms.map((t) => t.id))
+    for (const saved of snapshotTerms) {
+      const tab = sanitizeWorkspaceTerm(saved)
+      if (!tab || termIdSet.has(tab.id)) continue
+      const source = currentCaseFromTerm(tab)
+      nextTerms.push({ ...tab, caseTabId: tab.caseTabId ?? caseTabId(source) })
+      termIdSet.add(tab.id)
+    }
+
+    const caseTabFromTermForRestore = (term: TermTab): CaseWorkspaceTab => {
+      const source = currentCaseFromTerm(term)
+      return {
+        ...caseTabFromCurrentCase(source, term.id),
+        id: term.caseTabId ?? caseTabId(source)
+      }
+    }
     const nextCaseTabs = mergeCaseTabs(caseTabs, [
       ...restoredCaseTabs,
-      ...nextTerms.map((term) => caseTabFromCurrentCase(currentCaseFromTerm(term), term.id)),
-      ...(restoredCase ? [caseTabFromCurrentCase(restoredCase, activeTermId || undefined)] : [])
+      ...nextTerms.map(caseTabFromTermForRestore),
+      ...(restoredCase ? [caseTabFromCurrentCase(restoredCase, snapshot.activeTerm || undefined)] : [])
     ])
+
+    const nextDocs = [...docTabs]
+    const docIdMap = new Map<string, string>()
+    for (const saved of snapshotDocs) {
+      const tab = toDocTab(saved)
+      if (!tab) continue
+      const caseTabIdValue =
+        tab.caseTabId ??
+        inferCaseTabIdForPath(tab.path, nextCaseTabs) ??
+        (nextCaseTabs.length === 1 && !isSharedDocTab(tab) ? nextCaseTabs[0].id : undefined)
+      const nextTab = { ...tab, caseTabId: caseTabIdValue }
+      const existingById = nextDocs.find((t) => t.id === nextTab.id)
+      const existingByPath = nextTab.path
+        ? nextDocs.find(
+            (t) =>
+              t.path === nextTab.path &&
+              (t.caseTabId ?? inferCaseTabIdForPath(t.path, nextCaseTabs)) === nextTab.caseTabId
+          )
+        : undefined
+      const existing = existingById ?? existingByPath
+      if (existing) {
+        docIdMap.set(saved.id, existing.id)
+        continue
+      }
+      nextDocs.push(nextTab)
+      docIdMap.set(saved.id, nextTab.id)
+    }
+
+    const nextActiveCaseTabId =
+      (typeof snapshot.activeCaseTabId === 'string' &&
+      nextCaseTabs.some((tab) => tab.id === snapshot.activeCaseTabId)
+        ? snapshot.activeCaseTabId
+        : undefined) ??
+      (restoredCase ? caseTabId(restoredCase) : undefined) ??
+      (activeCaseTabId && nextCaseTabs.some((tab) => tab.id === activeCaseTabId)
+        ? activeCaseTabId
+        : undefined) ??
+      nextCaseTabs[0]?.id ??
+      ''
+    const caseDocs = nextDocs.filter(
+      (doc) => isSharedDocTab(doc) || !nextActiveCaseTabId || doc.caseTabId === nextActiveCaseTabId
+    )
+    const caseTerms = nextTerms.filter(
+      (term) => !nextActiveCaseTabId || caseIdForTerm(term) === nextActiveCaseTabId
+    )
+    const activeCaseTab = nextCaseTabs.find((tab) => tab.id === nextActiveCaseTabId)
+    const activeDocId =
+      (snapshot.activeDoc && docIdMap.get(snapshot.activeDoc)) ||
+      (activeCaseTab?.activeDocId && caseDocs.some((t) => t.id === activeCaseTab.activeDocId)
+        ? activeCaseTab.activeDocId
+        : undefined) ||
+      (activeDoc && caseDocs.some((t) => t.id === activeDoc) ? activeDoc : caseDocs[0]?.id ?? '')
+    const activeTermId =
+      (snapshot.activeTerm && caseTerms.some((t) => t.id === snapshot.activeTerm)
+        ? snapshot.activeTerm
+        : undefined) ||
+      (activeCaseTab?.activeTermId && caseTerms.some((t) => t.id === activeCaseTab.activeTermId)
+        ? activeCaseTab.activeTermId
+        : undefined) ||
+      (activeTerm && caseTerms.some((t) => t.id === activeTerm) ? activeTerm : caseTerms[0]?.id ?? '')
+    const activeTermTab = nextTerms.find((t) => t.id === activeTermId)
+
+    setDocTabs(nextDocs)
+    setTermTabs(nextTerms)
     setActiveDoc(activeDocId)
     setActiveTerm(activeTermId)
     setCaseTabs(nextCaseTabs)
 
     const validKeys = new Set([
-      ...nextDocs.map((t) => docKey(t.id)),
-      ...nextTerms.map((t) => termKeyOf(t.id))
+      ...caseDocs.map((t) => docKey(t.id)),
+      ...caseTerms.map((t) => termKeyOf(t.id))
     ])
     const firstKeyForSide = (side: DockSide): string => {
-      const doc = nextDocs.find((t) => docSide(t) === side)
+      const doc = caseDocs.find((t) => docSide(t) === side)
       if (doc) return docKey(doc.id)
-      const term = nextTerms.find((t) => termSide(t) === side)
+      const term = caseTerms.find((t) => termSide(t) === side)
       return term ? termKeyOf(term.id) : ''
     }
+    const restoredActiveWork = activeCaseTab?.activeWork ?? snapshot.activeWork
     const left =
-      isWorkKey(snapshot.activeWork?.left) && validKeys.has(snapshot.activeWork.left)
-        ? snapshot.activeWork.left
+      isWorkKey(restoredActiveWork?.left) && validKeys.has(restoredActiveWork.left)
+        ? restoredActiveWork.left
         : firstKeyForSide('left')
     const right =
-      isWorkKey(snapshot.activeWork?.right) && validKeys.has(snapshot.activeWork.right)
-        ? snapshot.activeWork.right
+      isWorkKey(restoredActiveWork?.right) && validKeys.has(restoredActiveWork.right)
+        ? restoredActiveWork.right
         : firstKeyForSide('right')
     setActiveWork({ left, right })
 
     if (isWorkspaceMode(snapshot.mode)) setMode(snapshot.mode)
     const nextCurrentCase = restoredCase ?? (activeTermTab ? currentCaseFromTerm(activeTermTab) : currentCase)
     setCurrentCase(nextCurrentCase)
-    const nextActiveCaseTabId =
-      (typeof snapshot.activeCaseTabId === 'string' &&
-      nextCaseTabs.some((tab) => tab.id === snapshot.activeCaseTabId)
-        ? snapshot.activeCaseTabId
-        : undefined) ??
-      (activeTermTab ? caseTabId(currentCaseFromTerm(activeTermTab)) : undefined) ??
-      (nextCurrentCase ? caseTabId(nextCurrentCase) : undefined) ??
-      activeCaseTabId
     setActiveCaseTabId(nextActiveCaseTabId)
     nextTerms.forEach((term) => preloadPastSessions(term.cwd, term))
     const restoredCaseSource = currentCaseSessionSource(nextCurrentCase, sshProfiles)
@@ -3506,7 +3725,10 @@ export default function App(): JSX.Element {
     // 파일: 이름 없으면 무제 스크래치(저장 시 이름 물어봄)
     if (!n) {
       const id = `doc-${++docSeq}`
-      setDocTabs((t) => [...t, { id, title: '무제.md', kind: 'mdview', side: 'left' }])
+      setDocTabs((t) => [
+        ...t,
+        { id, title: '무제.md', kind: 'mdview', caseTabId: currentCaseTabIdForNewTab(), side: 'left' }
+      ])
       setActiveDoc(id)
       setWorkActive('left', docKey(id))
       return
@@ -3579,7 +3801,7 @@ export default function App(): JSX.Element {
   const activeTermRef = useRef(activeTerm)
   activeTermRef.current = activeTerm
   const sendClaude = (payload: string, opts?: { displayText?: string }): void => {
-    const tab = resolveClaudeTargetTab(termTabs, activeTerm, activeWork)
+    const tab = resolveClaudeTargetTab(visibleTermTabs, activeTerm, activeWork)
     if (tab && isAgentTab(tab)) {
       void window.lt.agent.send(tab.id, { text: payload, displayText: opts?.displayText })
       return
@@ -3782,17 +4004,25 @@ export default function App(): JSX.Element {
   const [toasts, setToasts] = useState<{ key: number; termId: string; title: string }[]>([])
 
   const termsForCaseTab = (tab: CaseWorkspaceTab): TermTab[] =>
-    termTabs.filter((term) => caseTabId(currentCaseFromTerm(term)) === tab.id)
+    termTabs.filter((term) => caseIdForTerm(term) === tab.id)
+  const docsForCaseTab = (tab: CaseWorkspaceTab): DocTab[] =>
+    docTabs.filter((doc) => !isSharedDocTab(doc) && caseIdForDoc(doc) === tab.id)
   const caseTabRows = caseTabs.map((tab) => {
     const terms = termsForCaseTab(tab)
+    const docs = docsForCaseTab(tab)
     const working = terms.some((term) => termStatus.get(term.id) === 'working')
     const question = terms.some((term) => termStatus.get(term.id) === 'question')
-    const active = tab.id === activeCaseTabId || terms.some((term) => term.id === activeTerm)
+    const active =
+      tab.id === activeCaseTabId ||
+      terms.some((term) => term.id === activeTerm) ||
+      docs.some((doc) => doc.id === activeDoc)
+    const tabCount = terms.length + docs.length
     return {
       tab,
       terms,
+      docs,
       active,
-      status: question ? '확인 대기' : working ? '작업 중' : terms.length ? `${terms.length}개 탭` : '탭 닫힘'
+      status: question ? '확인 대기' : working ? '작업 중' : tabCount ? `${tabCount}개 탭` : '탭 닫힘'
     }
   })
   const caseTabTitle = (tab: CaseWorkspaceTab): string =>
@@ -3816,35 +4046,139 @@ export default function App(): JSX.Element {
 
   const openCaseTab = (tab: CaseWorkspaceTab): void => {
     const terms = termsForCaseTab(tab)
+    const docs = docsForCaseTab(tab)
     const preferred =
       terms.find((term) => term.id === tab.activeTermId) ||
       terms.find((term) => term.id === activeTerm) ||
       terms[0]
+    const preferredDoc =
+      docs.find((doc) => doc.id === tab.activeDocId) ||
+      docs.find((doc) => doc.id === activeDoc) ||
+      docs[0]
     const source = currentCaseFromCaseTab(tab)
     setCurrentCase(source)
     setActiveCaseTabId(tab.id)
     setCaseTabs((tabs) =>
       upsertCaseTab(tabs, {
         ...tab,
+        activeDocId: preferredDoc?.id ?? tab.activeDocId,
         activeTermId: preferred?.id ?? tab.activeTermId,
         updatedAt: Date.now()
       })
     )
     setCaseTabsOpen(false)
     setMode('explorer')
+    const validKeys = new Set([
+      ...docs.map((doc) => docKey(doc.id)),
+      ...terms.map((term) => termKeyOf(term.id))
+    ])
+    const firstKeyForSide = (side: DockSide): string => {
+      const doc = docs.find((item) => docSide(item) === side)
+      if (doc) return docKey(doc.id)
+      const term = terms.find((item) => termSide(item) === side)
+      return term ? termKeyOf(term.id) : ''
+    }
+    const nextWork = {
+      left:
+        isWorkKey(tab.activeWork?.left) && validKeys.has(tab.activeWork.left)
+          ? tab.activeWork.left
+          : firstKeyForSide('left'),
+      right:
+        isWorkKey(tab.activeWork?.right) && validKeys.has(tab.activeWork.right)
+          ? tab.activeWork.right
+          : firstKeyForSide('right')
+    }
+    setActiveWork(nextWork)
+    updateCaseTabActivity(tab.id, {
+      activeDocId: preferredDoc?.id ?? tab.activeDocId,
+      activeTermId: preferred?.id ?? tab.activeTermId,
+      activeWork: nextWork
+    })
+    if (preferredDoc) setActiveDoc(preferredDoc.id)
     if (preferred) {
-      selectTerm(preferred.id)
+      setActiveTerm(preferred.id)
       return
     }
     setActiveTerm('')
-    setActiveWork((active) => {
-      const left = parseWorkKey(active.left)
-      const right = parseWorkKey(active.right)
-      return {
-        left: left?.kind === 'terminal' ? '' : active.left,
-        right: right?.kind === 'terminal' ? '' : active.right
-      }
+  }
+
+  const closeCaseTab = (tabId: string): void => {
+    const tab = caseTabs.find((item) => item.id === tabId)
+    if (!tab) return
+    const docs = docsForCaseTab(tab)
+    const terms = termsForCaseTab(tab)
+    const dirty = docs.filter((doc) => dirtyDocs.has(doc.id))
+    if (dirty.length > 0) {
+      const names = dirty.slice(0, 5).map((doc) => `- ${doc.title}`)
+      const more = dirty.length > names.length ? `\n- 외 ${dirty.length - names.length}개` : ''
+      if (
+        !window.confirm(
+          `이 사건탭에 저장하지 않은 문서가 있습니다.\n\n${names.join('\n')}${more}\n\n사건탭을 닫을까요?`
+        )
+      )
+        return
+    }
+    const working = terms.filter((term) => termStatus.get(term.id) === 'working')
+    if (working.length > 0 && !window.confirm('이 사건탭에 아직 작업 중인 Claude/Agent가 있습니다. 닫을까요?')) {
+      return
+    }
+
+    for (const term of terms) {
+      if (isAgentTab(term)) void window.lt.agent.close(term.id)
+      else window.lt.pty.kill(term.id)
+    }
+    const docIds = new Set(docs.map((doc) => doc.id))
+    const termIds = new Set(terms.map((term) => term.id))
+    const remainingCaseTabs = caseTabs.filter((item) => item.id !== tabId)
+
+    setDocTabs((tabs) => tabs.filter((doc) => !docIds.has(doc.id)))
+    setTermTabs((tabs) => tabs.filter((term) => !termIds.has(term.id)))
+    setDirtyDocs((ids) => {
+      const next = new Set(ids)
+      for (const id of docIds) next.delete(id)
+      return next
     })
+    setPdfStatus((status) => {
+      const next = { ...status }
+      for (const id of docIds) delete next[id]
+      return next
+    })
+    setAgentAttachmentRequests((requests) => {
+      const next = { ...requests }
+      for (const id of termIds) delete next[id]
+      return next
+    })
+    setTermAttention((ids) => {
+      const next = new Set(ids)
+      for (const id of termIds) next.delete(id)
+      return next
+    })
+    setTermStatus((status) => {
+      const next = new Map(status)
+      for (const id of termIds) next.delete(id)
+      return next
+    })
+    setTermBracketedPasteMode((modes) => {
+      const next = { ...modes }
+      for (const id of termIds) delete next[id]
+      return next
+    })
+    setCaseTabs(remainingCaseTabs)
+    setCaseTabContextMenu(null)
+
+    if (activeCaseTabId !== tabId) return
+    const nextTab = remainingCaseTabs[0]
+    if (nextTab) {
+      openCaseTab(nextTab)
+      return
+    }
+    setActiveCaseTabId('')
+    setCurrentCase(null)
+    setActiveDoc('')
+    setActiveTerm('')
+    setActiveWork({ left: '', right: '' })
+    setFolderRecord(null)
+    setPdfRecord(null)
   }
 
   const cycleCaseTab = (dir: number): void => {
@@ -4019,6 +4353,7 @@ export default function App(): JSX.Element {
       id: newId(),
       title: buildHearingRecordTitle(hearingCase, hearing),
       kind: 'hearing',
+      caseTabId: currentCaseTabIdForNewTab(activeTermTab),
       path,
       hearingCase,
       hearingDrafts: drafts,
@@ -4660,8 +4995,8 @@ export default function App(): JSX.Element {
       )
     }
 
-    const docs = docTabs.filter((t) => docSide(t) === side)
-    const terms = termTabs.filter((t) => termSide(t) === side)
+    const docs = visibleDocTabs.filter((t) => docSide(t) === side)
+    const terms = visibleTermTabs.filter((t) => termSide(t) === side)
     const workTabs = [
       ...docs.map((t) => ({
         id: docKey(t.id),
@@ -4846,7 +5181,7 @@ export default function App(): JSX.Element {
         />
         {sessionListOpen && side === sessionListSide && (
           <SessionList
-            sessions={termTabs}
+            sessions={visibleTermTabs}
             activeId={activeTerm}
             filter={sessionFilter}
             onFilter={setSessionFilter}
@@ -5048,6 +5383,15 @@ export default function App(): JSX.Element {
                     className={`case-tab-row ${active ? 'active' : ''}`}
                     title={`${caseTabTitle(tab)}\n${caseTabSubtitle(tab)}`}
                     onClick={() => openCaseTab(tab)}
+                    onContextMenu={(e) => {
+                      e.preventDefault()
+                      e.stopPropagation()
+                      setCaseTabContextMenu({
+                        x: Math.max(8, Math.min(e.clientX, window.innerWidth - 220 - 8)),
+                        y: Math.max(8, Math.min(e.clientY, window.innerHeight - 48 - 8)),
+                        tabId: tab.id
+                      })
+                    }}
                   >
                     <span className="case-tab-row-main">
                       <span className="case-tab-row-title">{caseTabTitle(tab)}</span>
@@ -5063,6 +5407,26 @@ export default function App(): JSX.Element {
                 + 새 사건
               </button>
             </div>
+            {caseTabContextMenu && (
+              <div
+                className="tab-context-menu"
+                role="menu"
+                style={{ left: caseTabContextMenu.x, top: caseTabContextMenu.y }}
+                onMouseDown={(e) => e.stopPropagation()}
+              >
+                <button
+                  className="tab-context-menu-item"
+                  role="menuitem"
+                  title="이 사건탭과 여기에 속한 문서/터미널 탭을 닫습니다"
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    closeCaseTab(caseTabContextMenu.tabId)
+                  }}
+                >
+                  <span>사건탭 닫기</span>
+                </button>
+              </div>
+            )}
           </div>
         )}
         <div className="activitybar-bottom">
@@ -5218,7 +5582,7 @@ export default function App(): JSX.Element {
               )
             )
             setCurrentCase((c) => (c ? { ...c, records: uri } : c))
-            if (cur) registerCaseTab(currentCaseFromTerm({ ...cur, recordsFolder: uri }), cur.id)
+            if (cur) registerCaseTabFromTerm({ ...cur, recordsFolder: uri })
             else if (currentCase) registerCaseTab({ ...currentCase, records: uri })
             // 페어링 기억 → 다음에 이 사건을 열면 자동 적용
             const draftsPath = recordsPick.draftsPath ?? (cur?.ssh ? cur.cwd : undefined)

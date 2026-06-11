@@ -62,6 +62,7 @@ interface TerminalTabPayload {
   id: string
   title: string
   kind?: 'terminal' | 'agent'
+  caseTabId?: string
   cwd: string
   recordsFolder?: string
   suggestedRecords?: string
@@ -89,6 +90,7 @@ interface DocumentTabPayload {
   id?: string
   title: string
   kind?: 'markdown' | 'mdview' | 'file' | 'pdf' | 'image' | 'hwp' | 'docx' | 'csv' | 'settings' | 'hearing'
+  caseTabId?: string
   path?: string
   side?: 'left' | 'right'
 }
@@ -116,6 +118,7 @@ interface WorkspaceDocTabPayload {
   id: string
   title: string
   kind: 'markdown' | 'mdview' | 'file' | 'pdf' | 'image' | 'hwp' | 'docx' | 'csv' | 'settings' | 'hearing'
+  caseTabId?: string
   path?: string
   side?: 'left' | 'right'
 }
@@ -139,7 +142,9 @@ interface WorkspaceCaseTabPayload {
   sshLabel?: string
   profileId?: string
   remotePath?: string
+  activeDocId?: string
   activeTermId?: string
+  activeWork?: { left?: string; right?: string }
   updatedAt?: number
 }
 
