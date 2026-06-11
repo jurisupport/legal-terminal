@@ -75,6 +75,7 @@ export interface AgentPermissionRequest {
 }
 
 export interface AgentPermissionDecision {
+  sessionId?: string
   requestId: string
   decision: 'allow' | 'reject'
   message?: string

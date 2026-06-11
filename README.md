@@ -40,7 +40,7 @@ curl -fsSL https://raw.githubusercontent.com/jurisupport/legal-terminal/main/ins
 
 ## 이번 업데이트
 
-최신 릴리스: [v0.1.73](https://github.com/jurisupport/legal-terminal/releases/tag/v0.1.73)
+최신 릴리스: [v0.1.75](https://github.com/jurisupport/legal-terminal/releases/tag/v0.1.75)
 
 - **문서 변경 알림 사건 연결**: Agent가 수정한 문서 알림을 눌렀을 때 원래 사건탭에서 문서가 열립니다.
 - **HWP/HWPX Markdown 추출**: 본문과 표를 Markdown으로 볼 수 있고 `.md`로 저장할 수 있습니다.

@@ -335,6 +335,7 @@ export interface AgentSendInput {
 }
 
 export interface AgentPermissionDecision {
+  sessionId?: string
   requestId: string
   decision: 'allow' | 'reject'
   message?: string

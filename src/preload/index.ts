@@ -410,6 +410,7 @@ interface AgentSendInput {
 }
 
 interface AgentPermissionDecision {
+  sessionId?: string
   requestId: string
   decision: 'allow' | 'reject'
   message?: string

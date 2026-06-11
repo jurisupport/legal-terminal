@@ -2238,7 +2238,8 @@ export default function AgentPanel({
     decision: 'allow' | 'reject',
     remember = false
   ): Promise<void> => {
-    const result = await window.lt.agent.approve({ requestId, decision, remember })
+    setError('')
+    const result = await window.lt.agent.approve({ sessionId: id, requestId, decision, remember })
     if (!result.ok) setError(result.error ?? '권한 응답을 보낼 수 없습니다.')
   }
 
@@ -2324,7 +2325,12 @@ export default function AgentPanel({
   }, [id])
 
   useEffect(() => {
-    if (!visible || (status !== 'working' && !authActive)) return
+    const interruptible =
+      status === 'working' ||
+      status === 'waiting_permission' ||
+      status === 'waiting_user' ||
+      authActive
+    if (!visible || !interruptible) return
     const onKeyDown = (event: KeyboardEvent): void => {
       if (event.key !== 'Escape' || event.repeat) return
       event.preventDefault()

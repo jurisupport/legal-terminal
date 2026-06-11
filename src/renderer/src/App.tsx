@@ -1243,6 +1243,7 @@ export default function App(): JSX.Element {
 
   const [termTabs, setTermTabs] = useState<TermTab[]>([])
   const [activeTerm, setActiveTerm] = useState<string>('')
+  const [mountedTermIds, setMountedTermIds] = useState<Set<string>>(new Set())
   const [caseTabs, setCaseTabs] = useState<CaseWorkspaceTab[]>([])
   const [activeCaseTabId, setActiveCaseTabId] = useState<string>('')
   const caseTabCycleOrderRef = useRef<string[]>([])
@@ -2946,7 +2947,7 @@ export default function App(): JSX.Element {
     })
   }
 
-  // 터미널 작업 상태(진행중/완료/질문대기). 완료·질문 전이에서만 소리.
+  // 터미널 작업 상태(진행중/완료/질문대기). 완료·질문 전이에서 알림을 띄운다.
   const onTermStatus = (id: string, status: TermRunStatus): void => {
     setTermStatus((m) => {
       const n = new Map(m)
@@ -2965,19 +2966,22 @@ export default function App(): JSX.Element {
       window.lt.app.requestAttention(status)
       const bg = id !== activeTermRef.current
       if (bg) setTermAttention((s) => new Set(s).add(id))
-      if (status === 'question' && bg) pushToast(id)
+      pushToast(id, status)
     }
   }
   const onTermBracketedPasteMode = (id: string, enabled: boolean): void => {
     setTermBracketedPasteMode((m) => (m[id] === enabled ? m : { ...m, [id]: enabled }))
   }
 
-  // 질문/확인 대기 팝업(토스트)
+  // 완료/질문 알림 팝업(토스트)
   const toastSeq = useRef(0)
-  const pushToast = (termId: string): void => {
+  const pushToast = (termId: string, status: Exclude<TermRunStatus, 'working'>): void => {
     const t = termTabs.find((x) => x.id === termId)
     const key = ++toastSeq.current
-    setToasts((ts) => [...ts.filter((x) => x.termId !== termId), { key, termId, title: t?.title ?? '세션' }])
+    setToasts((ts) => [
+      ...ts.filter((x) => x.termId !== termId),
+      { key, termId, title: t?.title ?? '세션', status }
+    ])
     setTimeout(() => setToasts((ts) => ts.filter((x) => x.key !== key)), 12000)
   }
   const dismissToast = (key: number): void => setToasts((ts) => ts.filter((x) => x.key !== key))
@@ -3140,6 +3144,27 @@ export default function App(): JSX.Element {
 
   const visibleDocTabs = docTabs.filter(isDocVisibleInActiveCase)
   const visibleTermTabs = termTabs.filter((term) => visibleInActiveCase(caseIdForTerm(term)))
+  const visibleTermIdsKey = visibleTermTabs.map((term) => term.id).join('|')
+  const termIdsKeyForMount = termTabs.map((term) => term.id).join('|')
+  useEffect(() => {
+    const liveIds = new Set(termTabs.map((term) => term.id))
+    setMountedTermIds((ids) => {
+      let changed = false
+      const next = new Set<string>()
+      for (const id of ids) {
+        if (liveIds.has(id)) next.add(id)
+        else changed = true
+      }
+      for (const term of visibleTermTabs) {
+        if (next.has(term.id)) continue
+        next.add(term.id)
+        changed = true
+      }
+      return changed ? next : ids
+    })
+  }, [termIdsKeyForMount, visibleTermIdsKey]) // eslint-disable-line react-hooks/exhaustive-deps
+  const shouldMountTermPane = (term: TermTab): boolean =>
+    mountedTermIds.has(term.id) || visibleInActiveCase(caseIdForTerm(term))
   const activeDocTab = visibleDocTabs.find((t) => t.id === activeDoc)
   const activeTermTab = visibleTermTabs.find((t) => t.id === activeTerm)
   // 활성 터미널이 있으면 그 사건, 없으면(터미널 다 닫힘) 마지막 사건 컨텍스트 유지
@@ -4202,7 +4227,12 @@ export default function App(): JSX.Element {
   // claude 완료 주목 표시가 필요한 터미널 id 집합 + 진행중/완료 상태
   const [termAttention, setTermAttention] = useState<Set<string>>(new Set())
   const [termStatus, setTermStatus] = useState<Map<string, TermRunStatus>>(new Map())
-  const [toasts, setToasts] = useState<{ key: number; termId: string; title: string }[]>([])
+  const [toasts, setToasts] = useState<{
+    key: number
+    termId: string
+    title: string
+    status: Exclude<TermRunStatus, 'working'>
+  }[]>([])
 
   const termsForCaseTab = (tab: CaseWorkspaceTab): TermTab[] =>
     termTabs.filter((term) => caseIdForTerm(term) === tab.id)
@@ -5240,6 +5270,7 @@ export default function App(): JSX.Element {
 
     const docs = visibleDocTabs.filter((t) => docSide(t) === side)
     const terms = visibleTermTabs.filter((t) => termSide(t) === side)
+    const mountedTerms = termTabs.filter((t) => termSide(t) === side && shouldMountTermPane(t))
     const workTabs = [
       ...docs.map((t) => ({
         id: docKey(t.id),
@@ -5477,7 +5508,7 @@ export default function App(): JSX.Element {
               {renderDocContent(activeDocForPane)}
             </div>
           )}
-          {terms.map((t) => (
+          {mountedTerms.map((t) => (
             <div
               key={t.id}
               className="term-pane"
@@ -5893,7 +5924,9 @@ export default function App(): JSX.Element {
               </button>
             </div>
           ))}
-          {toasts.map((t) => (
+          {toasts.map((t) => {
+            const waiting = t.status === 'question'
+            return (
             <div
               key={t.key}
               className="toast"
@@ -5902,10 +5935,12 @@ export default function App(): JSX.Element {
                 dismissToast(t.key)
               }}
             >
-              <span className="toast-icon">❓</span>
+              <span className="toast-icon">{waiting ? '?' : '✓'}</span>
               <span className="toast-body">
                 <b>{t.title}</b>
-                <span className="toast-sub">claude가 확인/입력을 기다립니다 — 클릭하여 이동</span>
+                <span className="toast-sub">
+                  {waiting ? 'claude가 확인/입력을 기다립니다' : '터미널 작업이 완료되었습니다'} · 클릭하여 이동
+                </span>
               </span>
               <button
                 className="toast-x"
@@ -5917,7 +5952,8 @@ export default function App(): JSX.Element {
                 ×
               </button>
             </div>
-          ))}
+            )
+          })}
         </div>
       )}
     </div>

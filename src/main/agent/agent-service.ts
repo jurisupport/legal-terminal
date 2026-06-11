@@ -9,6 +9,7 @@ import {
   type McpServerStatus,
   type PermissionMode,
   type PermissionResult,
+  type PermissionUpdate,
   type UserDialogRequest,
   type UserDialogResult
 } from '@anthropic-ai/claude-agent-sdk'
@@ -35,7 +36,9 @@ import type {
 
 interface PendingPermission {
   sessionId: string
-  resolve: (value: PermissionResult) => void
+  toolUseId: string
+  suggestions?: PermissionUpdate[]
+  finish: (value: PermissionResult, decision: 'allow' | 'reject', emitWorking?: boolean) => void
   timer: NodeJS.Timeout
 }
 
@@ -175,8 +178,9 @@ function packagedClaudeAgentSdkExecutable(): string | undefined {
 function remoteClaudeCommand(session: AgentSession): string {
   const mode = cliPermissionMode(session.permissionMode)
   const flags = [
-    '-p --verbose --output-format stream-json',
+    '--verbose --output-format stream-json --input-format stream-json',
     '--include-partial-messages --include-hook-events',
+    '--permission-prompt-tool stdio',
     `--permission-mode ${shq(mode)}`,
     session.permissionMode === 'bypassPermissions' ? '--allow-dangerously-skip-permissions' : '',
     shellArgFlag('--resume', session.resumeSessionId).trim(),
@@ -978,6 +982,10 @@ function handleSystemMessage(session: AgentSession, message: Record<string, unkn
   }
   if (subtype === 'status') {
     const status = message.status === 'requesting' || message.status === 'compacting' ? 'working' : 'idle'
+    if (status === 'idle' && session.pendingPermissions.size > 0) {
+      emit(session, { type: 'status', sessionId: session.id, status: 'waiting_permission' })
+      return
+    }
     emit(session, { type: 'status', sessionId: session.id, status })
     if (message.status === 'compacting') {
       emitProcessEvent(session, stringValue(message.uuid) ?? 'status-compacting', '컨텍스트 압축', undefined, 'running')
@@ -1124,17 +1132,177 @@ function handleSdkMessage(session: AgentSession, sdkMessage: unknown): void {
   }
 }
 
-function handleRemoteJsonLine(session: AgentSession, line: string): void {
-  if (!line.trim()) return
+function handleRemoteJsonLine(session: AgentSession, line: string): Record<string, unknown> | null {
+  if (!line.trim()) return null
   try {
-    handleSdkMessage(session, JSON.parse(line))
+    const message = JSON.parse(line) as unknown
+    if (handleRemoteControlRequest(session, message)) return null
+    handleSdkMessage(session, message)
+    return asRecord(message)
   } catch {
     emit(session, {
       type: 'raw',
       sessionId: session.id,
       message: { source: 'ssh-stdout', line }
     })
+    return null
   }
+}
+
+function remotePromptLine(prompt: string): string {
+  return JSON.stringify({
+    type: 'user',
+    session_id: '',
+    message: {
+      role: 'user',
+      content: [{ type: 'text', text: prompt }]
+    },
+    parent_tool_use_id: null
+  })
+}
+
+function writeRemoteControlResponse(
+  session: AgentSession,
+  requestId: string,
+  response: unknown
+): boolean {
+  const proc = session.remoteProcess
+  if (!proc || proc.stdin.destroyed || proc.stdin.writableEnded) return false
+  try {
+    proc.stdin.write(
+      `${JSON.stringify({
+        type: 'control_response',
+        response: {
+          subtype: 'success',
+          request_id: requestId,
+          response
+        }
+      })}\n`
+    )
+    return true
+  } catch {
+    return false
+  }
+}
+
+function writeRemoteControlError(session: AgentSession, requestId: string, message: string): void {
+  const proc = session.remoteProcess
+  if (!proc || proc.stdin.destroyed || proc.stdin.writableEnded) return
+  try {
+    proc.stdin.write(
+      `${JSON.stringify({
+        type: 'control_response',
+        response: {
+          subtype: 'error',
+          request_id: requestId,
+          error: message
+        }
+      })}\n`
+    )
+  } catch {
+    /* The process close path reports the failure to the UI. */
+  }
+}
+
+function handleRemotePermissionRequest(
+  session: AgentSession,
+  requestId: string,
+  request: Record<string, unknown>
+): boolean {
+  const toolName = stringValue(request.tool_name)
+  if (!toolName) {
+    const message = '원격 Claude 권한 요청에 도구 이름이 없습니다.'
+    writeRemoteControlError(session, requestId, message)
+    emit(session, { type: 'error', sessionId: session.id, message, recoverable: true })
+    return true
+  }
+  const input = asRecord(request.input) ?? {}
+  const toolUseId = stringValue(request.tool_use_id) ?? requestId
+  const suggestions = Array.isArray(request.permission_suggestions)
+    ? (request.permission_suggestions as PermissionUpdate[])
+    : undefined
+
+  if (shouldAutoAllow(session, toolName)) {
+    writeRemoteControlResponse(session, requestId, { behavior: 'allow', toolUseID: toolUseId })
+    return true
+  }
+
+  const permission: AgentPermissionRequest = {
+    requestId,
+    sessionId: session.id,
+    toolUseId,
+    toolName,
+    input,
+    inputPreview: safeJsonPreview(input),
+    title: stringValue(request.title),
+    displayName: stringValue(request.display_name),
+    description: stringValue(request.description),
+    blockedPath: stringValue(request.blocked_path),
+    decisionReason: stringValue(request.decision_reason)
+  }
+
+  emit(session, { type: 'permission:request', request: permission })
+  emit(session, { type: 'status', sessionId: session.id, status: 'waiting_permission' })
+
+  let settled = false
+  let pending: PendingPermission
+  const timer = setTimeout(() => {
+    pending.finish(
+      {
+        behavior: 'deny',
+        message: '권한 요청 시간이 초과되었습니다.',
+        toolUseID: toolUseId,
+        decisionClassification: 'user_reject'
+      },
+      'reject'
+    )
+  }, PERMISSION_TIMEOUT_MS)
+  pending = {
+    sessionId: session.id,
+    toolUseId,
+    suggestions,
+    timer,
+    finish: (value, decision, emitWorking = false): void => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      session.pendingPermissions.delete(requestId)
+      const wrote = writeRemoteControlResponse(session, requestId, {
+        ...value,
+        toolUseID: toolUseId
+      } as PermissionResult)
+      if (!wrote && session.remoteProcess) {
+        emit(session, {
+          type: 'error',
+          sessionId: session.id,
+          message: '원격 Claude 권한 응답을 전달할 수 없습니다.',
+          recoverable: true
+        })
+      }
+      emit(session, { type: 'permission:resolved', sessionId: session.id, requestId, decision })
+      if (emitWorking) emit(session, { type: 'status', sessionId: session.id, status: 'working' })
+    }
+  }
+  session.pendingPermissions.set(requestId, pending)
+  return true
+}
+
+function handleRemoteControlRequest(session: AgentSession, messageValue: unknown): boolean {
+  const record = asRecord(messageValue)
+  if (record?.type !== 'control_request') return false
+  const requestId = stringValue(record.request_id)
+  const request = asRecord(record.request)
+  if (!requestId || !request) return true
+  if (request.subtype === 'can_use_tool') return handleRemotePermissionRequest(session, requestId, request)
+  const errorMessage = `지원하지 않는 원격 control request: ${String(request.subtype ?? 'unknown')}`
+  writeRemoteControlError(session, requestId, errorMessage)
+  emit(session, {
+    type: 'error',
+    sessionId: session.id,
+    message: errorMessage,
+    recoverable: true
+  })
+  return true
 }
 
 function runRemoteAgentMessage(
@@ -1156,6 +1324,15 @@ function runRemoteAgentMessage(
     let stderrBuffer = ''
     let sawJson = false
 
+    const endRemoteInput = (): void => {
+      if (proc.stdin.destroyed || proc.stdin.writableEnded) return
+      try {
+        proc.stdin.end()
+      } catch {
+        /* The process close handler reports any resulting failure. */
+      }
+    }
+
     const stopRemote = (): void => {
       if (proc.killed) return
       try {
@@ -1172,7 +1349,8 @@ function runRemoteAgentMessage(
       stdoutBuffer = lines.pop() ?? ''
       for (const line of lines) {
         if (line.trim()) sawJson = true
-        handleRemoteJsonLine(session, line)
+        const message = handleRemoteJsonLine(session, line)
+        if (message?.type === 'result') endRemoteInput()
       }
     })
 
@@ -1182,6 +1360,7 @@ function runRemoteAgentMessage(
 
     proc.on('error', (error) => {
       if (abortController.signal.aborted) return
+      rejectPendingPermissions(session, '원격 Claude 프로세스 오류로 권한 요청이 취소되었습니다.')
       emit(session, {
         type: 'error',
         sessionId: session.id,
@@ -1197,9 +1376,11 @@ function runRemoteAgentMessage(
       abortController.signal.removeEventListener('abort', stopRemote)
       if (stdoutBuffer.trim()) {
         sawJson = true
-        handleRemoteJsonLine(session, stdoutBuffer)
+        const message = handleRemoteJsonLine(session, stdoutBuffer)
+        if (message?.type === 'result') endRemoteInput()
         stdoutBuffer = ''
       }
+      rejectPendingPermissions(session, '원격 Claude 프로세스가 종료되었습니다.')
       if (abortController.signal.aborted) {
         resolve()
         return
@@ -1235,7 +1416,7 @@ function runRemoteAgentMessage(
     proc.stdin.on('error', () => {
       /* SSH may close stdin first on connection errors. The process close handler reports it. */
     })
-    proc.stdin.end(prompt)
+    proc.stdin.write(`${remotePromptLine(prompt)}\n`)
   })
 }
 
@@ -1321,7 +1502,8 @@ function requestPermission(
   toolName: string,
   input: Record<string, unknown>,
   options: {
-    suggestions?: unknown[]
+    signal: AbortSignal
+    suggestions?: PermissionUpdate[]
     blockedPath?: string
     decisionReason?: string
     title?: string
@@ -1332,10 +1514,11 @@ function requestPermission(
 ): Promise<PermissionResult> {
   if (shouldAutoAllow(session, toolName)) return Promise.resolve({ behavior: 'allow' })
   const requestId = options.toolUseID || randomUUID()
+  const toolUseId = options.toolUseID || requestId
   const request: AgentPermissionRequest = {
     requestId,
     sessionId: session.id,
-    toolUseId: requestId,
+    toolUseId,
     toolName,
     input,
     inputPreview: safeJsonPreview(input),
@@ -1350,16 +1533,52 @@ function requestPermission(
   emit(session, { type: 'status', sessionId: session.id, status: 'waiting_permission' })
 
   return new Promise<PermissionResult>((resolve) => {
-    const timer = setTimeout(() => {
+    let settled = false
+    let timer: NodeJS.Timeout
+    const finish = (
+      value: PermissionResult,
+      decision: 'allow' | 'reject',
+      emitWorking = false
+    ): void => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      options.signal.removeEventListener('abort', onAbort)
       session.pendingPermissions.delete(requestId)
-      emit(session, { type: 'permission:resolved', sessionId: session.id, requestId, decision: 'reject' })
-      resolve({
-        behavior: 'deny',
-        message: '권한 요청 시간이 초과되었습니다.',
-        decisionClassification: 'user_reject'
-      })
+      emit(session, { type: 'permission:resolved', sessionId: session.id, requestId, decision })
+      if (emitWorking) emit(session, { type: 'status', sessionId: session.id, status: 'working' })
+      resolve({ ...value, toolUseID: toolUseId } as PermissionResult)
+    }
+    const onAbort = (): void => {
+      finish(
+        {
+          behavior: 'deny',
+          message: '권한 요청이 취소되었습니다.',
+          interrupt: true,
+          decisionClassification: 'user_reject'
+        },
+        'reject'
+      )
+    }
+    timer = setTimeout(() => {
+      finish(
+        {
+          behavior: 'deny',
+          message: '권한 요청 시간이 초과되었습니다.',
+          decisionClassification: 'user_reject'
+        },
+        'reject'
+      )
     }, PERMISSION_TIMEOUT_MS)
-    session.pendingPermissions.set(requestId, { sessionId: session.id, resolve, timer })
+    session.pendingPermissions.set(requestId, {
+      sessionId: session.id,
+      toolUseId,
+      suggestions: options.suggestions,
+      finish,
+      timer
+    })
+    options.signal.addEventListener('abort', onAbort, { once: true })
+    if (options.signal.aborted) onAbort()
   })
 }
 
@@ -1598,16 +1817,35 @@ function queuedTextPreview(input: AgentSendInput): string {
 }
 
 function rejectPendingPermissions(session: AgentSession, message: string): void {
-  for (const [requestId, pending] of session.pendingPermissions) {
-    clearTimeout(pending.timer)
-    pending.resolve({
-      behavior: 'deny',
-      message,
-      decisionClassification: 'user_reject'
-    })
-    emit(session, { type: 'permission:resolved', sessionId: session.id, requestId, decision: 'reject' })
+  for (const pending of [...session.pendingPermissions.values()]) {
+    pending.finish(
+      {
+        behavior: 'deny',
+        message,
+        toolUseID: pending.toolUseId,
+        decisionClassification: 'user_reject'
+      },
+      'reject'
+    )
   }
-  session.pendingPermissions.clear()
+}
+
+function approvedPermissionResult(pending: PendingPermission, remember?: boolean): PermissionResult {
+  return {
+    behavior: 'allow',
+    toolUseID: pending.toolUseId,
+    decisionClassification: remember ? 'user_permanent' : 'user_temporary',
+    ...(remember && pending.suggestions?.length ? { updatedPermissions: pending.suggestions } : {})
+  }
+}
+
+function rejectedPermissionResult(pending: PendingPermission, message: string): PermissionResult {
+  return {
+    behavior: 'deny',
+    message,
+    toolUseID: pending.toolUseId,
+    decisionClassification: 'user_reject'
+  }
 }
 
 function cancelPendingDialogs(session: AgentSession): void {
@@ -1933,31 +2171,20 @@ function renderPrompt(input: AgentSendInput): string {
 }
 
 export function approveAgentPermission(decision: AgentPermissionDecision): AgentCommandResult {
-  for (const session of sessions.values()) {
+  const candidates = decision.sessionId
+    ? [sessions.get(decision.sessionId)].filter((session): session is AgentSession => Boolean(session))
+    : [...sessions.values()]
+  for (const session of candidates) {
     const pending = session.pendingPermissions.get(decision.requestId)
     if (!pending) continue
-    clearTimeout(pending.timer)
-    session.pendingPermissions.delete(decision.requestId)
     const allowed = decision.decision === 'allow'
-    pending.resolve(
+    pending.finish(
       allowed
-        ? {
-            behavior: 'allow',
-            decisionClassification: decision.remember ? 'user_permanent' : 'user_temporary'
-          }
-        : {
-            behavior: 'deny',
-            message: decision.message ?? '사용자가 거절했습니다.',
-            decisionClassification: 'user_reject'
-          }
+        ? approvedPermissionResult(pending, decision.remember)
+        : rejectedPermissionResult(pending, decision.message ?? '사용자가 거절했습니다.'),
+      allowed ? 'allow' : 'reject',
+      true
     )
-    emit(session, {
-      type: 'permission:resolved',
-      sessionId: session.id,
-      requestId: decision.requestId,
-      decision: allowed ? 'allow' : 'reject'
-    })
-    emit(session, { type: 'status', sessionId: session.id, status: 'working' })
     return { ok: true }
   }
   return { ok: false, error: '대기 중인 권한 요청을 찾을 수 없습니다.' }
