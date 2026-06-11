@@ -213,6 +213,21 @@ body {
   line-height: 16px;
   font-variant-numeric: tabular-nums;
 }
+.activity-item.case-tabs-trigger.has-updates {
+  color: #fff;
+}
+.activity-item.case-tabs-trigger.has-updates svg {
+  animation: case-tab-icon-sparkle 1.35s ease-in-out infinite;
+  filter: drop-shadow(0 0 6px rgba(245, 200, 76, 0.55));
+}
+.activity-badge.update {
+  background: #f5c84c;
+  color: #1f1800;
+  box-shadow:
+    0 0 0 2px #252526,
+    0 0 10px rgba(245, 200, 76, 0.55);
+  animation: case-update-badge-pop 1.35s ease-in-out infinite;
+}
 .case-tabs-flyout {
   position: absolute;
   left: 48px;
@@ -284,12 +299,25 @@ body {
   cursor: pointer;
   text-align: left;
 }
+.case-tab-row.has-updates {
+  border-color: rgba(245, 200, 76, 0.54);
+  background: rgba(245, 200, 76, 0.1);
+  box-shadow: inset 2px 0 0 #f5c84c;
+  animation: case-tab-row-sparkle 1.6s ease-in-out infinite;
+}
 .case-tab-row:hover {
   background: rgba(255, 255, 255, 0.06);
+}
+.case-tab-row.has-updates:hover {
+  background: rgba(245, 200, 76, 0.15);
 }
 .case-tab-row.active {
   background: color-mix(in srgb, var(--accent) 22%, transparent);
   border-color: color-mix(in srgb, var(--accent) 52%, transparent);
+}
+.case-tab-row.active.has-updates {
+  background: color-mix(in srgb, #f5c84c 18%, var(--accent) 16%);
+  border-color: rgba(245, 200, 76, 0.72);
 }
 .case-tab-row-main {
   min-width: 0;
@@ -329,6 +357,21 @@ body {
   font-weight: 700;
   line-height: 18px;
   font-variant-numeric: tabular-nums;
+}
+.case-tab-row-update-badge {
+  flex: 0 0 auto;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 9px;
+  color: #1f1800;
+  background: #f5c84c;
+  text-align: center;
+  font-size: 10.5px;
+  font-weight: 800;
+  line-height: 18px;
+  font-variant-numeric: tabular-nums;
+  box-shadow: 0 0 9px rgba(245, 200, 76, 0.55);
 }
 .case-tab-row-sub {
   color: var(--fg-muted);
@@ -1714,10 +1757,6 @@ body {
 .toast:hover {
   background: #333;
 }
-.toast.document-change {
-  border-color: #54745e;
-  border-left-color: #8bd49c;
-}
 .toast-icon {
   font-size: 18px;
   flex-shrink: 0;
@@ -1773,6 +1812,39 @@ body {
   }
   50% {
     opacity: 0.4;
+  }
+}
+@keyframes case-tab-icon-sparkle {
+  0%,
+  100% {
+    transform: scale(1);
+    filter: drop-shadow(0 0 3px rgba(245, 200, 76, 0.38));
+  }
+  45% {
+    transform: scale(1.08);
+    filter: drop-shadow(0 0 10px rgba(245, 200, 76, 0.72));
+  }
+}
+@keyframes case-update-badge-pop {
+  0%,
+  100% {
+    transform: scale(1);
+  }
+  50% {
+    transform: scale(1.1);
+  }
+}
+@keyframes case-tab-row-sparkle {
+  0%,
+  100% {
+    box-shadow:
+      inset 2px 0 0 #f5c84c,
+      0 0 0 rgba(245, 200, 76, 0);
+  }
+  50% {
+    box-shadow:
+      inset 2px 0 0 #f5c84c,
+      0 0 14px rgba(245, 200, 76, 0.22);
   }
 }
 .tab-close {

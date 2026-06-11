@@ -229,12 +229,9 @@ interface DocTab {
   side?: DockSide
 }
 
-interface ChangedDocumentToast {
-  key: number
-  path: string
-  title: string
-  changedAt: number
-  caseTabId?: string
+interface CaseDocumentUpdates {
+  paths: string[]
+  latestAt: number
 }
 
 interface DirtyDocTarget {
@@ -1233,8 +1230,7 @@ export default function App(): JSX.Element {
   const [activeDoc, setActiveDoc] = useState<string>(() => (docOnly ? '' : 'doc-welcome'))
   // 실제 파일에 저장되지 않은 변경사항이 있는 문서 id 집합 — 닫기 전 확인용
   const [dirtyDocs, setDirtyDocs] = useState<Set<string>>(new Set())
-  const [changedDocumentToasts, setChangedDocumentToasts] = useState<ChangedDocumentToast[]>([])
-  const changedDocumentToastSeq = useRef(0)
+  const [caseDocumentUpdates, setCaseDocumentUpdates] = useState<Record<string, CaseDocumentUpdates>>({})
   const docTabsRef = useRef<DocTab[]>(docTabs)
   const dirtyDocsRef = useRef<Set<string>>(dirtyDocs)
   const markdownSaveHandlersRef = useRef<Map<string, MarkdownSaveHandler>>(new Map())
@@ -1270,6 +1266,10 @@ export default function App(): JSX.Element {
       seen.add(id)
     }
     caseTabCycleOrderRef.current = nextOrder
+    setCaseDocumentUpdates((updates) => {
+      const next = Object.fromEntries(Object.entries(updates).filter(([id]) => liveIds.has(id)))
+      return Object.keys(next).length === Object.keys(updates).length ? updates : next
+    })
   }, [caseTabs])
   const termTabsRef = useRef<TermTab[]>([])
   const selectionAttachmentSeqRef = useRef(0)
@@ -1910,6 +1910,45 @@ export default function App(): JSX.Element {
     setWorkActive('left', docKey(tab.id))
   }
 
+  const clearCaseDocumentUpdates = (caseTabIdValue: string | undefined): void => {
+    if (!caseTabIdValue) return
+    setCaseDocumentUpdates((updates) => {
+      if (!updates[caseTabIdValue]) return updates
+      const next = { ...updates }
+      delete next[caseTabIdValue]
+      return next
+    })
+  }
+
+  useEffect(() => {
+    const liveCaseTabIds = new Set(caseTabs.map((tab) => tab.id))
+    const onDocumentChanged = (event: Event): void => {
+      const detail = (event as CustomEvent<{ paths?: unknown; caseTabId?: unknown }>).detail
+      const paths = Array.isArray(detail?.paths)
+        ? detail.paths.filter((item): item is string => typeof item === 'string')
+        : []
+      if (paths.length === 0) return
+      const explicitCaseTabId = typeof detail?.caseTabId === 'string' ? detail.caseTabId : undefined
+      setCaseDocumentUpdates((updates) => {
+        const next = { ...updates }
+        const now = Date.now()
+        let changed = false
+        for (const path of paths) {
+          const caseTabIdValue = explicitCaseTabId ?? inferCaseTabIdForPath(path, caseTabs)
+          if (!caseTabIdValue || !liveCaseTabIds.has(caseTabIdValue)) continue
+          const current = next[caseTabIdValue]
+          const pathSet = new Set(current?.paths ?? [])
+          pathSet.add(path)
+          next[caseTabIdValue] = { paths: [...pathSet], latestAt: now }
+          changed = true
+        }
+        return changed ? next : updates
+      })
+    }
+    window.addEventListener(REMOTE_FILE_CHANGED_EVENT, onDocumentChanged)
+    return () => window.removeEventListener(REMOTE_FILE_CHANGED_EVENT, onDocumentChanged)
+  }, [caseTabs])
+
   const openFile = (
     path: string,
     name: string,
@@ -1936,40 +1975,6 @@ export default function App(): JSX.Element {
       activeDocId: tab.id,
       activeWork: { ...activeWork, [side]: docKey(tab.id) }
     })
-  }
-
-  useEffect(() => {
-    const onDocumentChanged = (event: Event): void => {
-      const detail = (event as CustomEvent<{ paths?: unknown; caseTabId?: unknown }>).detail
-      const paths = Array.isArray(detail?.paths)
-        ? detail.paths.filter((item): item is string => typeof item === 'string')
-        : []
-      if (paths.length === 0) return
-      setChangedDocumentToasts((current) => {
-        const changed = new Set(paths)
-        const next = paths.map((path) => ({
-          key: ++changedDocumentToastSeq.current,
-          path,
-          title: fileNameFromPath(path),
-          changedAt: Date.now(),
-          caseTabId:
-            typeof detail?.caseTabId === 'string'
-              ? detail.caseTabId
-              : inferCaseTabIdForPath(path, caseTabs)
-        }))
-        return [...next, ...current.filter((toast) => !changed.has(toast.path))].slice(0, 6)
-      })
-    }
-    window.addEventListener(REMOTE_FILE_CHANGED_EVENT, onDocumentChanged)
-    return () => window.removeEventListener(REMOTE_FILE_CHANGED_EVENT, onDocumentChanged)
-  }, [caseTabs])
-
-  const dismissChangedDocumentToast = (key: number): void =>
-    setChangedDocumentToasts((items) => items.filter((item) => item.key !== key))
-
-  const openChangedDocumentToast = (toast: ChangedDocumentToast): void => {
-    dismissChangedDocumentToast(toast.key)
-    openFile(toast.path, toast.title, 'left', toast.caseTabId ?? inferCaseTabIdForPath(toast.path, caseTabs))
   }
 
   // 이미지 뷰어: 같은 폴더의 정렬순 이전/다음 이미지로 현재 탭에서 이동
@@ -4238,9 +4243,15 @@ export default function App(): JSX.Element {
     termTabs.filter((term) => caseIdForTerm(term) === tab.id)
   const docsForCaseTab = (tab: CaseWorkspaceTab): DocTab[] =>
     docTabs.filter((doc) => !isSharedDocTab(doc) && caseIdForDoc(doc) === tab.id)
+  const totalCaseDocumentUpdateCount = caseTabs.reduce(
+    (sum, tab) => sum + (caseDocumentUpdates[tab.id]?.paths.length ?? 0),
+    0
+  )
   const caseTabRows = caseTabs.map((tab) => {
     const terms = termsForCaseTab(tab)
     const docs = docsForCaseTab(tab)
+    const documentUpdates = caseDocumentUpdates[tab.id]
+    const documentUpdateCount = documentUpdates?.paths.length ?? 0
     const working = terms.some((term) => termStatus.get(term.id) === 'working')
     const question = terms.some((term) => termStatus.get(term.id) === 'question')
     const doneAgentCount = terms.filter(
@@ -4256,8 +4267,18 @@ export default function App(): JSX.Element {
       terms,
       docs,
       active,
+      documentUpdateCount,
+      documentUpdateLatestAt: documentUpdates?.latestAt,
       doneAgentCount,
-      status: question ? '확인 대기' : working ? '작업 중' : tabCount ? `${tabCount}개 탭` : '탭 닫힘'
+      status: documentUpdateCount
+        ? `업데이트 ${documentUpdateCount}개`
+        : question
+          ? '확인 대기'
+          : working
+            ? '작업 중'
+            : tabCount
+              ? `${tabCount}개 탭`
+              : '탭 닫힘'
     }
   })
   const caseTabTitle = (tab: CaseWorkspaceTab): string =>
@@ -4301,6 +4322,7 @@ export default function App(): JSX.Element {
         updatedAt: Date.now()
       })
     )
+    clearCaseDocumentUpdates(tab.id)
     setCaseTabsOpen(false)
     setMode('explorer')
     const validKeys = new Set([
@@ -5643,12 +5665,22 @@ export default function App(): JSX.Element {
             </button>
           ))}
           <button
-            className={`activity-item case-tabs-trigger ${caseTabsOpen ? 'active' : ''}`}
-            title={`사건탭 (${platform === 'darwin' ? '⌘0' : 'Ctrl+0'})`}
+            className={`activity-item case-tabs-trigger ${caseTabsOpen ? 'active' : ''} ${
+              totalCaseDocumentUpdateCount > 0 ? 'has-updates' : ''
+            }`}
+            title={
+              totalCaseDocumentUpdateCount > 0
+                ? `사건탭 · 업데이트 ${totalCaseDocumentUpdateCount}개 (${platform === 'darwin' ? '⌘0' : 'Ctrl+0'})`
+                : `사건탭 (${platform === 'darwin' ? '⌘0' : 'Ctrl+0'})`
+            }
             onClick={() => setCaseTabsOpen((open) => !open)}
           >
             <IconCaseTabs />
-            {caseTabs.length > 0 && <span className="activity-badge">{caseTabs.length}</span>}
+            {(totalCaseDocumentUpdateCount > 0 || caseTabs.length > 0) && (
+              <span className={`activity-badge ${totalCaseDocumentUpdateCount > 0 ? 'update' : ''}`}>
+                {totalCaseDocumentUpdateCount > 0 ? totalCaseDocumentUpdateCount : caseTabs.length}
+              </span>
+            )}
           </button>
         </div>
         {caseTabsOpen && (
@@ -5663,11 +5695,17 @@ export default function App(): JSX.Element {
               {caseTabRows.length === 0 ? (
                 <div className="case-tabs-empty">열린 사건탭 없음</div>
               ) : (
-                caseTabRows.map(({ tab, active, status, doneAgentCount }) => (
+                caseTabRows.map(({ tab, active, status, doneAgentCount, documentUpdateCount, documentUpdateLatestAt }) => (
                   <button
                     key={tab.id}
-                    className={`case-tab-row ${active ? 'active' : ''}`}
-                    title={`${caseTabTitle(tab)}${doneAgentCount > 0 ? ` · 완료 Agent ${doneAgentCount}개` : ''}\n${caseTabSubtitle(tab)}`}
+                    className={`case-tab-row ${active ? 'active' : ''} ${documentUpdateCount > 0 ? 'has-updates' : ''}`}
+                    title={`${caseTabTitle(tab)}${documentUpdateCount > 0 ? ` · 업데이트 ${documentUpdateCount}개` : ''}${
+                      doneAgentCount > 0 ? ` · 완료 Agent ${doneAgentCount}개` : ''
+                    }\n${caseTabSubtitle(tab)}${
+                      documentUpdateLatestAt
+                        ? `\n최근 업데이트 ${new Date(documentUpdateLatestAt).toLocaleTimeString('ko-KR')}`
+                        : ''
+                    }`}
                     onClick={() => openCaseTab(tab)}
                     onContextMenu={(e) => {
                       e.preventDefault()
@@ -5682,6 +5720,15 @@ export default function App(): JSX.Element {
                     <span className="case-tab-row-main">
                       <span className="case-tab-row-titleline">
                         <span className="case-tab-row-title">{caseTabTitle(tab)}</span>
+                        {documentUpdateCount > 0 && (
+                          <span
+                            className="case-tab-row-update-badge"
+                            title={`업데이트 ${documentUpdateCount}개`}
+                            aria-label={`업데이트 ${documentUpdateCount}개`}
+                          >
+                            {documentUpdateCount}
+                          </span>
+                        )}
                         {doneAgentCount > 0 && (
                           <span
                             className="case-tab-row-done-badge"
@@ -5897,33 +5944,8 @@ export default function App(): JSX.Element {
       )}
 
       {/* claude 질문/확인 대기 팝업 */}
-      {(changedDocumentToasts.length > 0 || toasts.length > 0) && (
+      {toasts.length > 0 && (
         <div className="toasts">
-          {changedDocumentToasts.map((t) => (
-            <div
-              key={t.key}
-              className="toast document-change"
-              onClick={() => openChangedDocumentToast(t)}
-              title={t.path}
-            >
-              <span className="toast-icon">↻</span>
-              <span className="toast-body">
-                <b>{t.title}</b>
-                <span className="toast-sub">
-                  문서가 변경됨 · 클릭하여 열기 · {new Date(t.changedAt).toLocaleTimeString('ko-KR')}
-                </span>
-              </span>
-              <button
-                className="toast-x"
-                onClick={(e) => {
-                  e.stopPropagation()
-                  dismissChangedDocumentToast(t.key)
-                }}
-              >
-                ×
-              </button>
-            </div>
-          ))}
           {toasts.map((t) => {
             const waiting = t.status === 'question'
             return (
