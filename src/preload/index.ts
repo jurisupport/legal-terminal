@@ -489,6 +489,10 @@ const api = {
       filePath: string
     ): Promise<{ ok: boolean; text: string; error?: string }> =>
       ipcRenderer.invoke('fs:readHwpText', filePath),
+    readHwpMarkdown: (
+      filePath: string
+    ): Promise<{ ok: boolean; markdown: string; error?: string }> =>
+      ipcRenderer.invoke('fs:readHwpMarkdown', filePath),
     readDocxText: (
       filePath: string
     ): Promise<{ ok: boolean; text: string; error?: string }> =>

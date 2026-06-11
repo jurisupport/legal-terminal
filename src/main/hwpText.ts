@@ -28,6 +28,13 @@ interface HwpParagraphListLike {
   items?: HwpParagraphLike[]
 }
 
+interface XmlBlock {
+  start: number
+  end: number
+  inner: string
+  outer: string
+}
+
 function assertRange(buf: Buffer, offset: number, length: number, label: string): void {
   if (offset < 0 || offset + length > buf.length) {
     throw new Error(`손상된 HWPX ZIP: ${label} 범위를 읽을 수 없습니다.`)
@@ -197,6 +204,44 @@ function normalizeExtractedText(lines: string[]): string {
   return lines.join('\n').replace(/\r\n?/g, '\n').replace(/\n{3,}/g, '\n\n')
 }
 
+function normalizeMarkdown(blocks: string[]): string {
+  return blocks
+    .map((block) => block.replace(/[ \t]+\n/g, '\n').trim())
+    .filter(Boolean)
+    .join('\n\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
+}
+
+function normalizeCellText(value: string): string {
+  return value
+    .replace(/\r\n?/g, '\n')
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n+/g, '<br>')
+    .replace(/\s+/g, ' ')
+    .replace(/ ?<br> ?/g, '<br>')
+    .trim()
+}
+
+function escapeMarkdownTableCell(value: string): string {
+  return normalizeCellText(value).replace(/\\/g, '\\\\').replace(/\|/g, '\\|')
+}
+
+function markdownTable(rows: string[][]): string {
+  const visibleRows = rows
+    .map((row) => row.map(escapeMarkdownTableCell))
+    .filter((row) => row.some(Boolean))
+  const columnCount = Math.max(0, ...visibleRows.map((row) => row.length))
+  if (columnCount === 0) return ''
+
+  const padded = visibleRows.map((row) =>
+    Array.from({ length: columnCount }, (_v, index) => row[index] ?? '')
+  )
+  const [header, ...body] = padded
+  const separator = Array.from({ length: columnCount }, () => '---')
+  return [header, separator, ...body].map((row) => `| ${row.join(' | ')} |`).join('\n')
+}
+
 function isParagraphList(value: unknown): value is HwpParagraphListLike {
   return typeof value === 'object' && value !== null && Array.isArray((value as HwpParagraphListLike).items)
 }
@@ -205,11 +250,24 @@ function extractLegacyParagraphListText(list: HwpParagraphListLike): string {
   return (list.items ?? []).map(extractLegacyParagraphText).filter(Boolean).join('\n')
 }
 
+function extractLegacyParagraphListMarkdown(list: HwpParagraphListLike): string {
+  return normalizeMarkdown((list.items ?? []).map(extractLegacyParagraphMarkdown))
+}
+
+function isLegacyTableRows(content: unknown[]): content is HwpParagraphListLike[][] {
+  return content.length > 0 && content.every((row) => Array.isArray(row))
+}
+
+function extractLegacyTableRows(rows: HwpParagraphListLike[][]): string[][] {
+  return rows.map((row) =>
+    row.map((cell) => extractLegacyParagraphListText(cell).replace(/\n+/g, ' ').trim())
+  )
+}
+
 function extractLegacyTableText(rows: HwpParagraphListLike[][]): string {
-  return rows
+  return extractLegacyTableRows(rows)
     .map((row) =>
       row
-        .map((cell) => extractLegacyParagraphListText(cell).replace(/\n+/g, ' ').trim())
         .join('\t')
         .trimEnd()
     )
@@ -224,7 +282,7 @@ function extractLegacyControlText(control?: unknown): string {
       : undefined
   if (!Array.isArray(content)) return ''
 
-  if (content.every((row) => Array.isArray(row))) {
+  if (isLegacyTableRows(content)) {
     return extractLegacyTableText(content as HwpParagraphListLike[][])
   }
 
@@ -235,10 +293,30 @@ function extractLegacyControlText(control?: unknown): string {
     .join('\n')
 }
 
+function extractLegacyControlMarkdown(control?: unknown): string {
+  const content =
+    typeof control === 'object' && control !== null
+      ? (control as { content?: unknown }).content
+      : undefined
+  if (!Array.isArray(content)) return ''
+
+  if (isLegacyTableRows(content)) {
+    return markdownTable(extractLegacyTableRows(content))
+  }
+
+  return normalizeMarkdown(content.filter(isParagraphList).map(extractLegacyParagraphListMarkdown))
+}
+
 function appendBlockText(text: string, block: string): string {
   if (!block) return text
   if (!text) return block
   return text.endsWith('\n') ? text + block : `${text}\n${block}`
+}
+
+function appendMarkdownBlock(text: string, block: string): string {
+  if (!block) return text
+  if (!text.trim()) return block
+  return `${text.trimEnd()}\n\n${block}`
 }
 
 function extractLegacyParagraphText(para: HwpParagraphLike): string {
@@ -269,6 +347,34 @@ function extractLegacyParagraphText(para: HwpParagraphLike): string {
   return text
 }
 
+function extractLegacyParagraphMarkdown(para: HwpParagraphLike): string {
+  let text = ''
+  let controlIndex = 0
+  let needsSeparatorBeforeText = false
+  const controls = para.controls ?? []
+
+  for (const ch of para.content ?? []) {
+    if (ch.type === 0 && typeof ch.value === 'string') {
+      if (needsSeparatorBeforeText && text.trim()) text += '\n\n'
+      needsSeparatorBeforeText = false
+      text += ch.value
+      continue
+    }
+
+    if (ch.type === 2) {
+      text = appendMarkdownBlock(text, extractLegacyControlMarkdown(controls[controlIndex]))
+      needsSeparatorBeforeText = true
+      controlIndex += 1
+    }
+  }
+
+  for (; controlIndex < controls.length; controlIndex += 1) {
+    text = appendMarkdownBlock(text, extractLegacyControlMarkdown(controls[controlIndex]))
+  }
+
+  return text
+}
+
 function sectionNumber(name: string): number {
   const match = /(?:^|\/)section([0-9]+)\.xml$/i.exec(name)
   return match ? Number.parseInt(match[1], 10) : Number.MAX_SAFE_INTEGER
@@ -292,6 +398,106 @@ function extractHwpxText(buf: Buffer): string {
   return normalizeExtractedText(lines)
 }
 
+function findXmlBlocks(xml: string, localName: string): XmlBlock[] {
+  const tagRe = new RegExp(
+    `<(/?)(?:[A-Za-z_][\\w.-]*:)?${localName}\\b[^>]*(/?)>`,
+    'gi'
+  )
+  const blocks: XmlBlock[] = []
+  let depth = 0
+  let start = -1
+  let innerStart = -1
+  let match: RegExpExecArray | null
+
+  while ((match = tagRe.exec(xml)) !== null) {
+    const closing = match[1] === '/'
+    const selfClosing = match[2] === '/' || /\/\s*>$/.test(match[0])
+    if (!closing && !selfClosing) {
+      if (depth === 0) {
+        start = match.index
+        innerStart = tagRe.lastIndex
+      }
+      depth += 1
+      continue
+    }
+
+    if (closing && depth > 0) {
+      depth -= 1
+      if (depth === 0 && start >= 0 && innerStart >= 0) {
+        blocks.push({
+          start,
+          end: tagRe.lastIndex,
+          inner: xml.slice(innerStart, match.index),
+          outer: xml.slice(start, tagRe.lastIndex)
+        })
+        start = -1
+        innerStart = -1
+      }
+    }
+  }
+
+  return blocks
+}
+
+function blockInside(block: XmlBlock, containers: XmlBlock[]): boolean {
+  return containers.some((container) => block.start > container.start && block.end < container.end)
+}
+
+function removeBlocks(xml: string, blocks: XmlBlock[]): string {
+  return blocks.reduce((out, block) => out.replace(block.outer, ''), xml)
+}
+
+function extractHwpxTableMarkdown(table: XmlBlock): string {
+  const rows = findXmlBlocks(table.inner, 'tr').map((row) =>
+    findXmlBlocks(row.inner, 'tc').map((cell) => {
+      const nestedTables = findXmlBlocks(cell.inner, 'tbl')
+      const cellXml = removeBlocks(cell.inner, nestedTables)
+      const paragraphs = findXmlBlocks(cellXml, 'p')
+      const text =
+        paragraphs.length > 0
+          ? paragraphs.map((para) => extractHwpxTextTokens(para.inner)).filter(Boolean).join('\n')
+          : extractHwpxTextTokens(cellXml)
+      return text
+    })
+  )
+  return markdownTable(rows)
+}
+
+function extractHwpxSectionMarkdownBlocks(xml: string): string[] {
+  const tables = findXmlBlocks(xml, 'tbl')
+  const paragraphs = findXmlBlocks(xml, 'p').filter((para) => !blockInside(para, tables))
+  const blocks = [
+    ...paragraphs.map((block) => ({ kind: 'paragraph' as const, block })),
+    ...tables.map((block) => ({ kind: 'table' as const, block }))
+  ].sort((a, b) => a.block.start - b.block.start)
+
+  return blocks
+    .map(({ kind, block }) => {
+      if (kind === 'table') return extractHwpxTableMarkdown(block)
+      const nestedTables = tables.filter((table) => table.start > block.start && table.end < block.end)
+      return extractHwpxTextTokens(removeBlocks(block.inner, nestedTables))
+    })
+    .filter(Boolean)
+}
+
+function extractHwpxMarkdown(buf: Buffer): string {
+  const entries = listZipEntries(buf)
+    .filter((entry) => /(?:^|\/)section[0-9]+\.xml$/i.test(entry.name))
+    .sort((a, b) => sectionNumber(a.name) - sectionNumber(b.name) || a.name.localeCompare(b.name))
+
+  if (entries.length === 0) {
+    throw new Error('HWPX 본문 section XML을 찾을 수 없습니다.')
+  }
+
+  const blocks: string[] = []
+  for (const entry of entries) {
+    const xml = readZipEntry(buf, entry).toString('utf8')
+    blocks.push(...extractHwpxSectionMarkdownBlocks(xml))
+  }
+
+  return normalizeMarkdown(blocks)
+}
+
 export function extractHwpDocumentText(doc: { sections: { content: HwpParagraphLike[] }[] }): string {
   const lines: string[] = []
   for (const section of doc.sections) {
@@ -302,11 +508,30 @@ export function extractHwpDocumentText(doc: { sections: { content: HwpParagraphL
   return normalizeExtractedText(lines)
 }
 
+export function extractHwpDocumentMarkdown(doc: { sections: { content: HwpParagraphLike[] }[] }): string {
+  const blocks: string[] = []
+  for (const section of doc.sections) {
+    for (const para of section.content) {
+      blocks.push(extractLegacyParagraphMarkdown(para))
+    }
+  }
+  return normalizeMarkdown(blocks)
+}
+
 function extractLegacyHwpText(buf: Buffer): string {
   const doc = parseHwp(buf as unknown as Parameters<typeof parseHwp>[0])
   return extractHwpDocumentText(doc)
 }
 
+function extractLegacyHwpMarkdown(buf: Buffer): string {
+  const doc = parseHwp(buf as unknown as Parameters<typeof parseHwp>[0])
+  return extractHwpDocumentMarkdown(doc)
+}
+
 export function extractHwpText(buf: Buffer, ext: string): string {
   return ext.toLowerCase() === '.hwpx' ? extractHwpxText(buf) : extractLegacyHwpText(buf)
+}
+
+export function extractHwpMarkdown(buf: Buffer, ext: string): string {
+  return ext.toLowerCase() === '.hwpx' ? extractHwpxMarkdown(buf) : extractLegacyHwpMarkdown(buf)
 }

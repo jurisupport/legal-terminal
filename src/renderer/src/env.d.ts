@@ -531,6 +531,9 @@ export interface LtApi {
     ) => Promise<{ name: string; path: string; isDir: boolean; mtimeMs?: number }[]>
     readBytes: (filePath: string) => Promise<ArrayBuffer>
     readHwpText: (filePath: string) => Promise<{ ok: boolean; text: string; error?: string }>
+    readHwpMarkdown: (
+      filePath: string
+    ) => Promise<{ ok: boolean; markdown: string; error?: string }>
     readDocxText: (filePath: string) => Promise<{ ok: boolean; text: string; error?: string }>
     writeText: (
       path: string,

@@ -50,7 +50,7 @@ import {
   rememberSessionMeta,
   type SessionSearchContext
 } from './sessions'
-import { extractHwpText } from './hwpText'
+import { extractHwpMarkdown, extractHwpText } from './hwpText'
 import {
   createPty,
   writePty,
@@ -1629,6 +1629,17 @@ ipcMain.handle('fs:readHwpText', async (_e, filePath: string) => {
     return { ok: true, text: extractHwpText(buf, ext) }
   } catch (e) {
     return { ok: false, text: '', error: 'HWP/HWPX 파싱 실패: ' + String(e) }
+  }
+})
+
+// HWP/HWPX 본문과 표를 Markdown으로 추출
+ipcMain.handle('fs:readHwpMarkdown', async (_e, filePath: string) => {
+  const ext = extname(filePath).toLowerCase()
+  try {
+    const buf = isRemote(filePath) ? await rfsReadBytes(filePath) : await readLocalBytes(filePath)
+    return { ok: true, markdown: extractHwpMarkdown(buf, ext) }
+  } catch (e) {
+    return { ok: false, markdown: '', error: 'HWP/HWPX Markdown 추출 실패: ' + String(e) }
   }
 })
 

@@ -108,6 +108,8 @@ export interface MarkdownDocumentPayload {
   markdown: string
 }
 
+export type MarkdownSaveHandler = () => Promise<string | undefined>
+
 function makeTheme(family: string, size: number): ReturnType<typeof EditorView.theme> {
   return EditorView.theme(
     {
@@ -148,6 +150,24 @@ function saveAsDefaultPath(
   const name = fileNameOf(currentPath) ?? defaultSaveName(title)
   if (defaultDir && !isRemotePath(defaultDir)) return joinDefaultPath(defaultDir, name)
   return name
+}
+
+function dirnameOf(value?: string): string | undefined {
+  if (!value) return undefined
+  const clean = value.replace(/[\\/]+$/, '')
+  const slash = Math.max(clean.lastIndexOf('/'), clean.lastIndexOf('\\'))
+  if (slash < 0) return undefined
+  if (slash === 0) return clean.startsWith('/') ? '/' : undefined
+  if (slash === 2 && /^[A-Za-z]:$/.test(clean.slice(0, slash))) return clean.slice(0, slash + 1)
+  return clean.slice(0, slash)
+}
+
+function claudeDraftFileName(currentPath?: string, title?: string): string {
+  const raw = fileNameOf(currentPath) ?? defaultSaveName(title)
+  const safe = raw.trim().replace(/[\\/]+/g, '-') || DEFAULT_UNTITLED_NAME
+  const dot = safe.lastIndexOf('.')
+  const stem = dot > 0 ? safe.slice(0, dot) : safe
+  return `${stem}.claude-draft.md`
 }
 
 function findMinimalReplacement(current: string, next: string): TextReplacement | null {
@@ -292,6 +312,7 @@ export default function MarkdownEditor({
   onPath,
   onAsk,
   onSendToJuriSupport,
+  onSaveHandler,
   onDirty
 }: {
   title?: string
@@ -299,8 +320,12 @@ export default function MarkdownEditor({
   draftId: string
   defaultDir?: string
   onPath?: (path: string) => void
-  onAsk?: (savedPath?: string) => void
+  onAsk?: (
+    draftPath?: string,
+    meta?: { sourcePath?: string; sourceTitle?: string }
+  ) => void
   onSendToJuriSupport?: (doc: MarkdownDocumentPayload) => void
+  onSaveHandler?: (handler: MarkdownSaveHandler | null) => void
   // 실제 파일에 저장되지 않은 변경사항이 있으면 닫기 전 알린다
   onDirty?: (dirty: boolean) => void
 }): JSX.Element {
@@ -316,6 +341,7 @@ export default function MarkdownEditor({
   const savedRef = useRef(!!path)
   const savedContentRef = useRef('')
   const localDirtyRef = useRef(false)
+  const saveNowRef = useRef<MarkdownSaveHandler>(() => Promise.resolve(undefined))
   const applyingRemoteRef = useRef(false)
   const remoteSigRef = useRef<FileSignature | null>(null)
   const remoteAppliedTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -337,6 +363,7 @@ export default function MarkdownEditor({
   const [findCount, setFindCount] = useState(0)
   const [findIndex, setFindIndex] = useState(-1)
   const [printLayout, setPrintLayout] = useState<PrintLayoutProfile>('default')
+  const [claudeDrafting, setClaudeDrafting] = useState(false)
 
   const setSavedState = (value: boolean): void => {
     savedRef.current = value
@@ -544,6 +571,15 @@ export default function MarkdownEditor({
     markSaved(targetPath, content, result.stat)
     return targetPath
   }
+  saveNowRef.current = saveNow
+
+  useEffect(() => {
+    if (!onSaveHandler) return
+    const handler: MarkdownSaveHandler = () => saveNowRef.current()
+    onSaveHandler(handler)
+    return () => onSaveHandler(null)
+  }, [onSaveHandler])
+
   const saveDraftNow = (updateState = true): Promise<void> => {
     const v = viewRef.current
     if (!v || !localDirtyRef.current) return Promise.resolve()
@@ -585,6 +621,35 @@ export default function MarkdownEditor({
       .finally(() => {
         if (updateState) setDraftSaving(false)
       })
+  }
+
+  const createClaudeDraftNow = async (): Promise<string | undefined> => {
+    const v = viewRef.current
+    if (!v) return undefined
+    const dir = dirnameOf(pathRef.current) ?? defaultDir
+    if (!dir) {
+      setSaveError('Claude 작업본을 만들 폴더가 없습니다. 먼저 문서를 저장하세요.')
+      return undefined
+    }
+    setClaudeDrafting(true)
+    setSaveError('')
+    try {
+      const result = await window.lt.fs.createFile(
+        dir,
+        claudeDraftFileName(pathRef.current, titleRef.current),
+        v.state.doc.toString()
+      )
+      if (!result.ok || !result.path) {
+        setSaveError(result.error ? `Claude 작업본 생성 실패: ${result.error}` : 'Claude 작업본 생성 실패')
+        return undefined
+      }
+      return result.path
+    } catch (e) {
+      setSaveError(`Claude 작업본 생성 실패: ${String(e)}`)
+      return undefined
+    } finally {
+      setClaudeDrafting(false)
+    }
   }
   const scheduleDraftSave = (): void => {
     if (saveTimer.current) clearTimeout(saveTimer.current)
@@ -913,18 +978,19 @@ export default function MarkdownEditor({
             <span className="tb-divider" />
             <button
               className="tb-btn"
-              title="이 문서에 대해 Claude에 물어보기"
+              title="현재 화면 내용으로 Claude 작업본을 만든 뒤 물어보기"
+              disabled={claudeDrafting}
               onClick={() => {
-                if (localDirtyRef.current) {
-                  const ok = window.confirm(
-                    '저장하지 않은 변경사항은 실제 파일에 저장되지 않았습니다.\n현재 저장본 기준으로 Claude에 물어볼까요?'
-                  )
-                  if (!ok) return
-                }
-                onAsk(pathRef.current)
+                void createClaudeDraftNow().then((draftPath) => {
+                  if (!draftPath) return
+                  onAsk(draftPath, {
+                    sourcePath: pathRef.current,
+                    sourceTitle: titleRef.current
+                  })
+                })
               }}
             >
-              ✳ Claude
+              {claudeDrafting ? '작업본…' : '✳ Claude'}
             </button>
           </>
         )}

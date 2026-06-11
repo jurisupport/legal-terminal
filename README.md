@@ -40,11 +40,12 @@ curl -fsSL https://raw.githubusercontent.com/jurisupport/legal-terminal/main/ins
 
 ## 이번 업데이트
 
-최신 릴리스: [v0.1.72](https://github.com/jurisupport/legal-terminal/releases/tag/v0.1.72)
+최신 릴리스: [v0.1.73](https://github.com/jurisupport/legal-terminal/releases/tag/v0.1.73)
 
-- **사건별 하위 탭 분리**: 사건 A에서 연 문서·터미널·Agent 탭은 사건 A 안에서만 보이고, 사건 B로 섞이지 않습니다.
-- **전체 사건탭 복원**: 스냅샷을 복원하면 여러 사건탭과 각 사건의 하위 탭 상태가 함께 돌아옵니다.
-- **사건탭 우클릭 닫기**: 사건탭 목록에서 우클릭으로 해당 사건탭과 그 안의 하위 탭을 닫을 수 있습니다.
+- **문서 변경 알림 사건 연결**: Agent가 수정한 문서 알림을 눌렀을 때 원래 사건탭에서 문서가 열립니다.
+- **HWP/HWPX Markdown 추출**: 본문과 표를 Markdown으로 볼 수 있고 `.md`로 저장할 수 있습니다.
+- **닫기 전 저장 흐름 개선**: 저장하지 않은 Markdown 문서가 있으면 창 닫기 전에 저장하거나 버릴 수 있습니다.
+- **Agent diff 표시 개선**: 큰 diff는 접힌 상태로 보여 작업 패널이 과하게 길어지지 않습니다.
 
 ## 처음 쓰는 순서
 

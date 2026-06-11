@@ -32,6 +32,7 @@ import {
 } from './icons/Icons'
 import MarkdownEditor, {
   TEXT_SELECTION_OVERLAY_EVENT,
+  type MarkdownSaveHandler,
   type MarkdownDocumentPayload,
   type TextSelectionOverlayDetail
 } from './editor/MarkdownEditor'
@@ -233,7 +234,23 @@ interface ChangedDocumentToast {
   path: string
   title: string
   changedAt: number
+  caseTabId?: string
 }
+
+interface DirtyDocTarget {
+  id: string
+  title: string
+  kind: DocTab['kind']
+  path?: string
+}
+
+interface CloseWindowPromptState {
+  docs: DirtyDocTarget[]
+  saving: boolean
+  error?: string
+}
+
+type SaveDirtyDocResult = { ok: true } | { ok: false; error: string }
 
 /**
  * 터미널 1개 = 사건 1개.
@@ -440,6 +457,11 @@ interface CurrentCase {
   sshLabel?: string
   profileId?: string
   remotePath?: string
+}
+
+interface ClaudeDraftPromptOptions {
+  sourcePath?: string
+  sourceTitle?: string
 }
 
 type CaseWorkspaceTab = WorkspaceCaseTabPayload
@@ -1215,11 +1237,15 @@ export default function App(): JSX.Element {
   const changedDocumentToastSeq = useRef(0)
   const docTabsRef = useRef<DocTab[]>(docTabs)
   const dirtyDocsRef = useRef<Set<string>>(dirtyDocs)
+  const markdownSaveHandlersRef = useRef<Map<string, MarkdownSaveHandler>>(new Map())
+  const requestWindowCloseRef = useRef<() => void>(() => {})
+  const [closeWindowPrompt, setCloseWindowPrompt] = useState<CloseWindowPromptState | null>(null)
 
   const [termTabs, setTermTabs] = useState<TermTab[]>([])
   const [activeTerm, setActiveTerm] = useState<string>('')
   const [caseTabs, setCaseTabs] = useState<CaseWorkspaceTab[]>([])
   const [activeCaseTabId, setActiveCaseTabId] = useState<string>('')
+  const caseTabCycleOrderRef = useRef<string[]>([])
   const [caseTabsOpen, setCaseTabsOpen] = useState(false)
   const [caseTabContextMenu, setCaseTabContextMenu] = useState<{
     x: number
@@ -1231,6 +1257,19 @@ export default function App(): JSX.Element {
   const [termBracketedPasteMode, setTermBracketedPasteMode] = useState<Record<string, boolean>>({})
   const termBracketedPasteModeRef = useRef<Record<string, boolean>>({})
   termBracketedPasteModeRef.current = termBracketedPasteMode
+
+  useEffect(() => {
+    const ids = caseTabs.map((tab) => tab.id)
+    const liveIds = new Set(ids)
+    const nextOrder = caseTabCycleOrderRef.current.filter((id) => liveIds.has(id))
+    const seen = new Set(nextOrder)
+    for (const id of ids) {
+      if (seen.has(id)) continue
+      nextOrder.push(id)
+      seen.add(id)
+    }
+    caseTabCycleOrderRef.current = nextOrder
+  }, [caseTabs])
   const termTabsRef = useRef<TermTab[]>([])
   const selectionAttachmentSeqRef = useRef(0)
   const rememberedSessionsRef = useRef<Set<string>>(new Set())
@@ -1343,15 +1382,7 @@ export default function App(): JSX.Element {
   }, [])
 
   useEffect(() => window.lt.app.onCloseActiveTab(() => closeActiveTabRef.current()), [])
-  useEffect(
-    () =>
-      window.lt.app.onCloseWindowRequest(() => {
-        if (!confirmCloseDirtyDocs('window')) return
-        forceWindowCloseRef.current = true
-        void window.lt.app.forceCloseWindow()
-      }),
-    []
-  )
+  useEffect(() => window.lt.app.onCloseWindowRequest(() => requestWindowCloseRef.current()), [])
   useEffect(() => {
     if (!caseTabsOpen) return
     const closeFromPointer = (event: MouseEvent): void => {
@@ -1563,6 +1594,30 @@ export default function App(): JSX.Element {
       .filter((tab) => ids.has(tab.id))
       .map((tab) => tab.title || tab.path?.split(/[\\/]/).pop() || '문서')
 
+  const dirtyDocTargets = (ids = dirtyDocsRef.current): DirtyDocTarget[] =>
+    docTabsRef.current
+      .filter((tab) => ids.has(tab.id))
+      .map((tab) => ({
+        id: tab.id,
+        title: tab.title || tab.path?.split(/[\\/]/).pop() || '문서',
+        kind: tab.kind,
+        path: tab.path
+      }))
+
+  const clearDirtyDoc = (id: string): void => {
+    if (dirtyDocsRef.current.has(id)) {
+      const nextRef = new Set(dirtyDocsRef.current)
+      nextRef.delete(id)
+      dirtyDocsRef.current = nextRef
+    }
+    setDirtyDocs((ids) => {
+      if (!ids.has(id)) return ids
+      const next = new Set(ids)
+      next.delete(id)
+      return next
+    })
+  }
+
   const confirmCloseDirtyDocs = (scope: 'tab' | 'window', title?: string): boolean => {
     const names = scope === 'tab' && title ? [title] : dirtyDocTitles()
     if (names.length === 0) return true
@@ -1573,6 +1628,115 @@ export default function App(): JSX.Element {
       `저장하지 않은 변경사항이 있습니다.\n\n${shown.join('\n')}${more}\n\n` +
         `변경사항은 실제 파일에 저장되지 않았고, 복구용 임시저장본만 남아 있습니다.\n${target}을 닫을까요?`
     )
+  }
+
+  const saveDirtyDocFromDraft = async (doc: DirtyDocTarget): Promise<SaveDirtyDocResult> => {
+    if (doc.kind !== 'mdview' && doc.kind !== 'markdown') {
+      return { ok: false, error: `「${doc.title}」 문서는 자동 저장을 지원하지 않습니다.` }
+    }
+    const identity = { path: doc.path, draftId: doc.id }
+    const draftResult = await window.lt.fs.loadDocumentDraft(identity).catch((e) => ({
+      ok: false as const,
+      error: String(e)
+    }))
+    if (!draftResult.ok) {
+      return { ok: false, error: `「${doc.title}」 임시저장본을 읽지 못했습니다: ${draftResult.error ?? '알 수 없는 오류'}` }
+    }
+    const draft = draftResult.draft
+    if (!draft) {
+      return { ok: false, error: `「${doc.title}」 임시저장본을 찾지 못했습니다. 문서를 다시 열어 저장하세요.` }
+    }
+
+    if (!doc.path) {
+      const result = await window.lt.fs.saveAs(draft.content, doc.title)
+      if (!result.ok || !result.path) {
+        return { ok: false, error: `「${doc.title}」 저장이 완료되지 않았습니다.` }
+      }
+      setDocPath(doc.id, result.path)
+      clearDirtyDoc(doc.id)
+      void window.lt.fs.deleteDocumentDraft({ draftId: doc.id }).catch(() => {})
+      return { ok: true }
+    }
+
+    const stat = await window.lt.fs.stat(doc.path).catch(() => null)
+    const draftSavedAt = Date.parse(draft.savedAt)
+    if (
+      stat?.ok &&
+      Number.isFinite(draftSavedAt) &&
+      typeof stat.mtimeMs === 'number' &&
+      stat.mtimeMs > draftSavedAt + 1000 &&
+      !window.confirm(
+        `「${doc.title}」 파일이 임시저장 이후 외부에서 변경된 것 같습니다.\n\n현재 임시저장본으로 덮어쓸까요?`
+      )
+    ) {
+      return { ok: false, error: `「${doc.title}」 저장을 취소했습니다.` }
+    }
+
+    const result = await window.lt.fs.writeText(doc.path, draft.content)
+    if (!result.ok) {
+      return { ok: false, error: `「${doc.title}」 저장 실패: ${result.error ?? '알 수 없는 오류'}` }
+    }
+    clearDirtyDoc(doc.id)
+    void window.lt.fs.deleteDocumentDraft(identity).catch(() => {})
+    return { ok: true }
+  }
+
+  const saveDirtyDocForClose = async (doc: DirtyDocTarget): Promise<SaveDirtyDocResult> => {
+    const handler = markdownSaveHandlersRef.current.get(doc.id)
+    if (handler) {
+      try {
+        const savedPath = await handler()
+        if (savedPath || !dirtyDocsRef.current.has(doc.id)) return { ok: true }
+        return { ok: false, error: `「${doc.title}」 저장이 완료되지 않았습니다.` }
+      } catch (e) {
+        return { ok: false, error: `「${doc.title}」 저장 실패: ${String(e)}` }
+      }
+    }
+    return saveDirtyDocFromDraft(doc)
+  }
+
+  const forceCloseWindow = (): void => {
+    forceWindowCloseRef.current = true
+    setCloseWindowPrompt(null)
+    void window.lt.app.forceCloseWindow()
+  }
+
+  const saveDirtyDocsAndClose = async (): Promise<void> => {
+    const targets = dirtyDocTargets()
+    setCloseWindowPrompt((prompt) =>
+      prompt ? { ...prompt, docs: targets, saving: true, error: undefined } : prompt
+    )
+    for (const doc of targets) {
+      if (!dirtyDocsRef.current.has(doc.id)) continue
+      const result = await saveDirtyDocForClose(doc)
+      if (!result.ok) {
+        setCloseWindowPrompt({
+          docs: dirtyDocTargets(),
+          saving: false,
+          error: result.error
+        })
+        return
+      }
+    }
+    const remaining = dirtyDocTargets()
+    if (remaining.length > 0) {
+      setCloseWindowPrompt({
+        docs: remaining,
+        saving: false,
+        error: '아직 저장되지 않은 문서가 있습니다.'
+      })
+      return
+    }
+    forceCloseWindow()
+  }
+
+  requestWindowCloseRef.current = (): void => {
+    const docs = dirtyDocTargets()
+    if (docs.length === 0) {
+      forceCloseWindow()
+      return
+    }
+    setCloseWindowPrompt({ docs, saving: false })
   }
 
   // ── 본문(문서) 탭 ──
@@ -1745,9 +1909,19 @@ export default function App(): JSX.Element {
     setWorkActive('left', docKey(tab.id))
   }
 
-  const openFile = (path: string, name: string, side: DockSide = 'left'): void => {
-    const caseTabIdValue = currentCaseTabIdForNewTab()
+  const openFile = (
+    path: string,
+    name: string,
+    side: DockSide = 'left',
+    caseTabIdOverride?: string
+  ): void => {
+    const caseTabIdValue = caseTabIdOverride ?? inferCaseTabIdForPath(path, caseTabs) ?? currentCaseTabIdForNewTab()
     const existing = docTabs.find((t) => t.path === path && caseIdForDoc(t) === caseTabIdValue)
+    if (caseTabIdValue) {
+      const caseTab = caseTabs.find((tab) => tab.id === caseTabIdValue)
+      if (caseTab) setCurrentCase(currentCaseFromCaseTab(caseTab))
+      setActiveCaseTabId(caseTabIdValue)
+    }
     if (existing) {
       activateDocTab(existing.id)
       return
@@ -1765,7 +1939,7 @@ export default function App(): JSX.Element {
 
   useEffect(() => {
     const onDocumentChanged = (event: Event): void => {
-      const detail = (event as CustomEvent<{ paths?: unknown }>).detail
+      const detail = (event as CustomEvent<{ paths?: unknown; caseTabId?: unknown }>).detail
       const paths = Array.isArray(detail?.paths)
         ? detail.paths.filter((item): item is string => typeof item === 'string')
         : []
@@ -1776,21 +1950,25 @@ export default function App(): JSX.Element {
           key: ++changedDocumentToastSeq.current,
           path,
           title: fileNameFromPath(path),
-          changedAt: Date.now()
+          changedAt: Date.now(),
+          caseTabId:
+            typeof detail?.caseTabId === 'string'
+              ? detail.caseTabId
+              : inferCaseTabIdForPath(path, caseTabs)
         }))
         return [...next, ...current.filter((toast) => !changed.has(toast.path))].slice(0, 6)
       })
     }
     window.addEventListener(REMOTE_FILE_CHANGED_EVENT, onDocumentChanged)
     return () => window.removeEventListener(REMOTE_FILE_CHANGED_EVENT, onDocumentChanged)
-  }, [])
+  }, [caseTabs])
 
   const dismissChangedDocumentToast = (key: number): void =>
     setChangedDocumentToasts((items) => items.filter((item) => item.key !== key))
 
   const openChangedDocumentToast = (toast: ChangedDocumentToast): void => {
     dismissChangedDocumentToast(toast.key)
-    openFile(toast.path, toast.title, 'left')
+    openFile(toast.path, toast.title, 'left', toast.caseTabId ?? inferCaseTabIdForPath(toast.path, caseTabs))
   }
 
   // 이미지 뷰어: 같은 폴더의 정렬순 이전/다음 이미지로 현재 탭에서 이동
@@ -3813,29 +3991,47 @@ export default function App(): JSX.Element {
   const buildFreshFilePrompt = async (
     path: string,
     label: string,
-    term?: TermTab
+    term?: TermTab,
+    draft?: ClaudeDraftPromptOptions
   ): Promise<string> => {
     const stat = await window.lt.fs.stat(path).catch((e) => ({
       ok: false as const,
       error: String(e)
     }))
     const readablePath = claudeReadablePath(path, term)
+    const sourceReadablePath = draft?.sourcePath ? claudeReadablePath(draft.sourcePath, term) : undefined
+    const isClaudeDraft = !!draft?.sourcePath && draft.sourcePath !== path
     const note = fileAccessNote(path, term)
     const lines = [
-      '작업 기준 파일:',
+      isClaudeDraft ? 'Claude 작업본 파일:' : '작업 기준 파일:',
       `- 파일명: ${label}`,
       `- 앱 경로: ${path}`,
       readablePath !== path ? `- Claude가 직접 읽을 경로: ${readablePath}` : undefined,
+      isClaudeDraft ? `- 원본 문서: ${draft?.sourceTitle || pathLeaf(draft?.sourcePath) || '원본 문서'}` : undefined,
+      isClaudeDraft && draft?.sourcePath ? `- 원본 앱 경로: ${draft.sourcePath}` : undefined,
+      isClaudeDraft && sourceReadablePath && sourceReadablePath !== draft?.sourcePath
+        ? `- 원본을 Claude가 직접 읽을 경로: ${sourceReadablePath}`
+        : undefined,
       stat.ok
         ? `- 현재 저장본: ${stat.size} bytes, 수정시각 ${formatFileMtime(stat.mtimeMs)}`
         : `- 현재 저장본 확인 실패: ${stat.error}`,
       note ? `- ${note}` : undefined,
       '',
       '반드시 다음 순서로 진행해줘:',
-      '1. 위 경로의 현재 저장된 파일을 디스크에서 다시 읽는다.',
-      '2. 이전 대화의 초안, 임시 파일, 기억 속 내용은 기준으로 쓰지 않는다.',
-      '3. 요청한 부분만 수정하고 사용자가 편집한 다른 부분은 보존한다.',
-      '4. 수정 후 변경 요약과 보존 여부를 알려준다.',
+      ...(isClaudeDraft
+        ? [
+            '1. 위 Claude 작업본 파일을 디스크에서 다시 읽는다.',
+            '2. 원본 문서 경로는 비교/참고용으로만 사용하고 직접 수정하지 않는다.',
+            '3. 편집이 필요하면 Claude 작업본 파일만 수정한다.',
+            '4. 사용자가 원본 반영을 명시적으로 요청하기 전에는 원본 파일에 쓰지 않는다.',
+            '5. 수정 후 원본과 작업본의 차이 또는 변경 요약을 알려준다.'
+          ]
+        : [
+            '1. 위 경로의 현재 저장된 파일을 디스크에서 다시 읽는다.',
+            '2. 이전 대화의 초안, 임시 파일, 기억 속 내용은 기준으로 쓰지 않는다.',
+            '3. 요청한 부분만 수정하고 사용자가 편집한 다른 부분은 보존한다.',
+            '4. 수정 후 변경 요약과 보존 여부를 알려준다.'
+          ]),
       ''
     ].filter((line): line is string => line !== undefined)
     return lines.join('\n')
@@ -3917,7 +4113,7 @@ export default function App(): JSX.Element {
   }
 
   // 활성 문서명+경로 + (있으면) 선택 텍스트로 claude 프롬프트 주입. 텍스트 없으면 문서 전체에 대해 묻기.
-  const askClaude = (text: string, opts?: { docPath?: string }): void => {
+  const askClaude = (text: string, opts?: { docPath?: string } & ClaudeDraftPromptOptions): void => {
     void (async () => {
       const d = docTabs.find((x) => x.id === activeDoc)
       const docPath = opts?.docPath ?? d?.path
@@ -3930,7 +4126,12 @@ export default function App(): JSX.Element {
         return
       }
       const filePrompt =
-        docPath && docName ? await buildFreshFilePrompt(docPath, docName, activeTermTab) : ''
+        docPath && docName
+          ? await buildFreshFilePrompt(docPath, docName, activeTermTab, {
+              sourcePath: opts?.sourcePath,
+              sourceTitle: opts?.sourceTitle
+            })
+          : ''
       let payload: string
       let displayText: string | undefined
       if (t) {
@@ -4012,6 +4213,9 @@ export default function App(): JSX.Element {
     const docs = docsForCaseTab(tab)
     const working = terms.some((term) => termStatus.get(term.id) === 'working')
     const question = terms.some((term) => termStatus.get(term.id) === 'question')
+    const doneAgentCount = terms.filter(
+      (term) => isAgentTab(term) && termAttention.has(term.id) && termStatus.get(term.id) === 'done'
+    ).length
     const active =
       tab.id === activeCaseTabId ||
       terms.some((term) => term.id === activeTerm) ||
@@ -4022,6 +4226,7 @@ export default function App(): JSX.Element {
       terms,
       docs,
       active,
+      doneAgentCount,
       status: question ? '확인 대기' : working ? '작업 중' : tabCount ? `${tabCount}개 탭` : '탭 닫힘'
     }
   })
@@ -4097,6 +4302,12 @@ export default function App(): JSX.Element {
     if (preferredDoc) setActiveDoc(preferredDoc.id)
     if (preferred) {
       setActiveTerm(preferred.id)
+      setTermAttention((ids) => {
+        if (!ids.has(preferred.id)) return ids
+        const next = new Set(ids)
+        next.delete(preferred.id)
+        return next
+      })
       return
     }
     setActiveTerm('')
@@ -4183,11 +4394,32 @@ export default function App(): JSX.Element {
 
   const cycleCaseTab = (dir: number): void => {
     if (caseTabRows.length === 0) return
-    const currentIndex = caseTabRows.findIndex((row) => row.active)
+    const rowsById = new Map(caseTabRows.map((row) => [row.tab.id, row]))
+    const orderedIds: string[] = []
+    const seen = new Set<string>()
+    for (const id of caseTabCycleOrderRef.current) {
+      if (!rowsById.has(id) || seen.has(id)) continue
+      orderedIds.push(id)
+      seen.add(id)
+    }
+    for (const row of caseTabRows) {
+      if (seen.has(row.tab.id)) continue
+      orderedIds.push(row.tab.id)
+      seen.add(row.tab.id)
+    }
+    caseTabCycleOrderRef.current = orderedIds
+    if (orderedIds.length < 2) return
+
+    const currentId =
+      activeCaseTabId && rowsById.has(activeCaseTabId)
+        ? activeCaseTabId
+        : caseTabRows.find((row) => row.active)?.tab.id
+    const currentIndex = currentId ? orderedIds.indexOf(currentId) : -1
+    const baseIndex = currentIndex < 0 ? (dir > 0 ? -1 : 0) : currentIndex
     const nextIndex =
-      (((currentIndex < 0 ? 0 : currentIndex) + dir) % caseTabRows.length + caseTabRows.length) %
-      caseTabRows.length
-    openCaseTab(caseTabRows[nextIndex].tab)
+      ((baseIndex + dir) % orderedIds.length + orderedIds.length) % orderedIds.length
+    const nextRow = rowsById.get(orderedIds[nextIndex])
+    if (nextRow) openCaseTab(nextRow.tab)
   }
 
   const updatePdfStatus = (tabId: string, status: PdfViewStatus): void => {
@@ -4656,8 +4888,12 @@ export default function App(): JSX.Element {
           draftId={tab.id}
           defaultDir={draftsRoot}
           onPath={(p) => setDocPath(tab.id, p)}
-          onAsk={(savedPath) => askClaude('', { docPath: savedPath })}
+          onAsk={(draftPath, meta) => askClaude('', { docPath: draftPath, ...meta })}
           onSendToJuriSupport={sendMarkdownToJuriSupport}
+          onSaveHandler={(handler) => {
+            if (handler) markdownSaveHandlersRef.current.set(tab.id, handler)
+            else markdownSaveHandlersRef.current.delete(tab.id)
+          }}
           onDirty={(d) =>
             setDirtyDocs((s) => {
               const has = s.has(tab.id)
@@ -4917,6 +5153,7 @@ export default function App(): JSX.Element {
                 resumeSessionId={t.resumeSessionId}
                 ssh={t.ssh}
                 profileId={t.profileId}
+                caseTabId={t.caseTabId}
                 visible={t.id === activeTerm}
                 attachmentRequests={agentAttachmentRequests[t.id] ?? []}
                 onAttachmentRequestsHandled={(requestIds) =>
@@ -4925,7 +5162,7 @@ export default function App(): JSX.Element {
                 onStatus={(s) => onTermStatus(t.id, s)}
                 onOpenTerminal={() => addTermSame(termSide(t), t.id, { reuseAgentTab: true })}
                 onOpenDiff={openAgentDiff}
-                onOpenFile={(path, title) => openFile(path, title ?? fileNameFromPath(path), 'left')}
+                onOpenFile={(path, title) => openFile(path, title ?? fileNameFromPath(path), 'left', t.caseTabId)}
               />
             ) : (
               <Terminal
@@ -5258,6 +5495,7 @@ export default function App(): JSX.Element {
                   resumeSessionId={t.resumeSessionId}
                   ssh={t.ssh}
                   profileId={t.profileId}
+                  caseTabId={t.caseTabId}
                   visible={t.id === visibleTermId}
                   attachmentRequests={agentAttachmentRequests[t.id] ?? []}
                   onAttachmentRequestsHandled={(requestIds) =>
@@ -5266,7 +5504,7 @@ export default function App(): JSX.Element {
                   onStatus={(s) => onTermStatus(t.id, s)}
                   onOpenTerminal={() => addTermSame(side, t.id, { reuseAgentTab: true })}
                   onOpenDiff={openAgentDiff}
-                  onOpenFile={(path, title) => openFile(path, title ?? fileNameFromPath(path), 'left')}
+                  onOpenFile={(path, title) => openFile(path, title ?? fileNameFromPath(path), 'left', t.caseTabId)}
                 />
               ) : (
                 <Terminal
@@ -5297,6 +5535,15 @@ export default function App(): JSX.Element {
     )
   }
 
+  const closeWindowDialog = closeWindowPrompt ? (
+    <UnsavedWindowCloseDialog
+      state={closeWindowPrompt}
+      onSaveAndClose={() => void saveDirtyDocsAndClose()}
+      onDiscardAndClose={forceCloseWindow}
+      onCancel={() => setCloseWindowPrompt(null)}
+    />
+  ) : null
+
   // 탭을 창 밖으로 찢어낸 '문서 전용 창': 터미널·탐색기·액티비티바 없이 문서만.
   if (docOnly) {
     return (
@@ -5322,6 +5569,7 @@ export default function App(): JSX.Element {
         </div>
         <SelectionAsk onAsk={askClaude} />
         <SelectionMenu onAsk={askClaude} />
+        {closeWindowDialog}
       </div>
     )
   }
@@ -5334,6 +5582,7 @@ export default function App(): JSX.Element {
           <span className="status-left">legal-terminal · 터미널</span>
           <span className="status-right">{statusInfo}</span>
         </div>
+        {closeWindowDialog}
       </div>
     )
   }
@@ -5377,11 +5626,11 @@ export default function App(): JSX.Element {
               {caseTabRows.length === 0 ? (
                 <div className="case-tabs-empty">열린 사건탭 없음</div>
               ) : (
-                caseTabRows.map(({ tab, active, status }) => (
+                caseTabRows.map(({ tab, active, status, doneAgentCount }) => (
                   <button
                     key={tab.id}
                     className={`case-tab-row ${active ? 'active' : ''}`}
-                    title={`${caseTabTitle(tab)}\n${caseTabSubtitle(tab)}`}
+                    title={`${caseTabTitle(tab)}${doneAgentCount > 0 ? ` · 완료 Agent ${doneAgentCount}개` : ''}\n${caseTabSubtitle(tab)}`}
                     onClick={() => openCaseTab(tab)}
                     onContextMenu={(e) => {
                       e.preventDefault()
@@ -5394,7 +5643,18 @@ export default function App(): JSX.Element {
                     }}
                   >
                     <span className="case-tab-row-main">
-                      <span className="case-tab-row-title">{caseTabTitle(tab)}</span>
+                      <span className="case-tab-row-titleline">
+                        <span className="case-tab-row-title">{caseTabTitle(tab)}</span>
+                        {doneAgentCount > 0 && (
+                          <span
+                            className="case-tab-row-done-badge"
+                            title={`완료된 Agent ${doneAgentCount}개`}
+                            aria-label={`완료된 Agent ${doneAgentCount}개`}
+                          >
+                            {doneAgentCount}
+                          </span>
+                        )}
+                      </span>
                       <span className="case-tab-row-sub">{caseTabSubtitle(tab)}</span>
                     </span>
                     <span className="case-tab-row-status">{status}</span>
@@ -5475,6 +5735,7 @@ export default function App(): JSX.Element {
 
       <SelectionAsk onAsk={askClaude} />
       <SelectionMenu onAsk={askClaude} />
+      {closeWindowDialog}
 
       {newCaseOpen && (
         <NewCaseLauncher
@@ -7107,7 +7368,15 @@ function findTextRanges(text: string, query: string): TextFindRange[] {
 }
 
 /** 텍스트 문서 표시 — 자동 줄바꿈 기본 ON(토글) */
-function TextDoc({ text, note }: { text: string; note?: string }): JSX.Element {
+function TextDoc({
+  text,
+  note,
+  actions
+}: {
+  text: string
+  note?: string
+  actions?: ReactNode
+}): JSX.Element {
   const [wrap, setWrap] = useState(true)
   const [findOpen, setFindOpen] = useState(false)
   const [findQuery, setFindQuery] = useState('')
@@ -7195,6 +7464,12 @@ function TextDoc({ text, note }: { text: string; note?: string }): JSX.Element {
           <IconSearch size={14} />
           <span className="sr-only">문서에서 찾기</span>
         </button>
+        {actions && (
+          <>
+            <span className="tb-divider" />
+            {actions}
+          </>
+        )}
       </div>
       {findOpen && (
         <FindBar
@@ -7264,31 +7539,58 @@ function FileView({ path }: { path: string }): JSX.Element {
   return <TextDoc text={state.text} note={state.truncated ? '… (이하 생략, 2MB 초과)' : undefined} />
 }
 
-/** HWP/HWPX — 텍스트만 추출해 표시 */
+/** HWP/HWPX — 본문과 표를 Markdown으로 추출해 표시 */
 function HwpView({ path }: { path: string }): JSX.Element {
   const remoteVersion = useRemoteFileVersion(path)
-  const [state, setState] = useState<{ loading: boolean; text: string; err: string }>({
+  const [state, setState] = useState<{ loading: boolean; markdown: string; err: string }>({
     loading: true,
-    text: '',
+    markdown: '',
     err: ''
   })
   useEffect(() => {
     let alive = true
-    setState({ loading: true, text: '', err: '' })
+    setState({ loading: true, markdown: '', err: '' })
     window.lt.fs
-      .readHwpText(path)
+      .readHwpMarkdown(path)
       .then((r) => {
         if (!alive) return
-        setState({ loading: false, text: r.text, err: r.ok ? '' : r.error || '추출 실패' })
+        setState({
+          loading: false,
+          markdown: r.markdown,
+          err: r.ok ? '' : r.error || 'Markdown 추출 실패'
+        })
       })
-      .catch((e) => alive && setState({ loading: false, text: '', err: String(e) }))
+      .catch((e) => alive && setState({ loading: false, markdown: '', err: String(e) }))
     return () => {
       alive = false
     }
   }, [path, remoteVersion])
-  if (state.loading) return <div className="welcome"><p className="muted">HWP/HWPX 텍스트 추출 중…</p></div>
+
+  const saveMarkdown = async (): Promise<void> => {
+    const defaultName = fileNameFromPath(path).replace(/\.(hwp|hwpx)$/i, '.md')
+    const defaultPath = path.startsWith('ssh://') ? defaultName : path.replace(/\.(hwp|hwpx)$/i, '.md')
+    const result = await window.lt.fs.saveAs(state.markdown, defaultPath)
+    if (!result.ok && result.error) window.alert('Markdown 저장 실패: ' + result.error)
+  }
+
+  if (state.loading) return <div className="welcome"><p className="muted">HWP/HWPX Markdown 추출 중…</p></div>
   if (state.err) return <div className="welcome"><p className="muted">{state.err}</p></div>
-  return <TextDoc text={state.text} />
+  return (
+    <TextDoc
+      text={state.markdown}
+      actions={
+        <button
+          className="tb-btn"
+          title="Markdown 파일로 저장"
+          disabled={!state.markdown}
+          onClick={() => void saveMarkdown()}
+        >
+          <IconSave size={14} />
+          <span>MD</span>
+        </button>
+      }
+    />
+  )
 }
 
 /** DOCX — Word 본문 텍스트만 추출해 표시 */
@@ -8158,6 +8460,60 @@ function SshProfilesEditor(): JSX.Element {
           }}
         />
       )}
+    </div>
+  )
+}
+
+function UnsavedWindowCloseDialog({
+  state,
+  onSaveAndClose,
+  onDiscardAndClose,
+  onCancel
+}: {
+  state: CloseWindowPromptState
+  onSaveAndClose: () => void
+  onDiscardAndClose: () => void
+  onCancel: () => void
+}): JSX.Element {
+  const shown = state.docs.slice(0, 6)
+  const more = state.docs.length - shown.length
+  return (
+    <div className="modal-overlay" onMouseDown={state.saving ? undefined : onCancel}>
+      <div
+        className="modal unsaved-close-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="unsaved-close-title"
+        onMouseDown={(e) => e.stopPropagation()}
+      >
+        <div className="modal-title" id="unsaved-close-title">
+          저장하지 않은 문서가 있습니다
+        </div>
+        <p className="unsaved-close-copy">
+          창을 닫기 전에 변경사항을 파일에 저장할 수 있습니다.
+        </p>
+        <div className="unsaved-close-list">
+          {shown.map((doc) => (
+            <div className="unsaved-close-item" key={doc.id} title={doc.path ?? doc.title}>
+              <span className="unsaved-close-name">{doc.title}</span>
+              {doc.path && <span className="unsaved-close-path">{doc.path}</span>}
+            </div>
+          ))}
+          {more > 0 && <div className="unsaved-close-more">외 {more}개 문서</div>}
+        </div>
+        {state.error && <div className="unsaved-close-error">{state.error}</div>}
+        <div className="modal-actions unsaved-close-actions">
+          <button className="header-btn primary" type="button" onClick={onSaveAndClose} disabled={state.saving}>
+            {state.saving ? '저장 중...' : '저장하고 닫기'}
+          </button>
+          <button className="header-btn danger" type="button" onClick={onDiscardAndClose} disabled={state.saving}>
+            저장하지 않고 닫기
+          </button>
+          <button className="header-btn" type="button" onClick={onCancel} disabled={state.saving}>
+            취소
+          </button>
+        </div>
+      </div>
     </div>
   )
 }
