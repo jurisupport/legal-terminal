@@ -524,6 +524,11 @@ export interface LtApi {
       html: string,
       defaultPath?: string
     ) => Promise<{ ok: boolean; path?: string; error?: string }>
+    mdToHwpx: (
+      markdown: string,
+      title?: string,
+      defaultPath?: string
+    ) => Promise<{ ok: boolean; path?: string; error?: string }>
   }
   fs: {
     list: (

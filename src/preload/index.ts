@@ -476,7 +476,13 @@ const api = {
       html: string,
       defaultPath?: string
     ): Promise<{ ok: boolean; path?: string; error?: string }> =>
-      ipcRenderer.invoke('export:mdToPdf', { html, defaultPath })
+      ipcRenderer.invoke('export:mdToPdf', { html, defaultPath }),
+    mdToHwpx: (
+      markdown: string,
+      title?: string,
+      defaultPath?: string
+    ): Promise<{ ok: boolean; path?: string; error?: string }> =>
+      ipcRenderer.invoke('export:mdToHwpx', { markdown, title, defaultPath })
   },
   fs: {
     list: (

@@ -40,10 +40,10 @@ curl -fsSL https://raw.githubusercontent.com/jurisupport/legal-terminal/main/ins
 
 ## 이번 업데이트
 
-최신 릴리스: [v0.1.75](https://github.com/jurisupport/legal-terminal/releases/tag/v0.1.75)
+최신 릴리스: [v0.1.76](https://github.com/jurisupport/legal-terminal/releases/tag/v0.1.76)
 
 - **문서 변경 알림 사건 연결**: Agent가 수정한 문서 알림을 눌렀을 때 원래 사건탭에서 문서가 열립니다.
-- **HWP/HWPX Markdown 추출**: 본문과 표를 Markdown으로 볼 수 있고 `.md`로 저장할 수 있습니다.
+- **HWP/HWPX Markdown 추출 및 HWPX 직접 내보내기**: 본문과 표를 Markdown으로 볼 수 있고, Markdown 문서는 PDF/HWPX로 저장할 수 있습니다.
 - **닫기 전 저장 흐름 개선**: 저장하지 않은 Markdown 문서가 있으면 창 닫기 전에 저장하거나 버릴 수 있습니다.
 - **Agent diff 표시 개선**: 큰 diff는 접힌 상태로 보여 작업 패널이 과하게 길어지지 않습니다.
 
@@ -87,7 +87,7 @@ curl -fsSL https://raw.githubusercontent.com/jurisupport/legal-terminal/main/ins
 
 ### 문서와 기록
 
-- Markdown 에디터는 라이브 프리뷰, 표 편집, PDF 내보내기를 지원합니다.
+- Markdown 에디터는 라이브 프리뷰, 표 편집, PDF/HWPX 내보내기를 지원합니다.
 - 파일 뷰어는 PDF, 이미지, HWP/HWPX 텍스트, DOCX 텍스트, CSV, Markdown을 다룹니다.
 - 전자소송기록 PDF는 문서, 서증, 첨부서류로 자동 분류해 탐색할 수 있습니다.
 - 탐색기와 기록뷰어의 파일을 Claude 탭으로 드래그하면 해당 파일을 바탕으로 질문할 수 있습니다.
@@ -161,6 +161,11 @@ legal-terminal은 실제 `claude` CLI를 실행합니다. [`jurisupport-plugins`
 사건 대시보드의 JuriSupport 토큰 연동은 위 플러그인 설치와 별개입니다. 사건·기일·당사자 대시보드를 쓰려면 앱의 사건 화면에서 JuriSupport MCP 토큰을 따로 연결합니다.
 
 ## 개발
+
+### 문서 변환 규칙
+
+- Markdown을 HWPX로 내보낼 때는 DOCX/PDF 등 중간 포맷을 거치지 않고 HWPX(OWPML) ZIP/XML을 직접 생성합니다.
+- Markdown 제목(`#`부터 `######`)은 HWPX 개요 레벨 1-6으로 매핑합니다.
 
 ```bash
 npm ci

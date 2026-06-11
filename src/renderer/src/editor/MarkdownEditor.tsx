@@ -914,13 +914,22 @@ export default function MarkdownEditor({
   const exportPdfTitle = isProofOfContentPrint
     ? "내용증명 PDF로 내보내기. 인쇄할 때 '이미지로 인쇄'를 선택하세요."
     : 'PDF로 내보내기'
+  const exportStem = (): string => {
+    const stem = (fileNameOf(pathRef.current) ?? titleRef.current ?? '문서').replace(/\.[^.]+$/, '')
+    return stem.trim() || '문서'
+  }
+  const exportDefaultPath = (extension: 'pdf' | 'hwpx', stem: string): string => {
+    const currentPath = pathRef.current
+    if (currentPath && !isRemotePath(currentPath)) return `${currentPath.replace(/\.[^.]+$/, '')}.${extension}`
+    if (defaultDir && !isRemotePath(defaultDir)) return joinDefaultPath(defaultDir, `${stem}.${extension}`)
+    return `${stem}.${extension}`
+  }
   const exportPdfNow = (): void => {
     const v = viewRef.current
     if (!v) return
     const layout = printLayout
-    const name = (pathRef.current?.split(/[\\/]/).pop() ?? '문서').replace(/\.[^.]+$/, '')
-    const def =
-      (pathRef.current?.replace(/\.[^.]+$/, '') ?? (defaultDir ? defaultDir + '\\' + name : name)) + '.pdf'
+    const name = exportStem()
+    const def = exportDefaultPath('pdf', name)
     void window.lt.export
       .mdToPdf(mdToPrintHtml(v.state.doc.toString(), name, layout), def)
       .then((r) => {
@@ -933,6 +942,18 @@ export default function MarkdownEditor({
         }
       })
       .catch((e) => window.alert(`PDF 내보내기 실패: ${String(e)}`))
+  }
+  const exportHwpxNow = (): void => {
+    const v = viewRef.current
+    if (!v) return
+    const name = exportStem()
+    const def = exportDefaultPath('hwpx', name)
+    void window.lt.export
+      .mdToHwpx(v.state.doc.toString(), name, def)
+      .then((r) => {
+        if (!r.ok && r.error) window.alert(`HWPX 내보내기 실패: ${r.error}`)
+      })
+      .catch((e) => window.alert(`HWPX 내보내기 실패: ${String(e)}`))
   }
 
   return (
@@ -973,6 +994,13 @@ export default function MarkdownEditor({
           onClick={exportPdfNow}
         >
           PDF
+        </button>
+        <button
+          className="tb-btn"
+          title="HWPX로 내보내기"
+          onClick={exportHwpxNow}
+        >
+          HWPX
         </button>
         <button
           className={`tb-btn ${findOpen ? 'on' : ''}`}

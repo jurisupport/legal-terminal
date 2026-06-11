@@ -51,6 +51,7 @@ import {
   type SessionSearchContext
 } from './sessions'
 import { extractHwpMarkdown, extractHwpText } from './hwpText'
+import { createHwpxFromMarkdown } from './hwpxExport'
 import {
   createPty,
   writePty,
@@ -1808,6 +1809,27 @@ ipcMain.handle('export:mdToPdf', async (e, p: { html: string; defaultPath?: stri
     rm(tmp, { force: true }).catch(() => {})
   }
 })
+
+// 마크다운 → HWPX (DOCX/PDF 중간 변환 없이 HWPX ZIP/XML 직접 생성)
+ipcMain.handle(
+  'export:mdToHwpx',
+  async (e, p: { markdown: string; title?: string; defaultPath?: string }) => {
+    const parentWindow = BrowserWindow.fromWebContents(e.sender) ?? mainWindow
+    if (!parentWindow || parentWindow.isDestroyed()) return { ok: false }
+    const r = await dialog.showSaveDialog(parentWindow, {
+      defaultPath: p.defaultPath,
+      filters: [{ name: 'HWPX', extensions: ['hwpx'] }]
+    })
+    if (r.canceled || !r.filePath) return { ok: false }
+    try {
+      const title = p.title?.trim() || basename(r.filePath).replace(/\.[^.]+$/, '') || '문서'
+      await writeFile(r.filePath, createHwpxFromMarkdown(p.markdown, title))
+      return { ok: true, path: r.filePath }
+    } catch (e) {
+      return { ok: false, error: String(e) }
+    }
+  }
+)
 
 // 다른 이름으로 저장 (새 문서)
 ipcMain.handle('fs:saveAs', async (_e, p: { content: string; defaultPath?: string }) => {
