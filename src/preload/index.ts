@@ -270,6 +270,8 @@ interface SessionTranscript {
   truncated?: boolean
 }
 
+type AgentPermissionMode = 'ask' | 'plan' | 'acceptEdits' | 'bypassPermissions' | 'dontAsk'
+
 interface AppSettings {
   draftsRoot?: string
   recordsRoot?: string
@@ -282,6 +284,7 @@ interface AppSettings {
   mdFont?: string
   mdFontSize?: number
   agentFontSize?: number
+  agentDefaultPermissionMode?: AgentPermissionMode
   explorerSortMode?: string
   remotePickerSortMode?: string
   remoteDirectoryCache?: boolean
@@ -361,8 +364,6 @@ interface TodoTerminalResult {
   todo?: JsTodo | null
   todos?: JsTodo[]
 }
-
-type AgentPermissionMode = 'ask' | 'plan' | 'acceptEdits' | 'bypassPermissions' | 'dontAsk'
 
 interface AgentAttachment {
   kind: 'file' | 'folder' | 'selection' | 'pdf-page-range' | 'terminal-snippet'

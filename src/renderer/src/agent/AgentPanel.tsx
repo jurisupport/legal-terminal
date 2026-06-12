@@ -34,6 +34,7 @@ type AgentPanelStatus = 'idle' | 'working' | 'waiting_permission' | 'waiting_use
 
 const SETTINGS_UPDATED_EVENT = 'lt:settings-updated'
 const DEFAULT_AGENT_FONT_SIZE = 13
+const DEFAULT_AGENT_PERMISSION_MODE: AgentPermissionMode = 'ask'
 const FONT_SIZE_MIN = 8
 const FONT_SIZE_MAX = 32
 const PROMPT_HISTORY_LIMIT = 100
@@ -180,6 +181,12 @@ const modeLabels: { value: AgentPermissionMode; label: string; title: string }[]
   { value: 'bypassPermissions', label: '자동 허용', title: '모든 권한 요청을 자동 허용합니다' },
   { value: 'dontAsk', label: '거절', title: '승인되지 않은 작업을 거절합니다' }
 ]
+
+const isAgentPermissionMode = (value: unknown): value is AgentPermissionMode =>
+  typeof value === 'string' && modeLabels.some((option) => option.value === value)
+
+const resolveAgentPermissionMode = (value: unknown): AgentPermissionMode =>
+  isAgentPermissionMode(value) ? value : DEFAULT_AGENT_PERMISSION_MODE
 
 const withSlashRest = (base: string, rest: string): string => (rest ? `${base}\n\n요청: ${rest}` : base)
 
@@ -1617,7 +1624,7 @@ export default function AgentPanel({
 }: AgentPanelProps): JSX.Element {
   const [items, setItems] = useState<TimelineItem[]>([])
   const [input, setInput] = useState('')
-  const [mode, setMode] = useState<AgentPermissionMode>('ask')
+  const [mode, setMode] = useState<AgentPermissionMode>(DEFAULT_AGENT_PERMISSION_MODE)
   const [status, setStatus] = useState<AgentPanelStatus>('idle')
   const [error, setError] = useState('')
   const [slashIndex, setSlashIndex] = useState(0)
@@ -1627,6 +1634,7 @@ export default function AgentPanel({
   const [authStatusMessage, setAuthStatusMessage] = useState('')
   const [authInput, setAuthInput] = useState('')
   const [modeMenuOpen, setModeMenuOpen] = useState(false)
+  const [settingsLoaded, setSettingsLoaded] = useState(false)
   const [expandedProcessIds, setExpandedProcessIds] = useState<Set<string>>(new Set())
   const [agentFontSize, setAgentFontSize] = useState(DEFAULT_AGENT_FONT_SIZE)
   const [copyFeedback, setCopyFeedback] = useState('')
@@ -1716,6 +1724,25 @@ export default function AgentPanel({
     copyFeedbackTimerRef.current = setTimeout(() => setCopyFeedback(''), 1400)
   }, [])
 
+  const persistPermissionMode = useCallback((nextMode: AgentPermissionMode): void => {
+    window.lt.settings
+      .set({ agentDefaultPermissionMode: nextMode })
+      .then((settings) => {
+        window.dispatchEvent(new CustomEvent<AppSettings>(SETTINGS_UPDATED_EVENT, { detail: settings }))
+      })
+      .catch(() => {
+        /* 권한 모드 저장 실패는 현재 세션 동작을 막지 않는다. */
+      })
+  }, [])
+
+  const selectPermissionMode = useCallback(
+    (nextMode: AgentPermissionMode, persist = true): void => {
+      setMode(nextMode)
+      if (persist) persistPermissionMode(nextMode)
+    },
+    [persistPermissionMode]
+  )
+
   const scrollTimelineToBottom = useCallback((): void => {
     const timeline = scrollRef.current
     if (!timeline) return
@@ -1795,6 +1822,7 @@ export default function AgentPanel({
   }, [cwd, id, onStatus, profileId, ssh])
 
   useEffect(() => {
+    if (!settingsLoaded) return
     if (createdRef.current) return
     createdRef.current = true
     void window.lt.agent
@@ -1811,7 +1839,7 @@ export default function AgentPanel({
         if (!result.ok) setError(result.error ?? 'Agent 세션을 만들 수 없습니다.')
       })
       .catch((e) => setError(String(e instanceof Error ? e.message : e)))
-  }, [cwd, id, mode, resumeSessionId, ssh, title])
+  }, [cwd, id, mode, resumeSessionId, settingsLoaded, ssh, title])
 
   useEffect(() => {
     if (!resumeSessionId) return
@@ -1857,15 +1885,27 @@ export default function AgentPanel({
   }, [modeMenuOpen])
 
   useEffect(() => {
+    let alive = true
     const applySettings = (settings: AppSettings): void => {
+      if (!alive) return
       setAgentFontSize(clampAgentFontSize(settings.agentFontSize))
+      setMode(resolveAgentPermissionMode(settings.agentDefaultPermissionMode))
+      setSettingsLoaded(true)
     }
-    window.lt.settings.get().then(applySettings).catch(() => {})
+    window.lt.settings
+      .get()
+      .then(applySettings)
+      .catch(() => {
+        if (alive) setSettingsLoaded(true)
+      })
     const onSettingsUpdated = (event: Event): void => {
       applySettings((event as CustomEvent<AppSettings>).detail)
     }
     window.addEventListener(SETTINGS_UPDATED_EVENT, onSettingsUpdated)
-    return () => window.removeEventListener(SETTINGS_UPDATED_EVENT, onSettingsUpdated)
+    return () => {
+      alive = false
+      window.removeEventListener(SETTINGS_UPDATED_EVENT, onSettingsUpdated)
+    }
   }, [])
 
   useLayoutEffect(() => {
@@ -1923,15 +1963,17 @@ export default function AgentPanel({
     authStatus !== 'authenticated' &&
     (authStatus === 'unauthenticated' || needsAuth)
   const sendBlockedReason =
-    authActive
-      ? 'Claude 로그인 진행 중'
-      : remoteAuthChecking
-        ? '원격 Claude Code 상태 확인 중'
-        : remoteCliUnavailable
-          ? '원격 Claude Code CLI 없음'
-          : remoteNeedsLogin
-            ? '원격 Claude 로그인 필요'
-            : ''
+    !settingsLoaded
+      ? 'Agent 설정 로드 중'
+      : authActive
+        ? 'Claude 로그인 진행 중'
+        : remoteAuthChecking
+          ? '원격 Claude Code 상태 확인 중'
+          : remoteCliUnavailable
+            ? '원격 Claude Code CLI 없음'
+            : remoteNeedsLogin
+              ? '원격 Claude 로그인 필요'
+              : ''
   const canSubmit = useMemo(
     () => hasPrompt && !sendBlockedReason,
     [hasPrompt, sendBlockedReason]
@@ -2133,7 +2175,7 @@ export default function AgentPanel({
       return
     }
     const nextMode = expanded.mode ?? mode
-    if (expanded.mode) setMode(expanded.mode)
+    if (expanded.mode) selectPermissionMode(expanded.mode, false)
     if (rawText) rememberPrompts([rawText])
     setInput('')
     setAttachments([])
@@ -2538,7 +2580,7 @@ export default function AgentPanel({
                     role="menuitemradio"
                     aria-checked={mode === option.value}
                     onClick={() => {
-                      setMode(option.value)
+                      selectPermissionMode(option.value)
                       setModeMenuOpen(false)
                     }}
                   >

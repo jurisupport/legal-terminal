@@ -268,6 +268,8 @@ export interface SessionTranscript {
   truncated?: boolean
 }
 
+export type AgentPermissionMode = 'ask' | 'plan' | 'acceptEdits' | 'bypassPermissions' | 'dontAsk'
+
 export interface AppSettings {
   draftsRoot?: string
   recordsRoot?: string
@@ -280,14 +282,13 @@ export interface AppSettings {
   mdFont?: string
   mdFontSize?: number
   agentFontSize?: number
+  agentDefaultPermissionMode?: AgentPermissionMode
   explorerSortMode?: string
   remotePickerSortMode?: string
   remoteDirectoryCache?: boolean
   remoteFileCache?: boolean
   sshProfiles?: SshProfile[]
 }
-
-export type AgentPermissionMode = 'ask' | 'plan' | 'acceptEdits' | 'bypassPermissions' | 'dontAsk'
 
 export interface AgentAttachment {
   kind: 'file' | 'folder' | 'selection' | 'pdf-page-range' | 'terminal-snippet'
