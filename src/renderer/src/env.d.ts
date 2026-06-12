@@ -468,6 +468,7 @@ export interface LtApi {
       search?: string
       status?: string
       caseType?: string
+      refresh?: boolean
     }) => Promise<{ ok: boolean; cases?: JsCase[]; error?: string }>
     getCase: (id: string) => Promise<{ ok: boolean; case?: JsCase; error?: string }>
   }

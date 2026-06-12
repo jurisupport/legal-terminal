@@ -65,11 +65,12 @@ export default function CasesDashboard({
     else onOpenWorkspace(c)
   }
 
-  const load = (q?: string): void => {
+  const load = (q?: string, refresh = false): void => {
+    const params = q ? { search: q, refresh } : refresh ? { refresh } : {}
     setLoading(true)
     setErr('')
     window.lt.js
-      .listCases(q ? { search: q } : {})
+      .listCases(params)
       .then((r) => {
         if (r.ok) setCases(r.cases ?? [])
         else setErr(r.error ?? '불러오기 실패')
@@ -100,7 +101,7 @@ export default function CasesDashboard({
     window.lt.js.setToken(t).then(() => {
       setTokenInput('')
       setTokenReady(true)
-      load()
+      load(undefined, true)
       onChanged?.() // 좌측 '다가오는 기일' 패널도 새로고침
     })
   }
@@ -162,7 +163,7 @@ export default function CasesDashboard({
           value={search}
           onChange={(e) => onSearchChange(e.target.value)}
         />
-        <button className="dash-btn" title="새로고침" onClick={() => load(search.trim())}>
+        <button className="dash-btn" title="새로고침" onClick={() => load(search.trim(), true)}>
           ↻
         </button>
         <button

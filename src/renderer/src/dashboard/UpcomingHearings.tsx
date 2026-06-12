@@ -115,7 +115,7 @@ export default function UpcomingHearings({
             return
           }
           window.lt.js
-            .listCases()
+            .listCases(reloadNonce > 0 ? { refresh: true } : undefined)
             .then((r) => {
               if (!alive) return
               if (!r.ok || !r.cases) {

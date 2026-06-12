@@ -619,6 +619,7 @@ const api = {
         search?: string
         status?: string
         caseType?: string
+        refresh?: boolean
       }
     ): Promise<{ ok: boolean; cases?: unknown[]; error?: string }> =>
       ipcRenderer.invoke('js:listCases', params ?? {}),

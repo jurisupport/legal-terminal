@@ -11,6 +11,7 @@ let toolQueue: Promise<void> = Promise.resolve()
 
 const CASES_PAGE_LIMIT = 100
 const CASES_MAX_PAGES = 20
+const CASE_LIST_CACHE_TTL_MS = 10 * 60_000
 const TODOS_PAGE_LIMIT = 100
 const TODOS_MAX_PAGES = 20
 
@@ -32,7 +33,7 @@ export async function setToken(token: string): Promise<void> {
   await setSettings({ jurisupportTokenEnc: token ? enc : undefined })
   sessionId = null // 토큰 바뀌면 세션 무효화
   toolQueue = Promise.resolve()
-  todoCaseCache.clear()
+  clearJuriSupportCaches()
 }
 
 async function getToken(): Promise<string | null> {
@@ -265,6 +266,7 @@ export interface ListCasesParams {
   search?: string
   status?: string
   caseType?: string
+  refresh?: boolean
 }
 
 function normalizeCase(value: unknown): JsCase | null {
@@ -699,11 +701,34 @@ function updateTaskArgs(input: TodoMutationInput): Record<string, unknown> {
   })
 }
 
+type CaseListQuery = Omit<ListCasesParams, 'refresh'>
+
+const caseListCache = new Map<string, { fetchedAt: number; cases: JsCase[] }>()
+const caseListInflight = new Map<string, Promise<JsCase[]>>()
+
+function clearJuriSupportCaches(): void {
+  todoCaseCache.clear()
+  caseListCache.clear()
+  caseListInflight.clear()
+}
+
+function caseListCacheKey(params: CaseListQuery): string {
+  return JSON.stringify(
+    compactRecord({
+      page: params.page,
+      limit: params.limit,
+      search: params.search?.trim(),
+      status: params.status,
+      caseType: params.caseType
+    })
+  )
+}
+
 async function listCasePage(params: ListCasesParams): Promise<JsCase[]> {
   return normalizeCaseList(await callTool('list_cases', params as Record<string, unknown>))
 }
 
-export async function listCases(params: ListCasesParams = {}): Promise<JsCase[]> {
+async function listCasesFresh(params: CaseListQuery): Promise<JsCase[]> {
   const { page, limit, ...filters } = params
   const hasExplicitPaging = page !== undefined || limit !== undefined
 
@@ -743,6 +768,31 @@ export async function listCases(params: ListCasesParams = {}): Promise<JsCase[]>
   }
 
   return cases
+}
+
+export async function listCases(params: ListCasesParams = {}): Promise<JsCase[]> {
+  const { refresh, ...query } = params
+  const key = caseListCacheKey(query)
+  const cached = caseListCache.get(key)
+  if (!refresh && cached && Date.now() - cached.fetchedAt < CASE_LIST_CACHE_TTL_MS) {
+    return cached.cases
+  }
+
+  if (!refresh) {
+    const inflight = caseListInflight.get(key)
+    if (inflight) return inflight
+  }
+
+  const request = listCasesFresh(query)
+    .then((cases) => {
+      caseListCache.set(key, { fetchedAt: Date.now(), cases })
+      return cases
+    })
+    .finally(() => {
+      if (caseListInflight.get(key) === request) caseListInflight.delete(key)
+    })
+  caseListInflight.set(key, request)
+  return request
 }
 
 export async function getCase(id: string): Promise<JsCase | null> {
