@@ -15,6 +15,7 @@ import { GFM } from '@lezer/markdown'
 import { syntaxHighlighting, defaultHighlightStyle } from '@codemirror/language'
 import { livePreview } from './livePreview'
 import { mdToPrintHtml, type PrintLayoutProfile } from './mdExport'
+import { mergeTextAgainstBase } from './threeWayMerge'
 import FindBar from '../search/FindBar'
 import { IconSave, IconSaveAs, IconSearch } from '../icons/Icons'
 import { writeMarkdownDataTransfer } from '../markdownClipboard'
@@ -363,6 +364,8 @@ export default function MarkdownEditor({
   const [draftSaving, setDraftSaving] = useState(false)
   const [draftSaved, setDraftSaved] = useState(false)
   const [remoteApplied, setRemoteApplied] = useState(false)
+  const [remoteAppliedMessage, setRemoteAppliedMessage] = useState('외부 수정 반영됨')
+  const [remoteConflict, setRemoteConflict] = useState(false)
   const [saved, setSaved] = useState(!!path)
   const [findOpen, setFindOpen] = useState(false)
   const [findQuery, setFindQuery] = useState('')
@@ -388,7 +391,9 @@ export default function MarkdownEditor({
     setFindIndex(value)
   }
 
-  const pulseRemoteApplied = (): void => {
+  const pulseRemoteApplied = (message = '외부 수정 반영됨'): void => {
+    setRemoteConflict(false)
+    setRemoteAppliedMessage(message)
     setRemoteApplied(true)
     if (remoteAppliedTimer.current) clearTimeout(remoteAppliedTimer.current)
     remoteAppliedTimer.current = setTimeout(() => {
@@ -470,6 +475,7 @@ export default function MarkdownEditor({
     localDirtyRef.current = false
     setDirty(false)
     setSaveError('')
+    setRemoteConflict(false)
     setDraftSaved(false)
     setDraftSaving(false)
     setSavedState(true)
@@ -822,9 +828,50 @@ export default function MarkdownEditor({
                 savedContentRef.current = next
                 setDirtyState(false)
                 setSavedState(true)
+                setRemoteConflict(false)
                 return
               }
-              if (localDirtyRef.current || !savedRef.current) return
+              if (localDirtyRef.current || !savedRef.current) {
+                if (!localDirtyRef.current) return
+                const merged = mergeTextAgainstBase(savedContentRef.current, current, next)
+                if (merged.status === 'conflict') {
+                  setRemoteConflict(true)
+                  return
+                }
+                if (merged.status === 'unchanged') {
+                  remoteSigRef.current = sig
+                  setRemoteConflict(false)
+                  return
+                }
+
+                const mergedText = merged.text
+                savedContentRef.current = next
+                remoteSigRef.current = sig
+                setRemoteConflict(false)
+                setSavedState(mergedText === next && !!pathRef.current)
+                setDirtyState(mergedText !== next)
+
+                const replacement = findMinimalReplacement(current, mergedText)
+                if (replacement) {
+                  const viewport = captureViewport(v)
+                  const selectionBookmark = bookmarkSelection(v.state)
+                  const previewTransaction = v.state.update({ changes: replacement })
+                  const scrollEffect = v.scrollSnapshot().map(previewTransaction.changes)
+                  const selection = changeCoversSelection(previewTransaction.changes, v.state.selection)
+                    ? restoreSelection(previewTransaction.state, selectionBookmark)
+                    : undefined
+                  v.dispatch({
+                    changes: previewTransaction.changes,
+                    ...(selection ? { selection } : {}),
+                    ...(scrollEffect ? { effects: [scrollEffect] } : {})
+                  })
+                  restoreViewport(v, viewport, previewTransaction.changes)
+                }
+                setDraftSaved(false)
+                if (mergedText !== next) scheduleDraftSave()
+                pulseRemoteApplied(merged.remoteHunkCount > 0 ? '외부 수정 병합됨' : '외부 수정 반영됨')
+                return
+              }
               const replacement = findMinimalReplacement(current, next)
               if (!replacement) return
               const viewport = captureViewport(v)
@@ -896,17 +943,19 @@ export default function MarkdownEditor({
   }
   const saveStatus = saveError
     ? '저장 실패'
-    : remoteApplied
-      ? '외부 수정 반영됨'
-      : dirty
-        ? draftSaving
-          ? '임시저장 중…'
-          : draftSaved
-            ? '임시저장됨 (Ctrl+S로 저장)'
-            : '변경됨 (Ctrl+S로 저장)'
-        : saved
-          ? '저장됨'
-          : '미저장 (Ctrl+S)'
+    : remoteConflict
+      ? '외부 수정 충돌 (수동 확인)'
+      : remoteApplied
+        ? remoteAppliedMessage
+        : dirty
+          ? draftSaving
+            ? '임시저장 중…'
+            : draftSaved
+              ? '임시저장됨 (Ctrl+S로 저장)'
+              : '변경됨 (Ctrl+S로 저장)'
+          : saved
+            ? '저장됨'
+            : '미저장 (Ctrl+S)'
   const isProofOfContentPrint = printLayout === 'proof-of-content'
   const printLayoutTitle = isProofOfContentPrint
     ? "내용증명 양식: 인쇄할 때 PDF 뷰어/프린터 옵션에서 '이미지로 인쇄'를 선택하세요."
@@ -1053,8 +1102,13 @@ export default function MarkdownEditor({
           </>
         )}
         <span
-          className={`tb-sep-text ${saveError ? 'error' : remoteApplied ? 'remote' : ''}`}
-          title={saveError || saveStatus}
+          className={`tb-sep-text ${saveError || remoteConflict ? 'error' : remoteApplied ? 'remote' : ''}`}
+          title={
+            saveError ||
+            (remoteConflict
+              ? '외부 변경사항과 현재 편집 내용이 같은 문단에서 겹쳐 자동 병합하지 않았습니다.'
+              : saveStatus)
+          }
         >
           {saveStatus}
         </span>

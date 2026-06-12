@@ -40,8 +40,9 @@ curl -fsSL https://raw.githubusercontent.com/jurisupport/legal-terminal/main/ins
 
 ## 이번 업데이트
 
-최신 릴리스: [v0.1.80](https://github.com/jurisupport/legal-terminal/releases/tag/v0.1.80)
+최신 릴리스: [v0.1.81](https://github.com/jurisupport/legal-terminal/releases/tag/v0.1.81)
 
+- **Claude 수정분 자동 병합**: Markdown 편집 중 Claude가 같은 문서를 수정하면 서로 다른 문단의 변경은 자동으로 합치고, 같은 문단 충돌만 수동 확인으로 남깁니다.
 - **Agent 권한 모드 저장**: Agent Panel에서 선택한 권한 모드를 설정에 저장해 다음 세션에서도 같은 기본 모드로 시작합니다.
 - **HWPX 내보내기 호환성 수정**: 한컴 OWPML 패키지 구조에 맞춰 `content.hpf`, 컨테이너, 매니페스트 참조를 정리해 손상 문서로 인식되는 문제를 고쳤습니다.
 - **사건탭 완료 배지**: 터미널 작업 완료 토스트 대신 왼쪽 사건탭 숫자 배지와 사건탭 목록에 완료 작업 수를 표시합니다.
