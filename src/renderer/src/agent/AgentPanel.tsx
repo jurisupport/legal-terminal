@@ -163,6 +163,43 @@ export interface AgentDiffOpenRequest {
   diff: DiffView
 }
 
+interface AgentTokenUsageView {
+  turns: number
+  inputTokens: number
+  outputTokens: number
+  cacheCreationInputTokens: number
+  cacheReadInputTokens: number
+  totalTokens: number
+  totalCostUsd?: number
+  lastTurnTokens?: number
+  updatedAt: number
+}
+
+interface AgentContextUsageView {
+  totalTokens: number
+  maxTokens: number
+  remainingTokens: number
+  percentage: number
+  model?: string
+  updatedAt: number
+}
+
+interface AgentRateLimitUsageView {
+  status?: 'allowed' | 'allowed_warning' | 'rejected'
+  rateLimitType?: string
+  utilization?: number
+  remainingPercent?: number
+  resetsAt?: number
+  isUsingOverage?: boolean
+  updatedAt: number
+}
+
+interface AgentUsageView {
+  tokens: AgentTokenUsageView
+  context?: AgentContextUsageView
+  rateLimit?: AgentRateLimitUsageView
+}
+
 interface SlashCommand {
   name: string
   label: string
@@ -364,6 +401,147 @@ const recordArray = (value: unknown): Record<string, unknown>[] =>
   Array.isArray(value)
     ? value.filter((item): item is Record<string, unknown> => Boolean(asRecord(item)))
     : []
+
+const compactNumberFormatter = new Intl.NumberFormat('ko-KR', {
+  notation: 'compact',
+  maximumFractionDigits: 1
+})
+
+const exactNumberFormatter = new Intl.NumberFormat('ko-KR')
+
+const costFormatter = new Intl.NumberFormat('en-US', {
+  style: 'currency',
+  currency: 'USD',
+  minimumFractionDigits: 4,
+  maximumFractionDigits: 4
+})
+
+const resetTimeFormatter = new Intl.DateTimeFormat('ko-KR', {
+  hour: '2-digit',
+  minute: '2-digit'
+})
+
+function emptyAgentUsageView(): AgentUsageView {
+  return {
+    tokens: {
+      turns: 0,
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheCreationInputTokens: 0,
+      cacheReadInputTokens: 0,
+      totalTokens: 0,
+      updatedAt: 0
+    }
+  }
+}
+
+function tokenCount(value: number | undefined): string {
+  if (value === undefined || !Number.isFinite(value)) return '-'
+  const rounded = Math.max(0, Math.round(value))
+  return rounded >= 10_000 ? compactNumberFormatter.format(rounded) : exactNumberFormatter.format(rounded)
+}
+
+function exactTokenCount(value: number | undefined): string {
+  return value === undefined || !Number.isFinite(value) ? '-' : exactNumberFormatter.format(Math.max(0, Math.round(value)))
+}
+
+function percentText(value: number | undefined): string {
+  if (value === undefined || !Number.isFinite(value)) return '-'
+  return `${Math.round(Math.max(0, Math.min(100, value)))}%`
+}
+
+function rateLimitTypeLabel(value: string | undefined): string {
+  if (value === 'five_hour') return '5시간 한도'
+  if (value === 'seven_day') return '7일 한도'
+  if (value === 'seven_day_opus') return '7일 Opus'
+  if (value === 'seven_day_sonnet') return '7일 Sonnet'
+  if (value === 'overage') return '초과 사용'
+  return '한도'
+}
+
+function resetTimeText(value: number | undefined): string | undefined {
+  if (value === undefined || !Number.isFinite(value)) return undefined
+  return resetTimeFormatter.format(new Date(value))
+}
+
+function tokenUsageFromEvent(value: unknown): AgentTokenUsageView | undefined {
+  const record = asRecord(value)
+  if (!record) return undefined
+  return {
+    turns: numberValue(record.turns) ?? 0,
+    inputTokens: numberValue(record.inputTokens) ?? 0,
+    outputTokens: numberValue(record.outputTokens) ?? 0,
+    cacheCreationInputTokens: numberValue(record.cacheCreationInputTokens) ?? 0,
+    cacheReadInputTokens: numberValue(record.cacheReadInputTokens) ?? 0,
+    totalTokens: numberValue(record.totalTokens) ?? 0,
+    totalCostUsd: numberValue(record.totalCostUsd),
+    lastTurnTokens: numberValue(record.lastTurnTokens),
+    updatedAt: numberValue(record.updatedAt) ?? Date.now()
+  }
+}
+
+function contextUsageFromEvent(value: unknown): AgentContextUsageView | undefined {
+  const record = asRecord(value)
+  if (!record) return undefined
+  const totalTokens = numberValue(record.totalTokens)
+  const maxTokens = numberValue(record.maxTokens)
+  const remainingTokens = numberValue(record.remainingTokens)
+  const percentage = numberValue(record.percentage)
+  if (
+    totalTokens === undefined ||
+    maxTokens === undefined ||
+    remainingTokens === undefined ||
+    percentage === undefined
+  ) {
+    return undefined
+  }
+  return {
+    totalTokens,
+    maxTokens,
+    remainingTokens,
+    percentage,
+    model: stringValue(record.model),
+    updatedAt: numberValue(record.updatedAt) ?? Date.now()
+  }
+}
+
+function rateLimitUsageFromEvent(value: unknown): AgentRateLimitUsageView | undefined {
+  const record = asRecord(value)
+  if (!record) return undefined
+  const status = stringValue(record.status)
+  return {
+    status: status === 'allowed' || status === 'allowed_warning' || status === 'rejected' ? status : undefined,
+    rateLimitType: stringValue(record.rateLimitType),
+    utilization: numberValue(record.utilization),
+    remainingPercent: numberValue(record.remainingPercent),
+    resetsAt: numberValue(record.resetsAt),
+    isUsingOverage: typeof record.isUsingOverage === 'boolean' ? record.isUsingOverage : undefined,
+    updatedAt: numberValue(record.updatedAt) ?? Date.now()
+  }
+}
+
+function usageTitle(usage: AgentUsageView): string {
+  const tokens = usage.tokens
+  const lines = [
+    `세션 토큰: ${exactTokenCount(tokens.totalTokens)} (${tokens.turns}턴)`,
+    `입력: ${exactTokenCount(tokens.inputTokens)}, 출력: ${exactTokenCount(tokens.outputTokens)}`,
+    `캐시 생성: ${exactTokenCount(tokens.cacheCreationInputTokens)}, 캐시 읽기: ${exactTokenCount(tokens.cacheReadInputTokens)}`
+  ]
+  if (tokens.lastTurnTokens !== undefined) lines.push(`마지막 턴: ${exactTokenCount(tokens.lastTurnTokens)}`)
+  if (tokens.totalCostUsd !== undefined) lines.push(`비용: ${costFormatter.format(tokens.totalCostUsd)}`)
+  if (usage.context) {
+    lines.push(
+      `컨텍스트: ${percentText(usage.context.percentage)} 사용, 잔여 ${exactTokenCount(usage.context.remainingTokens)} / ${exactTokenCount(usage.context.maxTokens)}`
+    )
+  }
+  if (usage.rateLimit) {
+    const reset = resetTimeText(usage.rateLimit.resetsAt)
+    lines.push(
+      `${rateLimitTypeLabel(usage.rateLimit.rateLimitType)}: 잔여 ${percentText(usage.rateLimit.remainingPercent)}${reset ? `, ${reset} 리셋` : ''}`
+    )
+  }
+  return lines.join('\n')
+}
 
 const dialogQuestions = (value: unknown): AgentDialogQuestion[] =>
   recordArray(value).map((question, questionIndex) => ({
@@ -1644,6 +1822,7 @@ export default function AgentPanel({
   const [attachmentDropOver, setAttachmentDropOver] = useState(false)
   const [showNewOutputNotice, setShowNewOutputNotice] = useState(false)
   const [revertingDiffIds, setRevertingDiffIds] = useState<Set<string>>(new Set())
+  const [usage, setUsage] = useState<AgentUsageView>(() => emptyAgentUsageView())
   const createdRef = useRef(false)
   const scrollRef = useRef<HTMLDivElement>(null)
   const shouldFollowTimelineRef = useRef(true)
@@ -1767,6 +1946,16 @@ export default function AgentPanel({
       }
       if (event.type === 'session:commands') {
         setRuntimeSlashCommands(runtimeSlashCommandsFromEvent(event.commands))
+      }
+      if (event.type === 'usage:update') {
+        const tokens = tokenUsageFromEvent(event.usage)
+        const context = contextUsageFromEvent(event.context)
+        const rateLimit = rateLimitUsageFromEvent(event.rateLimit)
+        setUsage((current) => ({
+          tokens: tokens ?? current.tokens,
+          context: context ?? current.context,
+          rateLimit: rateLimit ?? current.rateLimit
+        }))
       }
       if (event.type === 'auth:started') setAuthActive(true)
       if (event.type === 'auth:done') setAuthActive(false)
@@ -2527,6 +2716,21 @@ export default function AgentPanel({
     authStatus === 'checking' ||
     authStatus === 'authenticated' ||
     authStatus === 'unavailable'
+  const rateLimitState =
+    usage.rateLimit?.status === 'rejected'
+      ? 'error'
+      : usage.rateLimit?.status === 'allowed_warning'
+        ? 'warn'
+        : ''
+  const contextLabel = usage.context
+    ? `컨텍스트 ${percentText(usage.context.percentage)} · 잔여 ${tokenCount(usage.context.remainingTokens)}`
+    : '컨텍스트 대기'
+  const limitReset = resetTimeText(usage.rateLimit?.resetsAt)
+  const limitLabel = usage.rateLimit
+    ? `${rateLimitTypeLabel(usage.rateLimit.rateLimitType)} ${
+        usage.rateLimit.remainingPercent === undefined ? '확인됨' : `잔여 ${percentText(usage.rateLimit.remainingPercent)}`
+      }${limitReset ? ` · ${limitReset}` : ''}`
+    : '한도 대기'
   const panelStyle = {
     '--agent-font-size': `${agentFontSize}px`
   } as CSSProperties
@@ -3033,6 +3237,23 @@ export default function AgentPanel({
             ))}
           </div>
         )}
+        <div
+          className={`agent-usage-bar ${rateLimitState}`}
+          title={usageTitle(usage)}
+          aria-live="polite"
+        >
+          <span>
+            토큰 <strong>{tokenCount(usage.tokens.totalTokens)}</strong>
+            {usage.tokens.lastTurnTokens !== undefined && (
+              <span className="agent-usage-muted"> 마지막 {tokenCount(usage.tokens.lastTurnTokens)}</span>
+            )}
+          </span>
+          <span>입력 {tokenCount(usage.tokens.inputTokens)}</span>
+          <span>출력 {tokenCount(usage.tokens.outputTokens)}</span>
+          <span>{contextLabel}</span>
+          <span>{limitLabel}</span>
+          {usage.tokens.totalCostUsd !== undefined && <span>{costFormatter.format(usage.tokens.totalCostUsd)}</span>}
+        </div>
         <div className="agent-prompt-actions">
           <span className={`agent-status ${status}`} title={statusAccessibleLabel} aria-label={statusAccessibleLabel}>
             {status === 'working' ? (

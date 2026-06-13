@@ -40,7 +40,7 @@ curl -fsSL https://raw.githubusercontent.com/jurisupport/legal-terminal/main/ins
 
 ## 이번 업데이트
 
-최신 릴리스: [v0.1.83](https://github.com/jurisupport/legal-terminal/releases/tag/v0.1.83)
+최신 릴리스: [v0.1.84](https://github.com/jurisupport/legal-terminal/releases/tag/v0.1.84)
 
 - **Claude 수정분 자동 병합**: Markdown 편집 중 Claude가 같은 문서를 수정하면 서로 다른 문단의 변경은 자동으로 합치고, 같은 문단 충돌만 수동 확인으로 남깁니다.
 - **Agent 권한 모드 저장**: Agent Panel에서 선택한 권한 모드를 설정에 저장해 다음 세션에서도 같은 기본 모드로 시작합니다.
@@ -101,7 +101,8 @@ curl -fsSL https://raw.githubusercontent.com/jurisupport/legal-terminal/main/ins
 - JuriSupport 사건, 기일, 당사자 정보를 앱 안에서 조회합니다.
 - 좌측 **다가오는 기일** 패널에서 임박 기일을 날짜순으로 봅니다.
 - 사건 카드, 다가오는 기일, 할일 카드 클릭은 설정의 **사건 기본 열기**를 따릅니다.
-- 사건 우클릭 메뉴에서 로컬 열기, SSH 프로필별 열기, Claude 브리핑, `/brief-protocol` 초안, JuriSupport 웹 열기, 복사를 실행합니다.
+- 사건 우클릭 메뉴에서 로컬 열기, SSH 프로필별 열기, Claude 브리핑, JuriSupport 웹 열기, 복사를 실행합니다.
+- 다가오는 기일 우클릭 메뉴에서 해당 사건의 기일 준비 할일을 바로 만듭니다.
 
 ### 원격 작업 (SSH)
 

@@ -143,6 +143,37 @@ export type AgentStatus =
   | 'done'
   | 'error'
 
+export interface AgentTokenUsage {
+  turns: number
+  inputTokens: number
+  outputTokens: number
+  cacheCreationInputTokens: number
+  cacheReadInputTokens: number
+  totalTokens: number
+  totalCostUsd?: number
+  lastTurnTokens?: number
+  updatedAt: number
+}
+
+export interface AgentContextUsage {
+  totalTokens: number
+  maxTokens: number
+  remainingTokens: number
+  percentage: number
+  model?: string
+  updatedAt: number
+}
+
+export interface AgentRateLimitUsage {
+  status?: 'allowed' | 'allowed_warning' | 'rejected'
+  rateLimitType?: string
+  utilization?: number
+  remainingPercent?: number
+  resetsAt?: number
+  isUsingOverage?: boolean
+  updatedAt: number
+}
+
 export type AgentEvent =
   | {
       type: 'session:init'
@@ -202,6 +233,13 @@ export type AgentEvent =
   | { type: 'auth:output'; sessionId: string; text: string; urls?: string[]; codes?: string[] }
   | { type: 'auth:done'; sessionId: string; ok: boolean; exitCode: number | null; message?: string }
   | { type: 'auth:status'; sessionId: string; state: AgentAuthStatus; message?: string }
+  | {
+      type: 'usage:update'
+      sessionId: string
+      usage?: AgentTokenUsage
+      context?: AgentContextUsage
+      rateLimit?: AgentRateLimitUsage
+    }
   | { type: 'status'; sessionId: string; status: AgentStatus }
   | { type: 'error'; sessionId: string; message: string; recoverable: boolean }
   | { type: 'raw'; sessionId: string; message: unknown }

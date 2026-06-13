@@ -41,7 +41,6 @@ export default function CasesDashboard({
   sshProfiles = [],
   defaultOpenProfileId,
   onBrief,
-  onDraft,
   onHearingRecord,
   onChanged
 }: {
@@ -51,7 +50,6 @@ export default function CasesDashboard({
   sshProfiles?: SshProfile[]
   defaultOpenProfileId?: string
   onBrief: (c: JsCase) => void
-  onDraft: (c: JsCase) => void
   onHearingRecord?: (c: JsCase) => void
   onChanged?: () => void
 }): JSX.Element {
@@ -308,7 +306,6 @@ export default function CasesDashboard({
           sshProfiles={sshProfiles}
           defaultOpenProfileId={defaultOpenProfileId}
           onBrief={onBrief}
-          onDraft={onDraft}
           onHearingRecord={onHearingRecord}
           onDetail={toggleDetail}
         />

@@ -17,6 +17,7 @@ import type {
   AgentAttachment,
   AgentCommandResult,
   AgentCreateOptions,
+  AgentContextUsage,
   AgentEvent,
   AgentAuthInput,
   AgentAuthStatus,
@@ -30,6 +31,8 @@ import type {
   AgentSlashCommand,
   AgentSshConn,
   AgentSource,
+  AgentRateLimitUsage,
+  AgentTokenUsage,
   AgentWorktreeForkInput,
   AgentWorktreeForkResult
 } from './agent-types'
@@ -83,6 +86,9 @@ interface AgentSession {
   running?: AbortController
   remoteProcess?: ChildProcessWithoutNullStreams
   authProcess?: ChildProcessWithoutNullStreams
+  tokenUsage: AgentTokenUsage
+  contextUsage?: AgentContextUsage
+  rateLimitUsage?: AgentRateLimitUsage
 }
 
 const sessions = new Map<string, AgentSession>()
@@ -358,6 +364,10 @@ function asRecord(value: unknown): Record<string, unknown> | null {
 
 function stringValue(value: unknown): string | undefined {
   return typeof value === 'string' ? value : undefined
+}
+
+function numberValue(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined
 }
 
 function stringArrayValue(value: unknown): string[] {
@@ -787,6 +797,135 @@ function emitProcessEvent(
   emit(session, { type: 'process:event', sessionId: session.id, processId, title, text, status })
 }
 
+function emptyTokenUsage(): AgentTokenUsage {
+  return {
+    turns: 0,
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheCreationInputTokens: 0,
+    cacheReadInputTokens: 0,
+    totalTokens: 0,
+    updatedAt: Date.now()
+  }
+}
+
+function emitUsageUpdate(session: AgentSession): void {
+  emit(session, {
+    type: 'usage:update',
+    sessionId: session.id,
+    usage: session.tokenUsage,
+    context: session.contextUsage,
+    rateLimit: session.rateLimitUsage
+  })
+}
+
+function usageTokensFromRecord(value: unknown): Omit<AgentTokenUsage, 'turns' | 'updatedAt'> | undefined {
+  const usage = asRecord(value)
+  if (!usage) return undefined
+  const inputTokens = numberValue(usage.input_tokens) ?? numberValue(usage.inputTokens) ?? 0
+  const outputTokens = numberValue(usage.output_tokens) ?? numberValue(usage.outputTokens) ?? 0
+  const cacheCreationInputTokens =
+    numberValue(usage.cache_creation_input_tokens) ?? numberValue(usage.cacheCreationInputTokens) ?? 0
+  const cacheReadInputTokens =
+    numberValue(usage.cache_read_input_tokens) ?? numberValue(usage.cacheReadInputTokens) ?? 0
+  const totalTokens = inputTokens + outputTokens + cacheCreationInputTokens + cacheReadInputTokens
+  if (totalTokens <= 0) return undefined
+  return {
+    inputTokens,
+    outputTokens,
+    cacheCreationInputTokens,
+    cacheReadInputTokens,
+    totalTokens
+  }
+}
+
+function costUsdFromModelUsage(value: unknown): number | undefined {
+  const modelUsage = asRecord(value)
+  if (!modelUsage) return undefined
+  let total = 0
+  for (const item of Object.values(modelUsage)) {
+    const cost = numberValue(asRecord(item)?.costUSD)
+    if (cost) total += cost
+  }
+  return total > 0 ? total : undefined
+}
+
+function accumulateResultUsage(session: AgentSession, message: Record<string, unknown>): void {
+  const usage = usageTokensFromRecord(message.usage)
+  if (!usage) return
+  const cost = numberValue(message.total_cost_usd) ?? costUsdFromModelUsage(message.modelUsage)
+  session.tokenUsage = {
+    turns: session.tokenUsage.turns + 1,
+    inputTokens: session.tokenUsage.inputTokens + usage.inputTokens,
+    outputTokens: session.tokenUsage.outputTokens + usage.outputTokens,
+    cacheCreationInputTokens: session.tokenUsage.cacheCreationInputTokens + usage.cacheCreationInputTokens,
+    cacheReadInputTokens: session.tokenUsage.cacheReadInputTokens + usage.cacheReadInputTokens,
+    totalTokens: session.tokenUsage.totalTokens + usage.totalTokens,
+    totalCostUsd:
+      cost !== undefined ? (session.tokenUsage.totalCostUsd ?? 0) + cost : session.tokenUsage.totalCostUsd,
+    lastTurnTokens: usage.totalTokens,
+    updatedAt: Date.now()
+  }
+  emitUsageUpdate(session)
+}
+
+function normalizeContextUsage(value: unknown): AgentContextUsage | undefined {
+  const usage = asRecord(value)
+  if (!usage) return undefined
+  const totalTokens = numberValue(usage.totalTokens)
+  const maxTokens = numberValue(usage.maxTokens)
+  const rawMaxTokens = numberValue(usage.rawMaxTokens)
+  const limit = maxTokens ?? rawMaxTokens
+  if (totalTokens === undefined || limit === undefined || limit <= 0) return undefined
+  return {
+    totalTokens,
+    maxTokens: limit,
+    remainingTokens: Math.max(0, limit - totalTokens),
+    percentage: numberValue(usage.percentage) ?? Math.min(100, Math.max(0, (totalTokens / limit) * 100)),
+    model: stringValue(usage.model),
+    updatedAt: Date.now()
+  }
+}
+
+function rememberContextUsage(session: AgentSession, value: unknown): void {
+  const context = normalizeContextUsage(value)
+  if (!context) return
+  session.contextUsage = context
+  emitUsageUpdate(session)
+}
+
+function normalizedUtilization(value: unknown): number | undefined {
+  const raw = numberValue(value)
+  if (raw === undefined) return undefined
+  const percent = raw <= 1 ? raw * 100 : raw
+  return Math.min(100, Math.max(0, percent))
+}
+
+function normalizeResetTime(value: unknown): number | undefined {
+  const raw = numberValue(value)
+  if (raw === undefined || raw <= 0) return undefined
+  return raw < 10_000_000_000 ? raw * 1000 : raw
+}
+
+function rememberRateLimitUsage(session: AgentSession, value: unknown): AgentRateLimitUsage | undefined {
+  const info = asRecord(value)
+  if (!info) return undefined
+  const utilization = normalizedUtilization(info.utilization)
+  const status = stringValue(info.status)
+  const rateLimit: AgentRateLimitUsage = {
+    status: status === 'allowed' || status === 'allowed_warning' || status === 'rejected' ? status : undefined,
+    rateLimitType: stringValue(info.rateLimitType),
+    utilization,
+    remainingPercent: utilization === undefined ? undefined : Math.max(0, 100 - utilization),
+    resetsAt: normalizeResetTime(info.resetsAt),
+    isUsingOverage: typeof info.isUsingOverage === 'boolean' ? info.isUsingOverage : undefined,
+    updatedAt: Date.now()
+  }
+  session.rateLimitUsage = rateLimit
+  emitUsageUpdate(session)
+  return rateLimit
+}
+
 function makeDiffProposal(session: AgentSession, toolId: string, input: Record<string, unknown>): void {
   const edits = diffEditsFromInput(input)
   const filePath = stringValue(input.file_path)
@@ -1063,6 +1202,7 @@ function handleSystemMessage(session: AgentSession, message: Record<string, unkn
 function handleResultMessage(session: AgentSession, message: Record<string, unknown>): void {
   const subtype = stringValue(message.subtype)
   const isError = subtype !== 'success'
+  accumulateResultUsage(session, message)
   if (Array.isArray(message.permission_denials)) {
     for (const denialValue of message.permission_denials) {
       const denial = asRecord(denialValue)
@@ -1120,12 +1260,13 @@ function handleSdkMessage(session: AgentSession, sdkMessage: unknown): void {
     )
   } else if (message.type === 'rate_limit_event') {
     const info = asRecord(message.rate_limit_info)
+    const rateLimit = rememberRateLimitUsage(session, info)
     emitProcessEvent(
       session,
       stringValue(message.uuid) ?? randomUUID(),
       'Rate limit',
       stringValue(info?.status),
-      stringValue(info?.status)
+      rateLimit?.status
     )
   } else if (message.type === 'prompt_suggestion') {
     emitProcessEvent(session, stringValue(message.uuid) ?? randomUUID(), '다음 프롬프트 제안', stringValue(message.suggestion))
@@ -1762,6 +1903,7 @@ export function createAgentSession(opts: AgentCreateOptions, webContents: WebCon
     } else {
       refreshAgentAuthStatus(existing)
     }
+    emitUsageUpdate(existing)
     prefetchLocalSlashCommands(existing)
     return { ok: true }
   }
@@ -1791,12 +1933,14 @@ export function createAgentSession(opts: AgentCreateOptions, webContents: WebCon
     assistantText: new Map(),
     assistantStreamed: new Set(),
     startedTools: new Set(),
-    queue: []
+    queue: [],
+    tokenUsage: emptyTokenUsage()
   }
   sessions.set(opts.id, session)
   attach(session, webContents)
   emit(session, { type: 'session:init', sessionId: session.id, title: session.title, cwd: session.cwd, source: session.source })
   emit(session, { type: 'status', sessionId: session.id, status: 'idle' })
+  emitUsageUpdate(session)
   refreshAgentAuthStatus(session)
   prefetchLocalSlashCommands(session)
   return { ok: true }
@@ -1969,6 +2113,9 @@ function startAgentTurn(session: AgentSession, input: AgentSendInput): void {
 
   const prompt = renderPrompt(input)
   void (async () => {
+    let contextUsageTimer: NodeJS.Timeout | undefined
+    let contextUsageActive = true
+    let contextUsagePending = false
     try {
       if (session.source === 'ssh') {
         await runRemoteAgentMessage(session, prompt, abortController)
@@ -1999,6 +2146,22 @@ function startAgentTurn(session: AgentSession, input: AgentSendInput): void {
           env: cleanEnv()
         }
       })
+      const pollContextUsage = (): void => {
+        if (contextUsagePending || abortController.signal.aborted || !contextUsageActive) return
+        contextUsagePending = true
+        void withTimeout(response.getContextUsage(), '컨텍스트 사용량 확인', 5000)
+          .then((usage) => {
+            if (!abortController.signal.aborted && contextUsageActive) rememberContextUsage(session, usage)
+          })
+          .catch(() => {
+            /* Context usage is progressive enhancement; token totals still update from result. */
+          })
+          .finally(() => {
+            contextUsagePending = false
+          })
+      }
+      pollContextUsage()
+      contextUsageTimer = setInterval(pollContextUsage, 3000)
       for await (const sdkMessage of response) {
         handleSdkMessage(session, sdkMessage)
       }
@@ -2014,6 +2177,8 @@ function startAgentTurn(session: AgentSession, input: AgentSendInput): void {
         emit(session, { type: 'status', sessionId, status: 'error' })
       }
     } finally {
+      contextUsageActive = false
+      if (contextUsageTimer) clearInterval(contextUsageTimer)
       if (session.running === abortController) session.running = undefined
       if (session.queue.length === 0) {
         session.turnAssistantMessageId = undefined

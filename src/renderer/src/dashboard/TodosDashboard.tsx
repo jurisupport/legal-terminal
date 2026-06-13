@@ -337,7 +337,6 @@ export default function TodosDashboard({
   sshProfiles = [],
   defaultOpenProfileId,
   onBrief,
-  onDraft,
   onAskClaudeTodoUpdate
 }: {
   nonce?: number
@@ -348,7 +347,6 @@ export default function TodosDashboard({
   sshProfiles?: SshProfile[]
   defaultOpenProfileId?: string
   onBrief?: (c: JsCase) => void
-  onDraft?: (c: JsCase) => void
   onAskClaudeTodoUpdate?: (prompt: string) => void
 }): JSX.Element {
   const [tokenReady, setTokenReady] = useState<boolean | null>(null)
@@ -878,7 +876,6 @@ export default function TodosDashboard({
           sshProfiles={sshProfiles}
           defaultOpenProfileId={defaultOpenProfileId}
           onBrief={onBrief ?? (() => {})}
-          onDraft={onDraft ?? (() => {})}
         />
       )}
     </div>

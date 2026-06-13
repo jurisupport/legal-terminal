@@ -1,13 +1,15 @@
-import type { JsCase, SshProfile } from '../env'
+import type { JsCase, JsHearing, SshProfile } from '../env'
 import { caseWebUrl, nextHearing, partyNames } from './caseUtils'
 
 export interface CaseContextMenuState {
   x: number
   y: number
   c: JsCase
+  hearing?: JsHearing
 }
 
-type MenuItem = [string, (() => void) | null]
+type MenuAction = () => void | Promise<void>
+type MenuItem = [string, MenuAction | null]
 
 const openExt = (url: string): void => void window.lt.app.openExternal(url)
 const copy = (s: string): void => void navigator.clipboard.writeText(s)
@@ -20,8 +22,8 @@ export default function CaseContextMenu({
   sshProfiles = [],
   defaultOpenProfileId,
   onBrief,
-  onDraft,
   onHearingRecord,
+  onCreateTodo,
   onDetail
 }: {
   menu: CaseContextMenuState
@@ -31,15 +33,15 @@ export default function CaseContextMenu({
   sshProfiles?: SshProfile[]
   defaultOpenProfileId?: string
   onBrief: (c: JsCase) => void
-  onDraft: (c: JsCase) => void
   onHearingRecord?: (c: JsCase) => void
+  onCreateTodo?: (c: JsCase, hearing?: JsHearing) => void | Promise<void>
   onDetail?: (c: JsCase) => void
 }): JSX.Element {
   const c = menu.c
   const items: MenuItem[] = [
     ...(onHearingRecord ? ([['📝 기일 기록 시작', () => onHearingRecord(c)]] as MenuItem[]) : []),
+    ...(onCreateTodo ? ([['☑ 기일 할일 만들기', () => onCreateTodo(c, menu.hearing)]] as MenuItem[]) : []),
     ['✳ Claude에 브리핑 요청', () => onBrief(c)],
-    ['✍ 준비서면 초안 (/brief-protocol)', () => onDraft(c)],
     ['📁 로컬에서 열기', () => onOpenWorkspace(c)],
     ...(onOpenRemote && sshProfiles.length
       ? ([
@@ -88,7 +90,7 @@ export default function CaseContextMenu({
             key={i}
             className="ctx-item"
             onClick={() => {
-              act()
+              void act()
               onClose()
             }}
           >

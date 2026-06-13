@@ -59,8 +59,8 @@ export default function UpcomingHearings({
   sshProfiles = [],
   defaultOpenProfileId,
   onBrief,
-  onDraft,
-  onHearingRecord
+  onHearingRecord,
+  onTodoChanged
 }: {
   nonce?: number
   onPick: (c: JsCase) => void
@@ -69,8 +69,8 @@ export default function UpcomingHearings({
   sshProfiles?: SshProfile[]
   defaultOpenProfileId?: string
   onBrief: (c: JsCase) => void
-  onDraft: (c: JsCase) => void
   onHearingRecord?: (c: JsCase) => void
+  onTodoChanged?: () => void
 }): JSX.Element {
   const [rows, setRows] = useState<Row[] | null>(() => {
     const cached = readCachedCaseList()
@@ -78,6 +78,7 @@ export default function UpcomingHearings({
   })
   const [hasTok, setHasTok] = useState(true)
   const [err, setErr] = useState('')
+  const [notice, setNotice] = useState('')
   const [loading, setLoading] = useState(false)
   const [reloadNonce, setReloadNonce] = useState(0)
   const [menu, setMenu] = useState<CaseContextMenuState | null>(null)
@@ -107,6 +108,7 @@ export default function UpcomingHearings({
       const refresh = reloadNonce > 0
       if (attempt === 0) {
         setErr('')
+        setNotice('')
         const cached = refresh ? undefined : readCachedCaseList()
         if (cached) {
           setRows(buildRows(cached))
@@ -179,15 +181,78 @@ export default function UpcomingHearings({
 
   const today = new Date()
   const isSoon = (d: Date): boolean => (d.getTime() - today.getTime()) / 86400000 < 3
+  const value = (s?: string | null): string | undefined => s?.trim() || undefined
+  const pad = (n: number): string => String(n).padStart(2, '0')
+  const ymd = (d: Date): string => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
+  const hearingTime = (d: Date): string => `${ymd(d)} ${pad(d.getHours())}:${pad(d.getMinutes())}`
+  const namesByRole = (c: JsCase, role: string): string =>
+    c.parties
+      .filter((p) => p.role === role)
+      .map((p) => p.party.name)
+      .join(', ')
+  const createTodoForHearing = async (c: JsCase, h?: JsHearing): Promise<void> => {
+    if (!h) return
+    const when = new Date(h.dateTime)
+    if (Number.isNaN(when.getTime())) {
+      setErr('기일 날짜를 확인할 수 없어 할일을 만들지 못했습니다.')
+      return
+    }
+    const kind = formatHearingLabel(c, h)
+    const client = namesByRole(c, 'client')
+    const opponent = namesByRole(c, 'opponent')
+    const partyLine = [client, opponent].filter(Boolean).join(' / ')
+    const caseTitle = [c.caseNumber, c.caseName].filter(Boolean).join(' ') || '사건'
+    const notes = [
+      '[기일]',
+      `일시: ${hearingTime(when)}`,
+      kind && `종류: ${kind}`,
+      h.location && `장소: ${h.location}`,
+      h.note && h.note !== kind && `메모: ${h.note}`
+    ]
+      .filter((line): line is string => !!line)
+      .join('\n')
+
+    setNotice('JuriSupport 할일 생성 중...')
+    setErr('')
+    try {
+      const result = await window.lt.todo.create({
+        title: `기일 준비: ${when.getMonth() + 1}/${when.getDate()} ${kind} - ${caseTitle}`,
+        status: 'pending',
+        priority: isSoon(when) ? 'high' : 'medium',
+        dueDate: ymd(when),
+        caseId: value(c.id),
+        court: value(c.court),
+        caseNumber: value(c.caseNumber),
+        caseName: value(c.caseName),
+        client: value(client),
+        opponent: value(opponent),
+        partyNames: value(partyLine),
+        notes
+      })
+      if (!result.ok) {
+        setNotice('')
+        setErr(result.error ?? '할일 생성 실패')
+        return
+      }
+      setNotice('기일 할일을 만들었습니다.')
+      window.setTimeout(() => setNotice(''), 2500)
+      onTodoChanged?.()
+    } catch (error) {
+      setNotice('')
+      setErr(error instanceof Error ? error.message : String(error))
+    }
+  }
 
   return (
     <>
-      {err && (
+      {(err || notice) && (
         <div className="agenda-warning">
-          <span>{err}</span>
-          <button className="header-btn agenda-retry" onClick={() => setReloadNonce((n) => n + 1)}>
-            새로고침
-          </button>
+          <span>{err || notice}</span>
+          {err && (
+            <button className="header-btn agenda-retry" onClick={() => setReloadNonce((n) => n + 1)}>
+              새로고침
+            </button>
+          )}
         </div>
       )}
       <ul className="agenda">
@@ -205,7 +270,7 @@ export default function UpcomingHearings({
               onContextMenu={(e) => {
                 e.preventDefault()
                 e.stopPropagation()
-                setMenu({ x: e.clientX, y: e.clientY, c: r.c })
+                setMenu({ x: e.clientX, y: e.clientY, c: r.c, hearing: r.h })
               }}
               title={`${r.c.caseNumber ?? ''} ${r.c.caseName ?? ''}\n클릭 → ${
                 defaultOpenProfile ? `${defaultOpenProfile.label}에서 열기` : '작업환경 열기'
@@ -234,8 +299,8 @@ export default function UpcomingHearings({
           sshProfiles={sshProfiles}
           defaultOpenProfileId={defaultOpenProfileId}
           onBrief={onBrief}
-          onDraft={onDraft}
           onHearingRecord={onHearingRecord}
+          onCreateTodo={createTodoForHearing}
         />
       )}
     </>

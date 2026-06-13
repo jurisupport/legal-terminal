@@ -4886,11 +4886,6 @@ export default function App(): JSX.Element {
     const idPart = c.id ? `(JuriSupport id: ${c.id})` : ''
     sendClaude(`「${caseRef(c)}」 사건${idPart}의 다가오는 기일과 진행상황을 정리해줘.\n`)
   }
-  // 우클릭: 준비서면 초안 시작 (/brief-protocol 슬래시커맨드)
-  const draftCaseWithClaude = (c: JsCase): void => {
-    sendClaude(`/brief-protocol ${caseRef(c)} `)
-  }
-
   // 탐색기/외부에서 터미널로 드래그드롭한 파일들을 그 터미널 프롬프트에 주입.
   const dropFilesToTerm = (termId: string, paths: string[]): void => {
     if (!paths.length) return
@@ -4962,6 +4957,7 @@ export default function App(): JSX.Element {
           title={tab.title}
           path={tab.path}
           draftId={tab.id}
+          platform={platform}
           defaultDir={draftsRoot}
           onPath={(p) => setDocPath(tab.id, p)}
           onAsk={(draftPath, meta) => {
@@ -5082,7 +5078,6 @@ export default function App(): JSX.Element {
       sshProfiles={sshProfiles}
       defaultOpenProfileId={defaultCaseOpenProfileId}
       onBrief={briefCaseToClaude}
-      onDraft={draftCaseWithClaude}
       onHearingRecord={(c) => void openHearingRecordForCase(c)}
       jsNonce={jsNonce}
       todoNonce={todoNonce}
@@ -5285,7 +5280,6 @@ export default function App(): JSX.Element {
             sshProfiles={sshProfiles}
             defaultOpenProfileId={defaultCaseOpenProfileId}
             onBrief={briefCaseToClaude}
-            onDraft={draftCaseWithClaude}
             onHearingRecord={(c) => void openHearingRecordForCase(c)}
             onChanged={() => setJsNonce((n) => n + 1)}
           />
@@ -5305,7 +5299,6 @@ export default function App(): JSX.Element {
             sshProfiles={sshProfiles}
             defaultOpenProfileId={defaultCaseOpenProfileId}
             onBrief={briefCaseToClaude}
-            onDraft={draftCaseWithClaude}
             onAskClaudeTodoUpdate={(prompt) =>
               sendClaude(prompt, { displayText: '할일 변경분을 기준으로 클코 갱신 요청을 보냈습니다.' })
             }
@@ -6293,7 +6286,6 @@ function DocsPanel({
   sshProfiles = [],
   defaultOpenProfileId,
   onBrief,
-  onDraft,
   onHearingRecord,
   jsNonce,
   todoNonce,
@@ -6333,7 +6325,6 @@ function DocsPanel({
   sshProfiles?: SshProfile[]
   defaultOpenProfileId?: string
   onBrief: (c: JsCase) => void
-  onDraft: (c: JsCase) => void
   onHearingRecord?: (c: JsCase) => void
   jsNonce: number
   todoNonce: number
@@ -6560,8 +6551,8 @@ function DocsPanel({
             sshProfiles={sshProfiles}
             defaultOpenProfileId={defaultOpenProfileId}
             onBrief={onBrief}
-            onDraft={onDraft}
             onHearingRecord={onHearingRecord}
+            onTodoChanged={onTodoChanged}
           />
         )}
         {mode === 'todos' && <TodayTodos nonce={todoNonce} onChanged={onTodoChanged} />}

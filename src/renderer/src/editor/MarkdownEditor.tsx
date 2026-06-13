@@ -315,6 +315,7 @@ export default function MarkdownEditor({
   title,
   path,
   draftId,
+  platform,
   defaultDir,
   onPath,
   onAsk,
@@ -325,6 +326,7 @@ export default function MarkdownEditor({
   title?: string
   path?: string
   draftId: string
+  platform?: string
   defaultDir?: string
   onPath?: (path: string) => void
   onAsk?: (
@@ -941,6 +943,8 @@ export default function MarkdownEditor({
     if (e.shiftKey) void saveAsNow()
     else void saveNow()
   }
+  const saveShortcut = platform === 'darwin' ? '⌘S' : 'Ctrl+S'
+  const saveAsShortcut = platform === 'darwin' ? '⌘⇧S' : 'Ctrl+Shift+S'
   const saveStatus = saveError
     ? '저장 실패'
     : remoteConflict
@@ -951,11 +955,11 @@ export default function MarkdownEditor({
           ? draftSaving
             ? '임시저장 중…'
             : draftSaved
-              ? '임시저장됨 (Ctrl+S로 저장)'
-              : '변경됨 (Ctrl+S로 저장)'
+              ? `임시저장됨 (${saveShortcut}로 저장)`
+              : `변경됨 (${saveShortcut}로 저장)`
           : saved
             ? '저장됨'
-            : '미저장 (Ctrl+S)'
+            : `미저장 (${saveShortcut})`
   const isProofOfContentPrint = printLayout === 'proof-of-content'
   const printLayoutTitle = isProofOfContentPrint
     ? "내용증명 양식: 인쇄할 때 PDF 뷰어/프린터 옵션에서 '이미지로 인쇄'를 선택하세요."
@@ -1015,12 +1019,12 @@ export default function MarkdownEditor({
           원본
         </button>
         <span className="tb-divider" />
-        <button className="tb-btn" title="저장 (Ctrl/Cmd+S)" aria-label="저장" onClick={() => void saveNow()}>
+        <button className="tb-btn" title={`저장 (${saveShortcut})`} aria-label="저장" onClick={() => void saveNow()}>
           <IconSave size={14} />
         </button>
         <button
           className="tb-btn"
-          title="다른 이름으로 저장 (Ctrl/Cmd+Shift+S)"
+          title={`다른 이름으로 저장 (${saveAsShortcut})`}
           aria-label="다른 이름으로 저장"
           onClick={() => void saveAsNow()}
         >
