@@ -3,6 +3,12 @@ import type { JsCase, SshProfile } from '../env'
 import { formatHearingLabel } from './hearings'
 import CaseContextMenu, { type CaseContextMenuState } from './CaseContextMenu'
 import { fmtDate, nextHearing, partyNames } from './caseUtils'
+import {
+  clearCaseListCache,
+  listCasesCached,
+  readCachedCaseList,
+  type CaseListParams
+} from './caseListCache'
 
 const SIGNUP_URL = 'https://jurisupport.com/signup'
 const CASES_URL = 'https://jurisupport.com/cases'
@@ -21,6 +27,11 @@ function statusKo(s: string): string {
 }
 
 const openExt = (url: string): void => void window.lt.app.openExternal(url)
+
+function caseListParams(q?: string, refresh = false): CaseListParams {
+  const search = q?.trim()
+  return search ? { search, refresh } : refresh ? { refresh } : {}
+}
 
 /** JuriSupport(본체) 사건 대시보드. 좌클릭=작업환경 열기, 우클릭=컨텍스트 메뉴. */
 export default function CasesDashboard({
@@ -45,7 +56,7 @@ export default function CasesDashboard({
   onChanged?: () => void
 }): JSX.Element {
   const [tokenReady, setTokenReady] = useState<boolean | null>(null)
-  const [cases, setCases] = useState<JsCase[] | null>(null)
+  const [cases, setCases] = useState<JsCase[] | null>(() => readCachedCaseList() ?? null)
   const [err, setErr] = useState('')
   const [loading, setLoading] = useState(false)
   const [search, setSearch] = useState('')
@@ -66,11 +77,17 @@ export default function CasesDashboard({
   }
 
   const load = (q?: string, refresh = false): void => {
-    const params = q ? { search: q, refresh } : refresh ? { refresh } : {}
+    const params = caseListParams(q, refresh)
+    const cached = refresh ? undefined : readCachedCaseList(params)
+    if (cached) {
+      setCases(cached)
+      setErr('')
+      setLoading(false)
+      return
+    }
     setLoading(true)
     setErr('')
-    window.lt.js
-      .listCases(params)
+    listCasesCached(params)
       .then((r) => {
         if (r.ok) setCases(r.cases ?? [])
         else setErr(r.error ?? '불러오기 실패')
@@ -99,6 +116,7 @@ export default function CasesDashboard({
     const t = tokenInput.trim()
     if (!t) return
     window.lt.js.setToken(t).then(() => {
+      clearCaseListCache()
       setTokenInput('')
       setTokenReady(true)
       load(undefined, true)
@@ -170,6 +188,7 @@ export default function CasesDashboard({
           className="dash-btn"
           title="토큰 재설정"
           onClick={() => {
+            clearCaseListCache()
             setTokenReady(false)
             setCases(null)
           }}

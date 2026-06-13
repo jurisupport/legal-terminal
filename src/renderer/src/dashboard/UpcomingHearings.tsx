@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import type { JsCase, JsHearing, SshProfile } from '../env'
 import { formatHearingLabel } from './hearings'
 import CaseContextMenu, { type CaseContextMenuState } from './CaseContextMenu'
+import { listCasesCached, readCachedCaseList } from './caseListCache'
 
 const WD = ['일', '월', '화', '수', '목', '금', '토']
 const RETRY_DELAYS = [700, 1800]
@@ -71,7 +72,10 @@ export default function UpcomingHearings({
   onDraft: (c: JsCase) => void
   onHearingRecord?: (c: JsCase) => void
 }): JSX.Element {
-  const [rows, setRows] = useState<Row[] | null>(null)
+  const [rows, setRows] = useState<Row[] | null>(() => {
+    const cached = readCachedCaseList()
+    return cached ? buildRows(cached) : null
+  })
   const [hasTok, setHasTok] = useState(true)
   const [err, setErr] = useState('')
   const [loading, setLoading] = useState(false)
@@ -100,8 +104,15 @@ export default function UpcomingHearings({
     }
 
     const load = (attempt = 0): void => {
+      const refresh = reloadNonce > 0
       if (attempt === 0) {
         setErr('')
+        const cached = refresh ? undefined : readCachedCaseList()
+        if (cached) {
+          setRows(buildRows(cached))
+          setLoading(false)
+          return
+        }
         setLoading(true)
       }
       window.lt.js
@@ -114,8 +125,7 @@ export default function UpcomingHearings({
             setLoading(false)
             return
           }
-          window.lt.js
-            .listCases(reloadNonce > 0 ? { refresh: true } : undefined)
+          listCasesCached(refresh ? { refresh: true } : undefined)
             .then((r) => {
               if (!alive) return
               if (!r.ok || !r.cases) {
