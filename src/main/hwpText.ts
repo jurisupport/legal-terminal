@@ -319,6 +319,18 @@ function appendMarkdownBlock(text: string, block: string): string {
   return `${text.trimEnd()}\n\n${block}`
 }
 
+function legacyCharText(ch: HwpCharLike): string {
+  if (typeof ch.value === 'string') return ch.value
+
+  if (ch.type === 0) {
+    if (ch.value === 10 || ch.value === 13) return '\n'
+    return ''
+  }
+
+  if (ch.type === 1 && ch.value === 9) return '\t'
+  return ''
+}
+
 function extractLegacyParagraphText(para: HwpParagraphLike): string {
   let text = ''
   let controlIndex = 0
@@ -326,10 +338,12 @@ function extractLegacyParagraphText(para: HwpParagraphLike): string {
   const controls = para.controls ?? []
 
   for (const ch of para.content ?? []) {
-    if (ch.type === 0 && typeof ch.value === 'string') {
+    if (ch.type === 0 || ch.type === 1) {
+      const charText = legacyCharText(ch)
+      if (!charText) continue
       if (needsSeparatorBeforeText && text && !text.endsWith('\n')) text += '\n'
       needsSeparatorBeforeText = false
-      text += ch.value
+      text += charText
       continue
     }
 
@@ -354,10 +368,12 @@ function extractLegacyParagraphMarkdown(para: HwpParagraphLike): string {
   const controls = para.controls ?? []
 
   for (const ch of para.content ?? []) {
-    if (ch.type === 0 && typeof ch.value === 'string') {
+    if (ch.type === 0 || ch.type === 1) {
+      const charText = legacyCharText(ch)
+      if (!charText) continue
       if (needsSeparatorBeforeText && text.trim()) text += '\n\n'
       needsSeparatorBeforeText = false
-      text += ch.value
+      text += charText
       continue
     }
 

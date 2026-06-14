@@ -293,6 +293,19 @@ export default function FileTree({
     return paths.length ? paths : [entry.path]
   }
 
+  const clearRootDropState = (): void => {
+    setRootOver(false)
+    setRootDropLabel('')
+  }
+
+  const isLeavingRootDropTarget = (e: React.DragEvent<HTMLUListElement>): boolean => {
+    const relatedTarget = e.relatedTarget
+    if (relatedTarget instanceof Node && e.currentTarget.contains(relatedTarget)) return false
+
+    const targetAtPoint = document.elementFromPoint(e.clientX, e.clientY)
+    return !targetAtPoint || !e.currentTarget.contains(targetAtPoint)
+  }
+
   const deleteEntries = async (targets: Entry[]): Promise<void> => {
     if (!onDelete || !targets.length) return
     const unique = uniqueStrings(targets.map((entry) => entry.path))
@@ -350,6 +363,20 @@ export default function FileTree({
   useEffect(() => {
     setEditingPath(null)
   }, [root, query])
+
+  useEffect(() => {
+    if (!rootOver) return
+
+    const clear = (): void => clearRootDropState()
+    window.addEventListener('drop', clear)
+    window.addEventListener('dragend', clear)
+    window.addEventListener('blur', clear)
+    return () => {
+      window.removeEventListener('drop', clear)
+      window.removeEventListener('dragend', clear)
+      window.removeEventListener('blur', clear)
+    }
+  }, [rootOver])
 
   const commitRename = (path: string, name: string): void => {
     setEditingPath(null)
@@ -512,8 +539,7 @@ export default function FileTree({
   // 트리 빈 영역/루트로 드롭 → root 폴더로 이동(내부) 또는 복사(외부)
   const rootDrop = (e: React.DragEvent): void => {
     e.preventDefault()
-    setRootOver(false)
-    setRootDropLabel('')
+    clearRootDropState()
     const paths = readLtPaths(e.dataTransfer)
     if (paths.length) {
       for (const src of paths) {
@@ -548,11 +574,9 @@ export default function FileTree({
         setRootOver(true)
       }}
       onDragLeave={(e) => {
-        // 자식으로 들어간 경우는 무시 (루트 밖으로 나갈 때만 해제)
-        if (e.currentTarget === e.target) {
-          setRootOver(false)
-          setRootDropLabel('')
-        }
+        // 자식/손자 행에서 빠져나가는 dragleave도 버블링되므로,
+        // 실제 포인터가 루트 트리 밖으로 나간 경우에만 라벨을 지운다.
+        if (isLeavingRootDropTarget(e)) clearRootDropState()
       }}
       onDrop={rootDrop}
     >

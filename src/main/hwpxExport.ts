@@ -47,6 +47,21 @@ interface HwpxXmlContext {
   nextShapeId: number
 }
 
+const BASE_FONT_FACE = '휴먼명조'
+const BASE_FONT_HEIGHT = 1200
+const BODY_FIRST_LINE_INDENT = 1200
+const FONT_FACE_LANGS = ['HANGUL', 'LATIN', 'HANJA', 'JAPANESE', 'OTHER', 'SYMBOL', 'USER']
+const OUTLINE_HEADS = [
+  { numFormat: 'DIGIT', text: '^1.' },
+  { numFormat: 'HANGUL_SYLLABLE', text: '^2.' },
+  { numFormat: 'DIGIT', text: '^3)' },
+  { numFormat: 'HANGUL_SYLLABLE', text: '^4)' },
+  { numFormat: 'DIGIT', text: '(^5)' },
+  { numFormat: 'HANGUL_SYLLABLE', text: '(^6)' }
+]
+const OUTLINE_MARKER_RE =
+  /^(?:(?:\d{1,3}|[가-힣])\.(?:\s+|(?=[^\d\s]))|(?:\d{1,3}|[가-힣])\)(?:\s+|(?=[^\d\s]))|\((?:\d{1,3}|[가-힣])\)(?:\s+|(?=\S)))/
+
 const CRC_TABLE = new Uint32Array(256)
 for (let i = 0; i < CRC_TABLE.length; i += 1) {
   let c = i
@@ -226,6 +241,15 @@ function listItemText(item: Tokens.ListItem): string {
   return text
 }
 
+function stripLeadingOutlineMarkers(value: string): string {
+  const original = normalizeText(value)
+  let text = original
+  while (OUTLINE_MARKER_RE.test(text)) {
+    text = text.replace(OUTLINE_MARKER_RE, '').trimStart()
+  }
+  return text || original
+}
+
 function markdownBlocks(markdown: string): MarkdownBlock[] {
   const tokens = marked.lexer(markdown, { gfm: true, breaks: true })
   const blocks: MarkdownBlock[] = []
@@ -233,7 +257,7 @@ function markdownBlocks(markdown: string): MarkdownBlock[] {
   for (const token of tokens) {
     switch (token.type) {
       case 'heading': {
-        const text = inlineText(token.tokens, token.text)
+        const text = stripLeadingOutlineMarkers(inlineText(token.tokens, token.text))
         if (text) {
           const level = Math.min(token.depth, 6)
           blocks.push({ kind: 'paragraph', text, charPrIDRef: level, paraPrIDRef: level })
@@ -393,29 +417,39 @@ function headerXml(): string {
   const headingParaPrs = Array.from({ length: 7 }, (_v, id) => {
     const heading =
       id > 0 ? `<hh:heading type="OUTLINE" idRef="0" level="${id - 1}" />` : ''
+    const firstLineIndent = id === 0 ? BODY_FIRST_LINE_INDENT : 0
     return [
       `<hh:paraPr id="${id}" tabPrIDRef="0" condense="0" fontLineHeight="0" snapToGrid="1" suppressLineNumbers="0" checked="0">`,
       heading,
       '<hh:align horizontal="JUSTIFY" vertical="BASELINE" />',
       '<hh:breakSetting breakLatinWord="KEEP_WORD" breakNonLatinWord="KEEP_WORD" widowOrphan="0" keepWithNext="0" pageBreakBefore="0" lineWrap="BREAK" />',
+      '<hh:margin>',
+      `<hc:intent value="${firstLineIndent}" unit="HWPUNIT" />`,
+      '<hc:left value="0" unit="HWPUNIT" />',
+      '<hc:right value="0" unit="HWPUNIT" />',
+      '<hc:prev value="0" unit="HWPUNIT" />',
+      '<hc:next value="0" unit="HWPUNIT" />',
+      '</hh:margin>',
       '<hh:lineSpacing type="PERCENT" value="160" />',
       '</hh:paraPr>'
     ].join('')
   })
-  const outlineHeads = Array.from({ length: 7 }, (_v, level) => {
-    const charPrIDRef = Math.min(level + 1, 6)
-    return `<hh:paraHead start="1" level="${level}" align="LEFT" useInstWidth="1" autoIndent="1" widthAdjust="0" textOffsetType="PERCENT" textOffset="50" numFormat="DIGIT" charPrIDRef="${charPrIDRef}" checkable="0">^${level + 1}.</hh:paraHead>`
-  })
+  const outlineHeads = OUTLINE_HEADS.map(
+    (head, level) =>
+      `<hh:paraHead start="1" level="${level}" align="LEFT" useInstWidth="1" autoIndent="1" widthAdjust="0" textOffsetType="PERCENT" textOffset="50" numFormat="${head.numFormat}" charPrIDRef="0" checkable="0">${head.text}</hh:paraHead>`
+  )
+  const fontFaces = FONT_FACE_LANGS.map(
+    (lang) =>
+      `<hh:fontface lang="${lang}" fontCnt="1"><hh:font id="0" face="${BASE_FONT_FACE}" type="TTF" isEmbedded="0" /></hh:fontface>`
+  )
 
   return [
     '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
     `<hh:head xmlns:hh="${NS.hh}" xmlns:hp="${NS.hp}" xmlns:hc="${NS.hc}" version="${XML_VERSION}" secCnt="1">`,
     '<hh:beginNum page="1" footnote="1" endnote="1" pic="1" tbl="1" equation="1" />',
     '<hh:refList>',
-    '<hh:fontfaces itemCnt="1">',
-    '<hh:fontface lang="HANGUL" fontCnt="1">',
-    '<hh:font id="0" face="함초롬바탕" type="TTF" isEmbedded="0" />',
-    '</hh:fontface>',
+    `<hh:fontfaces itemCnt="${FONT_FACE_LANGS.length}">`,
+    ...fontFaces,
     '</hh:fontfaces>',
     '<hh:borderFills itemCnt="2">',
     '<hh:borderFill id="0" threeD="0" shadow="0" breakCellSeparateLine="0" slash="NONE" backSlash="NONE" />',
@@ -428,9 +462,8 @@ function headerXml(): string {
     '</hh:borderFill>',
     '</hh:borderFills>',
     '<hh:charProperties itemCnt="7">',
-    ...[1000, 1600, 1500, 1400, 1300, 1200, 1100].map(
-      (height, id) =>
-        `<hh:charPr id="${id}" height="${height}" textColor="#000000" shadeColor="#FFFFFF" useFontSpace="0" useKerning="0" symMark="NONE" borderFillIDRef="0"><hh:fontRef hangul="0" latin="0" hanja="0" japanese="0" other="0" symbol="0" user="0" /><hh:ratio hangul="100" latin="100" hanja="100" japanese="100" other="100" symbol="100" user="100" /><hh:spacing hangul="0" latin="0" hanja="0" japanese="0" other="0" symbol="0" user="0" /><hh:relSz hangul="100" latin="100" hanja="100" japanese="100" other="100" symbol="100" user="100" /><hh:offset hangul="0" latin="0" hanja="0" japanese="0" other="0" symbol="0" user="0" /></hh:charPr>`
+    ...Array.from({ length: 7 }, (_v, id) =>
+      `<hh:charPr id="${id}" height="${BASE_FONT_HEIGHT}" textColor="#000000" shadeColor="#FFFFFF" useFontSpace="0" useKerning="0" symMark="NONE" borderFillIDRef="0"><hh:fontRef hangul="0" latin="0" hanja="0" japanese="0" other="0" symbol="0" user="0" /><hh:ratio hangul="100" latin="100" hanja="100" japanese="100" other="100" symbol="100" user="100" /><hh:spacing hangul="0" latin="0" hanja="0" japanese="0" other="0" symbol="0" user="0" /><hh:relSz hangul="100" latin="100" hanja="100" japanese="100" other="100" symbol="100" user="100" /><hh:offset hangul="0" latin="0" hanja="0" japanese="0" other="0" symbol="0" user="0" /></hh:charPr>`
     ),
     '</hh:charProperties>',
     '<hh:numberings itemCnt="1">',

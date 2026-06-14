@@ -40,16 +40,11 @@ curl -fsSL https://raw.githubusercontent.com/jurisupport/legal-terminal/main/ins
 
 ## 이번 업데이트
 
-최신 릴리스: [v0.1.84](https://github.com/jurisupport/legal-terminal/releases/tag/v0.1.84)
+최신 릴리스: [v0.1.85](https://github.com/jurisupport/legal-terminal/releases/tag/v0.1.85)
 
-- **Claude 수정분 자동 병합**: Markdown 편집 중 Claude가 같은 문서를 수정하면 서로 다른 문단의 변경은 자동으로 합치고, 같은 문단 충돌만 수동 확인으로 남깁니다.
-- **Agent 권한 모드 저장**: Agent Panel에서 선택한 권한 모드를 설정에 저장해 다음 세션에서도 같은 기본 모드로 시작합니다.
-- **HWPX 내보내기 호환성 수정**: 한컴 OWPML 패키지 구조에 맞춰 `content.hpf`, 컨테이너, 매니페스트 참조를 정리해 손상 문서로 인식되는 문제를 고쳤습니다.
-- **사건탭 완료 배지**: 터미널 작업 완료 토스트 대신 왼쪽 사건탭 숫자 배지와 사건탭 목록에 완료 작업 수를 표시합니다.
-- **사건탭 업데이트 배지**: Agent가 문서를 수정하면 별도 알림 대신 사건탭에 업데이트 숫자와 반짝임으로 표시합니다.
-- **HWP/HWPX Markdown 추출 및 HWPX 직접 내보내기**: 본문과 표를 Markdown으로 볼 수 있고, Markdown 문서는 PDF/HWPX로 저장할 수 있습니다.
-- **닫기 전 저장 흐름 개선**: 저장하지 않은 Markdown 문서가 있으면 창 닫기 전에 저장하거나 버릴 수 있습니다.
-- **Agent diff 표시 개선**: 큰 diff는 접힌 상태로 보여 작업 패널이 과하게 길어지지 않습니다.
+- **Agent 선택 질문 수정**: 선택지 질문에서 권한 카드가 함께 떠 응답 후에도 진행되지 않던 문제를 고쳤습니다.
+- **HWP 텍스트 추출 보강**: legacy HWP 문자 코드의 줄바꿈과 탭을 본문/Markdown 추출에 반영합니다.
+- **HWPX 내보내기 서식 개선**: 기본 글꼴, 본문 들여쓰기, 개요 번호 처리를 한컴 문서 관례에 맞게 정리했습니다.
 
 ## 처음 쓰는 순서
 

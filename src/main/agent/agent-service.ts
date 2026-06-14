@@ -518,7 +518,7 @@ function diffEditsFromInput(input: Record<string, unknown>): { oldString?: strin
 }
 
 function isAskUserQuestionTool(name: string): boolean {
-  return /^(askuserquestion|ask_user_question|request_user_question)$/i.test(name)
+  return /^(askuserquestion|ask_user_question|request_user_question|requestuserinput|request_user_input)$/i.test(name)
 }
 
 function normalizeDialogQuestions(payload: Record<string, unknown>): AgentDialogQuestion[] {
@@ -968,13 +968,15 @@ function handleAssistantMessage(session: AgentSession, message: Record<string, u
     const name = stringValue(block.name) ?? 'tool'
     const input = asRecord(block.input) ?? {}
     if (isAskUserQuestionTool(name)) {
-      makeQuestionDialog(session, {
-        dialogId: toolId,
-        dialogKind: name,
-        payload: input,
-        toolUseId: toolId,
-        blocking: false
-      })
+      if (session.source === 'ssh') {
+        makeQuestionDialog(session, {
+          dialogId: toolId,
+          dialogKind: name,
+          payload: input,
+          toolUseId: toolId,
+          blocking: false
+        })
+      }
       continue
     }
     if (session.startedTools.has(toolId)) continue
@@ -1065,13 +1067,15 @@ function handleStreamEvent(session: AgentSession, message: Record<string, unknow
       const name = stringValue(block.name) ?? 'tool'
       const input = asRecord(block.input) ?? {}
       if (isAskUserQuestionTool(name)) {
-        makeQuestionDialog(session, {
-          dialogId: toolId,
-          dialogKind: name,
-          payload: input,
-          toolUseId: toolId,
-          blocking: false
-        })
+        if (session.source === 'ssh') {
+          makeQuestionDialog(session, {
+            dialogId: toolId,
+            dialogKind: name,
+            payload: input,
+            toolUseId: toolId,
+            blocking: false
+          })
+        }
         return
       }
       if (session.startedTools.has(toolId)) return
@@ -1633,6 +1637,7 @@ export function sendAgentAuthInput(sessionId: string, input: AgentAuthInput): Ag
 
 function shouldAutoAllow(session: AgentSession, toolName: string): boolean {
   if (session.permissionMode === 'bypassPermissions') return true
+  if (isAskUserQuestionTool(toolName)) return true
   if (READ_ONLY_TOOLS.has(toolName)) return true
   if (session.permissionMode === 'acceptEdits' && EDIT_TOOLS.has(toolName)) return true
   return false
