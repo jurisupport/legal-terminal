@@ -40,8 +40,9 @@ curl -fsSL https://raw.githubusercontent.com/jurisupport/legal-terminal/main/ins
 
 ## 이번 업데이트
 
-최신 릴리스: [v0.1.85](https://github.com/jurisupport/legal-terminal/releases/tag/v0.1.85)
+최신 릴리스: [v0.1.86](https://github.com/jurisupport/legal-terminal/releases/tag/v0.1.86)
 
+- **Mac 탭 전환 단축키 복구**: macOS에서도 `Ctrl+Tab` / `Ctrl+Shift+Tab`으로 문서·터미널 탭을 오갈 수 있게 고쳤습니다.
 - **Agent 선택 질문 수정**: 선택지 질문에서 권한 카드가 함께 떠 응답 후에도 진행되지 않던 문제를 고쳤습니다.
 - **HWP 텍스트 추출 보강**: legacy HWP 문자 코드의 줄바꿈과 탭을 본문/Markdown 추출에 반영합니다.
 - **HWPX 내보내기 서식 개선**: 기본 글꼴, 본문 들여쓰기, 개요 번호 처리를 한컴 문서 관례에 맞게 정리했습니다.

@@ -550,7 +550,8 @@ export default function Terminal({
           return false
         }
         const macCtrlT = isMac && e.ctrlKey && !e.metaKey && k === 't'
-        if (!primary && !macCtrlT) return true
+        const macCtrlTab = isMac && e.ctrlKey && !e.metaKey && k === 'tab'
+        if (!primary && !macCtrlT && !macCtrlTab) return true
         if (k === 't' && !e.altKey) {
           e.stopPropagation()
           if (e.shiftKey) {

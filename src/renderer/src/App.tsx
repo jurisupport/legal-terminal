@@ -1836,6 +1836,7 @@ export default function App(): JSX.Element {
         workSideForShortcut ?? termSide(termTabs.find((t) => t.id === sourceTermId))
       const primary = platform === 'darwin' ? e.metaKey && !e.ctrlKey : e.ctrlKey
       const pageCycleShortcut = (k === 'pageup' || k === 'pagedown') && !e.altKey && (primary || e.ctrlKey)
+      const macCtrlTab = platform === 'darwin' && e.ctrlKey && !e.metaKey && k === 'tab'
       const macCtrlTInWorkArea =
         platform === 'darwin' && !!(termId || workSideForShortcut) && e.ctrlKey && !e.metaKey && isT
       if (primary && e.altKey && !e.shiftKey && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) {
@@ -1850,7 +1851,7 @@ export default function App(): JSX.Element {
         cycleWorkTab(k === 'pageup' ? -1 : 1, workSideForShortcut, sourceWorkKeyForShortcut)
         return
       }
-      if ((!primary && !macCtrlTInWorkArea) || e.altKey) return
+      if ((!primary && !macCtrlTInWorkArea && !macCtrlTab) || e.altKey) return
       if (isT) {
         e.preventDefault()
         e.stopPropagation()
