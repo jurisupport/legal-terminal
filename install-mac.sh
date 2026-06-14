@@ -54,6 +54,44 @@ trap cleanup EXIT
 
 zip_path="${tmpdir}/${asset}"
 
+running_app_pids() {
+  pgrep -f "${target_app}/Contents/MacOS/legal-terminal" 2>/dev/null || true
+}
+
+quit_running_app() {
+  local pids attempt
+
+  pids="$(running_app_pids)"
+  if [[ -z "$pids" ]]; then
+    return
+  fi
+
+  log "Quitting running legal-terminal before replacing the app."
+  if command -v osascript >/dev/null 2>&1; then
+    osascript -e 'tell application id "kr.lawpid.legalterminal" to quit' >/dev/null 2>&1 \
+      || osascript -e 'tell application "legal-terminal" to quit' >/dev/null 2>&1 \
+      || true
+  fi
+
+  attempt=0
+  while [[ "$attempt" -lt 20 ]]; do
+    pids="$(running_app_pids)"
+    if [[ -z "$pids" ]]; then
+      return
+    fi
+    sleep 0.25
+    attempt=$((attempt + 1))
+  done
+
+  log "Stopping old legal-terminal process before install."
+  printf '%s\n' "$pids" | while IFS= read -r pid; do
+    if [[ -n "$pid" ]]; then
+      kill "$pid" 2>/dev/null || true
+    fi
+  done
+  sleep 1
+}
+
 log "Downloading ${asset}"
 log "$download_url"
 curl -fL --retry 3 --progress-bar "$download_url" -o "$zip_path"
@@ -71,6 +109,8 @@ copy_app() {
   rm -rf "$target_app"
   ditto "$source_app" "$target_app"
 }
+
+quit_running_app
 
 log "Installing to ${target_app}"
 if ! copy_app 2>/dev/null; then
