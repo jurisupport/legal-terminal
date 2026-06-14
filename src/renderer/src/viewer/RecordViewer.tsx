@@ -20,6 +20,7 @@ export default function RecordViewer({
   onCropRatio,
   onCurrent,
   onAskDoc,
+  initialStatus,
   onStatus
 }: {
   items: RecordItem[]
@@ -30,6 +31,7 @@ export default function RecordViewer({
   onCropRatio: (r: number) => void
   onCurrent?: (item: RecordItem) => void
   onAskDoc?: () => void
+  initialStatus?: PdfViewStatus
   onStatus?: (status: PdfViewStatus) => void
 }): JSX.Element {
   // 시작 문서 인덱스 (마운트 시 1회). 이후엔 내부 이동이 주도.
@@ -69,6 +71,7 @@ export default function RecordViewer({
       onNextDoc={() => setIndex((i) => Math.min(items.length - 1, i + 1))}
       onPrevDoc={() => setIndex((i) => Math.max(0, i - 1))}
       onAskDoc={onAskDoc}
+      initialStatus={initialStatus}
       onStatus={onStatus}
     />
   )

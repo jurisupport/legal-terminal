@@ -6,6 +6,7 @@ import { parseRecordOutline, type ParsedRecord } from './recordOutline'
 
 export type PdfZoomMode = 'fit_page' | 'fit_width' | 'custom'
 export interface PdfViewStatus {
+  path: string
   page: number
   pages: number
   zoomPct: number
@@ -14,6 +15,9 @@ export interface PdfViewStatus {
   cropRatio: number
 }
 const CROP_OPTIONS = [0.05, 0.1, 0.15, 0.2, 0.25]
+const WHEEL_SCROLL_SENSITIVITY = 0.45
+const WHEEL_PAGE_TURN_THRESHOLD_PX = 90
+const WHEEL_PAGE_TURN_LOCK_MS = 450
 const isRemotePath = (p: string): boolean => p.startsWith('ssh://')
 const isLocalCloudPath = (p: string): boolean =>
   p.includes('/OneDrive/') || p.includes('/Library/CloudStorage/OneDrive')
@@ -31,6 +35,16 @@ function resolveDefault(pdfZoom?: string): { mode: PdfZoomMode; scale: number } 
   const n = parseInt(pdfZoom, 10)
   if (!Number.isNaN(n)) return { mode: 'custom', scale: n / 100 }
   return { mode: 'fit_page', scale: 1 }
+}
+
+function wheelDeltaPixels(e: WheelEvent): { x: number; y: number } {
+  const unit =
+    e.deltaMode === WheelEvent.DOM_DELTA_LINE
+      ? 40
+      : e.deltaMode === WheelEvent.DOM_DELTA_PAGE
+        ? window.innerHeight
+        : 1
+  return { x: e.deltaX * unit, y: e.deltaY * unit }
 }
 
 function createPdfWorker(): pdfjs.PDFWorker {
@@ -56,6 +70,7 @@ export default function PdfViewer({
   onCropOn,
   onCropRatio,
   onAskDoc,
+  initialStatus,
   onStatus
 }: {
   path: string
@@ -68,6 +83,7 @@ export default function PdfViewer({
   onCropOn: (v: boolean) => void
   onCropRatio: (r: number) => void
   onAskDoc?: () => void // 이 문서에 대해 Claude에 묻기 (선택 없이)
+  initialStatus?: PdfViewStatus
   onStatus?: (status: PdfViewStatus) => void
 }): JSX.Element {
   const wrapRef = useRef<HTMLDivElement>(null)
@@ -79,6 +95,7 @@ export default function PdfViewer({
   const pageRef = useRef(1)
   const nextDocRef = useRef<(() => void) | undefined>(onNextDoc)
   const prevDocRef = useRef<(() => void) | undefined>(onPrevDoc)
+  const initialStatusRef = useRef<PdfViewStatus | undefined>(initialStatus)
   const passwordCallbackRef = useRef<((password: string) => void) | null>(null)
 
   const [numPages, setNumPages] = useState(0)
@@ -101,9 +118,11 @@ export default function PdfViewer({
   pageRef.current = page
   nextDocRef.current = onNextDoc
   prevDocRef.current = onPrevDoc
+  initialStatusRef.current = initialStatus
 
   useEffect(() => {
     onStatus?.({
+      path,
       page,
       pages: numPages,
       zoomPct: effPct,
@@ -111,7 +130,7 @@ export default function PdfViewer({
       cropOn,
       cropRatio
     })
-  }, [cropOn, cropRatio, effPct, mode, numPages, onStatus, page])
+  }, [cropOn, cropRatio, effPct, mode, numPages, onStatus, page, path])
 
   // 마지막/첫 페이지 경계에서 다음/이전 문서로 이동. 버튼 클릭 후에도 키보드가 먹도록 뷰어에 포커스 복원.
   // 로딩 중(numPages=0)엔 무시 — 새 문서가 뜨기 전 입력이 다음다음 문서로 건너뛰는 것 방지.
@@ -162,10 +181,14 @@ export default function PdfViewer({
   // 문서 로드
   useEffect(() => {
     let cancelled = false
+    const initialPage =
+      initialStatusRef.current?.path === path && Number.isFinite(initialStatusRef.current.page)
+        ? Math.max(1, Math.floor(initialStatusRef.current.page))
+        : 1
     setErr('')
     setLoading(true)
     setNumPages(0)
-    setPage(1)
+    setPage(initialPage)
     setRotation(0)
     setPasswordPrompt(null)
     setPasswordValue('')
@@ -198,6 +221,7 @@ export default function PdfViewer({
         passwordCallbackRef.current = null
         setPasswordPrompt(null)
         setPasswordBusy(false)
+        setPage(Math.min(initialPage, doc.numPages))
         setNumPages(doc.numPages)
         setLoading(false)
         // 새 문서 로드 직후 뷰어에 포커스 → 다음 문서로 넘어가도 화살표 키가 바로 동작
@@ -338,6 +362,18 @@ export default function PdfViewer({
   useEffect(() => {
     const wrap = wrapRef.current
     if (!wrap) return
+    let pageTurnDelta = 0
+    let pageTurnLocked = false
+    let unlockTimer: ReturnType<typeof setTimeout> | null = null
+    const lockPageTurn = (): void => {
+      pageTurnDelta = 0
+      if (unlockTimer) clearTimeout(unlockTimer)
+      pageTurnLocked = true
+      unlockTimer = setTimeout(() => {
+        pageTurnLocked = false
+        unlockTimer = null
+      }, WHEEL_PAGE_TURN_LOCK_MS)
+    }
     const onWheel = (e: WheelEvent): void => {
       if (e.ctrlKey) {
         e.preventDefault()
@@ -345,33 +381,55 @@ export default function PdfViewer({
         return
       }
 
-      const horizontalDelta = e.shiftKey && Math.abs(e.deltaX) < Math.abs(e.deltaY) ? e.deltaY : e.deltaX
-      const hasHorizontalIntent = Math.abs(horizontalDelta) > 0.5 && Math.abs(horizontalDelta) >= Math.abs(e.deltaY)
+      const delta = wheelDeltaPixels(e)
+      const verticalDelta = delta.y * WHEEL_SCROLL_SENSITIVITY
+      const horizontalDelta =
+        e.shiftKey && Math.abs(delta.x) < Math.abs(delta.y) ? verticalDelta : delta.x * WHEEL_SCROLL_SENSITIVITY
+      const hasHorizontalIntent =
+        Math.abs(horizontalDelta) > 0.5 && Math.abs(horizontalDelta) >= Math.abs(verticalDelta)
       const canScrollX = wrap.scrollWidth > wrap.clientWidth + 1
 
       if (hasHorizontalIntent) {
         e.preventDefault()
         if (canScrollX) wrap.scrollLeft += horizontalDelta
+        pageTurnDelta = 0
         return
       }
 
       const canScrollY = wrap.scrollHeight > wrap.clientHeight + 1
-      if (canScrollY && Math.abs(e.deltaY) > 0.5) {
+      if (canScrollY && Math.abs(verticalDelta) > 0.5) {
         const maxTop = wrap.scrollHeight - wrap.clientHeight
-        const nextTop = Math.max(0, Math.min(maxTop, wrap.scrollTop + e.deltaY))
+        const nextTop = Math.max(0, Math.min(maxTop, wrap.scrollTop + verticalDelta))
         if (nextTop !== wrap.scrollTop) {
           e.preventDefault()
           wrap.scrollTop = nextTop
+          pageTurnDelta = 0
           return
         }
       }
 
       e.preventDefault()
-      if (e.deltaY < 0) goPrev()
-      else if (e.deltaY > 0) goNext()
+      if (pageTurnLocked) {
+        if (Math.abs(delta.y) > 0.5) lockPageTurn()
+        return
+      }
+      if (Math.abs(delta.y) <= 0.5) return
+
+      if (pageTurnDelta !== 0 && Math.sign(delta.y) !== Math.sign(pageTurnDelta)) {
+        pageTurnDelta = 0
+      }
+      pageTurnDelta += delta.y
+      if (Math.abs(pageTurnDelta) < WHEEL_PAGE_TURN_THRESHOLD_PX) return
+
+      if (pageTurnDelta < 0) goPrev()
+      else goNext()
+      lockPageTurn()
     }
     wrap.addEventListener('wheel', onWheel, { passive: false })
-    return () => wrap.removeEventListener('wheel', onWheel)
+    return () => {
+      if (unlockTimer) clearTimeout(unlockTimer)
+      wrap.removeEventListener('wheel', onWheel)
+    }
   }, [zoomBy, goPrev, goNext])
 
   // 드래그 팬 (확대 시 스크롤 이동)

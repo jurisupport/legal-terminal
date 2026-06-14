@@ -797,6 +797,10 @@ function emitProcessEvent(
   emit(session, { type: 'process:event', sessionId: session.id, processId, title, text, status })
 }
 
+function emitInterrupted(session: AgentSession, message = '사용자가 Agent 작업을 중지했습니다.'): void {
+  emit(session, { type: 'session:interrupted', sessionId: session.id, message })
+}
+
 function emptyTokenUsage(): AgentTokenUsage {
   return {
     turns: 0,
@@ -1489,10 +1493,12 @@ function runRemoteAgentMessage(
     abortController.signal.addEventListener('abort', stopRemote, { once: true })
 
     proc.stdout.on('data', (chunk: Buffer) => {
+      if (abortController.signal.aborted || session.running !== abortController) return
       stdoutBuffer += chunk.toString('utf8')
       const lines = stdoutBuffer.split(/\r?\n/)
       stdoutBuffer = lines.pop() ?? ''
       for (const line of lines) {
+        if (abortController.signal.aborted || session.running !== abortController) return
         if (line.trim()) sawJson = true
         const message = handleRemoteJsonLine(session, line)
         if (message?.type === 'result') endRemoteInput()
@@ -1519,6 +1525,10 @@ function runRemoteAgentMessage(
     proc.on('close', (code, signal) => {
       if (session.remoteProcess === proc) session.remoteProcess = undefined
       abortController.signal.removeEventListener('abort', stopRemote)
+      if (abortController.signal.aborted || session.running !== abortController) {
+        resolve()
+        return
+      }
       if (stdoutBuffer.trim()) {
         sawJson = true
         const message = handleRemoteJsonLine(session, stdoutBuffer)
@@ -1526,10 +1536,6 @@ function runRemoteAgentMessage(
         stdoutBuffer = ''
       }
       rejectPendingPermissions(session, '원격 Claude 프로세스가 종료되었습니다.')
-      if (abortController.signal.aborted) {
-        resolve()
-        return
-      }
       if (code && code !== 0) {
         emit(session, {
           type: 'error',
@@ -2013,12 +2019,13 @@ function clearAgentQueue(session: AgentSession): void {
 }
 
 function interruptForImmediateInstruction(session: AgentSession): void {
+  emitInterrupted(session, '현재 작업을 중단하고 새 지시를 바로 실행합니다.')
   emitProcessEvent(
     session,
     `steer-${Date.now()}`,
     '바로 지시하기',
     '현재 작업을 중단하고 새 지시를 바로 실행합니다.',
-    'running'
+    'done'
   )
   rejectPendingPermissions(session, '사용자가 바로 지시하기로 현재 작업을 중단했습니다.')
   cancelPendingDialogs(session)
@@ -2168,9 +2175,12 @@ function startAgentTurn(session: AgentSession, input: AgentSendInput): void {
       pollContextUsage()
       contextUsageTimer = setInterval(pollContextUsage, 3000)
       for await (const sdkMessage of response) {
+        if (abortController.signal.aborted || session.running !== abortController) break
         handleSdkMessage(session, sdkMessage)
       }
-      emit(session, { type: 'status', sessionId, status: 'idle' })
+      if (!abortController.signal.aborted && session.running === abortController) {
+        emit(session, { type: 'status', sessionId, status: 'idle' })
+      }
     } catch (error) {
       if (!abortController.signal.aborted) {
         emit(session, {
@@ -2391,6 +2401,7 @@ export function interruptAgentSession(sessionId: string): AgentCommandResult {
   const session = sessions.get(sessionId)
   if (!session) return { ok: false, error: 'Agent 세션을 찾을 수 없습니다.' }
   clearAgentQueue(session)
+  emitInterrupted(session)
   rejectPendingPermissions(session, '사용자가 Agent 작업을 중지했습니다.')
   cancelPendingDialogs(session)
   session.running?.abort()

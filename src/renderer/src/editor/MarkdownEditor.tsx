@@ -62,6 +62,12 @@ interface ViewportBookmark {
   scrollLeft: number
 }
 
+interface DocumentScrollPosition {
+  key: string
+  top: number
+  left: number
+}
+
 interface EditorFindRange {
   from: number
   to: number
@@ -321,6 +327,9 @@ export default function MarkdownEditor({
   onAsk,
   onSendToJuriSupport,
   onSaveHandler,
+  scrollKey,
+  initialScroll,
+  onScrollPosition,
   onDirty
 }: {
   title?: string
@@ -335,11 +344,20 @@ export default function MarkdownEditor({
   ) => void
   onSendToJuriSupport?: (doc: MarkdownDocumentPayload) => void
   onSaveHandler?: (handler: MarkdownSaveHandler | null) => void
+  scrollKey?: string
+  initialScroll?: DocumentScrollPosition
+  onScrollPosition?: (position: DocumentScrollPosition) => void
   // 실제 파일에 저장되지 않은 변경사항이 있으면 닫기 전 알린다
   onDirty?: (dirty: boolean) => void
 }): JSX.Element {
   const onDirtyRef = useRef(onDirty)
   onDirtyRef.current = onDirty
+  const scrollKeyRef = useRef(scrollKey)
+  const initialScrollRef = useRef(initialScroll)
+  const onScrollPositionRef = useRef(onScrollPosition)
+  scrollKeyRef.current = scrollKey
+  initialScrollRef.current = initialScroll
+  onScrollPositionRef.current = onScrollPosition
   const hostRef = useRef<HTMLDivElement>(null)
   const viewRef = useRef<EditorView | null>(null)
   const previewComp = useRef(new Compartment())
@@ -359,6 +377,15 @@ export default function MarkdownEditor({
   const findIndexRef = useRef(-1)
   const applyFindRef = useRef<(query: string, requestedIndex: number) => void>(() => {})
   const openFindRef = useRef<() => void>(() => {})
+  const reportScrollPosition = (view = viewRef.current): void => {
+    const key = scrollKeyRef.current
+    if (!view || !key) return
+    onScrollPositionRef.current?.({
+      key,
+      top: view.scrollDOM.scrollTop,
+      left: view.scrollDOM.scrollLeft
+    })
+  }
   const [preview, setPreview] = useState(true)
   const [err, setErr] = useState('')
   const [saveError, setSaveError] = useState('')
@@ -745,6 +772,10 @@ export default function MarkdownEditor({
                 if (!writeMarkdownDataTransfer(event.clipboardData, markdownText, 'rich')) return false
                 event.preventDefault()
                 return true
+              },
+              scroll(_event, view) {
+                reportScrollPosition(view)
+                return false
               }
             }),
             EditorView.updateListener.of((u) => {
@@ -785,6 +816,16 @@ export default function MarkdownEditor({
         setDraftSaved(restoredDraft)
         setSavedState(!restoredDraft && !!pathRef.current)
         viewRef.current = new EditorView({ state, parent: hostRef.current })
+        const restoredScroll = initialScrollRef.current
+        if (restoredScroll && restoredScroll.key === scrollKeyRef.current) {
+          const { top, left } = restoredScroll
+          window.requestAnimationFrame(() => {
+            const scroller = viewRef.current?.scrollDOM
+            if (!scroller) return
+            scroller.scrollTop = top
+            scroller.scrollLeft = left
+          })
+        }
         viewRef.current.focus()
       })
       .catch((e) => alive && setErr(String(e)))
@@ -796,6 +837,7 @@ export default function MarkdownEditor({
       }
       if (localDirtyRef.current) void saveDraftNow(false)
       if (remoteAppliedTimer.current) clearTimeout(remoteAppliedTimer.current)
+      reportScrollPosition()
       viewRef.current?.destroy()
       viewRef.current = null
     }

@@ -40,8 +40,11 @@ curl -fsSL https://raw.githubusercontent.com/jurisupport/legal-terminal/main/ins
 
 ## 이번 업데이트
 
-최신 릴리스: [v0.1.86](https://github.com/jurisupport/legal-terminal/releases/tag/v0.1.86)
+최신 릴리스: [v0.1.87](https://github.com/jurisupport/legal-terminal/releases/tag/v0.1.87)
 
+- **문서 위치 복원**: Markdown, PDF, HWP, DOCX, CSV, 이미지 탭을 다시 열 때 마지막 스크롤·페이지 위치를 복원합니다.
+- **PDF 휠 이동 안정화**: 트랙패드/휠 스크롤이 끝 페이지에서 너무 민감하게 넘어가지 않도록 조정했습니다.
+- **Agent 중단 상태 정리**: 작업 중지/바로 지시하기 때 실행 중 표시와 대기 팝업을 즉시 중지 상태로 정리합니다.
 - **Mac 탭 전환 단축키 복구**: macOS에서도 `Ctrl+Tab` / `Ctrl+Shift+Tab`으로 문서·터미널 탭을 오갈 수 있게 고쳤습니다.
 - **Agent 선택 질문 수정**: 선택지 질문에서 권한 카드가 함께 떠 응답 후에도 진행되지 않던 문제를 고쳤습니다.
 - **HWP 텍스트 추출 보강**: legacy HWP 문자 코드의 줄바꿈과 탭을 본문/Markdown 추출에 반영합니다.

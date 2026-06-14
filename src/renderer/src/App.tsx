@@ -4,6 +4,7 @@ import {
   useRef,
   useState,
   type KeyboardEvent as ReactKeyboardEvent,
+  type RefObject,
   type ReactNode
 } from 'react'
 import Terminal from './terminal/Terminal'
@@ -227,6 +228,12 @@ interface DocTab {
   hearingDrafts?: string
   hearing?: JsHearing
   side?: DockSide
+}
+
+interface DocScrollPosition {
+  key: string
+  top: number
+  left: number
 }
 
 interface CaseDocumentUpdates {
@@ -571,12 +578,72 @@ const pdfZoomLabel = (mode: PdfViewStatus['zoomMode']): string => {
 
 const samePdfStatus = (a: PdfViewStatus | undefined, b: PdfViewStatus): boolean =>
   !!a &&
+  a.path === b.path &&
   a.page === b.page &&
   a.pages === b.pages &&
   a.zoomPct === b.zoomPct &&
   a.zoomMode === b.zoomMode &&
   a.cropOn === b.cropOn &&
   a.cropRatio === b.cropRatio
+
+const sameDocScrollPosition = (a: DocScrollPosition | undefined, b: DocScrollPosition): boolean =>
+  !!a && a.key === b.key && a.top === b.top && a.left === b.left
+
+const docScrollKey = (tab: Pick<DocTab, 'id' | 'path'>): string => tab.path ?? tab.id
+
+function useRestoredScroll<T extends HTMLElement>(
+  scrollKey: string | undefined,
+  initialScroll: DocScrollPosition | undefined,
+  onScrollPosition: ((position: DocScrollPosition) => void) | undefined,
+  restoreToken: unknown
+): { ref: RefObject<T>; onScroll: () => void } {
+  const ref = useRef<T>(null)
+  const onScrollPositionRef = useRef(onScrollPosition)
+  const rafRef = useRef<number | null>(null)
+  const restoredForRef = useRef('')
+  onScrollPositionRef.current = onScrollPosition
+
+  const emit = (): void => {
+    const el = ref.current
+    if (!el || !scrollKey) return
+    onScrollPositionRef.current?.({ key: scrollKey, top: el.scrollTop, left: el.scrollLeft })
+  }
+
+  const onScroll = (): void => {
+    if (rafRef.current !== null) return
+    rafRef.current = window.requestAnimationFrame(() => {
+      rafRef.current = null
+      emit()
+    })
+  }
+
+  useEffect(() => {
+    const el = ref.current
+    if (!el || !scrollKey || initialScroll?.key !== scrollKey) return
+    const restoreId = `${scrollKey}:${String(restoreToken)}`
+    if (restoredForRef.current === restoreId) return
+    restoredForRef.current = restoreId
+    const { top, left } = initialScroll
+    const frame = window.requestAnimationFrame(() => {
+      el.scrollTop = top
+      el.scrollLeft = left
+    })
+    return () => window.cancelAnimationFrame(frame)
+  }, [initialScroll?.key, restoreToken, scrollKey])
+
+  useEffect(
+    () => () => {
+      if (rafRef.current !== null) {
+        window.cancelAnimationFrame(rafRef.current)
+        rafRef.current = null
+      }
+      emit()
+    },
+    [scrollKey]
+  )
+
+  return { ref, onScroll }
+}
 
 const describeDocStatus = (
   tab: DocTab | undefined,
@@ -1313,6 +1380,7 @@ export default function App(): JSX.Element {
   // 활성 PDF의 목차 분류 결과 + 페이지 점프 신호
   const [pdfRecord, setPdfRecord] = useState<{ path: string; parsed: ParsedRecord } | null>(null)
   const [pdfStatus, setPdfStatus] = useState<Record<string, PdfViewStatus>>({})
+  const [docScrollPositions, setDocScrollPositions] = useState<Record<string, DocScrollPosition>>({})
   const [pdfJump, setPdfJump] = useState<{ page: number; nonce: number } | undefined>()
   const jumpNonce = useRef(0)
 
@@ -4502,7 +4570,18 @@ export default function App(): JSX.Element {
   const updatePdfStatus = (tabId: string, status: PdfViewStatus): void => {
     setPdfStatus((s) => (samePdfStatus(s[tabId], status) ? s : { ...s, [tabId]: status }))
   }
-  const activePdfStatus = activeDocTab?.kind === 'pdf' ? pdfStatus[activeDocTab.id] : undefined
+  const updateDocScrollPosition = (tabId: string, position: DocScrollPosition): void => {
+    setDocScrollPositions((s) => (sameDocScrollPosition(s[tabId], position) ? s : { ...s, [tabId]: position }))
+  }
+  const scrollPositionForDoc = (tab: DocTab): DocScrollPosition | undefined => {
+    const key = docScrollKey(tab)
+    const position = docScrollPositions[tab.id]
+    return position?.key === key ? position : undefined
+  }
+  const activePdfStatus =
+    activeDocTab?.kind === 'pdf' && pdfStatus[activeDocTab.id]?.path === activeDocTab.path
+      ? pdfStatus[activeDocTab.id]
+      : undefined
   const activeTermRunStatus = activeTerm ? termStatus.get(activeTerm) : undefined
   const selectionStatus = selectionCharCount > 0 ? `선택 ${formatCharCount(selectionCharCount)}자` : undefined
   const statusInfo =
@@ -4924,17 +5003,52 @@ export default function App(): JSX.Element {
     <>
       {!tab && <Empty label="열린 문서가 없습니다" actionLabel="새 문서" onAction={() => addDoc('left')} />}
       {tab?.kind === 'welcome' && <Welcome recent={recent} onOpen={openRecent} />}
-      {tab?.kind === 'file' && <FileView key={tab.path} path={tab.path as string} />}
+      {tab?.kind === 'file' && (
+        <FileView
+          key={tab.path}
+          path={tab.path as string}
+          scrollKey={docScrollKey(tab)}
+          initialScroll={scrollPositionForDoc(tab)}
+          onScrollPosition={(position) => updateDocScrollPosition(tab.id, position)}
+        />
+      )}
       {tab?.kind === 'image' && (
         <ImageViewer
           key={tab.path}
           path={tab.path as string}
+          scrollKey={docScrollKey(tab)}
+          initialScroll={scrollPositionForDoc(tab)}
+          onScrollPosition={(position) => updateDocScrollPosition(tab.id, position)}
           onNavigate={(dir) => navigateImage(tab.path as string, dir)}
         />
       )}
-      {tab?.kind === 'hwp' && <HwpView key={tab.path} path={tab.path as string} />}
-      {tab?.kind === 'docx' && <DocxView key={tab.path} path={tab.path as string} />}
-      {tab?.kind === 'csv' && <CsvView key={tab.path} path={tab.path as string} />}
+      {tab?.kind === 'hwp' && (
+        <HwpView
+          key={tab.path}
+          path={tab.path as string}
+          scrollKey={docScrollKey(tab)}
+          initialScroll={scrollPositionForDoc(tab)}
+          onScrollPosition={(position) => updateDocScrollPosition(tab.id, position)}
+        />
+      )}
+      {tab?.kind === 'docx' && (
+        <DocxView
+          key={tab.path}
+          path={tab.path as string}
+          scrollKey={docScrollKey(tab)}
+          initialScroll={scrollPositionForDoc(tab)}
+          onScrollPosition={(position) => updateDocScrollPosition(tab.id, position)}
+        />
+      )}
+      {tab?.kind === 'csv' && (
+        <CsvView
+          key={tab.path}
+          path={tab.path as string}
+          scrollKey={docScrollKey(tab)}
+          initialScroll={scrollPositionForDoc(tab)}
+          onScrollPosition={(position) => updateDocScrollPosition(tab.id, position)}
+        />
+      )}
       {tab?.kind === 'hearing' && (
         <HearingRecordPanel
           key={tab.id}
@@ -4961,6 +5075,9 @@ export default function App(): JSX.Element {
           platform={platform}
           defaultDir={draftsRoot}
           onPath={(p) => setDocPath(tab.id, p)}
+          scrollKey={docScrollKey(tab)}
+          initialScroll={scrollPositionForDoc(tab)}
+          onScrollPosition={(position) => updateDocScrollPosition(tab.id, position)}
           onAsk={(draftPath, meta) => {
             if (draftPath) {
               setTreeRefresh((current) => current + 1)
@@ -5001,6 +5118,7 @@ export default function App(): JSX.Element {
               )
             }
             onAskDoc={() => askClaude('')}
+            initialStatus={pdfStatus[tab.id]?.path === tab.path ? pdfStatus[tab.id] : undefined}
             onStatus={(status) => updatePdfStatus(tab.id, status)}
           />
         ) : (
@@ -5014,6 +5132,7 @@ export default function App(): JSX.Element {
             onCropOn={setCropOn}
             onCropRatio={setCropRatio}
             onAskDoc={() => askClaude('')}
+            initialStatus={pdfStatus[tab.id]?.path === tab.path ? pdfStatus[tab.id] : undefined}
             onStatus={(status) => updatePdfStatus(tab.id, status)}
           />
         ))}
@@ -7444,11 +7563,17 @@ function findTextRanges(text: string, query: string): TextFindRange[] {
 function TextDoc({
   text,
   note,
-  actions
+  actions,
+  scrollKey,
+  initialScroll,
+  onScrollPosition
 }: {
   text: string
   note?: string
   actions?: ReactNode
+  scrollKey?: string
+  initialScroll?: DocScrollPosition
+  onScrollPosition?: (position: DocScrollPosition) => void
 }): JSX.Element {
   const [wrap, setWrap] = useState(true)
   const [findOpen, setFindOpen] = useState(false)
@@ -7456,6 +7581,12 @@ function TextDoc({
   const [findIndex, setFindIndex] = useState(-1)
   const [docFont, setDocFont] = useState({ family: DEFAULT_MD_FONT, size: DEFAULT_MD_FONT_SIZE })
   const rootRef = useRef<HTMLDivElement>(null)
+  const { ref: scrollRef, onScroll } = useRestoredScroll<HTMLPreElement>(
+    scrollKey,
+    initialScroll,
+    onScrollPosition,
+    text.length
+  )
   const ranges = findTextRanges(text, findQuery)
   const activeFindIndex = ranges.length ? Math.max(0, Math.min(findIndex, ranges.length - 1)) : -1
 
@@ -7559,8 +7690,10 @@ function TextDoc({
         />
       )}
       <pre
+        ref={scrollRef}
         className={`file-view ${wrap ? 'wrap' : ''}`}
         style={{ fontFamily: docFont.family, fontSize: `${docFont.size}px` }}
+        onScroll={onScroll}
       >
         {renderText()}
         {note ? '\n\n' + note : ''}
@@ -7570,7 +7703,17 @@ function TextDoc({
 }
 
 /** 텍스트 파일 미리보기 (md/txt/csv/json…). MD 옵시디언식 라이브 프리뷰는 추후 CodeMirror로. */
-function FileView({ path }: { path: string }): JSX.Element {
+function FileView({
+  path,
+  scrollKey,
+  initialScroll,
+  onScrollPosition
+}: {
+  path: string
+  scrollKey?: string
+  initialScroll?: DocScrollPosition
+  onScrollPosition?: (position: DocScrollPosition) => void
+}): JSX.Element {
   const remoteVersion = useRemoteFileVersion(path)
   const [state, setState] = useState<{
     loading: boolean
@@ -7609,11 +7752,29 @@ function FileView({ path }: { path: string }): JSX.Element {
         <p className="muted">텍스트로 미리볼 수 없는 형식입니다.</p>
       </div>
     )
-  return <TextDoc text={state.text} note={state.truncated ? '… (이하 생략, 2MB 초과)' : undefined} />
+  return (
+    <TextDoc
+      text={state.text}
+      note={state.truncated ? '… (이하 생략, 2MB 초과)' : undefined}
+      scrollKey={scrollKey}
+      initialScroll={initialScroll}
+      onScrollPosition={onScrollPosition}
+    />
+  )
 }
 
 /** HWP/HWPX — 본문과 표를 Markdown으로 추출해 표시 */
-function HwpView({ path }: { path: string }): JSX.Element {
+function HwpView({
+  path,
+  scrollKey,
+  initialScroll,
+  onScrollPosition
+}: {
+  path: string
+  scrollKey?: string
+  initialScroll?: DocScrollPosition
+  onScrollPosition?: (position: DocScrollPosition) => void
+}): JSX.Element {
   const remoteVersion = useRemoteFileVersion(path)
   const [state, setState] = useState<{ loading: boolean; markdown: string; err: string }>({
     loading: true,
@@ -7651,6 +7812,9 @@ function HwpView({ path }: { path: string }): JSX.Element {
   return (
     <TextDoc
       text={state.markdown}
+      scrollKey={scrollKey}
+      initialScroll={initialScroll}
+      onScrollPosition={onScrollPosition}
       actions={
         <button
           className="tb-btn"
@@ -7667,7 +7831,17 @@ function HwpView({ path }: { path: string }): JSX.Element {
 }
 
 /** DOCX — Word 본문 텍스트만 추출해 표시 */
-function DocxView({ path }: { path: string }): JSX.Element {
+function DocxView({
+  path,
+  scrollKey,
+  initialScroll,
+  onScrollPosition
+}: {
+  path: string
+  scrollKey?: string
+  initialScroll?: DocScrollPosition
+  onScrollPosition?: (position: DocScrollPosition) => void
+}): JSX.Element {
   const remoteVersion = useRemoteFileVersion(path)
   const [state, setState] = useState<{ loading: boolean; text: string; err: string }>({
     loading: true,
@@ -7690,7 +7864,14 @@ function DocxView({ path }: { path: string }): JSX.Element {
   }, [path, remoteVersion])
   if (state.loading) return <div className="welcome"><p className="muted">DOCX 텍스트 추출 중…</p></div>
   if (state.err) return <div className="welcome"><p className="muted">{state.err}</p></div>
-  return <TextDoc text={state.text} />
+  return (
+    <TextDoc
+      text={state.text}
+      scrollKey={scrollKey}
+      initialScroll={initialScroll}
+      onScrollPosition={onScrollPosition}
+    />
+  )
 }
 
 // CSV 파싱 (따옴표·구분자 처리)
@@ -7737,7 +7918,17 @@ function detectDelim(firstLine: string): string {
 }
 
 /** CSV — 표(기본) / 색상 텍스트(열별 색상) */
-function CsvView({ path }: { path: string }): JSX.Element {
+function CsvView({
+  path,
+  scrollKey,
+  initialScroll,
+  onScrollPosition
+}: {
+  path: string
+  scrollKey?: string
+  initialScroll?: DocScrollPosition
+  onScrollPosition?: (position: DocScrollPosition) => void
+}): JSX.Element {
   const remoteVersion = useRemoteFileVersion(path)
   const [state, setState] = useState<{ loading: boolean; rows: string[][]; err: string }>({
     loading: true,
@@ -7745,6 +7936,12 @@ function CsvView({ path }: { path: string }): JSX.Element {
     err: ''
   })
   const [mode, setMode] = useState<'table' | 'color'>('table')
+  const { ref: scrollRef, onScroll } = useRestoredScroll<HTMLDivElement>(
+    scrollKey,
+    initialScroll,
+    onScrollPosition,
+    `${state.rows.length}:${mode}`
+  )
 
   useEffect(() => {
     let alive = true
@@ -7778,7 +7975,7 @@ function CsvView({ path }: { path: string }): JSX.Element {
         </button>
         <span className="tb-sep-text">{state.rows.length}행</span>
       </div>
-      <div className="csv-wrap">
+      <div className="csv-wrap" ref={scrollRef} onScroll={onScroll}>
         {mode === 'table' ? (
           <table className="csv-table">
             {header && (
@@ -7824,9 +8021,15 @@ function CsvView({ path }: { path: string }): JSX.Element {
 /** 이미지 뷰어 — 폭맞춤(기본)/원본, Ctrl+휠 줌 */
 function ImageViewer({
   path,
+  scrollKey,
+  initialScroll,
+  onScrollPosition,
   onNavigate
 }: {
   path: string
+  scrollKey?: string
+  initialScroll?: DocScrollPosition
+  onScrollPosition?: (position: DocScrollPosition) => void
   onNavigate?: (dir: 1 | -1) => void
 }): JSX.Element {
   const remoteVersion = useRemoteFileVersion(path)
@@ -7834,7 +8037,12 @@ function ImageViewer({
   const [err, setErr] = useState('')
   const [mode, setMode] = useState<'fit_page' | 'fit_width' | 'custom'>('fit_page')
   const [scale, setScale] = useState(1)
-  const wrapRef = useRef<HTMLDivElement>(null)
+  const { ref: wrapRef, onScroll } = useRestoredScroll<HTMLDivElement>(
+    scrollKey,
+    initialScroll,
+    onScrollPosition,
+    `${url}:${mode}:${scale}`
+  )
   const navLock = useRef(false)
 
   useEffect(() => {
@@ -7958,6 +8166,7 @@ function ImageViewer({
       <div
         className={`image-wrap ${mode === 'fit_page' ? 'center' : ''} ${mode === 'custom' ? 'pannable' : ''}`}
         ref={wrapRef}
+        onScroll={onScroll}
         onWheel={onWheel}
       >
         {url && <img src={url} style={imgStyle} draggable={false} alt="" />}

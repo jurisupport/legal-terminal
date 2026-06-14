@@ -295,6 +295,7 @@ const agentStatusLabels: Record<AgentPanelStatus, string> = {
 function timelineStatusLabel(item: TimelineItem): string | undefined {
   if (item.kind === 'diff' && item.status === 'applied') return '적용됨'
   if (item.kind === 'diff' && item.status === 'reverted') return '되돌림'
+  if (item.kind !== 'queue' && (item.status === 'cancelled' || item.status === 'canceled')) return '중지됨'
   if (item.kind !== 'queue') return item.status
   if (item.status === 'queued') return '대기'
   if (item.status === 'priority') return '바로 지시 대기'
@@ -309,6 +310,32 @@ function isWaitingQueueItem(item: TimelineItem): boolean {
     Boolean(item.queueId) &&
     (item.status === 'queued' || item.status === 'priority')
   )
+}
+
+function interruptedTimelineItems(
+  items: TimelineItem[],
+  message = '사용자가 작업을 중지했습니다.'
+): TimelineItem[] {
+  return items.map((item) => {
+    if (item.kind === 'process') {
+      const previousSteps = item.processSteps ?? []
+      const processSteps = previousSteps.map((step) =>
+        step.status === 'running' ? { ...step, status: 'cancelled' } : step
+      )
+      const hadRunningStep = previousSteps.some((step) => step.status === 'running')
+      if (!hadRunningStep && item.status !== 'running') return item
+      return { ...item, text: message, status: 'cancelled', processSteps }
+    }
+    if (item.kind === 'assistant' && item.status === 'streaming') return { ...item, status: 'cancelled' }
+    if (
+      (item.kind === 'permission' || item.kind === 'dialog') &&
+      (item.status === 'waiting' || item.status === 'running')
+    ) {
+      return { ...item, status: 'cancelled' }
+    }
+    if (item.kind === 'auth' && item.status === 'running') return { ...item, status: 'cancelled' }
+    return item
+  })
 }
 
 function expandSlashInput(text: string): { text: string; mode?: AgentPermissionMode } {
@@ -1178,6 +1205,9 @@ function reduceTimeline(items: TimelineItem[], event: AgentEvent): TimelineItem[
       }
     ]
   }
+  if (event.type === 'session:interrupted') {
+    return interruptedTimelineItems(items, stringValue(event.message))
+  }
   if (event.type === 'message:assistant_start') {
     const id = stringValue(event.messageId) ?? `assistant-${Date.now()}`
     return upsertItem(
@@ -2004,6 +2034,7 @@ export default function AgentPanel({
           else onStatus?.('question')
         } else if (next === 'idle') {
           setStatus('idle')
+          onStatus?.('done')
         }
       }
     })
@@ -2265,6 +2296,7 @@ export default function AgentPanel({
     (paths: string[], source: 'drop' | 'paste'): void => {
       const unique = uniqueStrings(paths)
       if (unique.length === 0 || authActive) return
+      focusPrompt()
       void (async () => {
         const nextAttachments: AgentAttachment[] = []
         for (const path of unique) {
@@ -2280,7 +2312,7 @@ export default function AgentPanel({
         })
         .catch((e) => setError(String(e instanceof Error ? e.message : e)))
     },
-    [attachmentForPath, authActive, showTransientFeedback]
+    [attachmentForPath, authActive, focusPrompt, showTransientFeedback]
   )
 
   useEffect(() => {
@@ -2550,10 +2582,16 @@ export default function AgentPanel({
   }
 
   const interrupt = useCallback(async (): Promise<void> => {
-    await window.lt.agent.interrupt(id)
+    const result = await window.lt.agent.interrupt(id)
+    if (!result.ok) {
+      setError(result.error ?? 'Agent 작업을 중지할 수 없습니다.')
+      return
+    }
     setAuthActive(false)
+    setItems((current) => interruptedTimelineItems(current))
     setStatus('idle')
-  }, [id])
+    onStatus?.('done')
+  }, [id, onStatus])
 
   useEffect(() => {
     const interruptible =

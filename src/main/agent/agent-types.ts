@@ -184,6 +184,7 @@ export type AgentEvent =
       slashCommands?: AgentSlashCommand[]
     }
   | { type: 'session:commands'; sessionId: string; commands: AgentSlashCommand[] }
+  | { type: 'session:interrupted'; sessionId: string; message?: string }
   | { type: 'message:user'; sessionId: string; messageId: string; text: string; attachments: AgentAttachment[] }
   | { type: 'message:assistant_start'; sessionId: string; messageId: string }
   | { type: 'message:assistant_delta'; sessionId: string; messageId: string; text: string }
