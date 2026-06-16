@@ -46,6 +46,18 @@ export interface AgentWorktreeForkResult extends AgentCommandResult {
   branchName?: string
 }
 
+export interface AgentSessionSnapshot {
+  id: string
+  cwd: string
+  title?: string
+  source: AgentSource
+  resumeSessionId?: string
+}
+
+export interface AgentSessionSnapshotResult extends AgentCommandResult {
+  session?: AgentSessionSnapshot
+}
+
 export interface AgentSendInput {
   text: string
   displayText?: string

@@ -425,6 +425,18 @@ interface AgentWorktreeForkResult extends AgentCommandResult {
   branchName?: string
 }
 
+interface AgentSessionSnapshot {
+  id: string
+  cwd: string
+  title?: string
+  source: 'local' | 'ssh'
+  resumeSessionId?: string
+}
+
+interface AgentSessionSnapshotResult extends AgentCommandResult {
+  session?: AgentSessionSnapshot
+}
+
 interface AgentSendInput {
   text: string
   displayText?: string
@@ -754,6 +766,8 @@ const api = {
   agent: {
     create: (opts: AgentCreateOptions): Promise<AgentCommandResult> =>
       ipcRenderer.invoke('agent:create', opts),
+    snapshot: (sessionId: string): Promise<AgentSessionSnapshotResult> =>
+      ipcRenderer.invoke('agent:snapshot', sessionId),
     worktreeFork: (input: AgentWorktreeForkInput): Promise<AgentWorktreeForkResult> =>
       ipcRenderer.invoke('agent:worktreeFork', input),
     send: (sessionId: string, input: AgentSendInput): Promise<AgentCommandResult> =>

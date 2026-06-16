@@ -28,6 +28,7 @@ import type {
   AgentPermissionMode,
   AgentPermissionRequest,
   AgentSendInput,
+  AgentSessionSnapshotResult,
   AgentSlashCommand,
   AgentSshConn,
   AgentSource,
@@ -1957,6 +1958,21 @@ export function createAgentSession(opts: AgentCreateOptions, webContents: WebCon
   return { ok: true }
 }
 
+export function getAgentSessionSnapshot(sessionId: string): AgentSessionSnapshotResult {
+  const session = sessions.get(sessionId)
+  if (!session) return { ok: false, error: 'Agent 세션을 찾을 수 없습니다.' }
+  return {
+    ok: true,
+    session: {
+      id: session.id,
+      cwd: session.cwd,
+      title: session.title,
+      source: session.source,
+      resumeSessionId: session.resumeSessionId
+    }
+  }
+}
+
 function isEmptyAgentInput(input: AgentSendInput): boolean {
   return !input.text.trim() && (!input.attachments || input.attachments.length === 0)
 }
@@ -2443,6 +2459,7 @@ export function disposeAgentSessions(): void {
 
 export function registerAgentIpc(ipcMain: IpcMain): void {
   ipcMain.handle('agent:create', (e, opts: AgentCreateOptions) => createAgentSession(opts, e.sender))
+  ipcMain.handle('agent:snapshot', (_e, sessionId: string) => getAgentSessionSnapshot(sessionId))
   ipcMain.handle('agent:worktreeFork', (_e, input: AgentWorktreeForkInput) =>
     createAgentWorktreeFork(input)
   )

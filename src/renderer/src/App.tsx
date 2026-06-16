@@ -3451,7 +3451,20 @@ export default function App(): JSX.Element {
     const terminals = await Promise.all(
       termTabs.map(async (t) => {
         const caseTabIdValue = caseIdForTerm(t)
-        if (isAgentTab(t)) return { ...t, caseTabId: caseTabIdValue, side: termSide(t) }
+        if (isAgentTab(t)) {
+          const agentSnapshot = await window.lt.agent.snapshot(t.id).catch(() => null)
+          const resumeSessionId =
+            agentSnapshot?.ok && agentSnapshot.session?.resumeSessionId
+              ? agentSnapshot.session.resumeSessionId
+              : t.resumeSessionId
+          if (resumeSessionId) rememberSessionForTerm(t, resumeSessionId, t.sessionTitle)
+          return {
+            ...t,
+            caseTabId: caseTabIdValue,
+            side: termSide(t),
+            resumeSessionId
+          }
+        }
         const current = await window.lt.sessions
           .current(t.cwd, (t.createdAt ?? 0) - 3000, t.ssh)
           .catch(() => null)

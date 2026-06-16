@@ -350,6 +350,18 @@ export interface AgentWorktreeForkResult extends AgentCommandResult {
   branchName?: string
 }
 
+export interface AgentSessionSnapshot {
+  id: string
+  cwd: string
+  title?: string
+  source: 'local' | 'ssh'
+  resumeSessionId?: string
+}
+
+export interface AgentSessionSnapshotResult extends AgentCommandResult {
+  session?: AgentSessionSnapshot
+}
+
 export interface AgentSendInput {
   text: string
   displayText?: string
@@ -694,6 +706,7 @@ export interface LtApi {
   }
   agent: {
     create: (opts: AgentCreateOptions) => Promise<AgentCommandResult>
+    snapshot: (sessionId: string) => Promise<AgentSessionSnapshotResult>
     worktreeFork: (input: AgentWorktreeForkInput) => Promise<AgentWorktreeForkResult>
     send: (sessionId: string, input: AgentSendInput) => Promise<AgentCommandResult>
     mcpStatus: (sessionId: string) => Promise<AgentCommandResult>
