@@ -303,7 +303,7 @@ interface FolderMatchSuggestion {
 
 const docSide = (tab?: DocTab): DockSide => tab?.side ?? 'left'
 const termSide = (tab?: TermTab): DockSide => tab?.side ?? 'right'
-const isAgentTab = (tab?: TermTab): boolean => tab?.kind === 'agent'
+const isAgentTab = (tab?: TermTab): tab is TermTab & { kind: 'agent' } => tab?.kind === 'agent'
 const otherSide = (side: DockSide): DockSide => (side === 'left' ? 'right' : 'left')
 const docKey = (id: string): WorkTabKey => `doc:${id}`
 const termKeyOf = (id: string): WorkTabKey => `terminal:${id}`
@@ -336,6 +336,11 @@ const nextWorkKeyAfterClose = (
   if (next.length === 0) return ''
   return next[Math.min(idx < 0 ? 0 : idx, next.length - 1)]
 }
+
+const bumpFocusNonce = (current: Record<string, number>, id: string): Record<string, number> => ({
+  ...current,
+  [id]: (current[id] ?? 0) + 1
+})
 
 const resolveClaudeTargetTab = (
   tabs: TermTab[],
@@ -1576,7 +1581,11 @@ export default function App(): JSX.Element {
           (el) => el.dataset.termId === parsed.id
         )
         const tab = termTabsRef.current.find((item) => item.id === parsed.id)
-        if (isAgentTab(tab)) term?.focus({ preventScroll: true })
+        if (isAgentTab(tab)) {
+          setTermFocusNonce((current) => bumpFocusNonce(current, parsed.id))
+        } else {
+          term?.focus({ preventScroll: true })
+        }
         return
       }
 
@@ -1603,10 +1612,7 @@ export default function App(): JSX.Element {
         if (isAgentTab(tab)) {
           focusWorkTargetSoon(side, key)
         } else {
-          setTermFocusNonce((current) => ({
-            ...current,
-            [parsed.id]: (current[parsed.id] ?? 0) + 1
-          }))
+          setTermFocusNonce((current) => bumpFocusNonce(current, parsed.id))
         }
         return
       }
@@ -3662,6 +3668,9 @@ export default function App(): JSX.Element {
         ? restoredActiveWork.right
         : firstKeyForSide('right')
     setActiveWork({ left, right })
+    if (isAgentTab(activeTermTab)) {
+      setTermFocusNonce((current) => bumpFocusNonce(current, activeTermTab.id))
+    }
 
     if (isWorkspaceMode(snapshot.mode)) setMode(snapshot.mode)
     const nextCurrentCase = restoredCase ?? (activeTermTab ? currentCaseFromTerm(activeTermTab) : currentCase)
@@ -4477,6 +4486,9 @@ export default function App(): JSX.Element {
     if (preferredDoc) setActiveDoc(preferredDoc.id)
     if (preferred) {
       setActiveTerm(preferred.id)
+      if (isAgentTab(preferred)) {
+        setTermFocusNonce((current) => bumpFocusNonce(current, preferred.id))
+      }
       setTermAttention((ids) => {
         if (!ids.has(preferred.id)) return ids
         const next = new Set(ids)
@@ -5368,7 +5380,9 @@ export default function App(): JSX.Element {
               selectTerm(t.id)
               if (!isAgentTab(t)) return
               const target = e.target as HTMLElement
-              if (!target.closest('input, textarea, button, select, a')) e.currentTarget.focus()
+              if (!target.closest('input, textarea, button, select, a, [contenteditable="true"]')) {
+                setTermFocusNonce((current) => bumpFocusNonce(current, t.id))
+              }
             }}
             style={{ display: t.id === activeTerm ? 'block' : 'none' }}
           >
@@ -5382,6 +5396,7 @@ export default function App(): JSX.Element {
                 profileId={t.profileId}
                 caseTabId={t.caseTabId}
                 visible={t.id === activeTerm}
+                focusNonce={termFocusNonce[t.id] ?? 0}
                 attachmentRequests={agentAttachmentRequests[t.id] ?? []}
                 onAttachmentRequestsHandled={(requestIds) =>
                   handleAgentAttachmentRequestsHandled(t.id, requestIds)
@@ -5517,8 +5532,7 @@ export default function App(): JSX.Element {
           onSelect={(key) => {
             const parsed = parseWorkKey(key)
             if (!parsed) return
-            if (parsed.kind === 'doc') activateDocTab(parsed.id)
-            else selectTerm(parsed.id)
+            activateWorkTab(side, key as WorkTabKey)
           }}
           onClose={(key) => {
             const parsed = parseWorkKey(key)
@@ -5709,7 +5723,9 @@ export default function App(): JSX.Element {
                 selectTerm(t.id)
                 if (!isAgentTab(t)) return
                 const target = e.target as HTMLElement
-                if (!target.closest('input, textarea, button, select, a')) e.currentTarget.focus()
+                if (!target.closest('input, textarea, button, select, a, [contenteditable="true"]')) {
+                  setTermFocusNonce((current) => bumpFocusNonce(current, t.id))
+                }
               }}
               style={{ display: t.id === visibleTermId ? 'block' : 'none' }}
             >
@@ -5723,6 +5739,7 @@ export default function App(): JSX.Element {
                   profileId={t.profileId}
                   caseTabId={t.caseTabId}
                   visible={t.id === visibleTermId}
+                  focusNonce={termFocusNonce[t.id] ?? 0}
                   attachmentRequests={agentAttachmentRequests[t.id] ?? []}
                   onAttachmentRequestsHandled={(requestIds) =>
                     handleAgentAttachmentRequestsHandled(t.id, requestIds)

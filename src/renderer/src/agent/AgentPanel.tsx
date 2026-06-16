@@ -65,6 +65,7 @@ interface AgentPanelProps {
   profileId?: string
   caseTabId?: string
   visible: boolean
+  focusNonce?: number
   attachmentRequests?: AgentAttachmentRequest[]
   onAttachmentRequestsHandled?: (requestIds: string[]) => void
   onStatus?: (status: AgentRunStatus) => void
@@ -1850,6 +1851,7 @@ export default function AgentPanel({
   profileId,
   caseTabId,
   visible,
+  focusNonce = 0,
   attachmentRequests = [],
   onAttachmentRequestsHandled,
   onStatus,
@@ -1932,6 +1934,11 @@ export default function AgentPanel({
       textarea.setSelectionRange(caret, caret)
     })
   }, [])
+
+  useEffect(() => {
+    if (!visible || authActive) return
+    focusPrompt()
+  }, [authActive, focusNonce, focusPrompt, visible])
 
   const resetPromptHistoryCursor = useCallback((): void => {
     promptHistoryIndexRef.current = null
