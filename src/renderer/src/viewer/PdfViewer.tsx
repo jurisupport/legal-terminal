@@ -116,6 +116,12 @@ export default function PdfViewer({
   const [passwordValue, setPasswordValue] = useState('')
   const [passwordBusy, setPasswordBusy] = useState(false)
 
+  const scrollToPageStart = useCallback((): void => {
+    const wrap = wrapRef.current
+    if (!wrap) return
+    wrap.scrollTop = 0
+  }, [])
+
   numPagesRef.current = numPages
   pageRef.current = page
   nextDocRef.current = onNextDoc
@@ -140,14 +146,20 @@ export default function PdfViewer({
     wrapRef.current?.focus()
     if (numPagesRef.current === 0) return
     if (pageRef.current <= 1) prevDocRef.current?.()
-    else setPage((p) => Math.max(1, p - 1))
-  }, [])
+    else {
+      scrollToPageStart()
+      setPage((p) => Math.max(1, p - 1))
+    }
+  }, [scrollToPageStart])
   const goNext = useCallback(() => {
     wrapRef.current?.focus()
     if (numPagesRef.current === 0) return
     if (pageRef.current >= numPagesRef.current) nextDocRef.current?.()
-    else setPage((p) => Math.min(numPagesRef.current, p + 1))
-  }, [])
+    else {
+      scrollToPageStart()
+      setPage((p) => Math.min(numPagesRef.current, p + 1))
+    }
+  }, [scrollToPageStart])
 
   useEffect(() => {
     window.lt.settings.get().then((s) => {
