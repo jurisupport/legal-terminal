@@ -22,6 +22,8 @@ const isRemotePath = (p: string): boolean => p.startsWith('ssh://')
 const isLocalCloudPath = (p: string): boolean =>
   p.includes('/OneDrive/') || p.includes('/Library/CloudStorage/OneDrive')
 type PasswordPrompt = { reason: 'need' | 'incorrect' }
+const PDF_PAN_EXCLUDE_SELECTOR =
+  'input, textarea, button, select, a, [contenteditable="true"], .pdf-password'
 
 function cleanPdfError(e: unknown): string {
   return (e instanceof Error ? e.message : String(e))
@@ -441,10 +443,16 @@ export default function PdfViewer({
     let sy = 0
     let sl = 0
     let st = 0
+    const finishDrag = (): void => {
+      dragging = false
+      wrap.classList.remove('grabbing')
+    }
     const down = (e: MouseEvent): void => {
       if (e.button !== 0) return
+      const target = e.target instanceof Element ? e.target : null
+      if (target?.closest(PDF_PAN_EXCLUDE_SELECTOR)) return
       // 손 도구가 꺼져 있으면 텍스트 레이어 위 드래그는 텍스트 선택으로 둔다.
-      if (!panMode && (e.target as HTMLElement)?.closest?.('.textLayer')) return
+      if (!panMode && target?.closest('.textLayer')) return
       dragging = true
       sx = e.clientX
       sy = e.clientY
@@ -455,22 +463,37 @@ export default function PdfViewer({
     }
     const move = (e: MouseEvent): void => {
       if (!dragging) return
+      e.preventDefault()
       wrap.scrollLeft = sl - (e.clientX - sx)
       wrap.scrollTop = st - (e.clientY - sy)
     }
-    const up = (): void => {
-      dragging = false
-      wrap.classList.remove('grabbing')
+    const onSelectStart = (e: Event): void => {
+      const target = e.target instanceof Element ? e.target : null
+      if (panMode && target?.closest('.textLayer')) e.preventDefault()
+    }
+    const onDragStart = (e: DragEvent): void => {
+      const target = e.target instanceof Element ? e.target : null
+      if (!target?.closest('.pdf-page')) return
+      e.preventDefault()
+      e.stopPropagation()
+      finishDrag()
     }
     wrap.addEventListener('mousedown', down)
+    wrap.addEventListener('selectstart', onSelectStart)
     window.addEventListener('mousemove', move)
-    window.addEventListener('mouseup', up)
+    window.addEventListener('mouseup', finishDrag)
+    window.addEventListener('blur', finishDrag)
+    document.addEventListener('dragstart', onDragStart, true)
     return () => {
       wrap.removeEventListener('mousedown', down)
+      wrap.removeEventListener('selectstart', onSelectStart)
       window.removeEventListener('mousemove', move)
-      window.removeEventListener('mouseup', up)
+      window.removeEventListener('mouseup', finishDrag)
+      window.removeEventListener('blur', finishDrag)
+      document.removeEventListener('dragstart', onDragStart, true)
+      finishDrag()
     }
-  }, [])
+  }, [panMode])
 
   // 키보드 (뷰어 영역 포커스 시)
   const onKeyDown = (e: React.KeyboardEvent): void => {

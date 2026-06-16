@@ -4621,6 +4621,7 @@ body {
 }
 .pdf-canvas-wrap.pannable .textLayer {
   user-select: none;
+  -webkit-user-drag: none;
 }
 .pdf-canvas-wrap.grabbing {
   cursor: grabbing;
@@ -4694,6 +4695,8 @@ body {
 }
 .pdf-page canvas {
   display: block;
+  user-select: none;
+  -webkit-user-drag: none;
 }
 /* pdf.js 텍스트 레이어 (드래그 선택용, 투명 텍스트) */
 .textLayer {
@@ -4715,6 +4718,7 @@ body {
   white-space: pre;
   cursor: text;
   transform-origin: 0 0;
+  -webkit-user-drag: none;
 }
 .textLayer ::selection {
   background: rgba(60, 140, 255, 0.4);
