@@ -40,15 +40,13 @@ curl -fsSL https://raw.githubusercontent.com/jurisupport/legal-terminal/main/ins
 
 ## 이번 업데이트
 
-최신 릴리스: [v0.1.87](https://github.com/jurisupport/legal-terminal/releases/tag/v0.1.87)
+최신 릴리스: [v0.1.88](https://github.com/jurisupport/legal-terminal/releases/tag/v0.1.88)
 
-- **문서 위치 복원**: Markdown, PDF, HWP, DOCX, CSV, 이미지 탭을 다시 열 때 마지막 스크롤·페이지 위치를 복원합니다.
-- **PDF 휠 이동 안정화**: 트랙패드/휠 스크롤이 끝 페이지에서 너무 민감하게 넘어가지 않도록 조정했습니다.
-- **Agent 중단 상태 정리**: 작업 중지/바로 지시하기 때 실행 중 표시와 대기 팝업을 즉시 중지 상태로 정리합니다.
-- **Mac 탭 전환 단축키 복구**: macOS에서도 `Ctrl+Tab` / `Ctrl+Shift+Tab`으로 문서·터미널 탭을 오갈 수 있게 고쳤습니다.
-- **Agent 선택 질문 수정**: 선택지 질문에서 권한 카드가 함께 떠 응답 후에도 진행되지 않던 문제를 고쳤습니다.
-- **HWP 텍스트 추출 보강**: legacy HWP 문자 코드의 줄바꿈과 탭을 본문/Markdown 추출에 반영합니다.
-- **HWPX 내보내기 서식 개선**: 기본 글꼴, 본문 들여쓰기, 개요 번호 처리를 한컴 문서 관례에 맞게 정리했습니다.
+- **문서 히스토리**: Markdown 임시저장본을 히스토리로 남기고, 편집기에서 과거 저장본을 골라 복원할 수 있습니다.
+- **원격 다운로드 진행 표시**: SSH 원격 파일·폴더 다운로드 중 파일 수와 현재 파일을 토스트로 보여줍니다.
+- **Agent 입력 안정화**: 작업 중 `Esc` 중지 단축키가 입력창과 한글 IME 이벤트를 가로채 입력이 잠기는 문제를 줄였습니다.
+- **Agent 중지 안전장치**: 작업 중 `Esc`를 한 번 누르면 중지 대기 상태를 표시하고, 한 번 더 눌러야 실제 중지합니다.
+- **Diff 미리보기 축약**: 긴 diff fallback 표시를 줄 단위로 접어 패널이 과도하게 길어지지 않게 했습니다.
 
 ## 처음 쓰는 순서
 

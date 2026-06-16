@@ -67,7 +67,8 @@ import type {
   WorkspaceEntry,
   WorkspaceLoadResult,
   WorkspaceCaseTabPayload,
-  WorkspaceSnapshot
+  WorkspaceSnapshot,
+  FsDownloadProgress
 } from './env'
 
 type Mode = 'explorer' | 'cases' | 'viewer' | 'todos'
@@ -1398,6 +1399,8 @@ export default function App(): JSX.Element {
   // 탐색기 트리 새로고침 트리거 (드래그드롭 복사 후)
   const [treeRefresh, setTreeRefresh] = useState(0)
   const recordsAutoDownloadInFlightRef = useRef('')
+  const [downloadProgress, setDownloadProgress] = useState<FsDownloadProgress | null>(null)
+  const downloadProgressHideTimerRef = useRef<number | null>(null)
 
   // 탐색기 인라인 생성 (VS Code식: 트리에 입력칸이 떠서 이름 입력)
   const [pendingCreate, setPendingCreate] = useState<PendingCreateRequest | null>(null)
@@ -1426,6 +1429,33 @@ export default function App(): JSX.Element {
     const onSettingsUpdated = (e: Event): void => applySettings((e as CustomEvent<AppSettings>).detail)
     window.addEventListener(SETTINGS_UPDATED_EVENT, onSettingsUpdated)
     return () => window.removeEventListener(SETTINGS_UPDATED_EVENT, onSettingsUpdated)
+  }, [])
+
+  useEffect(() => {
+    const clearHideTimer = (): void => {
+      if (downloadProgressHideTimerRef.current === null) return
+      window.clearTimeout(downloadProgressHideTimerRef.current)
+      downloadProgressHideTimerRef.current = null
+    }
+
+    const unsubscribe = window.lt.fs.onDownloadProgress((progress) => {
+      clearHideTimer()
+      setDownloadProgress(progress)
+      if (progress.phase === 'done' || progress.phase === 'error') {
+        downloadProgressHideTimerRef.current = window.setTimeout(
+          () => {
+            setDownloadProgress((current) => (current?.id === progress.id ? null : current))
+            downloadProgressHideTimerRef.current = null
+          },
+          progress.phase === 'done' ? 2500 : 6000
+        )
+      }
+    })
+
+    return () => {
+      clearHideTimer()
+      unsubscribe()
+    }
   }, [])
 
   docTabsRef.current = docTabs
@@ -6078,6 +6108,8 @@ export default function App(): JSX.Element {
         />
       )}
 
+      {downloadProgress && <DownloadProgressToast progress={downloadProgress} />}
+
       {/* claude 질문/확인 대기 팝업 */}
       {toasts.length > 0 && (
         <div className="toasts">
@@ -6108,6 +6140,51 @@ export default function App(): JSX.Element {
           ))}
         </div>
       )}
+    </div>
+  )
+}
+
+function DownloadProgressToast({ progress }: { progress: FsDownloadProgress }): JSX.Element {
+  const total = Math.max(0, progress.totalFiles)
+  const completed = total > 0 ? Math.min(progress.completedFiles, total) : progress.completedFiles
+  const percent = total > 0 ? Math.round((completed / total) * 100) : progress.phase === 'done' ? 100 : 0
+  const title =
+    progress.phase === 'preparing'
+      ? `${progress.name} 목록 확인 중`
+      : progress.phase === 'done'
+        ? `${progress.name} 다운로드 완료`
+        : progress.phase === 'error'
+          ? `${progress.name} 다운로드 실패`
+          : `${progress.name} 다운로드 중`
+  const detail =
+    progress.phase === 'preparing'
+      ? '원격 폴더를 살펴보는 중입니다.'
+      : progress.phase === 'error'
+        ? progress.error || '알 수 없는 오류'
+        : total > 0
+          ? `파일 ${completed}/${total}개${progress.currentFile ? ` · ${progress.currentFile}` : ''}`
+          : progress.isDir
+            ? '빈 폴더 또는 파일 목록 생성 중'
+            : progress.currentFile || '파일을 내려받는 중입니다.'
+
+  return (
+    <div className={`download-progress ${progress.phase}`} role="status" aria-live="polite">
+      <div className="download-progress-head">
+        <strong>{title}</strong>
+        <span>{percent}%</span>
+      </div>
+      <div
+        className="download-progress-bar"
+        role="progressbar"
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-valuenow={percent}
+      >
+        <div className="download-progress-fill" style={{ width: `${percent}%` }} />
+      </div>
+      <div className="download-progress-detail" title={detail}>
+        {detail}
+      </div>
     </div>
   )
 }

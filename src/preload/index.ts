@@ -41,6 +41,19 @@ type FsWriteTextResult =
   | { ok: true; stat?: FileSignature }
   | { ok: false; error?: string; conflict?: boolean; stat?: FileSignature }
 
+interface FsDownloadProgress {
+  id: string
+  source: string
+  name: string
+  isDir: boolean
+  phase: 'preparing' | 'downloading' | 'done' | 'error'
+  totalFiles: number
+  completedFiles: number
+  currentFile?: string
+  destPath?: string
+  error?: string
+}
+
 interface FolderMatchSuggestion {
   path: string
   name: string
@@ -154,6 +167,16 @@ interface DocumentDraftIdentity {
 }
 
 interface DocumentDraftEntry {
+  key: string
+  path?: string
+  draftId?: string
+  title: string
+  content: string
+  savedAt: string
+}
+
+interface DocumentDraftHistoryEntry {
+  id: string
   key: string
   path?: string
   draftId?: string
@@ -529,6 +552,13 @@ const api = {
       drafts?: DocumentDraftEntry[]
       error?: string
     }> => ipcRenderer.invoke('fs:listDocumentDrafts'),
+    listDocumentDraftHistory: (
+      identity: DocumentDraftIdentity
+    ): Promise<{
+      ok: boolean
+      history?: DocumentDraftHistoryEntry[]
+      error?: string
+    }> => ipcRenderer.invoke('fs:listDocumentDraftHistory', identity),
     deleteDocumentDraft: (
       identity: DocumentDraftIdentity
     ): Promise<{ ok: boolean; error?: string }> =>
@@ -541,6 +571,11 @@ const api = {
       source: string
     ): Promise<{ ok: boolean; path?: string; count?: number; canceled?: boolean; error?: string }> =>
       ipcRenderer.invoke('fs:download', source),
+    onDownloadProgress: (cb: (progress: FsDownloadProgress) => void): (() => void) => {
+      const listener = (_event: unknown, progress: FsDownloadProgress): void => cb(progress)
+      ipcRenderer.on('fs:downloadProgress', listener)
+      return () => ipcRenderer.removeListener('fs:downloadProgress', listener)
+    },
     autoDownloadRecords: (
       source: string
     ): Promise<{

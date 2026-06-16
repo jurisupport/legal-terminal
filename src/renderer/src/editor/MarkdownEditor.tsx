@@ -17,8 +17,9 @@ import { livePreview } from './livePreview'
 import { mdToPrintHtml, type PrintLayoutProfile } from './mdExport'
 import { mergeTextAgainstBase } from './threeWayMerge'
 import FindBar from '../search/FindBar'
-import { IconSave, IconSaveAs, IconSearch } from '../icons/Icons'
+import { IconHistory, IconSave, IconSaveAs, IconSearch } from '../icons/Icons'
 import { writeMarkdownDataTransfer } from '../markdownClipboard'
+import type { DocumentDraftHistoryEntry } from '../env'
 
 const DEFAULT_MD_FONT = "'D2Coding', 'Cascadia Mono', Consolas, monospace"
 const DEFAULT_UNTITLED_NAME = '무제.md'
@@ -181,6 +182,19 @@ function claudeDraftFileName(currentPath?: string, title?: string): string {
 
 function isClaudeDraftPath(value?: string): boolean {
   return !!value && /\.claude-draft(?: \(\d+\))?\.md$/i.test(fileNameOf(value) ?? '')
+}
+
+function formatDraftHistorySavedAt(value: string): string {
+  const date = new Date(value)
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleString('ko-KR')
+}
+
+function draftHistoryPreview(content: string): string {
+  const line = content
+    .split(/\r?\n/)
+    .map((part) => part.trim())
+    .find(Boolean)
+  return line || '(빈 문서)'
 }
 
 function findMinimalReplacement(current: string, next: string): TextReplacement | null {
@@ -402,6 +416,11 @@ export default function MarkdownEditor({
   const [findIndex, setFindIndex] = useState(-1)
   const [printLayout, setPrintLayout] = useState<PrintLayoutProfile>('default')
   const [claudeDrafting, setClaudeDrafting] = useState(false)
+  const [hasDraftHistory, setHasDraftHistory] = useState(false)
+  const [draftHistoryOpen, setDraftHistoryOpen] = useState(false)
+  const [draftHistoryLoading, setDraftHistoryLoading] = useState(false)
+  const [draftHistoryItems, setDraftHistoryItems] = useState<DocumentDraftHistoryEntry[]>([])
+  const [draftHistoryError, setDraftHistoryError] = useState('')
 
   const setSavedState = (value: boolean): void => {
     savedRef.current = value
@@ -697,6 +716,55 @@ export default function MarkdownEditor({
     saveTimer.current = setTimeout(() => void saveDraftNow(), 700)
   }
 
+  const openDraftHistory = (): void => {
+    setDraftHistoryOpen(true)
+    setDraftHistoryLoading(true)
+    setDraftHistoryError('')
+    void window.lt.fs
+      .listDocumentDraftHistory(draftIdentity())
+      .then((result) => {
+        if (!result.ok) {
+          setDraftHistoryItems([])
+          setHasDraftHistory(false)
+          setDraftHistoryError(result.error ?? '문서 히스토리를 불러오지 못했습니다.')
+          return
+        }
+        const items = result.history ?? []
+        setDraftHistoryItems(items)
+        setHasDraftHistory(items.length > 0)
+      })
+      .catch((e) => {
+        setDraftHistoryItems([])
+        setHasDraftHistory(false)
+        setDraftHistoryError(String(e))
+      })
+      .finally(() => setDraftHistoryLoading(false))
+  }
+
+  const applyDraftHistory = (entry: DocumentDraftHistoryEntry): void => {
+    const v = viewRef.current
+    if (!v) return
+    const current = v.state.doc.toString()
+    const replacement = findMinimalReplacement(current, entry.content)
+    if (replacement) {
+      const viewport = captureViewport(v)
+      const selectionBookmark = bookmarkSelection(v.state)
+      const previewTransaction = v.state.update({ changes: replacement })
+      const scrollEffect = v.scrollSnapshot().map(previewTransaction.changes)
+      const selection = changeCoversSelection(previewTransaction.changes, v.state.selection)
+        ? restoreSelection(previewTransaction.state, selectionBookmark)
+        : undefined
+      v.dispatch({
+        changes: previewTransaction.changes,
+        ...(selection ? { selection } : {}),
+        ...(scrollEffect ? { effects: [scrollEffect] } : {})
+      })
+      restoreViewport(v, viewport, previewTransaction.changes)
+    }
+    setDraftHistoryOpen(false)
+    window.requestAnimationFrame(() => viewRef.current?.focus())
+  }
+
   useEffect(() => {
     if (pathRef.current === path) return
     pathRef.current = path
@@ -720,20 +788,15 @@ export default function MarkdownEditor({
         const baseText = (r as { text: string }).text
         let docText = baseText
         let restoredDraft = false
+        let hasRestorableDraft = false
         const draftResult = await window.lt.fs.loadDocumentDraft(draftIdentity()).catch(() => null)
         if (!alive || !hostRef.current) return
         const draft = draftResult?.ok ? draftResult.draft : null
         if (draft && draft.content !== baseText) {
-          const shouldRestore = pathRef.current
-            ? window.confirm(
-                `이 문서의 임시저장본이 있습니다.\n\n${draft.title}\n임시저장 시각: ${new Date(draft.savedAt).toLocaleString('ko-KR')}\n\n가져올까요?`
-              )
-            : true
-          if (shouldRestore) {
+          hasRestorableDraft = true
+          if (!pathRef.current) {
             docText = draft.content
             restoredDraft = true
-          } else {
-            deleteDraft()
           }
         }
         savedContentRef.current = baseText
@@ -814,6 +877,7 @@ export default function MarkdownEditor({
         })
         setDirtyState(restoredDraft)
         setDraftSaved(restoredDraft)
+        setHasDraftHistory(hasRestorableDraft)
         setSavedState(!restoredDraft && !!pathRef.current)
         viewRef.current = new EditorView({ state, parent: hostRef.current })
         const restoredScroll = initialScrollRef.current
@@ -1098,6 +1162,14 @@ export default function MarkdownEditor({
           HWPX
         </button>
         <button
+          className={`tb-btn ${hasDraftHistory ? 'has-history' : ''}`}
+          title="문서 히스토리에서 가져오기"
+          onClick={openDraftHistory}
+        >
+          <IconHistory size={14} />
+          <span className="sr-only">문서 히스토리</span>
+        </button>
+        <button
           className={`tb-btn ${findOpen ? 'on' : ''}`}
           title="문서에서 찾기"
           onClick={openFind}
@@ -1175,6 +1247,48 @@ export default function MarkdownEditor({
             viewRef.current?.focus()
           }}
         />
+      )}
+      {draftHistoryOpen && (
+        <div className="modal-overlay" onMouseDown={() => setDraftHistoryOpen(false)}>
+          <div
+            className="modal draft-history-modal"
+            role="dialog"
+            aria-modal="true"
+            onMouseDown={(e) => e.stopPropagation()}
+          >
+            <div className="modal-title">문서 히스토리</div>
+            <div className="draft-history-list">
+              {draftHistoryLoading && <p className="muted pad small">히스토리를 불러오는 중입니다.</p>}
+              {!draftHistoryLoading && draftHistoryError && (
+                <p className="draft-history-error">{draftHistoryError}</p>
+              )}
+              {!draftHistoryLoading && !draftHistoryError && draftHistoryItems.length === 0 && (
+                <p className="muted pad small">가져올 과거 임시저장본이 없습니다.</p>
+              )}
+              {!draftHistoryLoading &&
+                !draftHistoryError &&
+                draftHistoryItems.map((entry) => (
+                  <button
+                    key={entry.id}
+                    className="draft-history-row"
+                    title={formatDraftHistorySavedAt(entry.savedAt)}
+                    onClick={() => applyDraftHistory(entry)}
+                  >
+                    <span className="draft-history-row-main">
+                      <span className="draft-history-title">{entry.title}</span>
+                      <span className="draft-history-preview">{draftHistoryPreview(entry.content)}</span>
+                    </span>
+                    <span className="draft-history-time">{formatDraftHistorySavedAt(entry.savedAt)}</span>
+                  </button>
+                ))}
+            </div>
+            <div className="modal-actions">
+              <button className="empty-action" onClick={() => setDraftHistoryOpen(false)}>
+                닫기
+              </button>
+            </div>
+          </div>
+        </div>
       )}
       <div
         className={`cm-host ${preview ? 'preview' : 'source'} ${remoteApplied ? 'remote-applied' : ''}`}

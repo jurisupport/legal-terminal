@@ -39,6 +39,19 @@ export type FsWriteTextResult =
   | { ok: true; stat?: FileSignature }
   | { ok: false; error?: string; conflict?: boolean; stat?: FileSignature }
 
+export interface FsDownloadProgress {
+  id: string
+  source: string
+  name: string
+  isDir: boolean
+  phase: 'preparing' | 'downloading' | 'done' | 'error'
+  totalFiles: number
+  completedFiles: number
+  currentFile?: string
+  destPath?: string
+  error?: string
+}
+
 export interface FolderMatchSuggestion {
   path: string
   name: string
@@ -152,6 +165,16 @@ export interface DocumentDraftIdentity {
 }
 
 export interface DocumentDraftEntry {
+  key: string
+  path?: string
+  draftId?: string
+  title: string
+  content: string
+  savedAt: string
+}
+
+export interface DocumentDraftHistoryEntry {
+  id: string
   key: string
   path?: string
   draftId?: string
@@ -563,6 +586,11 @@ export interface LtApi {
       drafts?: DocumentDraftEntry[]
       error?: string
     }>
+    listDocumentDraftHistory: (identity: DocumentDraftIdentity) => Promise<{
+      ok: boolean
+      history?: DocumentDraftHistoryEntry[]
+      error?: string
+    }>
     deleteDocumentDraft: (identity: DocumentDraftIdentity) => Promise<{ ok: boolean; error?: string }>
     copyInto: (destDir: string, srcPaths: string[]) => Promise<{ copied: string[] }>
     move: (src: string, destDir: string) => Promise<{ ok: boolean; path?: string; error?: string }>
@@ -594,6 +622,7 @@ export interface LtApi {
     download: (
       source: string
     ) => Promise<{ ok: boolean; path?: string; count?: number; canceled?: boolean; error?: string }>
+    onDownloadProgress: (cb: (progress: FsDownloadProgress) => void) => () => void
     autoDownloadRecords: (source: string) => Promise<{
       ok: boolean
       path?: string

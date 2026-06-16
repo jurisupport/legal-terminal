@@ -1813,6 +1813,73 @@ body {
 .toast-x:hover {
   color: var(--fg);
 }
+.download-progress {
+  position: fixed;
+  right: 14px;
+  bottom: 34px;
+  width: min(360px, calc(100vw - 28px));
+  padding: 11px 12px 10px;
+  background: #2b2b2b;
+  border: 1px solid var(--accent);
+  border-left: 3px solid var(--accent);
+  border-radius: 6px;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.55);
+  z-index: 1000;
+}
+.download-progress.done {
+  border-left-color: #5cd38a;
+}
+.download-progress.error {
+  border-left-color: #e0785c;
+}
+.download-progress-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: center;
+  margin-bottom: 8px;
+}
+.download-progress-head strong,
+.download-progress-detail {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.download-progress-head strong {
+  font-size: 13px;
+  color: var(--fg);
+}
+.download-progress-head span {
+  flex: 0 0 auto;
+  color: var(--fg-muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.download-progress-bar {
+  height: 6px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.12);
+}
+.download-progress-fill {
+  height: 100%;
+  min-width: 2px;
+  border-radius: inherit;
+  background: var(--accent);
+  transition: width 160ms ease;
+}
+.download-progress.done .download-progress-fill {
+  background: #5cd38a;
+}
+.download-progress.error .download-progress-fill {
+  background: #e0785c;
+}
+.download-progress-detail {
+  margin-top: 7px;
+  font-size: 11px;
+  color: var(--fg-muted);
+}
 /* claude 작업 중 표시 (회전 스피너) */
 .tab-spin {
   color: #e0a85c;
@@ -4159,6 +4226,12 @@ body {
   opacity: 0.45;
   cursor: default;
 }
+.agent-prompt-actions button.agent-stop-button.armed {
+  color: #fff;
+  border-color: #f0a0a0;
+  background: color-mix(in srgb, #f0a0a0 20%, var(--bg));
+  box-shadow: 0 0 0 2px color-mix(in srgb, #f0a0a0 24%, transparent);
+}
 .agent-status {
   min-width: 0;
   display: inline-flex;
@@ -4169,6 +4242,13 @@ body {
 }
 .agent-status.working {
   color: #d7ba7d;
+}
+.agent-status.esc-armed {
+  color: #f0a0a0;
+}
+.agent-status-esc-arm {
+  color: #f0a0a0;
+  white-space: nowrap;
 }
 .agent-status-spinner {
   width: 13px;
@@ -4355,6 +4435,9 @@ body {
 .tb-btn.on {
   background: var(--accent);
   color: var(--accent-fg);
+}
+.tb-btn.has-history {
+  color: #8fc7ff;
 }
 .tb-btn.pct {
   min-width: 46px;
@@ -4978,6 +5061,66 @@ body {
 
 .workspace-picker {
   width: min(560px, 92vw);
+}
+.draft-history-modal {
+  width: min(640px, 92vw);
+}
+.draft-history-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 80px;
+  max-height: min(56vh, 440px);
+  overflow: auto;
+}
+.draft-history-row {
+  width: 100%;
+  min-height: 58px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  text-align: left;
+  background: var(--bg-alt);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 10px 12px;
+  color: var(--fg);
+  cursor: pointer;
+}
+.draft-history-row:hover {
+  background: #2f2f30;
+  border-color: var(--fg-muted);
+}
+.draft-history-row-main {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.draft-history-title,
+.draft-history-preview {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.draft-history-title {
+  font-size: 12.5px;
+  font-weight: 600;
+}
+.draft-history-preview,
+.draft-history-time {
+  color: var(--fg-muted);
+  font-size: 11.5px;
+}
+.draft-history-time {
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.draft-history-error {
+  color: #ffb4a8;
+  font-size: 12px;
+  line-height: 1.45;
 }
 .unsaved-close-dialog {
   width: min(520px, 92vw);

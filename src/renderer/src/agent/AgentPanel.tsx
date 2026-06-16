@@ -42,9 +42,11 @@ const CONTEXT_ATTACHMENT_TEXT_LIMIT = 160_000
 const FOLDER_ATTACHMENT_ENTRY_LIMIT = 120
 const TIMELINE_BOTTOM_THRESHOLD = 36
 const TIMELINE_PREVIEW_LIMIT = 78
-const DIFF_COLLAPSED_ROW_LIMIT = 80
+const DIFF_COLLAPSED_ROW_LIMIT = 10
+const DIFF_FALLBACK_LINE_LIMIT = 10
 const DIFF_FALLBACK_TEXT_LIMIT = 6000
 const REMOTE_FILE_CHANGED_EVENT = 'lt:remote-file-changed'
+const ESC_INTERRUPT_ARM_MS = 2000
 
 const clampAgentFontSize = (value: number | undefined): number => {
   if (typeof value !== 'number' || !Number.isFinite(value)) return DEFAULT_AGENT_FONT_SIZE
@@ -825,6 +827,13 @@ function caretOnLastLine(textarea: HTMLTextAreaElement): boolean {
   return !textarea.value.slice(textarea.selectionStart).includes('\n')
 }
 
+function isEditableKeyboardTarget(target: EventTarget | null): boolean {
+  return (
+    target instanceof Element &&
+    Boolean(target.closest('input, textarea, select, [contenteditable="true"], [role="textbox"]'))
+  )
+}
+
 function dataTransferPaths(dataTransfer: DataTransfer): string[] {
   const internal = readLtPaths(dataTransfer)
   if (internal.length) return internal
@@ -958,6 +967,24 @@ function visibleDiffHunks(hunks: DiffHunkView[], rowLimit: number): DiffHunkView
   }
 
   return visible
+}
+
+function visibleDiffFallbackText(text: string): { text: string; truncated: boolean } {
+  const normalized = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n')
+  const lines = normalized.split('\n')
+  const lineLimited =
+    lines.length > DIFF_FALLBACK_LINE_LIMIT
+      ? lines.slice(0, DIFF_FALLBACK_LINE_LIMIT).join('\n')
+      : normalized
+  const charLimited =
+    lineLimited.length > DIFF_FALLBACK_TEXT_LIMIT
+      ? lineLimited.slice(0, DIFF_FALLBACK_TEXT_LIMIT)
+      : lineLimited
+  const truncated = lineLimited.length !== normalized.length || charLimited.length !== lineLimited.length
+  return {
+    text: truncated ? `${charLimited.trimEnd()}\n...` : charLimited,
+    truncated
+  }
 }
 
 function normalizePatchHunks(value: unknown): DiffPatchHunk[] {
@@ -1516,9 +1543,9 @@ export function DiffPreview({ diff, fallbackText }: { diff?: DiffView; fallbackT
 
   if (!diff || diff.hunks.length === 0) {
     if (!fallbackText) return null
-    const isLongFallback = fallbackText.length > DIFF_FALLBACK_TEXT_LIMIT
-    const visibleText =
-      isLongFallback && !expanded ? `${fallbackText.slice(0, DIFF_FALLBACK_TEXT_LIMIT).trimEnd()}\n...` : fallbackText
+    const fallbackPreview = visibleDiffFallbackText(fallbackText)
+    const isLongFallback = fallbackPreview.truncated
+    const visibleText = isLongFallback && !expanded ? fallbackPreview.text : fallbackText
 
     return (
       <div className="agent-diff-fallback">
@@ -1853,6 +1880,7 @@ export default function AgentPanel({
   const [showNewOutputNotice, setShowNewOutputNotice] = useState(false)
   const [revertingDiffIds, setRevertingDiffIds] = useState<Set<string>>(new Set())
   const [usage, setUsage] = useState<AgentUsageView>(() => emptyAgentUsageView())
+  const [escInterruptArmed, setEscInterruptArmed] = useState(false)
   const createdRef = useRef(false)
   const scrollRef = useRef<HTMLDivElement>(null)
   const shouldFollowTimelineRef = useRef(true)
@@ -1866,6 +1894,34 @@ export default function AgentPanel({
   const promptHistoryRef = useRef<string[]>([])
   const promptHistoryIndexRef = useRef<number | null>(null)
   const promptHistoryDraftRef = useRef('')
+  const escInterruptArmedRef = useRef(false)
+  const escInterruptTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  const clearEscInterruptTimer = useCallback((): void => {
+    if (escInterruptTimerRef.current) {
+      clearTimeout(escInterruptTimerRef.current)
+      escInterruptTimerRef.current = null
+    }
+  }, [])
+
+  const disarmEscInterrupt = useCallback((): void => {
+    clearEscInterruptTimer()
+    escInterruptArmedRef.current = false
+    setEscInterruptArmed(false)
+  }, [clearEscInterruptTimer])
+
+  const armEscInterrupt = useCallback((): void => {
+    clearEscInterruptTimer()
+    escInterruptArmedRef.current = true
+    setEscInterruptArmed(true)
+    escInterruptTimerRef.current = setTimeout(() => {
+      escInterruptArmedRef.current = false
+      setEscInterruptArmed(false)
+      escInterruptTimerRef.current = null
+    }, ESC_INTERRUPT_ARM_MS)
+  }, [clearEscInterruptTimer])
+
+  useEffect(() => clearEscInterruptTimer, [clearEscInterruptTimer])
 
   const focusPrompt = useCallback((position?: number): void => {
     window.requestAnimationFrame(() => {
@@ -2170,7 +2226,9 @@ export default function AgentPanel({
       ).length,
     [items]
   )
-  const statusLabel = agentStatusLabels[status]
+  const baseStatusLabel = agentStatusLabels[status]
+  const escInterruptHint = `Esc ${Math.round(ESC_INTERRUPT_ARM_MS / 1000)}초 안에 한 번 더 누르면 중지`
+  const statusLabel = escInterruptArmed ? `${baseStatusLabel}, ${escInterruptHint}` : baseStatusLabel
   const statusAccessibleLabel = queuedCount > 0 ? `${statusLabel}, 대기 ${queuedCount}` : statusLabel
   const needsAuth = useMemo(
     () => Boolean(ssh) && items.some((item) => isAuthFailureText(item.text)),
@@ -2200,6 +2258,11 @@ export default function AgentPanel({
   )
   const queuesNewInput =
     status === 'working' || status === 'waiting_permission' || status === 'waiting_user'
+  const interruptible = queuesNewInput || authActive
+  const stopButtonClassName = escInterruptArmed ? 'agent-stop-button armed' : 'agent-stop-button'
+  const stopButtonTitle = escInterruptArmed
+    ? `Esc ${Math.round(ESC_INTERRUPT_ARM_MS / 1000)}초 안에 한 번 더 누르면 중지됩니다`
+    : '작업 중지'
   const slashToken = useMemo(() => {
     const trimmed = input.trimStart()
     if (!/^\/[^\s]*$/.test(trimmed)) return ''
@@ -2582,6 +2645,7 @@ export default function AgentPanel({
   }
 
   const interrupt = useCallback(async (): Promise<void> => {
+    disarmEscInterrupt()
     const result = await window.lt.agent.interrupt(id)
     if (!result.ok) {
       setError(result.error ?? 'Agent 작업을 중지할 수 없습니다.')
@@ -2591,23 +2655,34 @@ export default function AgentPanel({
     setItems((current) => interruptedTimelineItems(current))
     setStatus('idle')
     onStatus?.('done')
-  }, [id, onStatus])
+  }, [disarmEscInterrupt, id, onStatus])
 
   useEffect(() => {
-    const interruptible =
-      status === 'working' ||
-      status === 'waiting_permission' ||
-      status === 'waiting_user' ||
-      authActive
-    if (!visible || !interruptible) return
+    if (!visible || !interruptible) {
+      disarmEscInterrupt()
+      return
+    }
     const onKeyDown = (event: KeyboardEvent): void => {
       if (event.key !== 'Escape' || event.repeat) return
+      if (
+        event.defaultPrevented ||
+        event.isComposing ||
+        event.keyCode === 229 ||
+        isEditableKeyboardTarget(event.target)
+      ) {
+        disarmEscInterrupt()
+        return
+      }
       event.preventDefault()
-      void interrupt()
+      if (escInterruptArmedRef.current) {
+        void interrupt()
+        return
+      }
+      armEscInterrupt()
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [authActive, interrupt, status, visible])
+  }, [armEscInterrupt, disarmEscInterrupt, interrupt, interruptible, visible])
 
   const startAuthLogin = async (): Promise<void> => {
     setError('')
@@ -3293,14 +3368,24 @@ export default function AgentPanel({
           {usage.tokens.totalCostUsd !== undefined && <span>{costFormatter.format(usage.tokens.totalCostUsd)}</span>}
         </div>
         <div className="agent-prompt-actions">
-          <span className={`agent-status ${status}`} title={statusAccessibleLabel} aria-label={statusAccessibleLabel}>
+          <span
+            className={`agent-status ${status}${escInterruptArmed ? ' esc-armed' : ''}`}
+            title={statusAccessibleLabel}
+            aria-label={statusAccessibleLabel}
+            aria-live="polite"
+          >
             {status === 'working' ? (
               <>
                 <span className="agent-status-spinner" aria-hidden="true" />
                 <span className="sr-only">{statusLabel}</span>
               </>
             ) : (
-              <span>{statusLabel}</span>
+              <span>{baseStatusLabel}</span>
+            )}
+            {escInterruptArmed && (
+              <span className="agent-status-esc-arm" aria-hidden="true">
+                Esc 한 번 더 누르면 중지
+              </span>
             )}
             {queuedCount > 0 && <span className="agent-status-queue">대기 {queuedCount}</span>}
           </span>
@@ -3316,10 +3401,14 @@ export default function AgentPanel({
               <button disabled={!canSubmit} onClick={() => void send('steer')}>
                 바로 지시하기
               </button>
-              <button onClick={() => void interrupt()}>중지</button>
+              <button className={stopButtonClassName} title={stopButtonTitle} onClick={() => void interrupt()}>
+                중지
+              </button>
             </div>
           ) : authActive ? (
-            <button onClick={() => void interrupt()}>중지</button>
+            <button className={stopButtonClassName} title={stopButtonTitle} onClick={() => void interrupt()}>
+              중지
+            </button>
           ) : (
             <button disabled={!canSubmit} onClick={() => void send()}>
               전송

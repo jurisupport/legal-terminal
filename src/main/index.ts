@@ -1,4 +1,4 @@
-import { app, BrowserWindow, shell, ipcMain, dialog, screen, Menu, clipboard } from 'electron'
+import { app, BrowserWindow, shell, ipcMain, dialog, screen, Menu, clipboard, type WebContents } from 'electron'
 import { spawn } from 'child_process'
 import { createHash } from 'crypto'
 import { request } from 'https'
@@ -722,6 +722,9 @@ const TEXT_EXT = new Set([
 ])
 const MAX_TEXT_BYTES = 2 * 1024 * 1024 // 2MB 초과 텍스트는 잘라서 안내
 const DOCUMENT_DRAFT_DIR = 'document-drafts'
+const DOCUMENT_DRAFT_HISTORY_VERSION = 1
+const DOCUMENT_DRAFT_HISTORY_LIMIT = 50
+const DOCUMENT_DRAFT_HISTORY_COALESCE_MS = 30_000
 const LOCAL_CLOUD_READ_TIMEOUT_MS = 45_000
 const LOCAL_CLOUD_HYDRATE_TIMEOUT_MS = 180_000
 const LOCAL_CLOUD_FOLDER_HYDRATE_TIMEOUT_MS = 8_000
@@ -740,6 +743,16 @@ interface DocumentDraftSaveInput extends DocumentDraftInput {
 }
 
 interface DocumentDraftEntry {
+  key: string
+  path?: string
+  draftId?: string
+  title: string
+  content: string
+  savedAt: string
+}
+
+interface DocumentDraftHistoryEntry {
+  id: string
   key: string
   path?: string
   draftId?: string
@@ -780,6 +793,10 @@ function documentDraftPath(input: DocumentDraftInput): string {
   return join(documentDraftRoot(), `${documentDraftKey(input)}.json`)
 }
 
+function documentDraftHistoryPath(input: DocumentDraftInput): string {
+  return join(documentDraftRoot(), `${documentDraftKey(input)}.history.json`)
+}
+
 function normalizeDocumentDraft(raw: unknown, key: string): DocumentDraftEntry | null {
   if (!raw || typeof raw !== 'object') return null
   const item = raw as Partial<DocumentDraftEntry>
@@ -792,6 +809,98 @@ function normalizeDocumentDraft(raw: unknown, key: string): DocumentDraftEntry |
     content: item.content,
     savedAt: typeof item.savedAt === 'string' ? item.savedAt : new Date(0).toISOString()
   }
+}
+
+function documentDraftHistoryEntryId(savedAt: string, content: string): string {
+  return createHash('sha1').update(`${savedAt}\0${content}`).digest('hex').slice(0, 16)
+}
+
+function documentDraftToHistoryEntry(entry: DocumentDraftEntry): DocumentDraftHistoryEntry {
+  return {
+    id: documentDraftHistoryEntryId(entry.savedAt, entry.content),
+    key: entry.key,
+    path: entry.path,
+    draftId: entry.draftId,
+    title: entry.title,
+    content: entry.content,
+    savedAt: entry.savedAt
+  }
+}
+
+function normalizeDocumentDraftHistoryEntry(raw: unknown, key: string): DocumentDraftHistoryEntry | null {
+  if (!raw || typeof raw !== 'object') return null
+  const item = raw as Partial<DocumentDraftHistoryEntry>
+  if (typeof item.content !== 'string') return null
+  const savedAt = typeof item.savedAt === 'string' ? item.savedAt : new Date(0).toISOString()
+  return {
+    id:
+      typeof item.id === 'string' && item.id
+        ? item.id
+        : documentDraftHistoryEntryId(savedAt, item.content),
+    key,
+    path: typeof item.path === 'string' ? item.path : undefined,
+    draftId: typeof item.draftId === 'string' ? item.draftId : undefined,
+    title: typeof item.title === 'string' && item.title.trim() ? item.title : '무제.md',
+    content: item.content,
+    savedAt
+  }
+}
+
+async function readDocumentDraftHistory(input: DocumentDraftInput): Promise<DocumentDraftHistoryEntry[]> {
+  try {
+    const key = documentDraftKey(input)
+    const raw = JSON.parse(await readFile(documentDraftHistoryPath(input), 'utf8')) as unknown
+    const entries = Array.isArray(raw)
+      ? raw
+      : raw && typeof raw === 'object' && Array.isArray((raw as { entries?: unknown }).entries)
+        ? (raw as { entries: unknown[] }).entries
+        : []
+    return entries
+      .map((entry) => normalizeDocumentDraftHistoryEntry(entry, key))
+      .filter((entry): entry is DocumentDraftHistoryEntry => !!entry)
+      .sort((a, b) => b.savedAt.localeCompare(a.savedAt))
+      .slice(0, DOCUMENT_DRAFT_HISTORY_LIMIT)
+  } catch {
+    return []
+  }
+}
+
+async function writeDocumentDraftHistory(
+  input: DocumentDraftInput,
+  entries: DocumentDraftHistoryEntry[]
+): Promise<void> {
+  const root = documentDraftRoot()
+  await mkdir(root, { recursive: true })
+  const file = documentDraftHistoryPath(input)
+  const tmp = join(root, `.${documentDraftKey(input)}.history.${Date.now()}.tmp`)
+  await writeFile(
+    tmp,
+    JSON.stringify({ version: DOCUMENT_DRAFT_HISTORY_VERSION, entries }, null, 2),
+    'utf8'
+  )
+  await rename(tmp, file)
+}
+
+async function appendDocumentDraftHistory(entry: DocumentDraftEntry): Promise<void> {
+  const input: DocumentDraftInput = { path: entry.path, draftId: entry.draftId }
+  const nextEntry = documentDraftToHistoryEntry(entry)
+  const history = await readDocumentDraftHistory(input)
+  const head = history[0]
+  const rest = history.slice(1)
+  let entries: DocumentDraftHistoryEntry[]
+
+  if (!head) {
+    entries = [nextEntry]
+  } else if (
+    head.content === nextEntry.content ||
+    Date.parse(nextEntry.savedAt) - Date.parse(head.savedAt) < DOCUMENT_DRAFT_HISTORY_COALESCE_MS
+  ) {
+    entries = [nextEntry, ...rest]
+  } else {
+    entries = [nextEntry, ...history]
+  }
+
+  await writeDocumentDraftHistory(input, entries.slice(0, DOCUMENT_DRAFT_HISTORY_LIMIT))
 }
 
 async function saveDocumentDraft(input: DocumentDraftSaveInput): Promise<DocumentDraftEntry> {
@@ -810,6 +919,7 @@ async function saveDocumentDraft(input: DocumentDraftSaveInput): Promise<Documen
   const tmp = join(root, `.${key}.${Date.now()}.tmp`)
   await writeFile(tmp, JSON.stringify(entry), 'utf8')
   await rename(tmp, file)
+  await appendDocumentDraftHistory(entry).catch(() => {})
   return entry
 }
 
@@ -833,7 +943,7 @@ async function listDocumentDrafts(): Promise<DocumentDraftEntry[]> {
     const files = await readdir(root, { withFileTypes: true })
     const drafts = await Promise.all(
       files
-        .filter((entry) => entry.isFile() && entry.name.endsWith('.json'))
+        .filter((entry) => entry.isFile() && entry.name.endsWith('.json') && !entry.name.endsWith('.history.json'))
         .map(async (entry) => {
           const key = entry.name.slice(0, -'.json'.length)
           try {
@@ -850,6 +960,23 @@ async function listDocumentDrafts(): Promise<DocumentDraftEntry[]> {
   } catch {
     return []
   }
+}
+
+async function listDocumentDraftHistory(input: DocumentDraftInput): Promise<DocumentDraftHistoryEntry[]> {
+  const latest = await loadDocumentDraft(input)
+  const history = await readDocumentDraftHistory(input)
+  const merged: DocumentDraftHistoryEntry[] = []
+  const seen = new Set<string>()
+  const push = (entry: DocumentDraftHistoryEntry): void => {
+    const dedupeKey = `${entry.savedAt}\0${entry.content}`
+    if (seen.has(dedupeKey)) return
+    seen.add(dedupeKey)
+    merged.push(entry)
+  }
+
+  if (latest) push(documentDraftToHistoryEntry(latest))
+  history.forEach(push)
+  return merged.sort((a, b) => b.savedAt.localeCompare(a.savedAt)).slice(0, DOCUMENT_DRAFT_HISTORY_LIMIT)
 }
 
 interface ZipEntry {
@@ -1472,19 +1599,118 @@ async function autoDownloadRemoteRecords(sourceUri: string): Promise<AutoDownloa
   }
 }
 
-async function downloadRemoteToLocal(srcUri: string, destPath: string): Promise<number> {
+type DownloadProgressPhase = 'preparing' | 'downloading' | 'done' | 'error'
+
+interface RemoteDownloadPlanFile {
+  source: string
+  destPath: string
+  label: string
+}
+
+interface RemoteDownloadPlan {
+  dirs: string[]
+  files: RemoteDownloadPlanFile[]
+}
+
+interface DownloadProgressBase {
+  id: string
+  source: string
+  name: string
+  isDir: boolean
+}
+
+interface DownloadProgressUpdate {
+  phase: DownloadProgressPhase
+  totalFiles?: number
+  completedFiles?: number
+  currentFile?: string
+  destPath?: string
+  error?: string
+}
+
+function createDownloadId(): string {
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
+}
+
+function sendDownloadProgress(
+  sender: WebContents,
+  base: DownloadProgressBase,
+  update: DownloadProgressUpdate
+): void {
+  if (sender.isDestroyed()) return
+  sender.send('fs:downloadProgress', {
+    ...base,
+    totalFiles: 0,
+    completedFiles: 0,
+    ...update
+  })
+}
+
+async function collectRemoteDownloadPlan(srcUri: string, destPath: string): Promise<RemoteDownloadPlan> {
   const st = await rfsStat(srcUri)
   if (!st.isDir) {
-    await mkdir(dirname(destPath), { recursive: true })
-    await writeFile(destPath, await rfsReadBytes(srcUri))
-    return 1
+    return {
+      dirs: [],
+      files: [{ source: srcUri, destPath, label: remoteBasename(srcUri) }]
+    }
   }
-  await mkdir(destPath, { recursive: true })
-  let count = 0
+
+  const plan: RemoteDownloadPlan = { dirs: [destPath], files: [] }
+  await collectRemoteFolderDownloadPlan(srcUri, destPath, '', plan)
+  return plan
+}
+
+async function collectRemoteFolderDownloadPlan(
+  srcUri: string,
+  destPath: string,
+  relativeDir: string,
+  plan: RemoteDownloadPlan
+): Promise<void> {
   for (const entry of await rfsList(srcUri)) {
-    count += await downloadRemoteToLocal(entry.path, join(destPath, entry.name))
+    const childDest = join(destPath, entry.name)
+    const childLabel = relativeDir ? `${relativeDir}/${entry.name}` : entry.name
+    if (entry.isDir) {
+      plan.dirs.push(childDest)
+      await collectRemoteFolderDownloadPlan(entry.path, childDest, childLabel, plan)
+    } else {
+      plan.files.push({ source: entry.path, destPath: childDest, label: childLabel })
+    }
   }
-  return count
+}
+
+async function downloadRemoteToLocalWithProgress(
+  srcUri: string,
+  destPath: string,
+  onProgress: (update: DownloadProgressUpdate) => void
+): Promise<number> {
+  const plan = await collectRemoteDownloadPlan(srcUri, destPath)
+  const totalFiles = plan.files.length
+  onProgress({ phase: 'downloading', totalFiles, completedFiles: 0, destPath })
+
+  for (const dir of plan.dirs) await mkdir(dir, { recursive: true })
+
+  let completedFiles = 0
+  for (const file of plan.files) {
+    onProgress({
+      phase: 'downloading',
+      totalFiles,
+      completedFiles,
+      currentFile: file.label,
+      destPath
+    })
+    await mkdir(dirname(file.destPath), { recursive: true })
+    await writeFile(file.destPath, await rfsReadBytes(file.source))
+    completedFiles += 1
+    onProgress({
+      phase: 'downloading',
+      totalFiles,
+      completedFiles,
+      currentFile: file.label,
+      destPath
+    })
+  }
+
+  return totalFiles
 }
 
 ipcMain.handle('fs:mkdir', async (_e, p: { dir: string; name: string }) => {
@@ -1678,6 +1904,14 @@ ipcMain.handle('fs:listDocumentDrafts', async () => {
   }
 })
 
+ipcMain.handle('fs:listDocumentDraftHistory', async (_e, input: DocumentDraftInput) => {
+  try {
+    return { ok: true, history: await listDocumentDraftHistory(input) }
+  } catch (e) {
+    return { ok: false, history: [], error: String(e) }
+  }
+})
+
 ipcMain.handle('fs:deleteDocumentDraft', async (_e, input: DocumentDraftInput) => {
   try {
     await deleteDocumentDraft(input)
@@ -1741,12 +1975,14 @@ ipcMain.handle('fs:copyInto', async (_e, p: { destDir: string; srcPaths: string[
   return { copied }
 })
 
-ipcMain.handle('fs:download', async (_e, source: string) => {
+ipcMain.handle('fs:download', async (event, source: string) => {
   if (!mainWindow) return { ok: false, error: '메인 창을 찾을 수 없습니다.' }
   if (!isRemote(source)) return { ok: false, error: '원격 경로만 다운로드할 수 있습니다.' }
+  let progressBase: DownloadProgressBase | undefined
   try {
     const st = await rfsStat(source)
     const name = remoteBasename(source)
+    progressBase = { id: createDownloadId(), source, name, isDir: st.isDir }
     if (st.isDir) {
       const r = await dialog.showOpenDialog(mainWindow, {
         title: '원격 폴더 다운로드 위치',
@@ -1755,7 +1991,16 @@ ipcMain.handle('fs:download', async (_e, source: string) => {
       })
       if (r.canceled || r.filePaths.length === 0) return { ok: true, canceled: true }
       const path = join(r.filePaths[0], name)
-      const count = await downloadRemoteToLocal(source, path)
+      sendDownloadProgress(event.sender, progressBase, { phase: 'preparing', destPath: path })
+      const count = await downloadRemoteToLocalWithProgress(source, path, (update) =>
+        sendDownloadProgress(event.sender, progressBase as DownloadProgressBase, update)
+      )
+      sendDownloadProgress(event.sender, progressBase, {
+        phase: 'done',
+        totalFiles: count,
+        completedFiles: count,
+        destPath: path
+      })
       return { ok: true, path, count }
     }
     const r = await dialog.showSaveDialog(mainWindow, {
@@ -1763,10 +2008,32 @@ ipcMain.handle('fs:download', async (_e, source: string) => {
       defaultPath: join(app.getPath('downloads'), name)
     })
     if (r.canceled || !r.filePath) return { ok: true, canceled: true }
-    const count = await downloadRemoteToLocal(source, r.filePath)
+    sendDownloadProgress(event.sender, progressBase, {
+      phase: 'downloading',
+      totalFiles: 1,
+      completedFiles: 0,
+      currentFile: name,
+      destPath: r.filePath
+    })
+    const count = await downloadRemoteToLocalWithProgress(source, r.filePath, (update) =>
+      sendDownloadProgress(event.sender, progressBase as DownloadProgressBase, update)
+    )
+    sendDownloadProgress(event.sender, progressBase, {
+      phase: 'done',
+      totalFiles: count,
+      completedFiles: count,
+      currentFile: name,
+      destPath: r.filePath
+    })
     return { ok: true, path: r.filePath, count }
-  } catch (e) {
-    return { ok: false, error: String(e) }
+  } catch (error) {
+    if (progressBase) {
+      sendDownloadProgress(event.sender, progressBase, {
+        phase: 'error',
+        error: String(error)
+      })
+    }
+    return { ok: false, error: String(error) }
   }
 })
 
