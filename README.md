@@ -40,7 +40,7 @@ curl -fsSL https://raw.githubusercontent.com/jurisupport/legal-terminal/main/ins
 
 ## 이번 업데이트
 
-최신 릴리스: [v0.1.90](https://github.com/jurisupport/legal-terminal/releases/tag/v0.1.90)
+최신 릴리스: [v0.1.91](https://github.com/jurisupport/legal-terminal/releases/tag/v0.1.91)
 
 - **문서 히스토리**: Markdown 임시저장본을 히스토리로 남기고, 편집기에서 과거 저장본을 골라 복원할 수 있습니다.
 - **원격 다운로드 진행 표시**: SSH 원격 파일·폴더 다운로드 중 파일 수와 현재 파일을 토스트로 보여줍니다.
