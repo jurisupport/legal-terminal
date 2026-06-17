@@ -563,6 +563,10 @@ const api = {
       identity: DocumentDraftIdentity & { title?: string; content: string }
     ): Promise<{ ok: boolean; entry?: DocumentDraftEntry; error?: string }> =>
       ipcRenderer.invoke('fs:saveDocumentDraft', identity),
+    addDocumentDraftHistory: (
+      identity: DocumentDraftIdentity & { title?: string; content: string }
+    ): Promise<{ ok: boolean; entry?: DocumentDraftHistoryEntry; error?: string }> =>
+      ipcRenderer.invoke('fs:addDocumentDraftHistory', identity),
     loadDocumentDraft: (
       identity: DocumentDraftIdentity
     ): Promise<{ ok: boolean; draft?: DocumentDraftEntry | null; error?: string }> =>

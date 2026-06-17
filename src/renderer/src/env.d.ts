@@ -596,6 +596,9 @@ export interface LtApi {
     saveDocumentDraft: (
       identity: DocumentDraftIdentity & { title?: string; content: string }
     ) => Promise<{ ok: boolean; entry?: DocumentDraftEntry; error?: string }>
+    addDocumentDraftHistory: (
+      identity: DocumentDraftIdentity & { title?: string; content: string }
+    ) => Promise<{ ok: boolean; entry?: DocumentDraftHistoryEntry; error?: string }>
     loadDocumentDraft: (
       identity: DocumentDraftIdentity
     ) => Promise<{ ok: boolean; draft?: DocumentDraftEntry | null; error?: string }>

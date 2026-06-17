@@ -472,6 +472,7 @@ interface CurrentCase {
 interface ClaudeDraftPromptOptions {
   sourcePath?: string
   sourceTitle?: string
+  instruction?: string
 }
 
 type CaseWorkspaceTab = WorkspaceCaseTabPayload
@@ -3076,8 +3077,7 @@ export default function App(): JSX.Element {
     } else {
       playNotificationSound(notificationSound, notificationVolume)
       window.lt.app.requestAttention(status)
-      const bg = id !== activeTermRef.current
-      if (bg) setTermAttention((s) => new Set(s).add(id))
+      setTermAttention((s) => new Set(s).add(id))
       if (status === 'question') pushToast(id, status)
       else dismissToastForTerm(id)
     }
@@ -4210,6 +4210,9 @@ export default function App(): JSX.Element {
             '3. 요청한 부분만 수정하고 사용자가 편집한 다른 부분은 보존한다.',
             '4. 수정 후 변경 요약과 보존 여부를 알려준다.'
           ]),
+      draft?.instruction ? '' : undefined,
+      draft?.instruction ? '추가 요청:' : undefined,
+      draft?.instruction,
       ''
     ].filter((line): line is string => line !== undefined)
     return lines.join('\n')
@@ -4331,7 +4334,7 @@ export default function App(): JSX.Element {
               ? `${ref} 중 다음 부분:\n"${t}"\n\n`
               : `"${t}"\n\n`
       } else if (docName) {
-        payload = filePrompt ? `${filePrompt}위 파일에 대해 ` : `${ref} 파일에 대해 `
+        payload = filePrompt ? `${filePrompt}${opts?.instruction ? '' : '위 파일에 대해 '}` : `${ref} 파일에 대해 `
       } else return
       sendClaude(payload, { displayText })
     })()
@@ -4401,7 +4404,7 @@ export default function App(): JSX.Element {
     const documentUpdates = caseDocumentUpdates[tab.id]
     const documentUpdateCount = documentUpdates?.paths.length ?? 0
     const working = terms.some((term) => termStatus.get(term.id) === 'working')
-    const question = terms.some((term) => termStatus.get(term.id) === 'question')
+    const questionTaskCount = terms.filter((term) => termStatus.get(term.id) === 'question').length
     const doneTaskCount = terms.filter(
       (term) => termAttention.has(term.id) && termStatus.get(term.id) === 'done'
     ).length
@@ -4417,11 +4420,12 @@ export default function App(): JSX.Element {
       active,
       documentUpdateCount,
       documentUpdateLatestAt: documentUpdates?.latestAt,
+      questionTaskCount,
       doneTaskCount,
       status: documentUpdateCount
         ? `업데이트 ${documentUpdateCount}개`
-        : question
-          ? '확인 대기'
+        : questionTaskCount
+          ? `확인 대기 ${questionTaskCount}개`
           : working
             ? '작업 중'
             : doneTaskCount
@@ -4432,19 +4436,28 @@ export default function App(): JSX.Element {
     }
   })
   const totalCaseDoneTaskCount = caseTabRows.reduce((sum, row) => sum + row.doneTaskCount, 0)
-  const totalCaseNoticeCount = totalCaseDocumentUpdateCount + totalCaseDoneTaskCount
+  const totalCaseQuestionTaskCount = caseTabRows.reduce((sum, row) => sum + row.questionTaskCount, 0)
+  const totalCaseNoticeCount =
+    totalCaseDocumentUpdateCount + totalCaseQuestionTaskCount + totalCaseDoneTaskCount
   const caseTabsShortcut = platform === 'darwin' ? '⌘0' : 'Ctrl+0'
   const caseTabActivityTitle =
     totalCaseNoticeCount > 0
       ? `사건탭 · ${[
           totalCaseDocumentUpdateCount > 0 ? `업데이트 ${totalCaseDocumentUpdateCount}개` : undefined,
+          totalCaseQuestionTaskCount > 0 ? `확인 대기 ${totalCaseQuestionTaskCount}개` : undefined,
           totalCaseDoneTaskCount > 0 ? `완료 작업 ${totalCaseDoneTaskCount}개` : undefined
         ]
           .filter(Boolean)
           .join(' · ')} (${caseTabsShortcut})`
       : `사건탭 (${caseTabsShortcut})`
   const caseTabActivityBadgeClass =
-    totalCaseDocumentUpdateCount > 0 ? 'update' : totalCaseDoneTaskCount > 0 ? 'done' : ''
+    totalCaseDocumentUpdateCount > 0
+      ? 'update'
+      : totalCaseQuestionTaskCount > 0
+        ? 'question'
+        : totalCaseDoneTaskCount > 0
+          ? 'done'
+          : ''
   const caseTabActivityBadgeCount = totalCaseNoticeCount > 0 ? totalCaseNoticeCount : caseTabs.length
   const caseTabTitle = (tab: CaseWorkspaceTab): string =>
     [
@@ -5899,7 +5912,17 @@ export default function App(): JSX.Element {
           <button
             className={`activity-item case-tabs-trigger ${caseTabsOpen ? 'active' : ''} ${
               totalCaseDocumentUpdateCount > 0 ? 'has-updates' : ''
-            } ${totalCaseDocumentUpdateCount === 0 && totalCaseDoneTaskCount > 0 ? 'has-done' : ''}`}
+            } ${
+              totalCaseDocumentUpdateCount === 0 && totalCaseQuestionTaskCount > 0
+                ? 'has-question'
+                : ''
+            } ${
+              totalCaseDocumentUpdateCount === 0 &&
+              totalCaseQuestionTaskCount === 0 &&
+              totalCaseDoneTaskCount > 0
+                ? 'has-done'
+                : ''
+            }`}
             title={caseTabActivityTitle}
             onClick={() => setCaseTabsOpen((open) => !open)}
           >
@@ -5923,13 +5946,25 @@ export default function App(): JSX.Element {
               {caseTabRows.length === 0 ? (
                 <div className="case-tabs-empty">열린 사건탭 없음</div>
               ) : (
-                caseTabRows.map(({ tab, active, status, doneTaskCount, documentUpdateCount, documentUpdateLatestAt }) => (
+                caseTabRows.map(({
+                  tab,
+                  active,
+                  status,
+                  questionTaskCount,
+                  doneTaskCount,
+                  documentUpdateCount,
+                  documentUpdateLatestAt
+                }) => (
                   <button
                     key={tab.id}
                     className={`case-tab-row ${active ? 'active' : ''} ${documentUpdateCount > 0 ? 'has-updates' : ''} ${
-                      documentUpdateCount === 0 && doneTaskCount > 0 ? 'has-done' : ''
+                      documentUpdateCount === 0 && questionTaskCount > 0 ? 'has-question' : ''
+                    } ${
+                      documentUpdateCount === 0 && questionTaskCount === 0 && doneTaskCount > 0 ? 'has-done' : ''
                     }`}
                     title={`${caseTabTitle(tab)}${documentUpdateCount > 0 ? ` · 업데이트 ${documentUpdateCount}개` : ''}${
+                      questionTaskCount > 0 ? ` · 확인 대기 ${questionTaskCount}개` : ''
+                    }${
                       doneTaskCount > 0 ? ` · 완료 작업 ${doneTaskCount}개` : ''
                     }\n${caseTabSubtitle(tab)}${
                       documentUpdateLatestAt
@@ -5957,6 +5992,15 @@ export default function App(): JSX.Element {
                             aria-label={`업데이트 ${documentUpdateCount}개`}
                           >
                             {documentUpdateCount}
+                          </span>
+                        )}
+                        {questionTaskCount > 0 && (
+                          <span
+                            className="case-tab-row-question-badge"
+                            title={`확인 대기 ${questionTaskCount}개`}
+                            aria-label={`확인 대기 ${questionTaskCount}개`}
+                          >
+                            {questionTaskCount}
                           </span>
                         )}
                         {doneTaskCount > 0 && (

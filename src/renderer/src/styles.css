@@ -220,6 +220,12 @@ body {
   animation: case-tab-icon-sparkle 1.35s ease-in-out infinite;
   filter: drop-shadow(0 0 6px rgba(245, 200, 76, 0.55));
 }
+.activity-item.case-tabs-trigger.has-question {
+  color: #fff;
+}
+.activity-item.case-tabs-trigger.has-question svg {
+  filter: drop-shadow(0 0 6px rgba(224, 120, 92, 0.52));
+}
 .activity-item.case-tabs-trigger.has-done {
   color: #fff;
 }
@@ -240,6 +246,13 @@ body {
   box-shadow:
     0 0 0 2px #252526,
     0 0 10px rgba(92, 211, 138, 0.45);
+}
+.activity-badge.question {
+  background: #e0785c;
+  color: #1f0c07;
+  box-shadow:
+    0 0 0 2px #252526,
+    0 0 10px rgba(224, 120, 92, 0.5);
 }
 .case-tabs-flyout {
   position: absolute;
@@ -318,6 +331,11 @@ body {
   box-shadow: inset 2px 0 0 #f5c84c;
   animation: case-tab-row-sparkle 1.6s ease-in-out infinite;
 }
+.case-tab-row.has-question {
+  border-color: rgba(224, 120, 92, 0.54);
+  background: rgba(224, 120, 92, 0.1);
+  box-shadow: inset 2px 0 0 #e0785c;
+}
 .case-tab-row.has-done {
   border-color: rgba(92, 211, 138, 0.5);
   background: rgba(92, 211, 138, 0.1);
@@ -329,6 +347,9 @@ body {
 .case-tab-row.has-updates:hover {
   background: rgba(245, 200, 76, 0.15);
 }
+.case-tab-row.has-question:hover {
+  background: rgba(224, 120, 92, 0.15);
+}
 .case-tab-row.has-done:hover {
   background: rgba(92, 211, 138, 0.15);
 }
@@ -339,6 +360,10 @@ body {
 .case-tab-row.active.has-updates {
   background: color-mix(in srgb, #f5c84c 18%, var(--accent) 16%);
   border-color: rgba(245, 200, 76, 0.72);
+}
+.case-tab-row.active.has-question {
+  background: color-mix(in srgb, #e0785c 18%, var(--accent) 16%);
+  border-color: rgba(224, 120, 92, 0.72);
 }
 .case-tab-row.active.has-done {
   background: color-mix(in srgb, #5cd38a 16%, var(--accent) 16%);
@@ -397,6 +422,20 @@ body {
   line-height: 18px;
   font-variant-numeric: tabular-nums;
   box-shadow: 0 0 9px rgba(245, 200, 76, 0.55);
+}
+.case-tab-row-question-badge {
+  flex: 0 0 auto;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 9px;
+  color: #1f0c07;
+  background: #e0785c;
+  text-align: center;
+  font-size: 10.5px;
+  font-weight: 800;
+  line-height: 18px;
+  font-variant-numeric: tabular-nums;
 }
 .case-tab-row-sub {
   color: var(--fg-muted);

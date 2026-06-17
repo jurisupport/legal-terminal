@@ -354,7 +354,7 @@ export default function MarkdownEditor({
   onPath?: (path: string) => void
   onAsk?: (
     draftPath?: string,
-    meta?: { sourcePath?: string; sourceTitle?: string }
+    meta?: { sourcePath?: string; sourceTitle?: string; instruction?: string }
   ) => void
   onSendToJuriSupport?: (doc: MarkdownDocumentPayload) => void
   onSaveHandler?: (handler: MarkdownSaveHandler | null) => void
@@ -385,6 +385,7 @@ export default function MarkdownEditor({
   const saveNowRef = useRef<MarkdownSaveHandler>(() => Promise.resolve(undefined))
   const applyingRemoteRef = useRef(false)
   const remoteSigRef = useRef<FileSignature | null>(null)
+  const remoteConflictContentRef = useRef('')
   const remoteAppliedTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const findOpenRef = useRef(false)
   const findQueryRef = useRef('')
@@ -521,6 +522,7 @@ export default function MarkdownEditor({
   const markSaved = (targetPath: string, content: string, signature?: FileSignature): void => {
     savedContentRef.current = content
     localDirtyRef.current = false
+    remoteConflictContentRef.current = ''
     setDirty(false)
     setSaveError('')
     setRemoteConflict(false)
@@ -711,6 +713,45 @@ export default function MarkdownEditor({
       setClaudeDrafting(false)
     }
   }
+
+  const conflictHistoryTitle = (): string => {
+    const base = fileNameOf(pathRef.current) ?? titleRef.current ?? '문서'
+    return `${base} (Claude 수정본)`
+  }
+
+  const recordRemoteConflictVersion = (content: string): void => {
+    if (remoteConflictContentRef.current === content) return
+    remoteConflictContentRef.current = content
+    void saveDraftNow(false)
+      .then(() =>
+        window.lt.fs.addDocumentDraftHistory({
+          ...draftIdentity(),
+          title: conflictHistoryTitle(),
+          content
+        })
+      )
+      .then((result) => {
+        if (result.ok) setHasDraftHistory(true)
+      })
+      .catch(() => {})
+  }
+
+  const askClaudeToMergeConflict = (): void => {
+    void createClaudeDraftNow().then((draftPath) => {
+      if (!draftPath) return
+      onAsk?.(draftPath, {
+        sourcePath: pathRef.current,
+        sourceTitle: conflictHistoryTitle(),
+        instruction: [
+          '충돌이 났습니다. 사용자 편집본과 Claude 수정본 두 본을 비교해서 하나로 병합해줘.',
+          '사용자 편집본은 위 Claude 작업본 파일이고, Claude 수정본은 원본 문서 경로의 현재 디스크 내용입니다.',
+          '두 본의 의미 있는 변경을 모두 살리고, 병합 결과는 사용자 편집본 파일에만 저장해줘.',
+          '원본 문서 경로는 비교용으로만 읽고 덮어쓰지 마세요.'
+        ].join('\n')
+      })
+    })
+  }
+
   const scheduleDraftSave = (): void => {
     if (saveTimer.current) clearTimeout(saveTimer.current)
     saveTimer.current = setTimeout(() => void saveDraftNow(), 700)
@@ -934,6 +975,7 @@ export default function MarkdownEditor({
               if (next === current) {
                 remoteSigRef.current = sig
                 savedContentRef.current = next
+                remoteConflictContentRef.current = ''
                 setDirtyState(false)
                 setSavedState(true)
                 setRemoteConflict(false)
@@ -943,11 +985,13 @@ export default function MarkdownEditor({
                 if (!localDirtyRef.current) return
                 const merged = mergeTextAgainstBase(savedContentRef.current, current, next)
                 if (merged.status === 'conflict') {
+                  recordRemoteConflictVersion(next)
                   setRemoteConflict(true)
                   return
                 }
                 if (merged.status === 'unchanged') {
                   remoteSigRef.current = sig
+                  remoteConflictContentRef.current = ''
                   setRemoteConflict(false)
                   return
                 }
@@ -955,6 +999,7 @@ export default function MarkdownEditor({
                 const mergedText = merged.text
                 savedContentRef.current = next
                 remoteSigRef.current = sig
+                remoteConflictContentRef.current = ''
                 setRemoteConflict(false)
                 setSavedState(mergedText === next && !!pathRef.current)
                 setDirtyState(mergedText !== next)
@@ -1002,6 +1047,7 @@ export default function MarkdownEditor({
               }
               savedContentRef.current = next
               remoteSigRef.current = sig
+              remoteConflictContentRef.current = ''
               setDirtyState(false)
               setSavedState(true)
               setDraftSaved(false)
@@ -1054,7 +1100,7 @@ export default function MarkdownEditor({
   const saveStatus = saveError
     ? '저장 실패'
     : remoteConflict
-      ? '외부 수정 충돌 (수동 확인)'
+      ? '외부 수정 충돌 (히스토리 확인)'
       : remoteApplied
         ? remoteAppliedMessage
         : dirty
@@ -1180,6 +1226,16 @@ export default function MarkdownEditor({
         {onAsk && (
           <>
             <span className="tb-divider" />
+            {remoteConflict && (
+              <button
+                className="tb-btn"
+                title="현재 편집본과 Claude 수정본 병합 요청"
+                disabled={claudeDrafting}
+                onClick={askClaudeToMergeConflict}
+              >
+                병합 요청
+              </button>
+            )}
             <button
               className="tb-btn"
               title="현재 화면 내용으로 Claude 작업본을 만든 뒤 물어보기"
@@ -1224,7 +1280,7 @@ export default function MarkdownEditor({
           title={
             saveError ||
             (remoteConflict
-              ? '외부 변경사항과 현재 편집 내용이 같은 문단에서 겹쳐 자동 병합하지 않았습니다.'
+              ? '외부 변경사항과 현재 편집 내용이 같은 문단에서 겹쳐 자동 병합하지 않았습니다. Claude 수정본은 문서 히스토리에 저장됩니다.'
               : saveStatus)
           }
         >

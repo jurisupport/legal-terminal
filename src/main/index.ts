@@ -952,6 +952,24 @@ async function appendDocumentDraftHistory(entry: DocumentDraftEntry): Promise<vo
   await writeDocumentDraftHistory(input, entries.slice(0, DOCUMENT_DRAFT_HISTORY_LIMIT))
 }
 
+async function addDocumentDraftHistory(input: DocumentDraftSaveInput): Promise<DocumentDraftHistoryEntry> {
+  const entry = documentDraftToHistoryEntry({
+    key: documentDraftKey(input),
+    path: input.path,
+    draftId: input.draftId,
+    title: input.title?.trim() || (input.path ? basename(input.path) : '무제.md'),
+    content: input.content,
+    savedAt: new Date().toISOString()
+  })
+  const history = await readDocumentDraftHistory(input)
+  const entries = [
+    entry,
+    ...history.filter((item) => item.title !== entry.title || item.content !== entry.content)
+  ]
+  await writeDocumentDraftHistory(input, entries.slice(0, DOCUMENT_DRAFT_HISTORY_LIMIT))
+  return entry
+}
+
 async function saveDocumentDraft(input: DocumentDraftSaveInput): Promise<DocumentDraftEntry> {
   const key = documentDraftKey(input)
   const entry: DocumentDraftEntry = {
@@ -1939,6 +1957,15 @@ ipcMain.handle('fs:readDocxText', async (_e, filePath: string) => {
 ipcMain.handle('fs:saveDocumentDraft', async (_e, input: DocumentDraftSaveInput) => {
   try {
     const entry = await saveDocumentDraft(input)
+    return { ok: true, entry }
+  } catch (e) {
+    return { ok: false, error: String(e) }
+  }
+})
+
+ipcMain.handle('fs:addDocumentDraftHistory', async (_e, input: DocumentDraftSaveInput) => {
+  try {
+    const entry = await addDocumentDraftHistory(input)
     return { ok: true, entry }
   } catch (e) {
     return { ok: false, error: String(e) }
