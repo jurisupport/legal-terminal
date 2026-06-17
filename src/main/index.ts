@@ -4,7 +4,7 @@ import { createHash } from 'crypto'
 import { request } from 'https'
 import { join, basename, dirname, extname, resolve, sep, posix } from 'path'
 import { readdir, readFile, stat, writeFile, copyFile, rm, mkdir, rename, cp } from 'fs/promises'
-import { existsSync, type Dirent } from 'fs'
+import { existsSync, watch, type Dirent, type FSWatcher } from 'fs'
 import { fileURLToPath } from 'url'
 import { inflateRawSync } from 'zlib'
 import { getSettings, setSettings, type Settings } from './settings'
@@ -731,6 +731,10 @@ const LOCAL_CLOUD_FOLDER_HYDRATE_TIMEOUT_MS = 8_000
 const LOCAL_CLOUD_FOLDER_HYDRATE_KICK_MS = 2_000
 const localPrefetching = new Set<string>()
 const localPrefetchedAt = new Map<string, number>()
+const fsWatchers = new Map<
+  string,
+  { watcher: FSWatcher; timer?: NodeJS.Timeout; sender: WebContents }
+>()
 
 interface DocumentDraftInput {
   path?: string
@@ -759,6 +763,51 @@ interface DocumentDraftHistoryEntry {
   title: string
   content: string
   savedAt: string
+}
+
+function closeFsWatcher(key: string): void {
+  const item = fsWatchers.get(key)
+  if (!item) return
+  if (item.timer) clearTimeout(item.timer)
+  item.watcher.close()
+  fsWatchers.delete(key)
+}
+
+function closeFsWatchersForSender(sender: WebContents): void {
+  for (const [key, item] of fsWatchers) {
+    if (item.sender.id === sender.id) closeFsWatcher(key)
+  }
+}
+
+function startFsWatcher(sender: WebContents, id: string, dir: string): void {
+  if (!id || !dir || isRemote(dir)) return
+  const key = `${sender.id}:${id}`
+  closeFsWatcher(key)
+
+  const sendChanged = (eventType?: string, filename?: string | Buffer | null): void => {
+    const item = fsWatchers.get(key)
+    if (!item) return
+    if (item.timer) clearTimeout(item.timer)
+    const changedPath = filename ? join(dir, filename.toString()) : undefined
+    item.timer = setTimeout(() => {
+      if (!sender.isDestroyed()) sender.send('fs:changed', { id, dir, path: changedPath, eventType })
+    }, 150)
+  }
+
+  let watcher: FSWatcher
+  try {
+    watcher = watch(dir, { recursive: true }, sendChanged)
+  } catch {
+    try {
+      watcher = watch(dir, sendChanged)
+    } catch {
+      return
+    }
+  }
+
+  fsWatchers.set(key, { watcher, sender })
+  watcher.on('error', () => closeFsWatcher(key))
+  sender.once('destroyed', () => closeFsWatchersForSender(sender))
 }
 
 interface FileSignature {
@@ -1805,6 +1854,14 @@ ipcMain.handle('fs:list', async (_e, dirPath: string, opts?: { refresh?: boolean
   return out.sort((a, b) =>
     a.isDir === b.isDir ? a.name.localeCompare(b.name, 'ko') : a.isDir ? -1 : 1
   )
+})
+
+ipcMain.on('fs:watch', (e, p: { id: string; dir: string }) => {
+  startFsWatcher(e.sender, p.id, p.dir)
+})
+
+ipcMain.on('fs:unwatch', (e, id: string) => {
+  closeFsWatcher(`${e.sender.id}:${id}`)
 })
 
 // 폴더(하위 포함)의 모든 PDF 수집 — 전자소송기록 폴더 분류용

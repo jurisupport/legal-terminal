@@ -3790,6 +3790,28 @@ export default function App(): JSX.Element {
   }, [activeDraftsFolder, activeRecordsFolder])
 
   useEffect(() => {
+    const dirs = Array.from(
+      new Set(
+        [activeDraftsFolder, activeRecordsFolder].filter(
+          (dir): dir is string => !!dir && !isRemotePath(dir)
+        )
+      )
+    )
+    if (!dirs.length) return
+
+    let timer: number | undefined
+    const refreshSoon = (): void => {
+      if (timer !== undefined) window.clearTimeout(timer)
+      timer = window.setTimeout(() => setTreeRefresh((x) => x + 1), 200)
+    }
+    const unwatch = dirs.map((dir) => window.lt.fs.watch(dir, refreshSoon))
+    return () => {
+      if (timer !== undefined) window.clearTimeout(timer)
+      for (const off of unwatch) off()
+    }
+  }, [activeDraftsFolder, activeRecordsFolder])
+
+  useEffect(() => {
     if (!activeRecordsFolder || !isRemotePath(activeRecordsFolder)) return
     let alive = true
     const run = (): void => {
@@ -4468,6 +4490,12 @@ export default function App(): JSX.Element {
       })
     )
     clearCaseDocumentUpdates(tab.id)
+    setTermAttention((ids) => {
+      if (!terms.some((term) => ids.has(term.id))) return ids
+      const next = new Set(ids)
+      for (const term of terms) next.delete(term.id)
+      return next
+    })
     setCaseTabsOpen(false)
     setMode('explorer')
     const validKeys = new Set([
@@ -4502,12 +4530,6 @@ export default function App(): JSX.Element {
       if (isAgentTab(preferred)) {
         setTermFocusNonce((current) => bumpFocusNonce(current, preferred.id))
       }
-      setTermAttention((ids) => {
-        if (!ids.has(preferred.id)) return ids
-        const next = new Set(ids)
-        next.delete(preferred.id)
-        return next
-      })
       return
     }
     setActiveTerm('')

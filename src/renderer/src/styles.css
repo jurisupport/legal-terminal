@@ -2565,11 +2565,6 @@ body {
 .agent-diff-count.remove {
   color: #ef9a9a;
 }
-.agent-diff-row-note {
-  min-width: 0;
-  margin-left: auto;
-  color: rgba(214, 214, 214, 0.62);
-}
 .agent-diff-toggle {
   min-height: 24px;
   padding: 0 8px;
@@ -2585,6 +2580,9 @@ body {
 .agent-diff-toggle:hover {
   color: var(--fg);
   background: rgba(255, 255, 255, 0.08);
+}
+.agent-diff-summary .agent-diff-toggle {
+  margin-left: auto;
 }
 .agent-diff-labels,
 .agent-diff-grid {
@@ -2658,18 +2656,6 @@ body {
 .agent-diff-line.before.add .agent-diff-line-text,
 .agent-diff-line.after.remove .agent-diff-line-text {
   color: transparent;
-}
-.agent-diff-more {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  flex-wrap: wrap;
-  gap: 8px;
-  padding: 8px;
-  border-top: 1px solid rgba(255, 255, 255, 0.07);
-  color: rgba(214, 214, 214, 0.66);
-  background: rgba(255, 255, 255, 0.025);
-  font-size: var(--agent-small-font-size);
 }
 .agent-diff-fallback .agent-diff-toggle {
   margin-top: 7px;

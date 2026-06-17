@@ -1,6 +1,6 @@
 {
   "name": "legal-terminal",
-  "version": "0.1.91",
+  "version": "0.1.92",
   "description": "대한민국 송무 변호사를 위한 AI 통합 작업환경 — Claude Code + 준비서면 에디터 + 전자소송기록 뷰어 + 사건 대시보드 + 원격(SSH) 작업",
   "main": "./out/main/index.js",
   "author": "lawpid",

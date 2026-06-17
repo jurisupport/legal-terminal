@@ -54,6 +54,12 @@ interface FsDownloadProgress {
   error?: string
 }
 
+interface FsWatchEvent {
+  dir: string
+  path?: string
+  eventType?: string
+}
+
 interface FolderMatchSuggestion {
   path: string
   name: string
@@ -468,6 +474,8 @@ interface AgentCommandResult {
 
 type AgentEvent = { type: string; sessionId?: string; [key: string]: unknown }
 
+let fsWatchSeq = 0
+
 const api = {
   app: {
     info: (): Promise<{
@@ -587,6 +595,18 @@ const api = {
       const listener = (_event: unknown, progress: FsDownloadProgress): void => cb(progress)
       ipcRenderer.on('fs:downloadProgress', listener)
       return () => ipcRenderer.removeListener('fs:downloadProgress', listener)
+    },
+    watch: (dir: string, cb: (event: FsWatchEvent) => void): (() => void) => {
+      const id = `fs-watch-${++fsWatchSeq}`
+      const listener = (_event: unknown, event: FsWatchEvent & { id?: string }): void => {
+        if (event.id === id) cb(event)
+      }
+      ipcRenderer.on('fs:changed', listener)
+      ipcRenderer.send('fs:watch', { id, dir })
+      return () => {
+        ipcRenderer.removeListener('fs:changed', listener)
+        ipcRenderer.send('fs:unwatch', id)
+      }
     },
     autoDownloadRecords: (
       source: string

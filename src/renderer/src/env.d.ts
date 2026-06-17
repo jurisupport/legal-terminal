@@ -52,6 +52,12 @@ export interface FsDownloadProgress {
   error?: string
 }
 
+export interface FsWatchEvent {
+  dir: string
+  path?: string
+  eventType?: string
+}
+
 export interface FolderMatchSuggestion {
   path: string
   name: string
@@ -635,6 +641,7 @@ export interface LtApi {
       source: string
     ) => Promise<{ ok: boolean; path?: string; count?: number; canceled?: boolean; error?: string }>
     onDownloadProgress: (cb: (progress: FsDownloadProgress) => void) => () => void
+    watch: (dir: string, cb: (event: FsWatchEvent) => void) => () => void
     autoDownloadRecords: (source: string) => Promise<{
       ok: boolean
       path?: string

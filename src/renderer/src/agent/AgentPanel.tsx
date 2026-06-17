@@ -42,7 +42,6 @@ const CONTEXT_ATTACHMENT_TEXT_LIMIT = 160_000
 const FOLDER_ATTACHMENT_ENTRY_LIMIT = 120
 const TIMELINE_BOTTOM_THRESHOLD = 36
 const TIMELINE_PREVIEW_LIMIT = 78
-const DIFF_COLLAPSED_ROW_LIMIT = 10
 const DIFF_FALLBACK_LINE_LIMIT = 10
 const DIFF_FALLBACK_TEXT_LIMIT = 6000
 const REMOTE_FILE_CHANGED_EVENT = 'lt:remote-file-changed'
@@ -952,24 +951,6 @@ function diffLineStats(hunks: DiffHunkView[]): { additions: number; deletions: n
   return { additions, deletions }
 }
 
-function diffRowCount(hunks: DiffHunkView[]): number {
-  return hunks.reduce((total, hunk) => total + hunk.rows.length, 0)
-}
-
-function visibleDiffHunks(hunks: DiffHunkView[], rowLimit: number): DiffHunkView[] {
-  let remainingRows = rowLimit
-  const visible: DiffHunkView[] = []
-
-  for (const hunk of hunks) {
-    if (remainingRows <= 0) break
-    const rows = hunk.rows.slice(0, remainingRows)
-    if (rows.length > 0) visible.push({ ...hunk, rows })
-    remainingRows -= rows.length
-  }
-
-  return visible
-}
-
 function visibleDiffFallbackText(text: string): { text: string; truncated: boolean } {
   const normalized = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n')
   const lines = normalized.split('\n')
@@ -1565,64 +1546,48 @@ export function DiffPreview({ diff, fallbackText }: { diff?: DiffView; fallbackT
     )
   }
 
-  const totalRows = diffRowCount(diff.hunks)
-  const isLongDiff = totalRows > DIFF_COLLAPSED_ROW_LIMIT
-  const hunks = isLongDiff && !expanded ? visibleDiffHunks(diff.hunks, DIFF_COLLAPSED_ROW_LIMIT) : diff.hunks
-  const hiddenRows = Math.max(0, totalRows - diffRowCount(hunks))
-
   return (
     <div className="agent-diff-view">
       <div className="agent-diff-summary">
         <span className="agent-diff-count add">+{diff.additions}</span>
         <span className="agent-diff-count remove">-{diff.deletions}</span>
-        {isLongDiff && (
-          <>
-            <span className="agent-diff-row-note">
-              {expanded ? `${totalRows}줄 전체 표시` : `${totalRows}줄 중 ${DIFF_COLLAPSED_ROW_LIMIT}줄 표시`}
-            </span>
-            <button
-              type="button"
-              className="agent-diff-toggle"
-              aria-expanded={expanded}
-              onClick={() => setExpanded((value) => !value)}
-            >
-              {expanded ? '접기' : '전체 펼쳐보기'}
-            </button>
-          </>
-        )}
+        <button
+          type="button"
+          className="agent-diff-toggle"
+          aria-expanded={expanded}
+          onClick={() => setExpanded((value) => !value)}
+        >
+          {expanded ? '접기' : '펼쳐보기'}
+        </button>
       </div>
-      <div className="agent-diff-labels" aria-hidden="true">
-        <span>변경 전</span>
-        <span>변경 후</span>
-      </div>
-      {hunks.map((hunk, hunkIndex) => (
-        <div key={`${hunk.label ?? 'hunk'}-${hunkIndex}`} className="agent-diff-hunk">
-          {(hunk.label || diff.hunks.length > 1) && (
-            <div className="agent-diff-hunk-title">{hunk.label ?? `Hunk ${hunkIndex + 1}`}</div>
-          )}
-          <div className="agent-diff-grid">
-            {hunk.rows.map((row, rowIndex) => (
-              <Fragment key={`${hunkIndex}-${rowIndex}`}>
-                <div className={`agent-diff-line before ${row.kind}`}>
-                  <span className="agent-diff-line-no">{row.beforeNo ?? ''}</span>
-                  <span className="agent-diff-line-text">{row.before ?? ''}</span>
-                </div>
-                <div className={`agent-diff-line after ${row.kind}`}>
-                  <span className="agent-diff-line-no">{row.afterNo ?? ''}</span>
-                  <span className="agent-diff-line-text">{row.after ?? ''}</span>
-                </div>
-              </Fragment>
-            ))}
+      {expanded && (
+        <>
+          <div className="agent-diff-labels" aria-hidden="true">
+            <span>변경 전</span>
+            <span>변경 후</span>
           </div>
-        </div>
-      ))}
-      {isLongDiff && !expanded && (
-        <div className="agent-diff-more">
-          <span>{hiddenRows}줄 더 있음</span>
-          <button type="button" className="agent-diff-toggle" onClick={() => setExpanded(true)}>
-            펼쳐보기
-          </button>
-        </div>
+          {diff.hunks.map((hunk, hunkIndex) => (
+            <div key={`${hunk.label ?? 'hunk'}-${hunkIndex}`} className="agent-diff-hunk">
+              {(hunk.label || diff.hunks.length > 1) && (
+                <div className="agent-diff-hunk-title">{hunk.label ?? `Hunk ${hunkIndex + 1}`}</div>
+              )}
+              <div className="agent-diff-grid">
+                {hunk.rows.map((row, rowIndex) => (
+                  <Fragment key={`${hunkIndex}-${rowIndex}`}>
+                    <div className={`agent-diff-line before ${row.kind}`}>
+                      <span className="agent-diff-line-no">{row.beforeNo ?? ''}</span>
+                      <span className="agent-diff-line-text">{row.before ?? ''}</span>
+                    </div>
+                    <div className={`agent-diff-line after ${row.kind}`}>
+                      <span className="agent-diff-line-no">{row.afterNo ?? ''}</span>
+                      <span className="agent-diff-line-text">{row.after ?? ''}</span>
+                    </div>
+                  </Fragment>
+                ))}
+              </div>
+            </div>
+          ))}
+        </>
       )}
     </div>
   )

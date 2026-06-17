@@ -40,13 +40,11 @@ curl -fsSL https://raw.githubusercontent.com/jurisupport/legal-terminal/main/ins
 
 ## 이번 업데이트
 
-최신 릴리스: [v0.1.91](https://github.com/jurisupport/legal-terminal/releases/tag/v0.1.91)
+최신 릴리스: [v0.1.92](https://github.com/jurisupport/legal-terminal/releases/tag/v0.1.92)
 
-- **문서 히스토리**: Markdown 임시저장본을 히스토리로 남기고, 편집기에서 과거 저장본을 골라 복원할 수 있습니다.
-- **원격 다운로드 진행 표시**: SSH 원격 파일·폴더 다운로드 중 파일 수와 현재 파일을 토스트로 보여줍니다.
-- **Agent 입력 안정화**: 작업 중 `Esc` 중지 단축키가 입력창과 한글 IME 이벤트를 가로채 입력이 잠기는 문제를 줄였습니다.
-- **Agent 중지 안전장치**: 작업 중 `Esc`를 한 번 누르면 중지 대기 상태를 표시하고, 한 번 더 눌러야 실제 중지합니다.
-- **Diff 미리보기 축약**: 긴 diff fallback 표시를 줄 단위로 접어 패널이 과도하게 길어지지 않게 했습니다.
+- **Windows Agent 선택 안정화**: Agent 패널에서 텍스트를 드래그해 선택하는 동작이 막히지 않게 조정했습니다.
+- **파일 패널 새로고침**: 로컬 사건 폴더 변경을 감지해 파일 목록을 더 빨리 갱신합니다.
+- **Diff 미리보기 정리**: Agent diff 패널은 요약을 먼저 보여주고 필요할 때 펼쳐보게 했습니다.
 
 ## 처음 쓰는 순서
 

@@ -1,21 +1,29 @@
-const TERMINAL_POINTER_DRAG_ATTR = 'data-lt-terminal-pointer-drag'
+const PANEL_POINTER_DRAG_ATTR = 'data-lt-panel-pointer-drag'
 
 interface CancellableEvent {
   preventDefault: () => void
   stopPropagation: () => void
 }
 
-export const isTerminalPointerDragActive = (): boolean =>
-  document.documentElement.hasAttribute(TERMINAL_POINTER_DRAG_ATTR)
+interface PointerDragGuardOptions {
+  cancelNativeDragStart?: boolean
+}
 
-export const cancelIfTerminalPointerDrag = (event: CancellableEvent): boolean => {
-  if (!isTerminalPointerDragActive()) return false
+export const isPanelPointerDragActive = (): boolean =>
+  document.documentElement.hasAttribute(PANEL_POINTER_DRAG_ATTR)
+
+export const cancelIfPanelPointerDrag = (event: CancellableEvent): boolean => {
+  if (!isPanelPointerDragActive()) return false
   event.preventDefault()
   event.stopPropagation()
   return true
 }
 
-export const installTerminalPointerDragGuard = (source: HTMLElement): (() => void) => {
+export const installPanelPointerDragGuard = (
+  source: HTMLElement,
+  options: PointerDragGuardOptions = {}
+): (() => void) => {
+  const cancelNativeDragStart = options.cancelNativeDragStart ?? true
   let activePointerId: number | null = null
   let fallbackClearTimer: number | null = null
 
@@ -28,7 +36,7 @@ export const installTerminalPointerDragGuard = (source: HTMLElement): (() => voi
   const clear = (): void => {
     activePointerId = null
     clearFallbackTimer()
-    document.documentElement.removeAttribute(TERMINAL_POINTER_DRAG_ATTR)
+    document.documentElement.removeAttribute(PANEL_POINTER_DRAG_ATTR)
   }
 
   const scheduleFallbackClear = (): void => {
@@ -39,12 +47,12 @@ export const installTerminalPointerDragGuard = (source: HTMLElement): (() => voi
   const onPointerDown = (event: PointerEvent): void => {
     if (!event.isPrimary || event.button !== 0) return
     activePointerId = event.pointerId
-    document.documentElement.setAttribute(TERMINAL_POINTER_DRAG_ATTR, 'true')
+    document.documentElement.setAttribute(PANEL_POINTER_DRAG_ATTR, 'true')
     scheduleFallbackClear()
   }
 
   const onDocumentPointerDown = (event: PointerEvent): void => {
-    if (!isTerminalPointerDragActive()) return
+    if (!isPanelPointerDragActive()) return
     if (activePointerId === null || event.pointerId !== activePointerId) clear()
   }
 
@@ -54,7 +62,11 @@ export const installTerminalPointerDragGuard = (source: HTMLElement): (() => voi
   }
 
   const onDragStart = (event: DragEvent): void => {
-    if (!isTerminalPointerDragActive()) return
+    if (!isPanelPointerDragActive()) return
+    if (!cancelNativeDragStart) {
+      clear()
+      return
+    }
     event.preventDefault()
     event.stopPropagation()
     clear()
@@ -93,3 +105,7 @@ export const installTerminalPointerDragGuard = (source: HTMLElement): (() => voi
     clear()
   }
 }
+
+export const isTerminalPointerDragActive = isPanelPointerDragActive
+export const cancelIfTerminalPointerDrag = cancelIfPanelPointerDrag
+export const installTerminalPointerDragGuard = installPanelPointerDragGuard
