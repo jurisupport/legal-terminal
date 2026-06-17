@@ -11,6 +11,8 @@ const hidden = Decoration.replace({})
 const HTML_BREAK_RE = /^<br\s*\/?>$/i
 const HTML_BREAK_TOKEN_RE = /<br\s*\/?>/gi
 const ENTITY_RE = /&(#x[\da-f]+|#\d+|[a-z][\da-z]+);/gi
+const ALIGN_CENTER_OPEN_RE = /^<!--\s*lt-align:center\s*-->\s*$/
+const ALIGN_CENTER_CLOSE_RE = /^<!--\s*\/lt-align\s*-->\s*$/
 
 const ENTITY_TEXT: Record<string, string> = {
   amp: '&',
@@ -361,12 +363,42 @@ function activeLines(state: EditorState): Set<number> {
   return set
 }
 
+function addAlignDecorations(
+  state: EditorState,
+  active: Set<number>,
+  deco: Range<Decoration>[]
+): void {
+  let center = false
+  for (let lineNo = 1; lineNo <= state.doc.lines; lineNo++) {
+    const line = state.doc.line(lineNo)
+    if (ALIGN_CENTER_OPEN_RE.test(line.text)) {
+      if (!active.has(lineNo)) {
+        deco.push(Decoration.line({ class: 'cm-md-hidden-line' }).range(line.from))
+        deco.push(Decoration.replace({}).range(line.from, line.to))
+      }
+      center = true
+      continue
+    }
+    if (ALIGN_CENTER_CLOSE_RE.test(line.text)) {
+      if (!active.has(lineNo)) {
+        deco.push(Decoration.line({ class: 'cm-md-hidden-line' }).range(line.from))
+        deco.push(Decoration.replace({}).range(line.from, line.to))
+      }
+      center = false
+      continue
+    }
+    if (center) deco.push(Decoration.line({ class: 'cm-md-align-center' }).range(line.from))
+  }
+}
+
 function build(state: EditorState): DecorationSet {
   const active = activeLines(state)
   const deco: Range<Decoration>[] = []
   const tableRanges: Array<[number, number]> = []
 
   try {
+    addAlignDecorations(state, active, deco)
+
     syntaxTree(state).iterate({
       enter: (node) => {
         const name = node.name

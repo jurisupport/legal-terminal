@@ -170,3 +170,14 @@ export function IconSaveAs({ size = 16 }: IconProps): JSX.Element {
     </svg>
   )
 }
+
+export function IconAlignCenter({ size = 16 }: IconProps): JSX.Element {
+  return (
+    <svg {...base(size)}>
+      <path d="M6 5h12" />
+      <path d="M4 9h16" />
+      <path d="M7 13h10" />
+      <path d="M5 17h14" />
+    </svg>
+  )
+}

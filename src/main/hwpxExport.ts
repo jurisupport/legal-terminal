@@ -50,6 +50,7 @@ interface HwpxXmlContext {
 const BASE_FONT_FACE = '휴먼명조'
 const BASE_FONT_HEIGHT = 1200
 const BODY_FIRST_LINE_INDENT = 1200
+const CENTER_PARA_PR_ID = 7
 const FONT_FACE_LANGS = ['HANGUL', 'LATIN', 'HANJA', 'JAPANESE', 'OTHER', 'SYMBOL', 'USER']
 const OUTLINE_HEADS = [
   { numFormat: 'DIGIT', text: '^1.' },
@@ -253,30 +254,44 @@ function stripLeadingOutlineMarkers(value: string): string {
 function markdownBlocks(markdown: string): MarkdownBlock[] {
   const tokens = marked.lexer(markdown, { gfm: true, breaks: true })
   const blocks: MarkdownBlock[] = []
+  let center = false
+  const paragraph = (
+    text: string,
+    opts: Omit<MarkdownParagraph, 'kind' | 'text'> = {}
+  ): MarkdownParagraph => ({
+    kind: 'paragraph',
+    text,
+    ...opts,
+    paraPrIDRef: center ? CENTER_PARA_PR_ID : opts.paraPrIDRef
+  })
 
   for (const token of tokens) {
     switch (token.type) {
+      case 'html':
+        if (/^<!--\s*lt-align:center\s*-->\s*$/.test(token.text.trim())) center = true
+        else if (/^<!--\s*\/lt-align\s*-->\s*$/.test(token.text.trim())) center = false
+        break
       case 'heading': {
         const text = stripLeadingOutlineMarkers(inlineText(token.tokens, token.text))
         if (text) {
           const level = Math.min(token.depth, 6)
-          blocks.push({ kind: 'paragraph', text, charPrIDRef: level, paraPrIDRef: level })
+          blocks.push(paragraph(text, { charPrIDRef: level, paraPrIDRef: level }))
         }
         break
       }
       case 'paragraph': {
         const text = inlineText(token.tokens, token.text)
-        if (text) blocks.push({ kind: 'paragraph', text })
+        if (text) blocks.push(paragraph(text))
         break
       }
       case 'code': {
         const text = normalizeText(token.text)
-        if (text) blocks.push({ kind: 'paragraph', text })
+        if (text) blocks.push(paragraph(text))
         break
       }
       case 'blockquote': {
         const text = blockText(token.tokens)
-        if (text) blocks.push({ kind: 'paragraph', text })
+        if (text) blocks.push(paragraph(text))
         break
       }
       case 'list': {
@@ -285,7 +300,7 @@ function markdownBlocks(markdown: string): MarkdownBlock[] {
           const text = listItemText(item)
           if (!text) return
           const marker = list.ordered ? `${Number(list.start || 1) + index}.` : '-'
-          blocks.push({ kind: 'paragraph', text: `${marker} ${text}` })
+          blocks.push(paragraph(`${marker} ${text}`))
         })
         break
       }
@@ -307,7 +322,7 @@ function markdownBlocks(markdown: string): MarkdownBlock[] {
         break
       }
       case 'hr':
-        blocks.push({ kind: 'paragraph', text: '---' })
+        blocks.push(paragraph('---'))
         break
       default:
         break
@@ -414,14 +429,17 @@ function sectionXml(blocks: MarkdownBlock[]): string {
 }
 
 function headerXml(): string {
-  const headingParaPrs = Array.from({ length: 7 }, (_v, id) => {
+  const headingParaPrs = Array.from({ length: CENTER_PARA_PR_ID + 1 }, (_v, id) => {
     const heading =
-      id > 0 ? `<hh:heading type="OUTLINE" idRef="0" level="${id - 1}" />` : ''
+      id > 0 && id < CENTER_PARA_PR_ID
+        ? `<hh:heading type="OUTLINE" idRef="0" level="${id - 1}" />`
+        : ''
     const firstLineIndent = id === 0 ? BODY_FIRST_LINE_INDENT : 0
+    const horizontal = id === CENTER_PARA_PR_ID ? 'CENTER' : 'JUSTIFY'
     return [
       `<hh:paraPr id="${id}" tabPrIDRef="0" condense="0" fontLineHeight="0" snapToGrid="1" suppressLineNumbers="0" checked="0">`,
       heading,
-      '<hh:align horizontal="JUSTIFY" vertical="BASELINE" />',
+      `<hh:align horizontal="${horizontal}" vertical="BASELINE" />`,
       '<hh:breakSetting breakLatinWord="KEEP_WORD" breakNonLatinWord="KEEP_WORD" widowOrphan="0" keepWithNext="0" pageBreakBefore="0" lineWrap="BREAK" />',
       '<hh:margin>',
       `<hc:intent value="${firstLineIndent}" unit="HWPUNIT" />`,
@@ -471,7 +489,7 @@ function headerXml(): string {
     ...outlineHeads,
     '</hh:numbering>',
     '</hh:numberings>',
-    '<hh:paraProperties itemCnt="7">',
+    `<hh:paraProperties itemCnt="${headingParaPrs.length}">`,
     ...headingParaPrs,
     '</hh:paraProperties>',
     '<hh:styles itemCnt="1">',

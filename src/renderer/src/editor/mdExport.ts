@@ -76,13 +76,21 @@ table { border-collapse: collapse; width: 100%; margin: .8em 0; page-break-insid
 table.fixed { table-layout: fixed; }
 th,td { border: 1px solid #999; padding: 5px 9px; text-align: left; word-break: break-word; }
 th { background: #f0f0f0; }
+.lt-align-center { text-align: center; }
 `
+}
+
+function applyAlignBlocks(html: string): string {
+  return html.replace(
+    /<!--\s*lt-align:center\s*-->([\s\S]*?)<!--\s*\/lt-align\s*-->/g,
+    '<div class="lt-align-center">$1</div>'
+  )
 }
 
 /** 마크다운 → 인쇄용 전체 HTML 문서. 표 colw 주석은 colgroup 너비로 반영. */
 export function mdToPrintHtml(md: string, title = '문서', profile: PrintLayoutProfile = 'default'): string {
   const { md: clean, widths } = extractColw(md)
-  let body = marked.parse(clean, { gfm: true, breaks: true }) as string
+  let body = applyAlignBlocks(marked.parse(clean, { gfm: true, breaks: true }) as string)
   const queue = [...widths]
   body = body.replace(/<table>/g, () => {
     const w = queue.shift()

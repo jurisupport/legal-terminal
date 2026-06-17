@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 
 import { createHwpxFromMarkdown } from '../src/main/hwpxExport.ts'
+import { mdToPrintHtml } from '../src/renderer/src/editor/mdExport.ts'
 import {
   extractHwpDocumentMarkdown,
   extractHwpDocumentText,
@@ -16,6 +17,16 @@ const hwpx = createHwpxFromMarkdown(
 assert.match(extractHwpText(hwpx, '.hwpx'), /제목/)
 assert.match(extractHwpText(hwpx, '.hwpx'), /본문입니다/)
 assert.match(extractHwpMarkdown(hwpx, '.hwpx'), /\| A \| B \|/)
+
+const centered = [
+  '<!-- lt-align:center -->',
+  '## 신청취지',
+  '',
+  '본문 **강조**',
+  '<!-- /lt-align -->'
+].join('\n')
+assert.match(mdToPrintHtml(centered), /<div class="lt-align-center">[\s\S]*<h2>신청취지<\/h2>/)
+assert.match(createHwpxFromMarkdown(centered).toString('utf8'), /horizontal="CENTER"/)
 
 const legacyDoc = {
   sections: [

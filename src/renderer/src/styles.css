@@ -1046,6 +1046,15 @@ body {
   padding-left: 14px !important;
   color: var(--fg-muted);
 }
+.cm-md-align-center {
+  text-align: center;
+}
+.cm-md-hidden-line {
+  height: 0;
+  line-height: 0 !important;
+  padding: 0 !important;
+  overflow: hidden;
+}
 .cm-md-heading {
   padding-top: 6px;
 }
@@ -1231,6 +1240,9 @@ body {
 }
 .md-body img {
   max-width: 100%;
+}
+.md-body .lt-align-center {
+  text-align: center;
 }
 
 /* CSV 뷰어 */

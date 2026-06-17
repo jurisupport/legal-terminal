@@ -17,7 +17,7 @@ import { livePreview } from './livePreview'
 import { mdToPrintHtml, type PrintLayoutProfile } from './mdExport'
 import { mergeTextAgainstBase } from './threeWayMerge'
 import FindBar from '../search/FindBar'
-import { IconHistory, IconSave, IconSaveAs, IconSearch } from '../icons/Icons'
+import { IconAlignCenter, IconHistory, IconSave, IconSaveAs, IconSearch } from '../icons/Icons'
 import { writeMarkdownDataTransfer } from '../markdownClipboard'
 import type { DocumentDraftHistoryEntry } from '../env'
 
@@ -25,6 +25,8 @@ const DEFAULT_MD_FONT = "'D2Coding', 'Cascadia Mono', Consolas, monospace"
 const DEFAULT_UNTITLED_NAME = '무제.md'
 const EXTERNAL_FILE_POLL_MS = 2500
 const CLAUDE_DRAFT_FILE_POLL_MS = 750
+const ALIGN_CENTER_OPEN = '<!-- lt-align:center -->'
+const ALIGN_CENTER_CLOSE = '<!-- /lt-align -->'
 export const TEXT_SELECTION_OVERLAY_EVENT = 'lt:text-selection-overlay'
 
 export interface TextSelectionOverlayDetail {
@@ -285,6 +287,10 @@ function editorSelectionOverlay(view: EditorView): TextSelectionOverlayDetail | 
 function selectedMarkdown(view: EditorView): string {
   const ranges = view.state.selection.ranges.filter((range) => !range.empty)
   return ranges.map((range) => view.state.sliceDoc(range.from, range.to)).join('\n')
+}
+
+function centerAlignBlock(value: string): string {
+  return [ALIGN_CENTER_OPEN, value, ALIGN_CENTER_CLOSE].join('\n')
 }
 
 function emitEditorSelectionOverlay(view: EditorView): void {
@@ -1129,6 +1135,21 @@ export default function MarkdownEditor({
     if (defaultDir && !isRemotePath(defaultDir)) return joinDefaultPath(defaultDir, `${stem}.${extension}`)
     return `${stem}.${extension}`
   }
+  const centerAlignSelection = (): void => {
+    const v = viewRef.current
+    if (!v) return
+    const sel = v.state.selection.main
+    const from = sel.empty ? v.state.doc.lineAt(sel.from).from : v.state.doc.lineAt(Math.min(sel.from, sel.to)).from
+    const to = sel.empty ? v.state.doc.lineAt(sel.to).to : v.state.doc.lineAt(Math.max(sel.from, sel.to)).to
+    const text = v.state.sliceDoc(from, to)
+    const insert = centerAlignBlock(text)
+    v.dispatch({
+      changes: { from, to, insert },
+      selection: { anchor: from + ALIGN_CENTER_OPEN.length + 1 },
+      scrollIntoView: true
+    })
+    v.focus()
+  }
   const exportPdfNow = (): void => {
     const v = viewRef.current
     if (!v) return
@@ -1169,6 +1190,15 @@ export default function MarkdownEditor({
         </button>
         <button className={`tb-btn ${!preview ? 'on' : ''}`} title="원본(소스)" onClick={() => setPreview(false)}>
           원본
+        </button>
+        <span className="tb-divider" />
+        <button
+          className="tb-btn"
+          title="가운데 정렬"
+          aria-label="가운데 정렬"
+          onClick={centerAlignSelection}
+        >
+          <IconAlignCenter size={14} />
         </button>
         <span className="tb-divider" />
         <button className="tb-btn" title={`저장 (${saveShortcut})`} aria-label="저장" onClick={() => void saveNow()}>
