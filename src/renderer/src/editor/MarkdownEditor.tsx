@@ -28,12 +28,14 @@ const CLAUDE_DRAFT_FILE_POLL_MS = 750
 const ALIGN_CENTER_OPEN = '<!-- lt-align:center -->'
 const ALIGN_CENTER_CLOSE = '<!-- /lt-align -->'
 export const TEXT_SELECTION_OVERLAY_EVENT = 'lt:text-selection-overlay'
+export const MARKDOWN_CENTER_SELECTION_EVENT = 'lt:markdown-center-selection'
 
 export interface TextSelectionOverlayDetail {
   x: number
   y: number
   text: string
   markdown?: string
+  editorDraftId?: string
   count: number
 }
 
@@ -259,7 +261,7 @@ function changeCoversSelection(changes: ChangeDesc, selection: EditorSelection):
   return selection.ranges.some((range) => changes.touchesRange(range.from, range.to) === 'cover')
 }
 
-function editorSelectionOverlay(view: EditorView): TextSelectionOverlayDetail | null {
+function editorSelectionOverlay(view: EditorView, editorDraftId: string): TextSelectionOverlayDetail | null {
   const text = selectedMarkdown(view)
   const visibleText = text.trim()
   if (!visibleText) return null
@@ -280,6 +282,7 @@ function editorSelectionOverlay(view: EditorView): TextSelectionOverlayDetail | 
     y: first.top - 6,
     text,
     markdown: text,
+    editorDraftId,
     count: Array.from(visibleText).length
   }
 }
@@ -293,10 +296,23 @@ function centerAlignBlock(value: string): string {
   return [ALIGN_CENTER_OPEN, value, ALIGN_CENTER_CLOSE].join('\n')
 }
 
-function emitEditorSelectionOverlay(view: EditorView): void {
+function centerAlignSelectionInView(view: EditorView): void {
+  const sel = view.state.selection.main
+  const from = sel.empty ? view.state.doc.lineAt(sel.from).from : view.state.doc.lineAt(Math.min(sel.from, sel.to)).from
+  const to = sel.empty ? view.state.doc.lineAt(sel.to).to : view.state.doc.lineAt(Math.max(sel.from, sel.to)).to
+  const text = view.state.sliceDoc(from, to)
+  view.dispatch({
+    changes: { from, to, insert: centerAlignBlock(text) },
+    selection: { anchor: from + ALIGN_CENTER_OPEN.length + 1 },
+    scrollIntoView: true
+  })
+  view.focus()
+}
+
+function emitEditorSelectionOverlay(view: EditorView, editorDraftId: string): void {
   window.dispatchEvent(
     new CustomEvent<TextSelectionOverlayDetail | null>(TEXT_SELECTION_OVERLAY_EVENT, {
-      detail: editorSelectionOverlay(view)
+      detail: editorSelectionOverlay(view, editorDraftId)
     })
   )
 }
@@ -824,6 +840,17 @@ export default function MarkdownEditor({
   }, [title])
 
   useEffect(() => {
+    const onCenterSelection = (event: Event): void => {
+      const detail = (event as CustomEvent<{ draftId?: string }>).detail
+      if (detail?.draftId !== draftId) return
+      const view = viewRef.current
+      if (view) centerAlignSelectionInView(view)
+    }
+    window.addEventListener(MARKDOWN_CENTER_SELECTION_EVENT, onCenterSelection)
+    return () => window.removeEventListener(MARKDOWN_CENTER_SELECTION_EVENT, onCenterSelection)
+  }, [draftId])
+
+  useEffect(() => {
     let alive = true
     setErr('')
     const init = pathRef.current
@@ -889,7 +916,7 @@ export default function MarkdownEditor({
               }
             }),
             EditorView.updateListener.of((u) => {
-              if (u.selectionSet || u.docChanged || u.viewportChanged) emitEditorSelectionOverlay(u.view)
+              if (u.selectionSet || u.docChanged || u.viewportChanged) emitEditorSelectionOverlay(u.view, draftId)
               if (u.docChanged) {
                 if (applyingRemoteRef.current) {
                   savedContentRef.current = u.state.doc.toString()
@@ -1138,17 +1165,7 @@ export default function MarkdownEditor({
   const centerAlignSelection = (): void => {
     const v = viewRef.current
     if (!v) return
-    const sel = v.state.selection.main
-    const from = sel.empty ? v.state.doc.lineAt(sel.from).from : v.state.doc.lineAt(Math.min(sel.from, sel.to)).from
-    const to = sel.empty ? v.state.doc.lineAt(sel.to).to : v.state.doc.lineAt(Math.max(sel.from, sel.to)).to
-    const text = v.state.sliceDoc(from, to)
-    const insert = centerAlignBlock(text)
-    v.dispatch({
-      changes: { from, to, insert },
-      selection: { anchor: from + ALIGN_CENTER_OPEN.length + 1 },
-      scrollIntoView: true
-    })
-    v.focus()
+    centerAlignSelectionInView(v)
   }
   const exportPdfNow = (): void => {
     const v = viewRef.current

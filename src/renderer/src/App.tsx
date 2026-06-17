@@ -32,6 +32,7 @@ import {
   IconSave
 } from './icons/Icons'
 import MarkdownEditor, {
+  MARKDOWN_CENTER_SELECTION_EVENT,
   TEXT_SELECTION_OVERLAY_EVENT,
   type MarkdownSaveHandler,
   type MarkdownDocumentPayload,
@@ -6306,7 +6307,7 @@ const SELECTION_ACTION_TARGET_SELECTOR =
   '.text-doc, .file-view, .pdf-viewer, .textLayer, .csv-wrap, .agent-md-body, .agent-card-text, .agent-card-input, .agent-process-step-text'
 const SELECTION_ACTION_EXCLUDE_SELECTOR =
   '.terminal-surface, .xterm, .tabs, .sidebar, .activitybar, .statusbar, button, input, textarea, select'
-const SELECTION_ACTION_CONTROL_SELECTOR = '.sel-ask, .ctx-menu'
+const SELECTION_ACTION_CONTROL_SELECTOR = '.sel-actions, .ctx-menu'
 
 const elementFromSelectionNode = (node: Node | null | undefined): Element | null =>
   node instanceof Element ? node : (node?.parentElement ?? null)
@@ -6320,6 +6321,11 @@ const canShowSelectionActions = (element: Element | null): boolean => {
   return !!element.closest(SELECTION_ACTION_TARGET_SELECTOR)
 }
 
+const centerMarkdownSelection = (draftId?: string): void => {
+  if (!draftId) return
+  window.dispatchEvent(new CustomEvent(MARKDOWN_CENTER_SELECTION_EVENT, { detail: { draftId } }))
+}
+
 // 본문에서 텍스트 선택 후 우클릭 → 컨텍스트 메뉴 (Claude/법제처/법고을/엘박스)
 function SelectionMenu({ onAsk }: { onAsk: (text: string) => void }): JSX.Element | null {
   const [menu, setMenu] = useState<{
@@ -6328,6 +6334,7 @@ function SelectionMenu({ onAsk }: { onAsk: (text: string) => void }): JSX.Elemen
     text: string
     queryText: string
     markdown?: string
+    editorDraftId?: string
   } | null>(null)
   const editorSelectionRef = useRef<TextSelectionOverlayDetail | null>(null)
 
@@ -6354,7 +6361,8 @@ function SelectionMenu({ onAsk }: { onAsk: (text: string) => void }): JSX.Elemen
         y: e.clientY,
         text,
         queryText: markdown ? markdownToPlainText(markdown) || text : text,
-        markdown
+        markdown,
+        editorDraftId: editorDetail?.editorDraftId
       })
     }
     const onEditorSelection = (event: Event): void => {
@@ -6380,6 +6388,10 @@ function SelectionMenu({ onAsk }: { onAsk: (text: string) => void }): JSX.Elemen
   const items: { label: string; act: () => void }[] = [
     ...(menu.markdown
       ? [
+          {
+            label: '가운데 정렬',
+            act: () => centerMarkdownSelection(menu.editorDraftId)
+          },
           {
             label: 'MD로 복사하기',
             act: () => {
@@ -6524,9 +6536,10 @@ function SelectionAsk({ onAsk }: { onAsk: (text: string) => void }): JSX.Element
   }, [])
 
   if (!box) return null
+  const centerDraftId = box.editorDraftId
   return (
-    <button
-      className="sel-ask"
+    <div
+      className="sel-actions"
       style={{ left: box.x, top: box.y }}
       onPointerDown={(e) => {
         e.preventDefault()
@@ -6536,14 +6549,29 @@ function SelectionAsk({ onAsk }: { onAsk: (text: string) => void }): JSX.Element
         e.preventDefault()
         e.stopPropagation()
       }}
-      onClick={() => {
-        onAsk(box.text)
-        setBox(null)
-        window.getSelection()?.removeAllRanges()
-      }}
     >
-      ✳ Claude에 묻기
-    </button>
+      {centerDraftId && (
+        <button
+          type="button"
+          onClick={() => {
+            centerMarkdownSelection(centerDraftId)
+            setBox(null)
+          }}
+        >
+          가운데
+        </button>
+      )}
+      <button
+        type="button"
+        onClick={() => {
+          onAsk(box.text)
+          setBox(null)
+          window.getSelection()?.removeAllRanges()
+        }}
+      >
+        ✳ Claude에 묻기
+      </button>
+    </div>
   )
 }
 

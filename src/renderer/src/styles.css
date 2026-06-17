@@ -4764,11 +4764,21 @@ body {
   user-select: text;
 }
 
-/* 선택 영역 "Claude에 묻기" 플로팅 버튼 */
-.sel-ask {
+/* 선택 영역 플로팅 액션 */
+.sel-actions {
   position: fixed;
+  display: inline-flex;
+  gap: 6px;
   transform: translate(-50%, -100%);
   z-index: 1000;
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-alt);
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.55);
+  white-space: nowrap;
+}
+.sel-actions button {
   background: var(--accent);
   color: var(--accent-fg);
   border: none;
@@ -4776,10 +4786,8 @@ body {
   padding: 6px 12px;
   font-size: 12px;
   cursor: pointer;
-  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.55);
-  white-space: nowrap;
 }
-.sel-ask:hover {
+.sel-actions button:hover {
   filter: brightness(1.12);
 }
 
