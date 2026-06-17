@@ -2062,7 +2062,6 @@ export default function AgentPanel({
           else onStatus?.('question')
         } else if (next === 'idle') {
           setStatus('idle')
-          onStatus?.('done')
         }
       }
     })

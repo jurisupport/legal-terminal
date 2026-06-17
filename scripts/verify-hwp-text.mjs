@@ -30,6 +30,7 @@ assert.match(createHwpxFromMarkdown(centered).toString('utf8'), /horizontal="CEN
 
 const spaced = '  앞  중간  뒤  '
 assert.match(mdToPrintHtml(spaced), /white-space: break-spaces/)
+assert.doesNotMatch(mdToPrintHtml('| A | B |\\n| --- | --- |\\n| 1 | 2 |'), /page-break-inside:\s*avoid/)
 assert.match(createHwpxFromMarkdown(spaced).toString('utf8'), /<hp:t xml:space="preserve">  앞  중간  뒤  <\/hp:t>/)
 
 const legacyDoc = {

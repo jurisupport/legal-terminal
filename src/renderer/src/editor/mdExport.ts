@@ -73,7 +73,7 @@ pre code { background: none; padding: 0; }
 blockquote { margin: .8em 0; padding: 2px 14px; border-left: 3px solid #888; color: #555; }
 hr { border: none; border-top: 1px solid #ccc; margin: 1.4em 0; }
 img { max-width: 100%; }
-table { border-collapse: collapse; width: 100%; margin: .8em 0; page-break-inside: avoid; }
+table { border-collapse: collapse; width: 100%; margin: .8em 0; break-inside: auto; page-break-inside: auto; }
 table.fixed { table-layout: fixed; }
 th,td { border: 1px solid #999; padding: 5px 9px; text-align: left; word-break: break-word; }
 th { background: #f0f0f0; }

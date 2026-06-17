@@ -16,6 +16,7 @@ interface RelatedTodoDraft {
   id: string
   text: string
   createdAt: string
+  createdTodoId?: string
 }
 
 interface TodoSnapshot {
@@ -203,10 +204,12 @@ function buildClaudeTodoPrompt(changeSetId: string, changes: TodoChangeEntry[]):
     const { relatedDrafts, ...rest } = entry
     return {
       ...rest,
-      relatedTodos: relatedDrafts.map((draft) => ({
-        text: draft.text,
-        createdAt: draft.createdAt
-      }))
+      relatedTodos: relatedDrafts
+        .filter((draft) => !draft.createdTodoId)
+        .map((draft) => ({
+          text: draft.text,
+          createdAt: draft.createdAt
+        }))
     }
   })
   const payload = {
@@ -371,7 +374,18 @@ export default function TodosDashboard({
 
   const filteredTodos = useMemo(() => (todos ?? []).slice().sort(todoSort), [todos])
   const changeEntries = useMemo(() => Object.values(todoChanges), [todoChanges])
-  const changeCount = changeEntries.length
+  const actionableChangeEntries = useMemo(
+    () =>
+      changeEntries.filter(
+        (entry) =>
+          entry.progressTexts.length > 0 ||
+          !!entry.status ||
+          !!entry.created ||
+          entry.relatedDrafts.some((draft) => !draft.createdTodoId)
+      ),
+    [changeEntries]
+  )
+  const changeCount = actionableChangeEntries.length
 
   const openDefault = (todo: JsTodo): void => {
     const c = todoToCase(todo)
@@ -557,10 +571,27 @@ export default function TodosDashboard({
     if (!text) return
     const currentDrafts = todoChanges[todo.id]?.relatedDrafts ?? []
     if (currentDrafts.some((draft) => draft.text === text)) return
-    recordTodoChange(todo, {
-      relatedDraft: { id: randomId('draft'), text, createdAt: new Date().toISOString() }
+    const source = snapshotTodo(todo)
+    window.lt.todo.create({
+      title: text,
+      court: source.court ?? undefined,
+      caseNumber: source.caseNumber ?? undefined,
+      caseName: source.caseName ?? undefined,
+      client: source.client ?? undefined,
+      opponent: source.opponent ?? undefined,
+      partyNames: source.partyNames ?? undefined,
+      notes: caseNotesForRelated(source)
+    }).then((r) => {
+      if (!r.ok || !r.todo) {
+        setErr(r.error ?? '관련 할일 생성 실패')
+        return
+      }
+      recordTodoChange(todo, {
+        relatedDraft: { id: randomId('draft'), text, createdAt: new Date().toISOString(), createdTodoId: r.todo.id }
+      })
+      setRelatedInputs((drafts) => ({ ...drafts, [todo.id]: '' }))
+      changed()
     })
-    setRelatedInputs((drafts) => ({ ...drafts, [todo.id]: '' }))
   }
 
   const removeRelatedDraft = (todo: JsTodo, draftId: string): void => {
@@ -585,10 +616,10 @@ export default function TodosDashboard({
   }
 
   const askClaudeTodoUpdate = (): void => {
-    if (!changeEntries.length) return
+    if (!actionableChangeEntries.length) return
     setPatchOpen(true)
     setPatchStatus('클코 응답 JSON을 붙여넣으면 적용할 수 있습니다.')
-    onAskClaudeTodoUpdate?.(buildClaudeTodoPrompt(changeSetId, changeEntries))
+    onAskClaudeTodoUpdate?.(buildClaudeTodoPrompt(changeSetId, actionableChangeEntries))
   }
 
   const applyPatchOperation = async (op: TodoPatchOperation): Promise<void> => {

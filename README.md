@@ -40,9 +40,10 @@ curl -fsSL https://raw.githubusercontent.com/jurisupport/legal-terminal/main/ins
 
 ## 이번 업데이트
 
-최신 릴리스: [v0.1.98](https://github.com/jurisupport/legal-terminal/releases/tag/v0.1.98)
+최신 릴리스: [v0.1.99](https://github.com/jurisupport/legal-terminal/releases/tag/v0.1.99)
 
-- **선택 범위 가운데 정렬**: Markdown 범위를 선택하면 플로팅 액션과 우클릭 메뉴에서 가운데 정렬을 바로 적용할 수 있습니다.
+- **PDF 표 내보내기 개선**: 긴 표가 현재 페이지에서 잘린 뒤 다음 페이지에 이어지도록 조정했습니다.
+- **관련 할일 처리 개선**: 관련 할일 추가 시 즉시 생성하고 Claude 요청에는 미생성 항목만 포함합니다.
 
 ## 처음 쓰는 순서
 
