@@ -40,11 +40,9 @@ curl -fsSL https://raw.githubusercontent.com/jurisupport/legal-terminal/main/ins
 
 ## 이번 업데이트
 
-최신 릴리스: [v0.1.95](https://github.com/jurisupport/legal-terminal/releases/tag/v0.1.95)
+최신 릴리스: [v0.1.96](https://github.com/jurisupport/legal-terminal/releases/tag/v0.1.96)
 
-- **Windows Agent 선택 안정화**: Agent 패널에서 텍스트를 드래그해 선택하는 동작이 막히지 않게 조정했습니다.
-- **파일 패널 새로고침**: 로컬 사건 폴더 변경을 감지해 파일 목록을 더 빨리 갱신합니다.
-- **Diff 미리보기 정리**: Agent diff 패널은 요약을 먼저 보여주고 필요할 때 펼쳐보게 했습니다.
+- **MD 출력 공백 보존**: PDF/HWPX로 내보낼 때 작성자가 넣은 앞·중간·뒤 공백을 유지합니다.
 
 ## 처음 쓰는 순서
 
