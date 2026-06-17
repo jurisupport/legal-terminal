@@ -1,4 +1,5 @@
 const PANEL_POINTER_DRAG_ATTR = 'data-lt-panel-pointer-drag'
+const POINTER_DRAG_THRESHOLD_PX = 4
 
 interface CancellableEvent {
   preventDefault: () => void
@@ -12,10 +13,15 @@ interface PointerDragGuardOptions {
 export const isPanelPointerDragActive = (): boolean =>
   document.documentElement.hasAttribute(PANEL_POINTER_DRAG_ATTR)
 
+const clearPanelPointerDrag = (): void => {
+  document.documentElement.removeAttribute(PANEL_POINTER_DRAG_ATTR)
+}
+
 export const cancelIfPanelPointerDrag = (event: CancellableEvent): boolean => {
   if (!isPanelPointerDragActive()) return false
   event.preventDefault()
   event.stopPropagation()
+  clearPanelPointerDrag()
   return true
 }
 
@@ -25,6 +31,8 @@ export const installPanelPointerDragGuard = (
 ): (() => void) => {
   const cancelNativeDragStart = options.cancelNativeDragStart ?? true
   let activePointerId: number | null = null
+  let startX = 0
+  let startY = 0
   let fallbackClearTimer: number | null = null
 
   const clearFallbackTimer = (): void => {
@@ -36,7 +44,7 @@ export const installPanelPointerDragGuard = (
   const clear = (): void => {
     activePointerId = null
     clearFallbackTimer()
-    document.documentElement.removeAttribute(PANEL_POINTER_DRAG_ATTR)
+    clearPanelPointerDrag()
   }
 
   const scheduleFallbackClear = (): void => {
@@ -44,11 +52,29 @@ export const installPanelPointerDragGuard = (
     fallbackClearTimer = window.setTimeout(clear, 8000)
   }
 
+  const markDragActive = (): void => {
+    if (isPanelPointerDragActive()) return
+    document.documentElement.setAttribute(PANEL_POINTER_DRAG_ATTR, 'true')
+    scheduleFallbackClear()
+  }
+
   const onPointerDown = (event: PointerEvent): void => {
     if (!event.isPrimary || event.button !== 0) return
     activePointerId = event.pointerId
-    document.documentElement.setAttribute(PANEL_POINTER_DRAG_ATTR, 'true')
-    scheduleFallbackClear()
+    startX = event.clientX
+    startY = event.clientY
+  }
+
+  const onPointerMove = (event: PointerEvent): void => {
+    if (activePointerId !== event.pointerId) return
+    if ((event.buttons & 1) === 0) {
+      clear()
+      return
+    }
+    const dx = event.clientX - startX
+    const dy = event.clientY - startY
+    if (dx * dx + dy * dy < POINTER_DRAG_THRESHOLD_PX * POINTER_DRAG_THRESHOLD_PX) return
+    markDragActive()
   }
 
   const onDocumentPointerDown = (event: PointerEvent): void => {
@@ -62,7 +88,8 @@ export const installPanelPointerDragGuard = (
   }
 
   const onDragStart = (event: DragEvent): void => {
-    if (!isPanelPointerDragActive()) return
+    const fromSource = event.target instanceof Node && source.contains(event.target)
+    if (!isPanelPointerDragActive() && !fromSource) return
     if (!cancelNativeDragStart) {
       clear()
       return
@@ -77,6 +104,7 @@ export const installPanelPointerDragGuard = (
   }
 
   source.addEventListener('pointerdown', onPointerDown, true)
+  source.addEventListener('pointermove', onPointerMove, true)
   source.addEventListener('lostpointercapture', onPointerDone, true)
   document.addEventListener('pointerdown', onDocumentPointerDown, true)
   document.addEventListener('pointerup', onPointerDone, true)
@@ -91,6 +119,7 @@ export const installPanelPointerDragGuard = (
 
   return () => {
     source.removeEventListener('pointerdown', onPointerDown, true)
+    source.removeEventListener('pointermove', onPointerMove, true)
     source.removeEventListener('lostpointercapture', onPointerDone, true)
     document.removeEventListener('pointerdown', onDocumentPointerDown, true)
     document.removeEventListener('pointerup', onPointerDone, true)

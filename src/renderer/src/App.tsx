@@ -5063,6 +5063,18 @@ export default function App(): JSX.Element {
 
   // 탭 드래그 중 여부 — 창 전체에서 '이동' 커서를 보이게 해 '금지' 표시를 막는다.
   const [tabDragging, setTabDragging] = useState(false)
+  useEffect(() => {
+    if (!tabDragging) return
+    const clear = (): void => setTabDragging(false)
+    window.addEventListener('dragend', clear, true)
+    window.addEventListener('drop', clear, true)
+    window.addEventListener('blur', clear)
+    return () => {
+      window.removeEventListener('dragend', clear, true)
+      window.removeEventListener('drop', clear, true)
+      window.removeEventListener('blur', clear)
+    }
+  }, [tabDragging])
   // 탭 드래그 중일 때 셸 어디서든 dragover를 허용(이동 커서) — 실제 찢기는 onDragEnd가 처리.
   const shellDragProps = {
     onDragOver: (e: React.DragEvent) => {
@@ -5071,6 +5083,7 @@ export default function App(): JSX.Element {
       e.dataTransfer.dropEffect = 'move'
     },
     onDrop: (e: React.DragEvent) => {
+      setTabDragging(false)
       if (tabDragging || e.dataTransfer.types.includes(TAB_DND_TYPE)) e.preventDefault()
     }
   }
