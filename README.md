@@ -40,9 +40,9 @@ curl -fsSL https://raw.githubusercontent.com/jurisupport/legal-terminal/main/ins
 
 ## 이번 업데이트
 
-최신 릴리스: [v0.1.96](https://github.com/jurisupport/legal-terminal/releases/tag/v0.1.96)
+최신 릴리스: [v0.1.97](https://github.com/jurisupport/legal-terminal/releases/tag/v0.1.97)
 
-- **MD 출력 공백 보존**: PDF/HWPX로 내보낼 때 작성자가 넣은 앞·중간·뒤 공백을 유지합니다.
+- **Agent 메시지 선택 안정화**: Claude 응답 본문을 드래그해 선택할 때 입력창으로 포커스가 튀지 않게 했습니다.
 
 ## 처음 쓰는 순서
 
