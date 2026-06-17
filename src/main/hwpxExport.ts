@@ -179,7 +179,7 @@ function escapeXml(value: string): string {
 }
 
 function normalizeText(value: string): string {
-  return value.replace(/\r\n?/g, '\n').replace(/[ \t]+\n/g, '\n').trim()
+  return value.replace(/\r\n?/g, '\n').replace(/[ \t]+\n/g, '\n')
 }
 
 function inlineText(tokens?: Token[], fallback = ''): string {
@@ -342,7 +342,7 @@ function textXml(value: string): string {
     const segments = line.split('\t')
     segments.forEach((segment, segmentIndex) => {
       if (segmentIndex > 0) parts.push('<hp:tab />')
-      if (segment) parts.push(`<hp:t>${escapeXml(segment)}</hp:t>`)
+      if (segment) parts.push(`<hp:t xml:space="preserve">${escapeXml(segment)}</hp:t>`)
     })
   })
   return parts.length > 0 ? parts.join('') : '<hp:t />'

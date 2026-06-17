@@ -28,6 +28,10 @@ const centered = [
 assert.match(mdToPrintHtml(centered), /<div class="lt-align-center">[\s\S]*<h2>신청취지<\/h2>/)
 assert.match(createHwpxFromMarkdown(centered).toString('utf8'), /horizontal="CENTER"/)
 
+const spaced = '  앞  중간  뒤  '
+assert.match(mdToPrintHtml(spaced), /white-space: break-spaces/)
+assert.match(createHwpxFromMarkdown(spaced).toString('utf8'), /<hp:t xml:space="preserve">  앞  중간  뒤  <\/hp:t>/)
+
 const legacyDoc = {
   sections: [
     {

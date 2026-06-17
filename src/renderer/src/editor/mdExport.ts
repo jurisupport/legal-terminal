@@ -63,6 +63,7 @@ h1 { font-size: 1.8em; border-bottom: 1px solid #ccc; padding-bottom: .2em; }
 h2 { font-size: 1.45em; border-bottom: 1px solid #ddd; padding-bottom: .15em; }
 h3 { font-size: 1.22em; }
 p { margin: .6em 0; }
+p,li,th,td { white-space: break-spaces; }
 ul,ol { margin: .5em 0; padding-left: 1.6em; }
 li { margin: .2em 0; }
 a { color: #1456b8; text-decoration: none; }
