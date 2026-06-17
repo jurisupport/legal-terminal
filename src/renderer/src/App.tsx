@@ -511,6 +511,10 @@ const shouldFocusDocContainer = (target: HTMLElement): boolean =>
   !target.closest(
     'input, textarea, button, select, a, [contenteditable="true"], [role="button"], [role="textbox"], [tabindex]:not([tabindex="-1"])'
   )
+const shouldFocusAgentPrompt = (target: HTMLElement): boolean =>
+  !target.closest(
+    'input, textarea, button, select, a, [contenteditable="true"], [role="button"], [role="textbox"], .agent-md-wrap, .agent-card-text, .agent-card-input, .agent-process-step-text'
+  )
 
 const formatWorkspaceSavedAt = (savedAt: string): string => {
   const date = new Date(savedAt)
@@ -5441,7 +5445,7 @@ export default function App(): JSX.Element {
               selectTerm(t.id)
               if (!isAgentTab(t)) return
               const target = e.target as HTMLElement
-              if (!target.closest('input, textarea, button, select, a, [contenteditable="true"]')) {
+              if (shouldFocusAgentPrompt(target)) {
                 setTermFocusNonce((current) => bumpFocusNonce(current, t.id))
               }
             }}
@@ -5784,7 +5788,7 @@ export default function App(): JSX.Element {
                 selectTerm(t.id)
                 if (!isAgentTab(t)) return
                 const target = e.target as HTMLElement
-                if (!target.closest('input, textarea, button, select, a, [contenteditable="true"]')) {
+                if (shouldFocusAgentPrompt(target)) {
                   setTermFocusNonce((current) => bumpFocusNonce(current, t.id))
                 }
               }}
@@ -6298,9 +6302,10 @@ function DownloadProgressToast({ progress }: { progress: FsDownloadProgress }): 
   )
 }
 
-const SELECTION_ACTION_TARGET_SELECTOR = '.text-doc, .file-view, .pdf-viewer, .textLayer, .csv-wrap'
+const SELECTION_ACTION_TARGET_SELECTOR =
+  '.text-doc, .file-view, .pdf-viewer, .textLayer, .csv-wrap, .agent-md-body, .agent-card-text, .agent-card-input, .agent-process-step-text'
 const SELECTION_ACTION_EXCLUDE_SELECTOR =
-  '.terminal-surface, .xterm, .agent-panel, .tabs, .sidebar, .activitybar, .statusbar, button, input, textarea, select'
+  '.terminal-surface, .xterm, .tabs, .sidebar, .activitybar, .statusbar, button, input, textarea, select'
 const SELECTION_ACTION_CONTROL_SELECTOR = '.sel-ask, .ctx-menu'
 
 const elementFromSelectionNode = (node: Node | null | undefined): Element | null =>
