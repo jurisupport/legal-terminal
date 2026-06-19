@@ -2426,7 +2426,7 @@ body {
 }
 .agent-mode-trigger:hover,
 .agent-mode-trigger.active,
-.agent-icon-btn:hover,
+.agent-icon-btn:hover:not(:disabled),
 .agent-auth-btn:hover:not(:disabled),
 .agent-prompt-actions button:hover:not(:disabled),
 .agent-card-actions button:hover,
@@ -2476,6 +2476,10 @@ body {
   border: 1px solid var(--border);
   border-radius: 4px;
   font-family: var(--font-mono);
+}
+.agent-icon-btn:disabled {
+  opacity: 0.45;
+  cursor: default;
 }
 .agent-auth-btn {
   min-height: var(--agent-control-height);
@@ -3216,6 +3220,42 @@ body {
 .hearing-reader-item small {
   color: var(--fg-muted);
 }
+.hearing-template-list {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(118px, 1fr));
+  gap: 6px;
+  padding: 8px;
+}
+.hearing-template-btn {
+  min-width: 0;
+  min-height: 46px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  gap: 2px;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--fg);
+  background: var(--bg);
+  text-align: left;
+  cursor: pointer;
+}
+.hearing-template-btn:hover {
+  border-color: var(--accent);
+}
+.hearing-template-btn span,
+.hearing-template-btn small {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.hearing-template-btn small {
+  color: var(--fg-muted);
+}
 .hearing-body {
   flex: 1;
   min-height: 0;
@@ -3410,12 +3450,18 @@ body {
   min-width: 0;
   max-width: 100%;
   display: grid;
-  grid-template-columns: minmax(118px, 142px) minmax(0, 1fr) auto;
+  grid-template-columns: minmax(160px, 220px) minmax(0, 1fr) auto;
   align-items: stretch;
   gap: 7px;
   padding: 8px;
   border-top: 1px solid var(--border);
   background: #202020;
+}
+.hearing-speaker-pick {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 5px;
 }
 .hearing-current-speaker {
   min-width: 0;
@@ -3468,6 +3514,35 @@ body {
   font: 13px/1.45 var(--font-ui);
   outline: none;
 }
+.hearing-speaker-form {
+  grid-column: 1 / -1;
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 64px minmax(0, 1fr) auto minmax(0, auto);
+  align-items: center;
+  gap: 6px;
+}
+.hearing-speaker-form input {
+  min-width: 0;
+  min-height: 28px;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--fg);
+  background: var(--bg);
+  font: inherit;
+  font-size: 12.5px;
+  outline: none;
+}
+.hearing-speaker-form input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px rgba(14, 99, 156, 0.35);
+}
+.hearing-speaker-form small {
+  min-width: 0;
+  color: #f0a0a0;
+  font-size: 11px;
+}
 @container (max-width: 520px) {
   .hearing-head {
     align-items: stretch;
@@ -3491,6 +3566,12 @@ body {
   .hearing-composer {
     grid-template-columns: minmax(0, 1fr);
   }
+  .hearing-speaker-form {
+    grid-template-columns: 56px minmax(0, 1fr) auto;
+  }
+  .hearing-speaker-form small {
+    grid-column: 1 / -1;
+  }
 }
 @media (max-width: 820px) {
   .hearing-head {
@@ -3508,6 +3589,12 @@ body {
   }
   .hearing-composer {
     grid-template-columns: minmax(0, 1fr);
+  }
+  .hearing-speaker-form {
+    grid-template-columns: 56px minmax(0, 1fr) auto;
+  }
+  .hearing-speaker-form small {
+    grid-column: 1 / -1;
   }
 }
 .agent-copy-actions {

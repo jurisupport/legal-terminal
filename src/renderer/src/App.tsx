@@ -364,6 +364,7 @@ const remoteUri = (profileId: string, p: string): string =>
   'ssh://' + profileId + (p.startsWith('/') ? p : '/' + p)
 
 const isRemotePath = (p?: string): p is string => !!p && p.startsWith('ssh://')
+const remoteJsPairingKey = (profileId: string, caseId: string): string => `remote:${profileId}:${caseId}`
 const REMOTE_FILE_CHANGED_EVENT = 'lt:remote-file-changed'
 const parseRemoteUri = (uri: string): { profileId: string; path: string } | null => {
   if (!isRemotePath(uri)) return null
@@ -531,13 +532,15 @@ const pathLeaf = (path?: string): string | undefined => {
   return clean.split(/[\\/]/).filter(Boolean).pop() || clean
 }
 
+const remoteStartPointKey = (path: string): string => path.trim().replace(/\/+$/, '') || '/'
+
 const normalizeRemoteQuickStartPaths = (paths: Array<string | undefined> = []): string[] => {
   const seen = new Set<string>()
   const out: string[] = []
   for (const path of paths) {
     const trimmed = path?.trim()
     if (!trimmed) continue
-    const key = trimmed.replace(/\/+$/, '') || '/'
+    const key = remoteStartPointKey(trimmed)
     if (seen.has(key)) continue
     seen.add(key)
     out.push(trimmed)
@@ -2488,7 +2491,8 @@ export default function App(): JSX.Element {
     remotePath: string,
     title: string,
     records?: string,
-    suggestions?: FolderMatchSuggestion[]
+    suggestions?: FolderMatchSuggestion[],
+    caseId?: string
   ): void => {
     if (!records && !suggestions?.length) return
     setTermTabs((tabs) =>
@@ -2516,6 +2520,7 @@ export default function App(): JSX.Element {
       )
     )
     window.lt.case.setPairing(drafts, records)
+    if (caseId) window.lt.case.setJsPairing(remoteJsPairingKey(profile.id, caseId), drafts, records)
     window.lt.case.addHistory({ drafts, records, name: title }).then(setRecent)
   }
 
@@ -2527,7 +2532,7 @@ export default function App(): JSX.Element {
     c?: JsCase
   ): void => {
     void resolveRemoteRecords(profile, remotePath, c)
-      .then((r) => attachRemoteRecords(tabId, profile, remotePath, title, r.records, r.suggestions))
+      .then((r) => attachRemoteRecords(tabId, profile, remotePath, title, r.records, r.suggestions, c?.id))
       .catch(() => {})
   }
 
@@ -4293,9 +4298,8 @@ export default function App(): JSX.Element {
     ].join('\n')
 
   const askAboutTerminalSelection = (termId: string, text: string): void => {
-    const selected = text.trim()
-    if (!selected) return
-    pasteToTerm(termId, terminalSnippetPrompt(selected))
+    if (!text.trim()) return
+    pasteToTerm(termId, terminalSnippetPrompt(text))
   }
 
   // 활성 문서명+경로 + (있으면) 선택 텍스트로 claude 프롬프트 주입. 텍스트 없으면 문서 전체에 대해 묻기.
@@ -5019,6 +5023,15 @@ export default function App(): JSX.Element {
       partyNames: partyNames || undefined,
       memo: c.memo?.trim() || undefined
     }
+    const saved = c.id ? await window.lt.case.getJsPairing(remoteJsPairingKey(profile.id, c.id)) : undefined
+    const savedRemote = saved?.drafts ? parseRemoteUri(saved.drafts) : null
+    const savedRecords = saved?.records
+    if (savedRemote?.profileId === profile.id) {
+      const opened = createRemoteCase(profile, savedRemote.path, name, meta, savedRecords)
+      if (!savedRecords) resolveRemoteRecordsLater(opened.id, profile, savedRemote.path, opened.title, c)
+      setMode('explorer')
+      return
+    }
     // 원격 작성서류 루트에서 폴더명(사건번호/당사자) 자동 매칭
     let matchedUri: string | undefined
     if (profile.draftsRoot) {
@@ -5027,6 +5040,7 @@ export default function App(): JSX.Element {
     if (matchedUri) {
       const remotePath = remotePlain(matchedUri, profile.id)
       const opened = createRemoteCase(profile, remotePath, name, meta)
+      if (c.id) window.lt.case.setJsPairing(remoteJsPairingKey(profile.id, c.id), matchedUri)
       // 소송기록 매칭은 터미널을 먼저 띄운 뒤 붙인다. SFTP/키 문제로 터미널 생성이 막히면 안 된다.
       resolveRemoteRecordsLater(opened.id, profile, remotePath, opened.title, c)
       setMode('explorer')
@@ -5468,6 +5482,8 @@ export default function App(): JSX.Element {
                   handleAgentAttachmentRequestsHandled(t.id, requestIds)
                 }
                 onStatus={(s) => onTermStatus(t.id, s)}
+                onFork={() => void forkAgentTab(t.id, termSide(t))}
+                onWorktreeFork={() => void forkAgentWorktreeTab(t.id, termSide(t))}
                 onOpenTerminal={() => addTermSame(termSide(t), t.id, { reuseAgentTab: true })}
                 onOpenDiff={openAgentDiff}
                 onOpenFile={(path, title) => openFile(path, title ?? fileNameFromPath(path), 'left', t.caseTabId)}
@@ -5811,6 +5827,8 @@ export default function App(): JSX.Element {
                     handleAgentAttachmentRequestsHandled(t.id, requestIds)
                   }
                   onStatus={(s) => onTermStatus(t.id, s)}
+                  onFork={() => void forkAgentTab(t.id, side)}
+                  onWorktreeFork={() => void forkAgentWorktreeTab(t.id, side)}
                   onOpenTerminal={() => addTermSame(side, t.id, { reuseAgentTab: true })}
                   onOpenDiff={openAgentDiff}
                   onOpenFile={(path, title) => openFile(path, title ?? fileNameFromPath(path), 'left', t.caseTabId)}
@@ -6167,6 +6185,12 @@ export default function App(): JSX.Element {
             const { profile, name, meta, caseData } = remoteCasePick
             setRemoteCasePick(null)
             const opened = createRemoteCase(profile, remotePath, name, meta)
+            if (caseData.id) {
+              window.lt.case.setJsPairing(
+                remoteJsPairingKey(profile.id, caseData.id),
+                remoteUri(profile.id, remotePath)
+              )
+            }
             resolveRemoteRecordsLater(opened.id, profile, remotePath, opened.title, caseData)
             setMode('explorer')
           }}
@@ -9375,6 +9399,9 @@ function RemoteFolderPicker({
   const [err, setErr] = useState<string>('')
   const [loading, setLoading] = useState(false)
   const [pathInput, setPathInput] = useState(initial)
+  const [quickStartPaths, setQuickStartPaths] = useState<string[]>(() =>
+    normalizeRemoteQuickStartPaths(profile.quickStartPaths)
+  )
   const [syncOpen, setSyncOpen] = useState<{
     macFolder: string
     reloadPath: string
@@ -9431,6 +9458,10 @@ function RemoteFolderPicker({
   }, [])
 
   useEffect(() => {
+    setQuickStartPaths(normalizeRemoteQuickStartPaths(profile.quickStartPaths))
+  }, [profile.id, profile.quickStartPaths])
+
+  useEffect(() => {
     let alive = true
     const applySettings = (settings: AppSettings): void => {
       if (alive) setSortMode(resolveSortMode(settings.remotePickerSortMode))
@@ -9458,7 +9489,9 @@ function RemoteFolderPicker({
   const syncPath = (pathInput.trim() || cwd).trim()
   const canSyncOneDrive = looksLikeOneDrivePath(syncPath)
   const syncFolderLabel = title.includes('소송기록') ? '소송기록 폴더' : '사건폴더'
-  const quickStartPoints = profileRemoteStartPoints(profile)
+  const quickStartPoints = profileRemoteStartPoints({ ...profile, quickStartPaths })
+  const canAddCurrentQuickStart =
+    !!cwd.trim() && !quickStartPoints.some((p) => remoteStartPointKey(p.path) === remoteStartPointKey(cwd))
   const visibleDirs = folderSearchResults ? sortEntries(folderSearchResults, sortMode) : dirs
   const folderQueryText = folderQuery.trim()
   const canCreateFolder = !loading && !err && !!cwd.trim() && !!newFolderName.trim() && !creatingFolder
@@ -9540,6 +9573,26 @@ function RemoteFolderPicker({
         setCreateFolderErr(e instanceof Error ? e.message : String(e))
       })
   }
+  const addCurrentQuickStart = (): void => {
+    const previousPaths = quickStartPaths
+    const nextPaths = normalizeRemoteQuickStartPaths([...quickStartPaths, cwd])
+    setQuickStartPaths(nextPaths)
+    void window.lt.settings
+      .get()
+      .then((settings) => {
+        const profiles = settings.sshProfiles ?? []
+        if (!profiles.some((p) => p.id === profile.id)) return settings
+        return window.lt.settings.set({
+          sshProfiles: profiles.map((p) =>
+            p.id === profile.id
+              ? { ...p, quickStartPaths: nextPaths.length > 0 ? nextPaths : undefined }
+              : p
+          )
+        })
+      })
+      .then(emitSettingsUpdated)
+      .catch(() => setQuickStartPaths(previousPaths))
+  }
 
   return (
     <>
@@ -9617,6 +9670,16 @@ function RemoteFolderPicker({
                 {p.label}
               </button>
             ))}
+            {canAddCurrentQuickStart && (
+              <button
+                className="remote-chip"
+                type="button"
+                title="현재 폴더를 이 SSH 프로필 빠른 시작에 저장"
+                onClick={addCurrentQuickStart}
+              >
+                + 현재 위치
+              </button>
+            )}
           </div>
           <form
             className="remote-jump"

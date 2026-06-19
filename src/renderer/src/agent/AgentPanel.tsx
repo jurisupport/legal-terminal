@@ -68,6 +68,8 @@ interface AgentPanelProps {
   attachmentRequests?: AgentAttachmentRequest[]
   onAttachmentRequestsHandled?: (requestIds: string[]) => void
   onStatus?: (status: AgentRunStatus) => void
+  onFork?: () => void
+  onWorktreeFork?: () => void
   onOpenTerminal?: () => void
   onOpenDiff?: (request: AgentDiffOpenRequest) => void
   onOpenFile?: (path: string, title?: string) => void
@@ -1820,6 +1822,8 @@ export default function AgentPanel({
   attachmentRequests = [],
   onAttachmentRequestsHandled,
   onStatus,
+  onFork,
+  onWorktreeFork,
   onOpenTerminal,
   onOpenDiff,
   onOpenFile
@@ -2887,6 +2891,31 @@ export default function AgentPanel({
               onClick={() => void startAuthLogin()}
             >
               {authButtonLabel}
+            </button>
+          )}
+          {onFork && (
+            <button
+              className="agent-icon-btn"
+              title="현재 Agent 세션 맥락을 같은 폴더의 새 탭으로 열기"
+              aria-label="Fork"
+              onClick={onFork}
+            >
+              F
+            </button>
+          )}
+          {onWorktreeFork && (
+            <button
+              className="agent-icon-btn"
+              disabled={Boolean(ssh)}
+              title={
+                ssh
+                  ? '원격 Agent 탭은 아직 worktree fork를 지원하지 않습니다'
+                  : 'Git worktree를 만들고 새 Agent 탭에서 열기'
+              }
+              aria-label="Worktree Fork"
+              onClick={onWorktreeFork}
+            >
+              WT
             </button>
           )}
           {onOpenTerminal && (

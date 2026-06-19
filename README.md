@@ -40,10 +40,10 @@ curl -fsSL https://raw.githubusercontent.com/jurisupport/legal-terminal/main/ins
 
 ## 이번 업데이트
 
-최신 릴리스: [v0.1.99](https://github.com/jurisupport/legal-terminal/releases/tag/v0.1.99)
+최신 릴리스: [v0.1.100](https://github.com/jurisupport/legal-terminal/releases/tag/v0.1.100)
 
-- **PDF 표 내보내기 개선**: 긴 표가 현재 페이지에서 잘린 뒤 다음 페이지에 이어지도록 조정했습니다.
-- **관련 할일 처리 개선**: 관련 할일 추가 시 즉시 생성하고 Claude 요청에는 미생성 항목만 포함합니다.
+- **기일 기록 템플릿 개선**: 재판·조사·조정/면담별 화자 프리셋과 입력 템플릿을 추가했습니다.
+- **문서 내보내기 개선**: 정렬과 표 내보내기 동작을 더 안정적으로 조정했습니다.
 
 ## 처음 쓰는 순서
 

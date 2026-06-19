@@ -238,8 +238,6 @@ export default function PdfViewer({
         setPage(Math.min(initialPage, doc.numPages))
         setNumPages(doc.numPages)
         setLoading(false)
-        // 새 문서 로드 직후 뷰어에 포커스 → 다음 문서로 넘어가도 화살표 키가 바로 동작
-        requestAnimationFrame(() => wrapRef.current?.focus())
         if (onOutline) {
           parseRecordOutline(doc)
             .then((parsed) => {

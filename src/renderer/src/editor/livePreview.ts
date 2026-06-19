@@ -161,10 +161,42 @@ function addInactiveHtmlPreviewDecorations(
 }
 
 type Align = 'none' | 'left' | 'center' | 'right'
+type ColWidth = { value: number; unit: '%' | 'cm' }
+type ColWidthSlot = ColWidth | null
 interface TableModel {
   headers: string[]
   aligns: Align[]
   rows: string[][]
+}
+
+function parseColw(value: string, defaultUnit: ColWidth['unit'] = '%'): ColWidthSlot[] {
+  return value
+    .split(',')
+    .map((part) => {
+      const trimmed = part.trim()
+      if (!trimmed) return null
+      const match = trimmed.match(/^(\d+(?:\.\d+)?)(cm|%)?$/i)
+      if (!match) return null
+      const value = parseFloat(match[1])
+      if (!(value > 0)) return null
+      return {
+        value,
+        unit: (match[2]?.toLowerCase() === 'cm' ? 'cm' : defaultUnit) as ColWidth['unit']
+      }
+    })
+}
+
+function formatWidth(width: ColWidth): string {
+  return `${width.value}${width.unit}`
+}
+
+function normalizeColw(widths: ColWidthSlot[], colCount: number): ColWidthSlot[] | null {
+  const normalized = Array.from({ length: colCount }, (_v, index) => widths[index] ?? null)
+  return normalized.some(Boolean) ? normalized : null
+}
+
+function formatColw(widths: ColWidthSlot[]): string {
+  return widths.map((width) => (width ? formatWidth(width) : '')).join(',')
 }
 
 function splitRow(line: string): string[] {
@@ -205,7 +237,7 @@ class TableWidget extends WidgetType {
     readonly src: string,
     readonly from: number,
     readonly to: number,
-    readonly widths?: number[]
+    readonly widths?: ColWidthSlot[]
   ) {
     super()
   }
@@ -222,17 +254,20 @@ class TableWidget extends WidgetType {
   toDOM(view: EditorView): HTMLElement {
     const model = parseTable(this.src)
     const ncol = model.headers.length
-    let widths: number[] | null =
-      this.widths && this.widths.length === ncol ? [...this.widths] : null
+    let widths = this.widths ? normalizeColw(this.widths, ncol) : null
 
     const wrap = document.createElement('div')
     wrap.className = 'cm-md-table'
     const table = document.createElement('table')
+    if (widths?.every((width): width is ColWidth => !!width && width.unit === 'cm')) {
+      table.style.width = `${widths.reduce((sum, width) => sum + width.value, 0)}cm`
+    }
 
     const colgroup = document.createElement('colgroup')
     for (let c = 0; c < ncol; c++) {
       const col = document.createElement('col')
-      if (widths) col.style.width = widths[c] + '%'
+      const width = widths?.[c]
+      if (width) col.style.width = formatWidth(width)
       colgroup.appendChild(col)
     }
     table.appendChild(colgroup)
@@ -245,10 +280,10 @@ class TableWidget extends WidgetType {
       aligns: model.aligns,
       rows: Array.from(tbody.rows).map((tr) => Array.from(tr.cells).map((td) => td.innerText))
     })
-    const applyAll = (m: TableModel, w: number[] | null): void => {
+    const applyAll = (m: TableModel, w: ColWidthSlot[] | null): void => {
       let md = toMarkdown(m)
-      if (w && w.length === m.headers.length)
-        md += '\n<!-- colw: ' + w.map((x) => Math.round(x)).join(',') + ' -->'
+      if (w && w.length === m.headers.length && w.some(Boolean))
+        md += '\n<!-- colw: ' + formatColw(w) + ' -->'
       view.dispatch({ changes: { from: this.from, to: this.to, insert: md } })
     }
 
@@ -259,7 +294,7 @@ class TableWidget extends WidgetType {
       resizing = true
       const tableW = table.offsetWidth || 1
       const ths = Array.from(htr.children) as HTMLElement[]
-      const startCur = widths ?? ths.map((th) => (th.offsetWidth / tableW) * 100)
+      const startCur = ths.map((th) => (th.offsetWidth / tableW) * 100)
       const base = [...startCur]
       const startX = e.clientX
       const cols = Array.from(colgroup.children) as HTMLElement[]
@@ -268,8 +303,12 @@ class TableWidget extends WidgetType {
         const next = [...base]
         next[col] = Math.max(5, base[col] + d)
         next[col + 1] = Math.max(5, base[col + 1] - d)
-        widths = next
-        cols.forEach((cl, i) => ((cl as HTMLElement).style.width = next[i] + '%'))
+        widths = next.map((value) => ({ value: Math.round(value), unit: '%' }))
+        table.style.removeProperty('width')
+        cols.forEach((cl, i) => {
+          const width = widths?.[i]
+          if (width) (cl as HTMLElement).style.width = formatWidth(width)
+        })
       }
       const onUp = (): void => {
         window.removeEventListener('mousemove', onMove)
@@ -338,6 +377,20 @@ class TableWidget extends WidgetType {
         m.aligns.push('none')
         m.rows.forEach((r) => r.push(''))
         applyAll(m, null) // 열 수 변경 → 너비 초기화
+      })
+    )
+    bar.appendChild(
+      mkBtn('폭(cm)', () => {
+        const current = widths
+          ? widths.map((width) => (width?.unit === 'cm' ? String(width.value) : '')).join(',')
+          : ''
+        const answer = window.prompt(
+          '열 너비(cm)를 쉼표로 입력하세요. 빈 칸은 남은 폭을 자동 배분합니다.\n예: 2,,3',
+          current
+        )
+        if (answer === null) return
+        widths = normalizeColw(parseColw(answer, 'cm'), readModel().headers.length)
+        applyAll(readModel(), widths)
       })
     )
     bar.appendChild(
@@ -411,15 +464,12 @@ function build(state: EditorState): DecorationSet {
           let eLine = state.doc.lineAt(node.to)
           const tableTo = eLine.to
           // 표 바로 뒤 colw 주석에서 열너비 읽기
-          let widths: number[] | undefined
+          let widths: ColWidthSlot[] | undefined
           if (eLine.number < state.doc.lines) {
             const nx = state.doc.line(eLine.number + 1)
-            const m = nx.text.match(/^<!--\s*colw:\s*([\d.,\s]+)-->\s*$/)
+            const m = nx.text.match(/^<!--\s*colw:\s*(.*?)\s*-->\s*$/)
             if (m) {
-              widths = m[1]
-                .split(',')
-                .map((x) => parseFloat(x.trim()))
-                .filter((n) => !Number.isNaN(n))
+              widths = parseColw(m[1])
               eLine = nx
             }
           }

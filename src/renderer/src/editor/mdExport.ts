@@ -1,10 +1,46 @@
 import { marked } from 'marked'
 
+type ColWidth = { value: number; unit: '%' | 'cm' }
+type ColWidthSlot = ColWidth | null
+
+function parseColw(value: string, defaultUnit: ColWidth['unit'] = '%'): ColWidthSlot[] {
+  return value
+    .split(',')
+    .map((part) => {
+      const trimmed = part.trim()
+      if (!trimmed) return null
+      const match = trimmed.match(/^(\d+(?:\.\d+)?)(cm|%)?$/i)
+      if (!match) return null
+      const value = parseFloat(match[1])
+      if (!(value > 0)) return null
+      return {
+        value,
+        unit: (match[2]?.toLowerCase() === 'cm' ? 'cm' : defaultUnit) as ColWidth['unit']
+      }
+    })
+}
+
+function formatWidth(width: ColWidth): string {
+  return `${width.value}${width.unit}`
+}
+
+function columnCount(row: string): number {
+  let value = row.trim()
+  if (value.startsWith('|')) value = value.slice(1)
+  if (value.endsWith('|')) value = value.slice(0, -1)
+  return Math.max(1, value.split('|').length)
+}
+
+function normalizeColw(widths: ColWidthSlot[], colCount: number): ColWidthSlot[] | null {
+  const normalized = Array.from({ length: colCount }, (_v, index) => widths[index] ?? null)
+  return normalized.some(Boolean) ? normalized : null
+}
+
 // 표 뒤 colw 주석을 추출하고(표별 너비, 순서대로) 주석 줄은 제거
-function extractColw(md: string): { md: string; widths: (number[] | null)[] } {
+function extractColw(md: string): { md: string; widths: (ColWidthSlot[] | null)[] } {
   const lines = md.split('\n')
   const out: string[] = []
-  const widths: (number[] | null)[] = []
+  const widths: (ColWidthSlot[] | null)[] = []
   const isSep = (l: string): boolean => /-/.test(l) && /^\s*\|?[\s:|-]+\|?\s*$/.test(l)
   let i = 0
   while (i < lines.length) {
@@ -15,13 +51,10 @@ function extractColw(md: string): { md: string; widths: (number[] | null)[] } {
         out.push(lines[j])
         j++
       }
-      let w: number[] | null = null
-      const m = j < lines.length ? lines[j].match(/^<!--\s*colw:\s*([\d.,\s]+)-->\s*$/) : null
+      let w: ColWidthSlot[] | null = null
+      const m = j < lines.length ? lines[j].match(/^<!--\s*colw:\s*(.*?)\s*-->\s*$/) : null
       if (m) {
-        w = m[1]
-          .split(',')
-          .map((x) => parseFloat(x.trim()))
-          .filter((n) => !Number.isNaN(n))
+        w = normalizeColw(parseColw(m[1]), columnCount(lines[i]))
         j++
       }
       widths.push(w)
@@ -96,8 +129,14 @@ export function mdToPrintHtml(md: string, title = '문서', profile: PrintLayout
   body = body.replace(/<table>/g, () => {
     const w = queue.shift()
     if (w && w.length) {
-      const cg = '<colgroup>' + w.map((x) => `<col style="width:${x}%">`).join('') + '</colgroup>'
-      return '<table class="fixed">' + cg
+      const cg =
+        '<colgroup>' +
+        w.map((x) => (x ? `<col style="width:${formatWidth(x)}">` : '<col>')).join('') +
+        '</colgroup>'
+      const tableWidth = w.every((x): x is ColWidth => !!x && x.unit === 'cm')
+        ? ` style="width:${w.reduce((sum, x) => sum + x.value, 0)}cm"`
+        : ''
+      return `<table class="fixed"${tableWidth}>` + cg
     }
     return '<table>'
   })

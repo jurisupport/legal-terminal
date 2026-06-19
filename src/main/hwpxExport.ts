@@ -38,9 +38,13 @@ interface MarkdownParagraph {
 interface MarkdownTable {
   kind: 'table'
   rows: string[][]
+  widths?: ColWidthSlot[]
 }
 
 type MarkdownBlock = MarkdownParagraph | MarkdownTable
+
+type ColWidth = { value: number; unit: '%' | 'cm' }
+type ColWidthSlot = ColWidth | null
 
 interface HwpxXmlContext {
   nextParagraphId: number
@@ -62,6 +66,7 @@ const OUTLINE_HEADS = [
 ]
 const OUTLINE_MARKER_RE =
   /^(?:(?:\d{1,3}|[가-힣])\.(?:\s+|(?=[^\d\s]))|(?:\d{1,3}|[가-힣])\)(?:\s+|(?=[^\d\s]))|\((?:\d{1,3}|[가-힣])\)(?:\s+|(?=\S)))/
+const HWP_UNIT_PER_CM = 2835
 
 const CRC_TABLE = new Uint32Array(256)
 for (let i = 0; i < CRC_TABLE.length; i += 1) {
@@ -251,6 +256,28 @@ function stripLeadingOutlineMarkers(value: string): string {
   return text || original
 }
 
+function parseColw(value: string, defaultUnit: ColWidth['unit'] = '%'): ColWidthSlot[] {
+  return value
+    .split(',')
+    .map((part) => {
+      const trimmed = part.trim()
+      if (!trimmed) return null
+      const match = trimmed.match(/^(\d+(?:\.\d+)?)(cm|%)?$/i)
+      if (!match) return null
+      const value = parseFloat(match[1])
+      if (!(value > 0)) return null
+      return {
+        value,
+        unit: (match[2]?.toLowerCase() === 'cm' ? 'cm' : defaultUnit) as ColWidth['unit']
+      }
+    })
+}
+
+function normalizeColw(widths: ColWidthSlot[], colCount: number): ColWidthSlot[] | null {
+  const normalized = Array.from({ length: colCount }, (_v, index) => widths[index] ?? null)
+  return normalized.some(Boolean) ? normalized : null
+}
+
 function markdownBlocks(markdown: string): MarkdownBlock[] {
   const tokens = marked.lexer(markdown, { gfm: true, breaks: true })
   const blocks: MarkdownBlock[] = []
@@ -270,6 +297,12 @@ function markdownBlocks(markdown: string): MarkdownBlock[] {
       case 'html':
         if (/^<!--\s*lt-align:center\s*-->\s*$/.test(token.text.trim())) center = true
         else if (/^<!--\s*\/lt-align\s*-->\s*$/.test(token.text.trim())) center = false
+        else {
+          const colw = token.text.trim().match(/^<!--\s*colw:\s*(.*?)\s*-->\s*$/)
+          const last = blocks[blocks.length - 1]
+          if (colw && last?.kind === 'table')
+            last.widths = normalizeColw(parseColw(colw[1]), last.rows[0]?.length ?? 0) ?? undefined
+        }
         break
       case 'heading': {
         const text = stripLeadingOutlineMarkers(inlineText(token.tokens, token.text))
@@ -360,11 +393,29 @@ function paragraphXml(ctx: HwpxXmlContext, text: string, charPrIDRef = 0, paraPr
   ].join('')
 }
 
-function tableXml(ctx: HwpxXmlContext, rows: string[][]): string {
+function tableColumnWidths(colCount: number, widths?: ColWidthSlot[]): number[] {
+  if (widths?.length === colCount && widths.some(Boolean) && widths.every((width) => !width || width.unit === 'cm')) {
+    const fixed = widths.reduce((sum, width) => sum + (width ? Math.round(width.value * HWP_UNIT_PER_CM) : 0), 0)
+    const autoCount = widths.filter((width) => !width).length
+    const autoWidth = autoCount > 0 ? Math.max(1, Math.floor(Math.max(0, 42520 - fixed) / autoCount)) : 0
+    return widths.map((width) => (width ? Math.max(1, Math.round(width.value * HWP_UNIT_PER_CM)) : autoWidth))
+  }
+  if (widths?.length === colCount && widths.some(Boolean) && widths.every((width) => !width || width.unit === '%')) {
+    const fixed = widths.reduce((sum, width) => sum + (width?.value ?? 0), 0)
+    const autoCount = widths.filter((width) => !width).length
+    const auto = autoCount > 0 ? Math.max(0, 100 - fixed) / autoCount : 0
+    const values = widths.map((width) => width?.value ?? auto)
+    const total = values.reduce((sum, value) => sum + value, 0) || 100
+    return values.map((value) => Math.max(1, Math.round((42520 * value) / total)))
+  }
+  return Array.from({ length: colCount }, () => Math.floor(42520 / colCount))
+}
+
+function tableXml(ctx: HwpxXmlContext, rows: string[][], widths?: ColWidthSlot[]): string {
   const rowCount = rows.length
   const colCount = Math.max(1, ...rows.map((row) => row.length))
-  const cellWidth = Math.floor(42520 / colCount)
-  const width = cellWidth * colCount
+  const cellWidths = tableColumnWidths(colCount, widths)
+  const width = cellWidths.reduce((sum, cellWidth) => sum + cellWidth, 0)
   const height = Math.max(5000, rowCount * 1400)
   const shapeId = ctx.nextShapeId
   ctx.nextShapeId += 1
@@ -379,7 +430,7 @@ function tableXml(ctx: HwpxXmlContext, rows: string[][]): string {
               `<hp:tc name="" header="${rowIndex === 0 ? '1' : '0'}" hasMargin="0" protect="0" editable="0" dirty="0" borderFillIDRef="1">`,
               `<hp:cellAddr colAddr="${colIndex}" rowAddr="${rowIndex}" />`,
               '<hp:cellSpan colSpan="1" rowSpan="1" />',
-              `<hp:cellSz width="${cellWidth}" height="1400" />`,
+              `<hp:cellSz width="${cellWidths[colIndex]}" height="1400" />`,
               '<hp:cellMargin left="283" right="283" top="141" bottom="141" />',
               '<hp:subList id="" textDirection="HORIZONTAL" lineWrap="BREAK" vertAlign="TOP" linkListIDRef="0" linkListNextIDRef="0" textWidth="0" textHeight="0" hasTextRef="0" hasNumRef="0">',
               paragraphXml(ctx, cell, rowIndex === 0 ? 1 : 0),
@@ -415,7 +466,7 @@ function sectionXml(blocks: MarkdownBlock[]): string {
   const body = blocks
     .map((block) =>
       block.kind === 'table'
-        ? tableXml(ctx, block.rows)
+        ? tableXml(ctx, block.rows, block.widths)
         : paragraphXml(ctx, block.text, block.charPrIDRef ?? 0, block.paraPrIDRef ?? 0)
     )
     .join('\n')

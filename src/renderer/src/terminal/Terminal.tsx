@@ -777,10 +777,10 @@ export default function Terminal({
           setSelectionAction(null)
           return
         }
-        const selected = term.getSelection().trim()
+        const selected = normalizeTerminalCopyText(term.getSelection())
         const position = term.getSelectionPosition()
         const metrics = measureCellMetrics(term)
-        if (!selected || !position || !metrics) {
+        if (!selected.trim() || !position || !metrics) {
           setSelectionAction(null)
           return
         }
@@ -899,7 +899,8 @@ export default function Terminal({
             e.stopPropagation()
           }}
           onClick={() => {
-            onAskSelectionRef.current?.(selectionAction.text)
+            const selected = normalizeTerminalCopyText(termRef.current?.getSelection() ?? '')
+            onAskSelectionRef.current?.(selected.trim() ? selected : selectionAction.text)
             termRef.current?.clearSelection()
             setSelectionAction(null)
           }}

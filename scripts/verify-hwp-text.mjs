@@ -33,6 +33,17 @@ assert.match(mdToPrintHtml(spaced), /white-space: break-spaces/)
 assert.doesNotMatch(mdToPrintHtml('| A | B |\\n| --- | --- |\\n| 1 | 2 |'), /page-break-inside:\s*avoid/)
 assert.match(createHwpxFromMarkdown(spaced).toString('utf8'), /<hp:t xml:space="preserve">  앞  중간  뒤  <\/hp:t>/)
 
+const cmTable = ['| A | B |', '| --- | --- |', '| 1 | 2 |', '<!-- colw: 2cm,3cm -->'].join('\n')
+assert.match(mdToPrintHtml(cmTable), /<table class="fixed" style="width:5cm">/)
+assert.match(mdToPrintHtml(cmTable), /<col style="width:2cm"><col style="width:3cm">/)
+assert.match(createHwpxFromMarkdown(cmTable).toString('utf8'), /<hp:cellSz width="5670" height="1400" \/>/)
+assert.match(createHwpxFromMarkdown(cmTable).toString('utf8'), /<hp:cellSz width="8505" height="1400" \/>/)
+
+const partialCmTable = ['| A | B |', '| --- | --- |', '| 1 | 2 |', '<!-- colw: 2cm -->'].join('\n')
+assert.match(mdToPrintHtml(partialCmTable), /<table class="fixed"><colgroup><col style="width:2cm"><col>/)
+assert.match(createHwpxFromMarkdown(partialCmTable).toString('utf8'), /<hp:cellSz width="5670" height="1400" \/>/)
+assert.match(createHwpxFromMarkdown(partialCmTable).toString('utf8'), /<hp:cellSz width="36850" height="1400" \/>/)
+
 const legacyDoc = {
   sections: [
     {
