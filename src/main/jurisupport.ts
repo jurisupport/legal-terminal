@@ -17,8 +17,8 @@ const MCP_URL = 'https://api.jurisupport.com/mcp'
 let sessionId: string | null = null
 let toolQueue: Promise<void> = Promise.resolve()
 
-const CASES_PAGE_LIMIT = 100
-const CASES_MAX_PAGES = 20
+const CASES_PAGE_LIMIT = 50
+const CASES_MAX_PAGES = 40
 const CASE_LIST_CACHE_TTL_MS = 10 * 60_000
 const TODOS_PAGE_LIMIT = 100
 const TODOS_MAX_PAGES = 20
