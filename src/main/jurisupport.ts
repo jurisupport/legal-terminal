@@ -1,5 +1,13 @@
 import { safeStorage } from 'electron'
 import { getSettings, setSettings } from './settings'
+import {
+  normalizeCase,
+  normalizeCaseList,
+  type JsCase,
+  type JsParty
+} from './jurisupportNormalize'
+
+export type { JsCase, JsHearing, JsParty } from './jurisupportNormalize'
 
 // JuriSupport 본체(jurisupport3) MCP over HTTP 클라이언트.
 // 프로토콜: POST /mcp 로 initialize → notifications/initialized → tools/call.
@@ -165,33 +173,6 @@ async function callTool(name: string, args: Record<string, unknown>): Promise<un
   }
 }
 
-export interface JsParty {
-  role: string // client | opponent
-  position: string | null
-  party: { name: string; type: string; phone?: string | null }
-}
-export interface JsHearing {
-  type: string
-  dateTime: string
-  location?: string | null
-  note?: string | null
-  status?: string
-}
-export interface JsCase {
-  id: string
-  caseNumber: string | null
-  caseName: string | null
-  court: string | null
-  division: string | null
-  caseType: string | null
-  status: string
-  memo?: string | null
-  parties: JsParty[]
-  hearings: JsHearing[]
-  updatedAt?: string
-  _count?: { parties: number; hearings: number; progresses: number; documents: number }
-}
-
 export interface JsTodoProgress {
   id?: string
   text: string
@@ -267,41 +248,6 @@ export interface ListCasesParams {
   status?: string
   caseType?: string
   refresh?: boolean
-}
-
-function normalizeCase(value: unknown): JsCase | null {
-  const obj = asObject(value)
-  if (!obj) return null
-  const id = stringFrom(obj.id) ?? stringFrom(obj.caseId) ?? stringFrom(obj.case_id)
-  if (!id) return null
-  return {
-    ...(obj as unknown as JsCase),
-    id,
-    memo:
-      stringFrom(obj.memo) ??
-      stringFrom(obj.notes) ??
-      stringFrom(obj.description) ??
-      stringFrom(obj.content) ??
-      null
-  }
-}
-
-function normalizeCases(value: unknown): JsCase[] {
-  return Array.isArray(value)
-    ? value.map(normalizeCase).filter((item): item is JsCase => item !== null)
-    : []
-}
-
-function normalizeCaseList(r: unknown): JsCase[] {
-  if (Array.isArray(r)) return normalizeCases(r)
-  if (!r || typeof r !== 'object') return []
-
-  const obj = r as Record<string, unknown>
-  for (const key of ['cases', 'items', 'data', 'results']) {
-    const value = obj[key]
-    if (Array.isArray(value)) return normalizeCases(value)
-  }
-  return []
 }
 
 function asObject(value: unknown): Record<string, unknown> | null {
