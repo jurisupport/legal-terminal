@@ -405,7 +405,7 @@ function Test-JuriSupportPluginsInstalled {
   if (Test-Path $settingsPath) {
     try {
       $settings = Get-Content -Raw -Path $settingsPath
-      if ($settings -match 'jurisupport|songmu-legal|korean-law') {
+      if ($settings -match 'jurisupport-plugins|songmu-legal|korean-law|pretool_data_protection') {
         return $true
       }
     } catch {
@@ -436,14 +436,94 @@ function Invoke-JuriSupportPluginsBootstrap {
     throw 'powershell.exe를 찾을 수 없어 jurisupport-plugins 준비 스크립트를 실행할 수 없습니다.'
   }
 
-  Write-InstallStep 'legal-terminal 설치 전에 jurisupport-plugins 준비 스크립트를 실행합니다.'
-  & $powerShell -NoProfile -ExecutionPolicy Bypass -File $bootstrapPath
+  Write-InstallStep 'jurisupport-plugins 준비 스크립트를 실행합니다.'
+  $previousSkipLawyerProfile = $env:JURISUPPORT_SKIP_LAWYER_PROFILE
+  $previousSkipLegalTerminal = $env:JURISUPPORT_SKIP_LEGAL_TERMINAL
+
+  try {
+    $env:JURISUPPORT_SKIP_LAWYER_PROFILE = '1'
+    $env:JURISUPPORT_SKIP_LEGAL_TERMINAL = '1'
+    & $powerShell -NoProfile -ExecutionPolicy Bypass -File $bootstrapPath
+  } finally {
+    if ($null -eq $previousSkipLawyerProfile) {
+      Remove-Item Env:JURISUPPORT_SKIP_LAWYER_PROFILE -ErrorAction SilentlyContinue
+    } else {
+      $env:JURISUPPORT_SKIP_LAWYER_PROFILE = $previousSkipLawyerProfile
+    }
+
+    if ($null -eq $previousSkipLegalTerminal) {
+      Remove-Item Env:JURISUPPORT_SKIP_LEGAL_TERMINAL -ErrorAction SilentlyContinue
+    } else {
+      $env:JURISUPPORT_SKIP_LEGAL_TERMINAL = $previousSkipLegalTerminal
+    }
+  }
 
   if ($LASTEXITCODE -ne 0) {
     throw "jurisupport-plugins 준비 스크립트가 실패했습니다. 종료 코드: $LASTEXITCODE"
   }
 
   Refresh-ProcessPath
+}
+
+function Test-LawyerProfilePluginInstalled {
+  if (-not (Test-InstallerCommand -Names @('claude.cmd', 'claude'))) {
+    return $false
+  }
+
+  try {
+    $claude = Get-InstallerCommand -Names @('claude.cmd', 'claude')
+    $plugins = & $claude plugin list 2>$null | Out-String
+    return $plugins -match 'jurisupport-lawyer-profile'
+  } catch {
+    return $false
+  }
+}
+
+function Invoke-LawyerProfilePluginInstaller {
+  $shouldInstall = Read-InstallerYesNo `
+    -Question '변호사 강점찾기 플러그인을 설치할까요?' `
+    -DefaultYes $true `
+    -OptionName 'InstallLawyerProfile'
+
+  if (-not $shouldInstall) {
+    Write-InstallStep '변호사 강점찾기 플러그인 설치를 건너뜁니다.'
+    return
+  }
+
+  if (Test-LawyerProfilePluginInstalled) {
+    Write-InstallStep '변호사 강점찾기 플러그인이 이미 설치된 것으로 보여 건너뜁니다.'
+    return
+  }
+
+  $previousSkipJuriSupport = $env:JURISUPPORT_LAWYER_PROFILE_SKIP_JURISUPPORT
+  $previousSkipLegalTerminal = $env:JURISUPPORT_LAWYER_PROFILE_SKIP_LEGAL_TERMINAL
+  $previousConnectMcp = $env:JURISUPPORT_CONNECT_MCP
+
+  try {
+    $env:JURISUPPORT_LAWYER_PROFILE_SKIP_JURISUPPORT = '1'
+    $env:JURISUPPORT_LAWYER_PROFILE_SKIP_LEGAL_TERMINAL = '1'
+    $env:JURISUPPORT_CONNECT_MCP = '0'
+    Write-InstallStep '변호사 강점찾기 플러그인 설치 스크립트를 실행합니다.'
+    irm https://raw.githubusercontent.com/jurisupport/jurisupport-lawyer-profile-plugin/main/install.ps1 | iex
+  } finally {
+    if ($null -eq $previousSkipJuriSupport) {
+      Remove-Item Env:JURISUPPORT_LAWYER_PROFILE_SKIP_JURISUPPORT -ErrorAction SilentlyContinue
+    } else {
+      $env:JURISUPPORT_LAWYER_PROFILE_SKIP_JURISUPPORT = $previousSkipJuriSupport
+    }
+
+    if ($null -eq $previousSkipLegalTerminal) {
+      Remove-Item Env:JURISUPPORT_LAWYER_PROFILE_SKIP_LEGAL_TERMINAL -ErrorAction SilentlyContinue
+    } else {
+      $env:JURISUPPORT_LAWYER_PROFILE_SKIP_LEGAL_TERMINAL = $previousSkipLegalTerminal
+    }
+
+    if ($null -eq $previousConnectMcp) {
+      Remove-Item Env:JURISUPPORT_CONNECT_MCP -ErrorAction SilentlyContinue
+    } else {
+      $env:JURISUPPORT_CONNECT_MCP = $previousConnectMcp
+    }
+  }
 }
 
 if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) {
@@ -464,8 +544,8 @@ if (($Channel -ne 'setup') -and ($Channel -ne 'portable')) {
 }
 
 Write-InstallStep 'Windows 설치를 시작합니다.'
-Write-InstallStep '진행 순서: 필요한 도구 확인 → 설치 파일 다운로드(진행률 표시) → 설치 파일 실행'
-Write-InstallStep '추가 도구가 필요하면 먼저 물어본 뒤 진행합니다.'
+Write-InstallStep '진행 순서: Claude Code 확인 → legal-terminal 설치 → jurisupport-plugins 추천 → 변호사 강점찾기 추천'
+Write-InstallStep '추가 도구나 추천 구성요소가 필요하면 물어본 뒤 진행합니다.'
 
 if ($DestinationOption) {
   $Destination = [string]$DestinationOption
@@ -482,30 +562,7 @@ if ($InstallerArgsOption) {
 Enable-ModernTls
 Refresh-ProcessPath
 
-$juriSupportOption = Get-InstallerOption -Name 'InstallJuriSupport' -DefaultValue $null
-
-if ($null -ne $juriSupportOption) {
-  $shouldInstallJuriSupport = ConvertTo-InstallerBoolean -Value $juriSupportOption -DefaultValue $false
-} elseif (Test-JuriSupportPluginsInstalled) {
-  Write-InstallStep 'jurisupport-plugins가 이미 설치된 것으로 보여 준비 과정을 건너뜁니다.'
-  $shouldInstallJuriSupport = $false
-} else {
-  $shouldInstallJuriSupport = Read-InstallerYesNo `
-    -Question 'jurisupport-plugins(송무 플러그인/검색 도구)가 설치되어 있지 않은 것 같습니다. 판례/법령 검색과 개인정보 보호 훅에 필요합니다. 지금 설치할까요?' `
-    -DefaultYes $true `
-    -OptionName 'InstallJuriSupport'
-}
-
-if ($shouldInstallJuriSupport) {
-  Invoke-JuriSupportPluginsBootstrap -ShouldInstall $true
-
-  if (-not (Test-InstallerCommand -Names @('claude.cmd', 'claude'))) {
-    Ensure-ClaudeCode
-  }
-} else {
-  Invoke-JuriSupportPluginsBootstrap -ShouldInstall $false
-  Ensure-ClaudeCode
-}
+Ensure-ClaudeCode
 
 $assetName = Get-AssetName -SelectedChannel $Channel
 $releaseBaseUrl = Get-ReleaseBaseUrl -SelectedVersion $Version
@@ -527,24 +584,40 @@ if (Get-Command Unblock-File -ErrorAction SilentlyContinue) {
 if ($Channel -eq 'portable') {
   Write-InstallStep "포터블 앱을 저장했습니다: $downloadPath"
   Start-Process -FilePath $downloadPath | Out-Null
-  return
-}
+} else {
+  Write-InstallStep '설치 파일을 실행합니다. 열리는 설치 창의 안내에 따라 마무리해 주세요.'
+  $startProcessArgs = @{
+    FilePath = $downloadPath
+    Wait = $true
+    PassThru = $true
+  }
 
-Write-InstallStep '설치 파일을 실행합니다. 열리는 설치 창의 안내에 따라 마무리해 주세요.'
-$startProcessArgs = @{
-  FilePath = $downloadPath
-  Wait = $true
-  PassThru = $true
-}
+  if ($InstallerArgs.Count -gt 0) {
+    $startProcessArgs.ArgumentList = $InstallerArgs
+  }
 
-if ($InstallerArgs.Count -gt 0) {
-  $startProcessArgs.ArgumentList = $InstallerArgs
-}
+  $process = Start-Process @startProcessArgs
 
-$process = Start-Process @startProcessArgs
-
-if ($process.ExitCode -ne 0) {
-  throw "설치 파일이 오류로 종료되었습니다. 종료 코드: $($process.ExitCode)"
+  if ($process.ExitCode -ne 0) {
+    throw "설치 파일이 오류로 종료되었습니다. 종료 코드: $($process.ExitCode)"
+  }
 }
 
 Write-InstallStep '설치가 끝났습니다.'
+
+$juriSupportOption = Get-InstallerOption -Name 'InstallJuriSupport' -DefaultValue $null
+
+if ($null -ne $juriSupportOption) {
+  $shouldInstallJuriSupport = ConvertTo-InstallerBoolean -Value $juriSupportOption -DefaultValue $false
+} elseif (Test-JuriSupportPluginsInstalled) {
+  Write-InstallStep 'jurisupport-plugins가 이미 설치된 것으로 보여 준비 과정을 건너뜁니다.'
+  $shouldInstallJuriSupport = $false
+} else {
+  $shouldInstallJuriSupport = Read-InstallerYesNo `
+    -Question 'jurisupport-plugins(송무 플러그인/검색 도구)를 설치할까요?' `
+    -DefaultYes $true `
+    -OptionName 'InstallJuriSupport'
+}
+
+Invoke-JuriSupportPluginsBootstrap -ShouldInstall $shouldInstallJuriSupport
+Invoke-LawyerProfilePluginInstaller

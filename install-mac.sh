@@ -14,6 +14,105 @@ require_command() {
   command -v "$1" >/dev/null 2>&1 || die "$1 command not found"
 }
 
+env_yes_no() {
+  local name="$1" default="$2" value
+  value="${!name:-}"
+  value="$(printf '%s' "$value" | tr '[:upper:]' '[:lower:]')"
+
+  case "$value" in
+    1|true|yes|y|on) return 0 ;;
+    0|false|no|n|off) return 1 ;;
+  esac
+
+  [[ "$default" == "yes" ]]
+}
+
+ask_yes_no() {
+  local question="$1" env_name="$2" answer
+
+  if [[ -n "${!env_name:-}" ]]; then
+    env_yes_no "$env_name" yes
+    return $?
+  fi
+
+  if [[ -r /dev/tty && -w /dev/tty ]]; then
+    printf '[legal-terminal] %s [Y/n, Enter=yes] ' "$question" > /dev/tty
+    IFS= read -r answer < /dev/tty || answer=""
+  else
+    return 1
+  fi
+  case "$answer" in
+    [Nn]|[Nn][Oo]) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
+refresh_path() {
+  export PATH="$HOME/.local/bin:$HOME/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
+}
+
+ensure_claude() {
+  refresh_path
+  if command -v claude >/dev/null 2>&1; then
+    log "Claude Code found: $(command -v claude)"
+    return
+  fi
+
+  if ! ask_yes_no "Claude Code is not installed. Install it first?" "LEGAL_TERMINAL_INSTALL_CLAUDE"; then
+    log "Skipping Claude Code install."
+    return
+  fi
+
+  log "Installing Claude Code."
+  curl -fsSL https://claude.ai/install.sh | bash
+  refresh_path
+}
+
+jurisupport_plugins_installed() {
+  [[ -f "$HOME/jurisupport-plugins/install.sh" ]] && return 0
+  command -v claude >/dev/null 2>&1 || return 1
+  claude plugin list 2>/dev/null | grep -E -q 'jurisupport@jurisupport-plugins|jurisupport-plugins|songmu-legal|korean-law'
+}
+
+install_jurisupport_plugins() {
+  if jurisupport_plugins_installed; then
+    log "jurisupport-plugins already looks installed; skipping."
+    return
+  fi
+
+  if ! ask_yes_no "Install jurisupport-plugins for legal search, skills, and privacy hooks?" "LEGAL_TERMINAL_INSTALL_JURI_SUPPORT"; then
+    log "Skipping jurisupport-plugins install."
+    return
+  fi
+
+  log "Installing jurisupport-plugins."
+  curl -fsSL https://raw.githubusercontent.com/jurisupport/jurisupport-plugins/main/bootstrap.sh \
+    | JURISUPPORT_SKIP_LAWYER_PROFILE=1 JURISUPPORT_SKIP_LEGAL_TERMINAL=1 bash
+  refresh_path
+}
+
+lawyer_profile_plugin_installed() {
+  command -v claude >/dev/null 2>&1 || return 1
+  claude plugin list 2>/dev/null | grep -q 'jurisupport-lawyer-profile'
+}
+
+install_lawyer_profile_plugin() {
+  if lawyer_profile_plugin_installed; then
+    log "JuriSupport lawyer profile plugin already looks installed; skipping."
+    return
+  fi
+
+  if ! ask_yes_no "Install the JuriSupport lawyer strength/profile plugin?" "LEGAL_TERMINAL_INSTALL_LAWYER_PROFILE"; then
+    log "Skipping lawyer strength/profile plugin install."
+    return
+  fi
+
+  log "Installing lawyer strength/profile plugin."
+  curl -fsSL https://raw.githubusercontent.com/jurisupport/jurisupport-lawyer-profile-plugin/main/install.sh \
+    | JURISUPPORT_LAWYER_PROFILE_SKIP_JURISUPPORT=1 JURISUPPORT_LAWYER_PROFILE_SKIP_LEGAL_TERMINAL=1 JURISUPPORT_CONNECT_MCP=0 bash
+  refresh_path
+}
+
 case "$(uname -s)" in
   Darwin) ;;
   *) die "This installer is for macOS only." ;;
@@ -28,6 +127,8 @@ esac
 require_command curl
 require_command unzip
 require_command ditto
+
+ensure_claude
 
 version="${LEGAL_TERMINAL_VERSION:-latest}"
 asset="legal-terminal-mac-${arch}.zip"
@@ -125,6 +226,9 @@ if command -v xattr >/dev/null 2>&1; then
 fi
 
 log "Installed."
+
+install_jurisupport_plugins
+install_lawyer_profile_plugin
 
 if [[ "${LEGAL_TERMINAL_NO_OPEN:-0}" != "1" ]]; then
   open "$target_app"
