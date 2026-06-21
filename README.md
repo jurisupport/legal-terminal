@@ -40,10 +40,11 @@ curl -fsSL https://raw.githubusercontent.com/jurisupport/legal-terminal/main/ins
 
 ## 이번 업데이트
 
-최신 릴리스: [v0.1.100](https://github.com/jurisupport/legal-terminal/releases/tag/v0.1.100)
+최신 릴리스: [v0.1.101](https://github.com/jurisupport/legal-terminal/releases/tag/v0.1.101)
 
-- **기일 기록 템플릿 개선**: 재판·조사·조정/면담별 화자 프리셋과 입력 템플릿을 추가했습니다.
-- **문서 내보내기 개선**: 정렬과 표 내보내기 동작을 더 안정적으로 조정했습니다.
+- **Codex Agent 패널 추가**: 탭별로 Claude/Codex를 선택하고 Codex 모델·reasoning effort를 고를 수 있습니다.
+- **Claude/Codex slash command 정리**: 패널 실행 가능 명령과 터미널 TUI 전용 명령을 구분해 안내합니다.
+- **사용량 표시 개선**: Claude 구독 한도 잔여율과 Codex 토큰/프로세스 상태를 더 정확하게 보여줍니다.
 
 ## 처음 쓰는 순서
 

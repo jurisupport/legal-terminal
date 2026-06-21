@@ -20,7 +20,9 @@ import { LT_PATH, LT_PATHS, readLtPaths } from '../filetree/FileTree'
 import type {
   AgentAttachment,
   AgentEvent,
+  AgentModelOption,
   AgentPermissionMode,
+  AgentProvider,
   AppSettings,
   SessionTranscript,
   SshConn
@@ -59,6 +61,7 @@ interface AgentPanelProps {
   id: string
   cwd: string
   title: string
+  provider: AgentProvider
   resumeSessionId?: string
   ssh?: SshConn
   profileId?: string
@@ -69,6 +72,7 @@ interface AgentPanelProps {
   onAttachmentRequestsHandled?: (requestIds: string[]) => void
   onStatus?: (status: AgentRunStatus) => void
   onFork?: () => void
+  onProviderChange?: (provider: AgentProvider) => void
   onWorktreeFork?: () => void
   onOpenTerminal?: () => void
   onOpenDiff?: (request: AgentDiffOpenRequest) => void
@@ -202,6 +206,7 @@ interface AgentUsageView {
   tokens: AgentTokenUsageView
   context?: AgentContextUsageView
   rateLimit?: AgentRateLimitUsageView
+  rateLimits?: AgentRateLimitUsageView[]
 }
 
 interface SlashCommand {
@@ -209,9 +214,10 @@ interface SlashCommand {
   label: string
   description: string
   mode?: AgentPermissionMode
+  providers?: AgentProvider[]
   argumentHint?: string
   aliases?: string[]
-  source?: 'app' | 'claude'
+  source?: 'app' | 'claude' | 'codex'
   expand?: (rest: string) => string
 }
 
@@ -222,6 +228,11 @@ const modeLabels: { value: AgentPermissionMode; label: string; title: string }[]
   { value: 'bypassPermissions', label: '자동 허용', title: '모든 권한 요청을 자동 허용합니다' },
   { value: 'dontAsk', label: '거절', title: '승인되지 않은 작업을 거절합니다' }
 ]
+
+const agentProviderLabels: Record<AgentProvider, string> = {
+  claude: 'Claude',
+  codex: 'Codex'
+}
 
 const isAgentPermissionMode = (value: unknown): value is AgentPermissionMode =>
   typeof value === 'string' && modeLabels.some((option) => option.value === value)
@@ -260,7 +271,8 @@ const slashCommands: SlashCommand[] = [
   {
     name: '/mcp',
     label: 'MCP',
-    description: '사용 가능한 도구와 연결 상태를 점검합니다',
+    description: 'MCP 상태를 봅니다. 서버 설정/OAuth 조작은 터미널 모드에서 실행합니다',
+    providers: ['claude'],
     expand: (rest) =>
       withSlashRest('현재 사용 가능한 MCP, 도구, 연결 상태를 확인하고 작업에 쓸 수 있는 항목을 정리하세요.', rest)
   },
@@ -268,8 +280,15 @@ const slashCommands: SlashCommand[] = [
     name: '/plugins',
     label: '플러그인',
     description: 'Claude Code 플러그인 상태를 확인합니다',
+    providers: ['claude'],
     expand: (rest) =>
       withSlashRest('현재 Claude Code 플러그인과 스킬 상태를 확인하고 필요한 활성화 또는 설치 후보를 정리하세요.', rest)
+  },
+  {
+    name: '/model',
+    label: '모델',
+    description: 'Codex 모델을 선택합니다',
+    providers: ['codex']
   },
   {
     name: '/brief-protocol',
@@ -286,6 +305,122 @@ const slashCommands: SlashCommand[] = [
       withSlashRest('작업을 시작하기 전에 목표, 제약, 사실관계, 필요한 자료를 짧은 질문으로 먼저 확인하세요.', rest)
   }
 ]
+
+const codexSlashCommands: SlashCommand[] = [
+  { name: '/permissions', label: '권한', description: 'Codex 권한 모드를 확인하거나 변경합니다', source: 'codex', argumentHint: '[ask|auto|read-only]' },
+  { name: '/ide', label: 'IDE', description: 'IDE 컨텍스트를 포함합니다', source: 'codex' },
+  { name: '/keymap', label: '키맵', description: 'TUI 단축키 설정을 엽니다', source: 'codex' },
+  { name: '/vim', label: 'Vim', description: 'TUI Vim 모드를 전환합니다', source: 'codex' },
+  { name: '/sandbox-add-read-dir', label: 'Sandbox', description: '추가 읽기 디렉터리를 허용합니다', source: 'codex' },
+  { name: '/agent', label: 'Agent', description: '에이전트 thread를 전환합니다', source: 'codex' },
+  { name: '/apps', label: '앱', description: '사용 가능한 앱/커넥터를 봅니다', source: 'codex' },
+  { name: '/plugins', label: '플러그인', description: 'Codex 플러그인 목록을 봅니다', source: 'codex' },
+  { name: '/hooks', label: '훅', description: 'Codex lifecycle hook 목록을 봅니다', source: 'codex' },
+  { name: '/clear', label: '초기화', description: '현재 패널 출력을 지우고 새 Codex thread로 전환합니다', source: 'codex' },
+  { name: '/archive', label: '보관', description: '현재 Codex thread를 보관합니다', source: 'codex' },
+  { name: '/delete', label: '삭제', description: '현재 세션 삭제는 TUI에서 실행합니다', source: 'codex' },
+  { name: '/compact', label: '요약', description: 'Codex 컨텍스트 압축을 시작합니다', source: 'codex' },
+  { name: '/copy', label: '복사', description: '최신 응답 복사는 TUI 전용입니다', source: 'codex' },
+  { name: '/diff', label: 'Diff', description: '현재 Git diff를 봅니다', source: 'codex' },
+  { name: '/exit', label: '나가기', description: 'Codex TUI를 종료합니다', source: 'codex' },
+  { name: '/experimental', label: '실험 기능', description: 'Codex 실험 기능을 설정합니다', source: 'codex' },
+  { name: '/approve', label: '승인', description: '자동 리뷰 거절을 한 번 승인합니다', source: 'codex' },
+  { name: '/memories', label: '메모리', description: 'Codex memory 설정을 엽니다', source: 'codex' },
+  { name: '/skills', label: '스킬', description: '사용 가능한 Codex skill을 봅니다', source: 'codex' },
+  { name: '/import', label: 'Import', description: '외부 에이전트 설정 가져오기는 TUI에서 실행합니다', source: 'codex' },
+  { name: '/feedback', label: '피드백', description: '피드백 전송은 TUI에서 실행합니다', source: 'codex' },
+  { name: '/init', label: 'AGENTS.md', description: 'AGENTS.md 초기화는 TUI에서 실행합니다', source: 'codex' },
+  { name: '/logout', label: '로그아웃', description: 'Codex 로그아웃은 TUI에서 실행합니다', source: 'codex' },
+  { name: '/mcp', label: 'MCP', description: 'Codex MCP 서버 상태를 봅니다. 서버 설정/OAuth 조작은 터미널 모드에서 실행합니다', source: 'codex', argumentHint: '[verbose]' },
+  { name: '/mention', label: 'Mention', description: '파일 mention 삽입은 TUI 전용입니다', source: 'codex' },
+  { name: '/model', label: '모델', description: 'Codex 모델과 reasoning effort를 선택합니다', source: 'codex' },
+  { name: '/fast', label: 'Fast', description: 'Fast service tier 전환은 TUI에서 실행합니다', source: 'codex' },
+  { name: '/goal', label: '목표', description: 'Codex goal을 보거나 설정합니다', source: 'codex', argumentHint: '[objective|clear]' },
+  { name: '/personality', label: '성격', description: '응답 성격 설정은 TUI에서 실행합니다', source: 'codex' },
+  { name: '/ps', label: '프로세스', description: '백그라운드 터미널 확인은 TUI에서 실행합니다', source: 'codex' },
+  { name: '/stop', label: '중지', description: '백그라운드 터미널 중지는 TUI에서 실행합니다', source: 'codex' },
+  { name: '/fork', label: 'Fork', description: '현재 대화 fork는 TUI에서 실행합니다', source: 'codex' },
+  { name: '/side', label: 'Side', description: 'Side conversation은 TUI에서 실행합니다', source: 'codex' },
+  { name: '/btw', label: 'BTW', description: 'Side conversation alias입니다', source: 'codex' },
+  { name: '/raw', label: 'Raw', description: 'Raw scrollback 전환은 TUI 전용입니다', source: 'codex' },
+  { name: '/resume', label: '이어하기', description: '저장된 Codex 대화 재개는 TUI에서 실행합니다', source: 'codex' },
+  { name: '/new', label: '새 대화', description: '새 Codex thread로 전환합니다', source: 'codex' },
+  { name: '/quit', label: '종료', description: 'Codex TUI를 종료합니다', source: 'codex' },
+  { name: '/review', label: '리뷰', description: '작업 트리 리뷰를 시작합니다', source: 'codex' },
+  { name: '/status', label: '상태', description: '현재 Codex 세션 설정을 봅니다', source: 'codex' },
+  { name: '/usage', label: '사용량', description: '계정 사용량을 봅니다', source: 'codex' },
+  { name: '/debug-config', label: 'Config', description: 'Config 진단은 TUI에서 실행합니다', source: 'codex' },
+  { name: '/statusline', label: '상태줄', description: 'TUI 상태줄 설정을 엽니다', source: 'codex' },
+  { name: '/title', label: '제목', description: '터미널 제목 설정을 엽니다', source: 'codex' },
+  { name: '/theme', label: '테마', description: 'TUI syntax theme를 고릅니다', source: 'codex' }
+]
+
+const codexPanelSlashCommandNames = new Set(codexSlashCommands.map((command) => command.name))
+const codexTerminalOnlySlashCommandNames = new Set([
+  '/agent',
+  '/approve',
+  '/btw',
+  '/copy',
+  '/debug-config',
+  '/delete',
+  '/exit',
+  '/experimental',
+  '/fast',
+  '/feedback',
+  '/fork',
+  '/ide',
+  '/import',
+  '/init',
+  '/keymap',
+  '/logout',
+  '/memories',
+  '/mention',
+  '/personality',
+  '/ps',
+  '/quit',
+  '/raw',
+  '/resume',
+  '/sandbox-add-read-dir',
+  '/side',
+  '/statusline',
+  '/stop',
+  '/theme',
+  '/title',
+  '/vim'
+])
+const claudeTerminalOnlySlashCommandNames = new Set([
+  '/exit',
+  '/ide',
+  '/keymap',
+  '/logout',
+  '/model',
+  '/permissions',
+  '/quit',
+  '/status',
+  '/statusline',
+  '/theme',
+  '/title',
+  '/vim'
+])
+
+function isTerminalOnlySlashCommand(command: SlashCommand, provider: AgentProvider): boolean {
+  const name = command.name.toLowerCase()
+  return provider === 'codex'
+    ? codexTerminalOnlySlashCommandNames.has(name)
+    : claudeTerminalOnlySlashCommandNames.has(name)
+}
+
+function slashCommandSurfaceLabel(command: SlashCommand, provider: AgentProvider): string {
+  if (command.name.toLowerCase() === '/mcp') return '상태 보기'
+  return isTerminalOnlySlashCommand(command, provider) ? '터미널 전용' : '패널 실행'
+}
+
+function isInteractiveMcpArgument(argument: string): boolean {
+  if (!argument.trim()) return false
+  return /\b(add|auth|authorize|connect|config|configure|delete|disable|disconnect|enable|install|login|logout|oauth|remove|settings|setup|toggle|trust)\b/i.test(
+    argument
+  )
+}
 
 const agentStatusLabels: Record<AgentPanelStatus, string> = {
   idle: '대기',
@@ -342,10 +477,10 @@ function interruptedTimelineItems(
   })
 }
 
-function expandSlashInput(text: string): { text: string; mode?: AgentPermissionMode } {
+function expandSlashInput(text: string, commands: SlashCommand[]): { text: string; mode?: AgentPermissionMode } {
   const match = text.match(/^(\/[^\s]+)(?:\s+([\s\S]*))?$/)
   if (!match) return { text }
-  const command = slashCommands.find((item) => item.name === match[1].toLowerCase())
+  const command = commands.find((item) => item.name === match[1].toLowerCase())
   if (!command?.expand) return { text }
   return { text: command.expand((match[2] ?? '').trim()), mode: command.mode }
 }
@@ -368,7 +503,7 @@ function runtimeSlashCommandLabel(name: string): string {
 function runtimeSlashCommandDescription(command: SlashCommand): string {
   const description = command.description.trim()
   if (command.argumentHint) return `${description} ${command.argumentHint}`.trim()
-  return description || 'Claude Code 명령'
+  return description || (command.source === 'codex' ? 'Codex 명령' : 'Claude Code 명령')
 }
 
 function runtimeSlashCommandsFromEvent(value: unknown): SlashCommand[] {
@@ -413,7 +548,7 @@ function mergeSlashCommands(appCommands: SlashCommand[], runtimeCommands: SlashC
   for (const command of appCommands) merged.set(command.name.toLowerCase(), { ...command, source: 'app' })
   for (const command of runtimeCommands) {
     const key = command.name.toLowerCase()
-    if (!merged.has(key)) merged.set(key, command)
+    merged.set(key, command)
   }
   return [...merged.values()]
 }
@@ -490,9 +625,37 @@ function rateLimitTypeLabel(value: string | undefined): string {
   return '한도'
 }
 
+function rateLimitLabel(value: AgentRateLimitUsageView): string {
+  const reset = resetTimeText(value.resetsAt)
+  const remaining =
+    value.remainingPercent === undefined ? rateLimitStatusText(value) : `잔여 ${percentText(value.remainingPercent)}`
+  return `${rateLimitTypeLabel(value.rateLimitType)} ${remaining}${reset ? ` · ${reset}` : ''}`
+}
+
+function rateLimitStatusText(value: AgentRateLimitUsageView): string {
+  if (value.rateLimitType === 'overage') {
+    if (value.isUsingOverage) return '사용 중'
+    if (value.status === 'rejected') return '불가'
+    if (value.status === 'allowed_warning') return '주의'
+    if (value.status === 'allowed') return '가능'
+  }
+  if (value.status === 'rejected') return '소진'
+  if (value.status === 'allowed_warning') return '주의'
+  return '잔여율 미제공'
+}
+
+function showRateLimitInBar(value: AgentRateLimitUsageView): boolean {
+  if (value.rateLimitType !== 'overage') return true
+  return value.isUsingOverage === true || value.status === 'rejected' || value.status === 'allowed_warning'
+}
+
 function resetTimeText(value: number | undefined): string | undefined {
   if (value === undefined || !Number.isFinite(value)) return undefined
   return resetTimeFormatter.format(new Date(value))
+}
+
+function cacheTokenTotal(tokens: AgentTokenUsageView): number {
+  return tokens.cacheCreationInputTokens + tokens.cacheReadInputTokens
 }
 
 function tokenUsageFromEvent(value: unknown): AgentTokenUsageView | undefined {
@@ -551,7 +714,14 @@ function rateLimitUsageFromEvent(value: unknown): AgentRateLimitUsageView | unde
   }
 }
 
-function usageTitle(usage: AgentUsageView): string {
+function rateLimitUsagesFromEvent(value: unknown): AgentRateLimitUsageView[] | undefined {
+  if (!Array.isArray(value)) return undefined
+  return value
+    .map((item) => rateLimitUsageFromEvent(item))
+    .filter((item): item is AgentRateLimitUsageView => Boolean(item))
+}
+
+function usageTitle(usage: AgentUsageView, provider: AgentProvider): string {
   const tokens = usage.tokens
   const lines = [
     `세션 토큰: ${exactTokenCount(tokens.totalTokens)} (${tokens.turns}턴)`,
@@ -559,17 +729,15 @@ function usageTitle(usage: AgentUsageView): string {
     `캐시 생성: ${exactTokenCount(tokens.cacheCreationInputTokens)}, 캐시 읽기: ${exactTokenCount(tokens.cacheReadInputTokens)}`
   ]
   if (tokens.lastTurnTokens !== undefined) lines.push(`마지막 턴: ${exactTokenCount(tokens.lastTurnTokens)}`)
-  if (tokens.totalCostUsd !== undefined) lines.push(`비용: ${costFormatter.format(tokens.totalCostUsd)}`)
+  if (provider === 'codex' && tokens.totalCostUsd !== undefined) lines.push(`비용: ${costFormatter.format(tokens.totalCostUsd)}`)
   if (usage.context) {
     lines.push(
       `컨텍스트: ${percentText(usage.context.percentage)} 사용, 잔여 ${exactTokenCount(usage.context.remainingTokens)} / ${exactTokenCount(usage.context.maxTokens)}`
     )
   }
-  if (usage.rateLimit) {
-    const reset = resetTimeText(usage.rateLimit.resetsAt)
-    lines.push(
-      `${rateLimitTypeLabel(usage.rateLimit.rateLimitType)}: 잔여 ${percentText(usage.rateLimit.remainingPercent)}${reset ? `, ${reset} 리셋` : ''}`
-    )
+  const limits = usage.rateLimits?.length ? usage.rateLimits : usage.rateLimit ? [usage.rateLimit] : []
+  if (limits.length > 0) {
+    lines.push(...limits.map((limit) => rateLimitLabel(limit)))
   }
   return lines.join('\n')
 }
@@ -589,7 +757,7 @@ const dialogQuestions = (value: unknown): AgentDialogQuestion[] =>
   })).filter((question) => question.question)
 
 const isAuthFailureText = (text: string | undefined): boolean =>
-  /failed to authenticate|invalid authentication credentials|api error:\s*401/i.test(text ?? '')
+  /failed to authenticate|invalid authentication credentials|api error:\s*401|401 unauthorized|refresh[_\s-]*token|sign in again|log out and sign in again/i.test(text ?? '')
 
 const attachmentOrigin = (value: unknown): AgentAttachment['origin'] | undefined =>
   value === 'local' || value === 'remote' ? value : undefined
@@ -1203,7 +1371,7 @@ function upsertProcessStep(items: TimelineItem[], step: ProcessStep): TimelineIt
   return [...items.slice(0, insertAfter + 1), makeItem(), ...items.slice(insertAfter + 1)]
 }
 
-function reduceTimeline(items: TimelineItem[], event: AgentEvent): TimelineItem[] {
+function reduceTimeline(items: TimelineItem[], event: AgentEvent, agentLabel: string): TimelineItem[] {
   if (event.type === 'message:user') {
     return [
       ...items,
@@ -1224,7 +1392,7 @@ function reduceTimeline(items: TimelineItem[], event: AgentEvent): TimelineItem[
     return upsertItem(
       items,
       id,
-      () => ({ id, kind: 'assistant', title: 'Claude', text: '', status: 'streaming' }),
+      () => ({ id, kind: 'assistant', title: agentLabel, text: '', status: 'streaming' }),
       (item) => ({ ...item, status: item.status === 'done' ? 'done' : 'streaming' })
     )
   }
@@ -1234,7 +1402,7 @@ function reduceTimeline(items: TimelineItem[], event: AgentEvent): TimelineItem[
     return upsertItem(
       items,
       id,
-      () => ({ id, kind: 'assistant', title: 'Claude', text, status: 'streaming' }),
+      () => ({ id, kind: 'assistant', title: agentLabel, text, status: 'streaming' }),
       (item) => ({ ...item, text: `${item.text ?? ''}${text}`, status: 'streaming' })
     )
   }
@@ -1244,7 +1412,7 @@ function reduceTimeline(items: TimelineItem[], event: AgentEvent): TimelineItem[
     return upsertItem(
       items,
       id,
-      () => ({ id, kind: 'assistant', title: 'Claude', text, status: 'streaming' }),
+      () => ({ id, kind: 'assistant', title: agentLabel, text, status: 'streaming' }),
       (item) => ({ ...item, text, status: item.status === 'done' ? 'done' : 'streaming' })
     )
   }
@@ -1354,7 +1522,7 @@ function reduceTimeline(items: TimelineItem[], event: AgentEvent): TimelineItem[
       () => ({
         id: dialogId,
         kind: 'dialog',
-        title: stringValue(dialog?.title) ?? 'Claude 질문',
+        title: stringValue(dialog?.title) ?? `${agentLabel} 질문`,
         text: stringValue(dialog?.dialogKind),
         status: 'waiting',
         dialogId,
@@ -1461,8 +1629,8 @@ function reduceTimeline(items: TimelineItem[], event: AgentEvent): TimelineItem[
       () => ({
         id,
         kind: 'auth',
-        title: 'Claude 로그인',
-        text: '원격 Claude 로그인 절차를 시작했습니다.',
+        title: `${agentLabel} 로그인`,
+        text: `${agentLabel} 로그인 절차를 시작했습니다.`,
         status: 'running'
       }),
       (item) => ({ ...item, status: 'running' })
@@ -1479,7 +1647,7 @@ function reduceTimeline(items: TimelineItem[], event: AgentEvent): TimelineItem[
       () => ({
         id,
         kind: 'auth',
-        title: 'Claude 로그인',
+        title: `${agentLabel} 로그인`,
         text,
         status: 'running',
         urls,
@@ -1496,14 +1664,14 @@ function reduceTimeline(items: TimelineItem[], event: AgentEvent): TimelineItem[
   if (event.type === 'auth:done') {
     const id = `auth-${stringValue(event.sessionId) ?? Date.now()}`
     const ok = event.ok === true
-    const message = stringValue(event.message) ?? (ok ? 'Claude 로그인이 완료되었습니다.' : 'Claude 로그인이 실패했습니다.')
+    const message = stringValue(event.message) ?? (ok ? `${agentLabel} 로그인이 완료되었습니다.` : `${agentLabel} 로그인이 실패했습니다.`)
     return upsertItem(
       items,
       id,
       () => ({
         id,
         kind: 'auth',
-        title: 'Claude 로그인',
+        title: `${agentLabel} 로그인`,
         text: message,
         status: ok ? 'done' : 'error'
       }),
@@ -1513,11 +1681,11 @@ function reduceTimeline(items: TimelineItem[], event: AgentEvent): TimelineItem[
   return items
 }
 
-function transcriptToTimeline(transcript: SessionTranscript): TimelineItem[] {
+function transcriptToTimeline(transcript: SessionTranscript, agentLabel: string): TimelineItem[] {
   return transcript.messages.map((message, index) => ({
     id: `history-${message.id || `${transcript.sessionId}-${index}`}`,
     kind: message.role === 'assistant' ? 'assistant' : 'user',
-    title: message.role === 'assistant' ? 'Claude' : '나',
+    title: message.role === 'assistant' ? agentLabel : '나',
     text: message.text
   }))
 }
@@ -1813,6 +1981,7 @@ export default function AgentPanel({
   id,
   cwd,
   title,
+  provider,
   resumeSessionId,
   ssh,
   profileId,
@@ -1823,11 +1992,14 @@ export default function AgentPanel({
   onAttachmentRequestsHandled,
   onStatus,
   onFork,
+  onProviderChange,
   onWorktreeFork,
   onOpenTerminal,
   onOpenDiff,
   onOpenFile
 }: AgentPanelProps): JSX.Element {
+  const usesClaudeRemoteAuth = Boolean(ssh) && provider === 'claude'
+  const usesAgentAuth = usesClaudeRemoteAuth || provider === 'codex'
   const [items, setItems] = useState<TimelineItem[]>([])
   const [input, setInput] = useState('')
   const [mode, setMode] = useState<AgentPermissionMode>(DEFAULT_AGENT_PERMISSION_MODE)
@@ -1836,7 +2008,7 @@ export default function AgentPanel({
   const [slashIndex, setSlashIndex] = useState(0)
   const [runtimeSlashCommands, setRuntimeSlashCommands] = useState<SlashCommand[]>([])
   const [authActive, setAuthActive] = useState(false)
-  const [authStatus, setAuthStatus] = useState<AgentAuthStatus>(ssh ? 'checking' : 'unavailable')
+  const [authStatus, setAuthStatus] = useState<AgentAuthStatus>(usesAgentAuth ? 'checking' : 'unavailable')
   const [authStatusMessage, setAuthStatusMessage] = useState('')
   const [authInput, setAuthInput] = useState('')
   const [modeMenuOpen, setModeMenuOpen] = useState(false)
@@ -1848,10 +2020,16 @@ export default function AgentPanel({
   const [dialogResponses, setDialogResponses] = useState<Record<string, string>>({})
   const [attachments, setAttachments] = useState<AgentAttachment[]>([])
   const [attachmentDropOver, setAttachmentDropOver] = useState(false)
+  const [modelOptions, setModelOptions] = useState<AgentModelOption[]>([])
+  const [modelPickerOpen, setModelPickerOpen] = useState(false)
+  const [modelLoading, setModelLoading] = useState(false)
+  const [selectedModel, setSelectedModel] = useState<string | undefined>()
+  const [selectedReasoningEffort, setSelectedReasoningEffort] = useState<string | undefined>()
   const [showNewOutputNotice, setShowNewOutputNotice] = useState(false)
   const [revertingDiffIds, setRevertingDiffIds] = useState<Set<string>>(new Set())
   const [usage, setUsage] = useState<AgentUsageView>(() => emptyAgentUsageView())
   const [escInterruptArmed, setEscInterruptArmed] = useState(false)
+  const agentLabel = agentProviderLabels[provider]
   const createdRef = useRef(false)
   const scrollRef = useRef<HTMLDivElement>(null)
   const shouldFollowTimelineRef = useRef(true)
@@ -1867,6 +2045,7 @@ export default function AgentPanel({
   const promptHistoryDraftRef = useRef('')
   const escInterruptArmedRef = useRef(false)
   const escInterruptTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const providerRef = useRef(provider)
 
   const clearEscInterruptTimer = useCallback((): void => {
     if (escInterruptTimerRef.current) {
@@ -1893,6 +2072,27 @@ export default function AgentPanel({
   }, [clearEscInterruptTimer])
 
   useEffect(() => clearEscInterruptTimer, [clearEscInterruptTimer])
+
+  useEffect(() => {
+    if (providerRef.current === provider) return
+    providerRef.current = provider
+    createdRef.current = false
+    loadedHistoryKeyRef.current = null
+    handledAttachmentRequestIdsRef.current.clear()
+    setItems([])
+    setRuntimeSlashCommands([])
+    setAuthActive(false)
+    setAuthInput('')
+    setAttachments([])
+    setAuthStatus(usesAgentAuth ? 'checking' : 'unavailable')
+    setAuthStatusMessage('')
+    setModelOptions([])
+    setModelPickerOpen(false)
+    setSelectedModel(undefined)
+    setSelectedReasoningEffort(undefined)
+    setUsage(emptyAgentUsageView())
+    setError('')
+  }, [provider, ssh, usesAgentAuth])
 
   const focusPrompt = useCallback((position?: number): void => {
     window.requestAnimationFrame(() => {
@@ -2013,10 +2213,13 @@ export default function AgentPanel({
         const tokens = tokenUsageFromEvent(event.usage)
         const context = contextUsageFromEvent(event.context)
         const rateLimit = rateLimitUsageFromEvent(event.rateLimit)
+        const rateLimits = rateLimitUsagesFromEvent(event.rateLimits)
+        const hasRateLimits = Object.prototype.hasOwnProperty.call(event, 'rateLimits')
         setUsage((current) => ({
           tokens: tokens ?? current.tokens,
           context: context ?? current.context,
-          rateLimit: rateLimit ?? current.rateLimit
+          rateLimit: rateLimit ?? rateLimits?.[0] ?? current.rateLimit,
+          rateLimits: hasRateLimits ? (rateLimits ?? []) : current.rateLimits
         }))
       }
       if (event.type === 'auth:started') setAuthActive(true)
@@ -2049,7 +2252,7 @@ export default function AgentPanel({
           )
         }
       }
-      if (event.type !== 'raw') setItems((prev) => reduceTimeline(prev, event))
+      if (event.type !== 'raw') setItems((prev) => reduceTimeline(prev, event, agentLabel))
       if (event.type === 'status') {
         const next = stringValue(event.status)
         if (
@@ -2070,7 +2273,7 @@ export default function AgentPanel({
       }
     })
     return off
-  }, [cwd, id, onStatus, profileId, ssh])
+  }, [agentLabel, cwd, id, onStatus, profileId, ssh])
 
   useEffect(() => {
     if (!settingsLoaded) return
@@ -2081,6 +2284,7 @@ export default function AgentPanel({
         id,
         cwd,
         title,
+        provider,
         resumeSessionId,
         permissionMode: mode,
         source: ssh ? 'ssh' : 'local',
@@ -2090,9 +2294,10 @@ export default function AgentPanel({
         if (!result.ok) setError(result.error ?? 'Agent 세션을 만들 수 없습니다.')
       })
       .catch((e) => setError(String(e instanceof Error ? e.message : e)))
-  }, [cwd, id, mode, resumeSessionId, settingsLoaded, ssh, title])
+  }, [cwd, id, mode, provider, resumeSessionId, settingsLoaded, ssh, title])
 
   useEffect(() => {
+    if (provider !== 'claude') return
     if (!resumeSessionId) return
     const sourceKey = ssh ? `ssh:${ssh.user}@${ssh.host}:${ssh.port ?? 22}:${ssh.identityFile ?? ''}` : 'local'
     const historyKey = `${sourceKey}:${resumeSessionId}`
@@ -2103,7 +2308,7 @@ export default function AgentPanel({
       .transcript(resumeSessionId, ssh)
       .then((transcript) => {
         if (!alive || !transcript || transcript.messages.length === 0) return
-        const historyItems = transcriptToTimeline(transcript)
+        const historyItems = transcriptToTimeline(transcript, agentLabel)
         rememberPrompts(
           transcript.messages
             .filter((message) => message.role === 'user')
@@ -2122,7 +2327,7 @@ export default function AgentPanel({
     return () => {
       alive = false
     }
-  }, [rememberPrompts, resumeSessionId, ssh])
+  }, [agentLabel, provider, rememberPrompts, resumeSessionId, ssh])
 
   useEffect(() => {
     if (!modeMenuOpen) return
@@ -2206,26 +2411,23 @@ export default function AgentPanel({
   const statusLabel = escInterruptArmed ? `${baseStatusLabel}, ${escInterruptHint}` : baseStatusLabel
   const statusAccessibleLabel = queuedCount > 0 ? `${statusLabel}, 대기 ${queuedCount}` : statusLabel
   const needsAuth = useMemo(
-    () => Boolean(ssh) && items.some((item) => isAuthFailureText(item.text)),
-    [items, ssh]
+    () => usesAgentAuth && items.some((item) => isAuthFailureText(item.text)),
+    [items, usesAgentAuth]
   )
-  const remoteCliUnavailable = Boolean(ssh) && authStatus === 'unavailable'
-  const remoteAuthChecking = Boolean(ssh) && authStatus === 'checking'
-  const remoteNeedsLogin =
-    Boolean(ssh) &&
-    authStatus !== 'authenticated' &&
-    (authStatus === 'unauthenticated' || needsAuth)
+  const authCliUnavailable = usesAgentAuth && authStatus === 'unavailable'
+  const authChecking = usesAgentAuth && authStatus === 'checking'
+  const needsLogin = usesAgentAuth && authStatus !== 'authenticated' && (authStatus === 'unauthenticated' || needsAuth)
   const sendBlockedReason =
     !settingsLoaded
       ? 'Agent 설정 로드 중'
       : authActive
-        ? 'Claude 로그인 진행 중'
-        : remoteAuthChecking
-          ? '원격 Claude Code 상태 확인 중'
-          : remoteCliUnavailable
-            ? '원격 Claude Code CLI 없음'
-            : remoteNeedsLogin
-              ? '원격 Claude 로그인 필요'
+        ? `${agentLabel} 로그인 진행 중`
+        : authChecking
+          ? `${agentLabel} 상태 확인 중`
+          : authCliUnavailable
+            ? `${agentLabel} CLI 없음`
+            : needsLogin
+              ? `${agentLabel} 로그인 필요`
               : ''
   const canSubmit = useMemo(
     () => hasPrompt && !sendBlockedReason,
@@ -2244,8 +2446,12 @@ export default function AgentPanel({
     return trimmed.toLowerCase()
   }, [input])
   const allSlashCommands = useMemo(
-    () => mergeSlashCommands(slashCommands, runtimeSlashCommands),
-    [runtimeSlashCommands]
+    () =>
+      mergeSlashCommands(
+        slashCommands.filter((command) => !command.providers || command.providers.includes(provider)),
+        provider === 'claude' ? runtimeSlashCommands : codexSlashCommands
+      ),
+    [provider, runtimeSlashCommands]
   )
   const slashMatches = useMemo(() => {
     if (!slashToken) return []
@@ -2259,8 +2465,26 @@ export default function AgentPanel({
         command.argumentHint ?? ''
       ].join(' ').toLowerCase()
       return haystack.includes(query)
+    }).sort((a, b) => {
+      const aTerminal = isTerminalOnlySlashCommand(a, provider)
+      const bTerminal = isTerminalOnlySlashCommand(b, provider)
+      return Number(aTerminal) - Number(bTerminal)
     })
-  }, [allSlashCommands, slashToken])
+  }, [allSlashCommands, provider, slashToken])
+  const slashMenuRows = useMemo(() => {
+    const panelRows = slashMatches
+      .map((command, index) => ({ command, index }))
+      .filter(({ command }) => !isTerminalOnlySlashCommand(command, provider))
+    const terminalRows = slashMatches
+      .map((command, index) => ({ command, index }))
+      .filter(({ command }) => isTerminalOnlySlashCommand(command, provider))
+    return [
+      ...(panelRows.length > 0 ? [{ kind: 'heading' as const, label: '패널에서 실행' }] : []),
+      ...panelRows.map((row) => ({ kind: 'command' as const, ...row })),
+      ...(terminalRows.length > 0 ? [{ kind: 'heading' as const, label: '터미널 모드에서 실행' }] : []),
+      ...terminalRows.map((row) => ({ kind: 'command' as const, ...row }))
+    ]
+  }, [provider, slashMatches])
   const showSlashMenu = slashMatches.length > 0 && !authActive
 
   useEffect(() => {
@@ -2282,6 +2506,11 @@ export default function AgentPanel({
     if (command.mode) setMode(command.mode)
     const nextInput = `${command.name} `
     setInput(nextInput)
+    setError(
+      isTerminalOnlySlashCommand(command, provider)
+        ? `${command.name}은 터미널 TUI 전용 명령입니다. 조작하려면 상단 터미널 버튼으로 터미널 모드에서 실행해 주세요.`
+        : ''
+    )
     focusPrompt(nextInput.length)
   }
 
@@ -2406,7 +2635,56 @@ export default function AgentPanel({
   const send = async (delivery?: AgentSendDelivery): Promise<void> => {
     const rawText = input.trim()
     const sendAttachments = attachments
-    if (rawText && slashCommandName(rawText) === '/mcp') {
+    const commandName = rawText ? slashCommandName(rawText) : undefined
+    const slashArgument = rawText.match(/^\/[^\s]+(?:\s+([\s\S]*))?$/)?.[1]?.trim() ?? ''
+    if (commandName === '/mcp' && isInteractiveMcpArgument(slashArgument)) {
+      setError('/mcp 설정/OAuth 조작은 터미널 TUI 전용입니다. 상단 터미널 버튼으로 터미널 모드에서 실행해 주세요.')
+      return
+    }
+    if (
+      commandName &&
+      ((provider === 'claude' && claudeTerminalOnlySlashCommandNames.has(commandName)) ||
+        (provider === 'codex' && codexTerminalOnlySlashCommandNames.has(commandName)))
+    ) {
+      setError(`${commandName}은 터미널 TUI 전용 명령입니다. 조작하려면 상단 터미널 버튼으로 터미널 모드에서 실행해 주세요.`)
+      return
+    }
+    if (provider === 'codex' && commandName && codexPanelSlashCommandNames.has(commandName)) {
+      if (sendAttachments.length > 0) {
+        setError(`${commandName}에는 첨부를 사용할 수 없습니다.`)
+        return
+      }
+      if (sendBlockedReason) {
+        setError(sendBlockedReason)
+        return
+      }
+      if (commandName === '/model') {
+        const tokens = slashArgument.split(/\s+/).filter(Boolean)
+        const effortFlagIndex = tokens.findIndex((token) => token === 'effort' || token === '--effort')
+        const requestedModel = tokens[0]
+        const requestedEffort =
+          effortFlagIndex >= 0 ? tokens[effortFlagIndex + 1] : tokens.length > 1 ? tokens[1] : undefined
+        if (requestedModel) {
+          const useDefault = requestedModel === 'default' || requestedModel === 'auto'
+          await chooseModel(useDefault ? undefined : requestedModel, useDefault ? undefined : requestedEffort)
+        } else {
+          await openModelPicker()
+        }
+      } else {
+        const result = await window.lt.agent.slashCommand(id, commandName, slashArgument)
+        if (!result.ok) {
+          setError(result.error ?? `${commandName} 명령을 실행할 수 없습니다.`)
+          return
+        }
+        if (commandName === '/clear' || commandName === '/new') setItems([])
+      }
+      rememberPrompts([rawText])
+      setInput('')
+      setAttachments([])
+      setError('')
+      return
+    }
+    if (provider === 'claude' && rawText && slashCommandName(rawText) === '/mcp') {
       if (sendAttachments.length > 0) {
         setError('MCP 상태 확인에는 첨부를 사용할 수 없습니다.')
         return
@@ -2427,7 +2705,7 @@ export default function AgentPanel({
       return
     }
 
-    const expanded = rawText ? expandSlashInput(rawText) : { text: '' }
+    const expanded = rawText ? expandSlashInput(rawText, allSlashCommands) : { text: '' }
     const text = expanded.text
     if ((!text && sendAttachments.length === 0) || sendBlockedReason) {
       if (sendBlockedReason) setError(sendBlockedReason)
@@ -2662,14 +2940,52 @@ export default function AgentPanel({
   const startAuthLogin = async (): Promise<void> => {
     setError('')
     const result = await window.lt.agent.authLogin(id)
-    if (!result.ok) setError(result.error ?? 'Claude 로그인을 시작할 수 없습니다.')
+    if (!result.ok) setError(result.error ?? `${agentLabel} 로그인을 시작할 수 없습니다.`)
   }
 
   const sendAuthInput = async (): Promise<void> => {
     const text = authInput
     setAuthInput('')
     const result = await window.lt.agent.authInput(id, text)
-    if (!result.ok) setError(result.error ?? 'Claude 로그인 입력을 보낼 수 없습니다.')
+    if (!result.ok) setError(result.error ?? `${agentLabel} 로그인 입력을 보낼 수 없습니다.`)
+  }
+
+  const openModelPicker = async (): Promise<void> => {
+    if (provider !== 'codex') {
+      setError('/model은 Codex Agent에서만 사용할 수 있습니다.')
+      return
+    }
+    setError('')
+    setModelPickerOpen(true)
+    if (modelOptions.length > 0) return
+    setModelLoading(true)
+    const result = await window.lt.agent.models(id)
+    setModelLoading(false)
+    if (!result.ok) {
+      setError(result.error ?? 'Codex 모델 목록을 불러올 수 없습니다.')
+      return
+    }
+    setModelOptions(result.models ?? [])
+    setSelectedModel(result.selectedModel)
+    setSelectedReasoningEffort(result.selectedReasoningEffort)
+  }
+
+  const chooseModel = async (model?: string, reasoningEffort?: string): Promise<void> => {
+    const result = await window.lt.agent.setModel(id, model, reasoningEffort)
+    if (!result.ok) {
+      setError(result.error ?? 'Codex 모델을 선택할 수 없습니다.')
+      return
+    }
+    setSelectedModel(model)
+    setSelectedReasoningEffort(reasoningEffort)
+    setModelPickerOpen(false)
+    setInput('')
+    setError('')
+    showTransientFeedback(
+      model
+        ? `Codex 모델: ${model}${reasoningEffort ? ` / ${reasoningEffort}` : ''}`
+        : 'Codex 모델: 기본값'
+    )
   }
 
   const copyAuthCode = async (code: string): Promise<void> => {
@@ -2792,33 +3108,32 @@ export default function AgentPanel({
   const authButtonTitle =
     authStatusMessage ||
     (authStatus === 'authenticated'
-      ? '원격 Claude Code 로그인이 확인되었습니다'
+      ? `${agentLabel} 로그인이 확인되었습니다`
       : authStatus === 'checking'
-        ? '원격 Claude Code 로그인 상태를 확인하고 있습니다'
+        ? `${agentLabel} 로그인 상태를 확인하고 있습니다`
         : authStatus === 'unavailable'
-          ? '원격에서 Claude Code CLI를 찾을 수 없습니다'
-          : '원격 Claude Code 로그인')
+          ? `${agentLabel} CLI를 찾을 수 없습니다`
+          : `${agentLabel} 로그인`)
   const authButtonDisabled =
     authActive ||
     status === 'working' ||
     authStatus === 'checking' ||
     authStatus === 'authenticated' ||
     authStatus === 'unavailable'
+  const visibleRateLimits = (usage.rateLimits?.length ? usage.rateLimits : usage.rateLimit ? [usage.rateLimit] : []).filter(
+    showRateLimitInBar
+  )
   const rateLimitState =
-    usage.rateLimit?.status === 'rejected'
+    visibleRateLimits.some((limit) => limit.status === 'rejected')
       ? 'error'
-      : usage.rateLimit?.status === 'allowed_warning'
+      : visibleRateLimits.some((limit) => limit.status === 'allowed_warning')
         ? 'warn'
         : ''
   const contextLabel = usage.context
     ? `컨텍스트 ${percentText(usage.context.percentage)} · 잔여 ${tokenCount(usage.context.remainingTokens)}`
     : '컨텍스트 대기'
-  const limitReset = resetTimeText(usage.rateLimit?.resetsAt)
-  const limitLabel = usage.rateLimit
-    ? `${rateLimitTypeLabel(usage.rateLimit.rateLimitType)} ${
-        usage.rateLimit.remainingPercent === undefined ? '확인됨' : `잔여 ${percentText(usage.rateLimit.remainingPercent)}`
-      }${limitReset ? ` · ${limitReset}` : ''}`
-    : '한도 대기'
+  const cacheTokens = cacheTokenTotal(usage.tokens)
+  const limitLabels = visibleRateLimits.map((limit) => rateLimitLabel(limit))
   const panelStyle = {
     '--agent-font-size': `${agentFontSize}px`
   } as CSSProperties
@@ -2850,6 +3165,16 @@ export default function AgentPanel({
           </span>
         </div>
         <div className="agent-head-actions">
+          <select
+            className="agent-provider-select"
+            value={provider}
+            disabled={queuesNewInput || authActive}
+            title="이 탭에서 사용할 AI"
+            onChange={(e) => onProviderChange?.(e.currentTarget.value as AgentProvider)}
+          >
+            <option value="claude">Claude</option>
+            <option value="codex">Codex</option>
+          </select>
           <div className="agent-mode-menu" ref={modeMenuRef}>
             <button
               type="button"
@@ -2883,7 +3208,7 @@ export default function AgentPanel({
               </div>
             )}
           </div>
-          {ssh && (
+          {usesAgentAuth && (
             <button
               className="agent-auth-btn"
               disabled={authButtonDisabled}
@@ -2928,7 +3253,7 @@ export default function AgentPanel({
 
       <div className="agent-timeline-wrap">
         <div className="agent-timeline" ref={scrollRef} onScroll={updateTimelineFollowState} onCopy={copySelection}>
-          {items.length === 0 && <div className="agent-empty">Claude Agent</div>}
+          {items.length === 0 && <div className="agent-empty">{agentLabel} Agent</div>}
           {items.map((item) => {
             if (item.kind === 'process') {
               const expanded = expandedProcessIds.has(item.id)
@@ -2972,7 +3297,7 @@ export default function AgentPanel({
             return (
               <section key={item.id} className={`agent-card dialog ${item.status ?? ''}`}>
                 <div className="agent-card-head">
-                  <span>{item.title ?? 'Claude 질문'}</span>
+                  <span>{item.title ?? `${agentLabel} 질문`}</span>
                   {item.status && <span className="agent-card-status">{item.status}</span>}
                 </div>
                 <div className="agent-question-list">
@@ -3213,10 +3538,12 @@ export default function AgentPanel({
         )}
       </div>
 
-      {remoteCliUnavailable && (
+      {authCliUnavailable && (
         <div className="agent-auth-banner unavailable">
           <span>
-            원격 서버에서 Claude Code CLI를 찾을 수 없습니다. 원격 터미널에서 설치한 뒤 Agent를 다시 여세요.
+            {usesClaudeRemoteAuth
+              ? '원격 서버에서 Claude Code CLI를 찾을 수 없습니다. 원격 터미널에서 설치한 뒤 Agent를 다시 여세요.'
+              : 'Codex CLI를 찾을 수 없습니다. Codex CLI를 설치한 뒤 Agent를 다시 여세요.'}
           </span>
           {onOpenTerminal && (
             <button onClick={onOpenTerminal}>
@@ -3225,14 +3552,76 @@ export default function AgentPanel({
           )}
         </div>
       )}
-      {!remoteCliUnavailable && (needsAuth || remoteNeedsLogin || remoteAuthChecking) && authStatus !== 'authenticated' && (
+      {!authCliUnavailable && (needsAuth || needsLogin || authChecking) && authStatus !== 'authenticated' && (
         <div className="agent-auth-banner">
           <span>
-            {remoteAuthChecking ? '원격 Claude 상태를 확인하고 있습니다.' : '원격 Claude 로그인이 필요합니다.'}
+            {authChecking ? `${agentLabel} 상태를 확인하고 있습니다.` : `${agentLabel} 로그인이 필요합니다.`}
           </span>
           <button disabled={authButtonDisabled} onClick={() => void startAuthLogin()}>
             {authButtonLabel === '로그인' ? '로그인 시작' : authButtonLabel}
           </button>
+        </div>
+      )}
+      {modelPickerOpen && (
+        <div className="agent-model-picker">
+          <div className="agent-model-picker-head">
+            <span>Codex 모델</span>
+            <button type="button" onClick={() => setModelPickerOpen(false)}>닫기</button>
+          </div>
+          {modelLoading ? (
+            <div className="agent-model-loading">모델 목록 로드 중</div>
+          ) : (
+            <div className="agent-model-list">
+              <button
+                type="button"
+                className={`agent-model-default ${!selectedModel ? 'selected' : ''}`}
+                onClick={() => void chooseModel(undefined, undefined)}
+              >
+                <span>기본값</span>
+                <small>Codex 설정과 계정에 맞는 기본 모델</small>
+              </button>
+              {modelOptions.map((model) => {
+                const efforts = model.supportedReasoningEfforts ?? []
+                const defaultEffort = model.defaultReasoningEffort ?? efforts[0]?.reasoningEffort
+                return (
+                  <div
+                    key={model.id}
+                    className={`agent-model-item ${selectedModel === model.model ? 'selected' : ''}`}
+                  >
+                    <button
+                      type="button"
+                      className="agent-model-main"
+                      onClick={() => void chooseModel(model.model, defaultEffort)}
+                    >
+                      <span>{model.displayName}</span>
+                      <small>{model.description || model.model}</small>
+                    </button>
+                    {efforts.length > 0 && (
+                      <div className="agent-model-efforts" aria-label={`${model.displayName} reasoning effort`}>
+                        {efforts.map((effort) => (
+                          <button
+                            key={effort.reasoningEffort}
+                            type="button"
+                            className={
+                              selectedModel === model.model &&
+                              selectedReasoningEffort === effort.reasoningEffort
+                                ? 'selected'
+                                : ''
+                            }
+                            title={effort.description || `${model.displayName} ${effort.reasoningEffort}`}
+                            onClick={() => void chooseModel(model.model, effort.reasoningEffort)}
+                          >
+                            {effort.reasoningEffort}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )
+              })}
+              {modelOptions.length === 0 && <span className="muted small">선택 가능한 모델이 없습니다.</span>}
+            </div>
+          )}
         </div>
       )}
       {error && <div className="agent-error">{error}</div>}
@@ -3241,28 +3630,44 @@ export default function AgentPanel({
       <footer className="agent-prompt">
         {showSlashMenu && (
           <div ref={slashMenuRef} className="agent-slash-menu" role="listbox" aria-label="Slash commands">
-            {slashMatches.map((command, index) => (
-              <button
-                key={command.name}
-                type="button"
-                id={`agent-slash-${id}-${index}`}
-                className={`agent-slash-item ${index === slashIndex ? 'active' : ''}`}
-                data-active={index === slashIndex ? 'true' : undefined}
-                role="option"
-                aria-selected={index === slashIndex}
-                title={`${command.name}${command.argumentHint ? ` ${command.argumentHint}` : ''}`}
-                onMouseDown={(e) => {
-                  e.preventDefault()
-                  applySlashCommand(command)
-                }}
-              >
-                <span className="agent-slash-command">{command.name}</span>
-                <span className="agent-slash-detail">
-                  <span className="agent-slash-label">{command.label}</span>
-                  <span className="agent-slash-desc">{runtimeSlashCommandDescription(command)}</span>
-                </span>
-              </button>
-            ))}
+            {slashMenuRows.map((row) => {
+              if (row.kind === 'heading') {
+                return (
+                  <div key={row.label} className="agent-slash-heading">
+                    {row.label}
+                  </div>
+                )
+              }
+              const command = row.command
+              const terminalOnly = isTerminalOnlySlashCommand(command, provider)
+              return (
+                <button
+                  key={command.name}
+                  type="button"
+                  id={`agent-slash-${id}-${row.index}`}
+                  className={`agent-slash-item ${terminalOnly ? 'terminal-only' : ''} ${row.index === slashIndex ? 'active' : ''}`}
+                  data-active={row.index === slashIndex ? 'true' : undefined}
+                  role="option"
+                  aria-selected={row.index === slashIndex}
+                  title={`${command.name}${command.argumentHint ? ` ${command.argumentHint}` : ''}`}
+                  onMouseDown={(e) => {
+                    e.preventDefault()
+                    applySlashCommand(command)
+                  }}
+                >
+                  <span className="agent-slash-command">{command.name}</span>
+                  <span className="agent-slash-detail">
+                    <span className="agent-slash-label-row">
+                      <span className="agent-slash-label">{command.label}</span>
+                      <span className={`agent-slash-surface ${terminalOnly ? 'terminal-only' : 'panel'}`}>
+                        {slashCommandSurfaceLabel(command, provider)}
+                      </span>
+                    </span>
+                    <span className="agent-slash-desc">{runtimeSlashCommandDescription(command)}</span>
+                  </span>
+                </button>
+              )
+            })}
           </div>
         )}
         {authActive && (
@@ -3284,7 +3689,7 @@ export default function AgentPanel({
           ref={textareaRef}
           value={input}
           disabled={authActive}
-          placeholder={authActive ? 'Claude 로그인 진행 중' : 'Claude에게 요청'}
+          placeholder={authActive ? `${agentLabel} 로그인 진행 중` : `${agentLabel}에게 요청`}
           onChange={(e) => {
             resetPromptHistoryCursor()
             setInput(e.target.value)
@@ -3352,7 +3757,7 @@ export default function AgentPanel({
         )}
         <div
           className={`agent-usage-bar ${rateLimitState}`}
-          title={usageTitle(usage)}
+          title={usageTitle(usage, provider)}
           aria-live="polite"
         >
           <span>
@@ -3363,9 +3768,16 @@ export default function AgentPanel({
           </span>
           <span>입력 {tokenCount(usage.tokens.inputTokens)}</span>
           <span>출력 {tokenCount(usage.tokens.outputTokens)}</span>
+          {cacheTokens > 0 && <span>캐시 {tokenCount(cacheTokens)}</span>}
           <span>{contextLabel}</span>
-          <span>{limitLabel}</span>
-          {usage.tokens.totalCostUsd !== undefined && <span>{costFormatter.format(usage.tokens.totalCostUsd)}</span>}
+          {limitLabels.length > 0 ? (
+            limitLabels.map((label) => <span key={label}>{label}</span>)
+          ) : (
+            <span>한도 대기</span>
+          )}
+          {provider === 'codex' && usage.tokens.totalCostUsd !== undefined && (
+            <span>{costFormatter.format(usage.tokens.totalCostUsd)}</span>
+          )}
         </div>
         <div className="agent-prompt-actions">
           <span

@@ -5,7 +5,7 @@ import { CanvasAddon } from '@xterm/addon-canvas'
 import { WebglAddon } from '@xterm/addon-webgl'
 import '@xterm/xterm/css/xterm.css'
 import { LT_PATH, LT_PATHS, readLtPaths } from '../filetree/FileTree'
-import type { SshConn, TodoTerminalContext } from '../env'
+import type { AgentProvider, SshConn, TodoTerminalContext } from '../env'
 import FindBar from '../search/FindBar'
 import { installTerminalPointerDragGuard } from '../dragGuard'
 
@@ -235,6 +235,7 @@ export default function Terminal({
   cwd,
   visible,
   autoClaude = false,
+  autoAgent,
   resumeSessionId,
   ssh,
   focusNonce = 0,
@@ -254,6 +255,7 @@ export default function Terminal({
   cwd?: string
   visible: boolean
   autoClaude?: boolean
+  autoAgent?: AgentProvider
   resumeSessionId?: string
   ssh?: SshConn
   focusNonce?: number
@@ -800,6 +802,7 @@ export default function Terminal({
         cwd,
         cols: term.cols,
         rows: term.rows,
+        autoLaunchAgent: autoAgent,
         autoLaunchClaude: autoClaude,
         resumeSessionId,
         ssh

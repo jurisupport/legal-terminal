@@ -70,6 +70,7 @@ export interface PtyCreateOpts {
   cwd?: string
   cols: number
   rows: number
+  autoLaunchAgent?: AgentProvider
   autoLaunchClaude?: boolean
   resumeSessionId?: string
   ssh?: SshConn
@@ -85,6 +86,8 @@ export interface TerminalTabPayload {
   suggestedRecords?: string
   suggestedRecordOptions?: FolderMatchSuggestion[]
   autoClaude?: boolean
+  autoAgent?: AgentProvider
+  agentProvider?: AgentProvider
   jsId?: string
   court?: string
   caseNumber?: string
@@ -298,6 +301,7 @@ export interface SessionTranscript {
 }
 
 export type AgentPermissionMode = 'ask' | 'plan' | 'acceptEdits' | 'bypassPermissions' | 'dontAsk'
+export type AgentProvider = 'claude' | 'codex'
 
 export interface AppSettings {
   draftsRoot?: string
@@ -312,6 +316,7 @@ export interface AppSettings {
   mdFontSize?: number
   agentFontSize?: number
   agentDefaultPermissionMode?: AgentPermissionMode
+  agentDefaultProvider?: AgentProvider
   explorerSortMode?: string
   remotePickerSortMode?: string
   remoteDirectoryCache?: boolean
@@ -335,6 +340,7 @@ export interface AgentCreateOptions {
   id: string
   cwd: string
   title?: string
+  provider?: AgentProvider
   model?: string
   permissionMode?: AgentPermissionMode
   resumeSessionId?: string
@@ -360,12 +366,34 @@ export interface AgentSessionSnapshot {
   id: string
   cwd: string
   title?: string
+  provider: AgentProvider
   source: 'local' | 'ssh'
   resumeSessionId?: string
 }
 
 export interface AgentSessionSnapshotResult extends AgentCommandResult {
   session?: AgentSessionSnapshot
+}
+
+export interface AgentModelOption {
+  id: string
+  model: string
+  displayName: string
+  description?: string
+  isDefault?: boolean
+  supportedReasoningEfforts?: AgentReasoningEffortOption[]
+  defaultReasoningEffort?: string
+}
+
+export interface AgentModelListResult extends AgentCommandResult {
+  models?: AgentModelOption[]
+  selectedModel?: string
+  selectedReasoningEffort?: string
+}
+
+export interface AgentReasoningEffortOption {
+  reasoningEffort: string
+  description?: string
 }
 
 export interface AgentSendInput {
@@ -719,6 +747,9 @@ export interface LtApi {
     snapshot: (sessionId: string) => Promise<AgentSessionSnapshotResult>
     worktreeFork: (input: AgentWorktreeForkInput) => Promise<AgentWorktreeForkResult>
     send: (sessionId: string, input: AgentSendInput) => Promise<AgentCommandResult>
+    models: (sessionId: string) => Promise<AgentModelListResult>
+    setModel: (sessionId: string, model?: string, reasoningEffort?: string) => Promise<AgentCommandResult>
+    slashCommand: (sessionId: string, command: string, argument?: string) => Promise<AgentCommandResult>
     mcpStatus: (sessionId: string) => Promise<AgentCommandResult>
     promoteQueued: (sessionId: string, queueId: string) => Promise<AgentCommandResult>
     removeQueued: (sessionId: string, queueId: string) => Promise<AgentCommandResult>

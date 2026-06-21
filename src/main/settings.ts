@@ -1,7 +1,7 @@
 import { app } from 'electron'
 import { join } from 'path'
 import { readFile, writeFile, mkdir } from 'fs/promises'
-import type { AgentPermissionMode } from './agent/agent-types'
+import type { AgentPermissionMode, AgentProvider } from './agent/agent-types'
 
 /** SSH 접속 프로필 — 원격 서버에서 사건 작업(claude 실행 등)을 위한 저장된 연결. */
 export interface SshProfile {
@@ -53,6 +53,8 @@ export interface Settings {
   agentFontSize?: number
   /** Agent Panel 기본 권한 모드 */
   agentDefaultPermissionMode?: AgentPermissionMode
+  /** 새 Agent Panel 기본 AI */
+  agentDefaultProvider?: AgentProvider
   /** 파일 탐색기 정렬 방식 */
   explorerSortMode?: string
   /** 원격 폴더 선택기 정렬 방식 */

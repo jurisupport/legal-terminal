@@ -53,6 +53,7 @@ import { cancelIfTerminalPointerDrag } from './dragGuard'
 import type {
   AppSettings,
   AgentAttachment,
+  AgentProvider,
   JsCase,
   JsHearing,
   TodoTerminalContext,
@@ -107,6 +108,7 @@ const TAB_DND_TYPE = 'application/x-legal-terminal-tab'
 const DEFAULT_TERM_FONT_SIZE = 13
 const DEFAULT_MD_FONT_SIZE = 14
 const DEFAULT_AGENT_FONT_SIZE = 13
+const DEFAULT_AGENT_PROVIDER: AgentProvider = 'claude'
 const FONT_SIZE_MIN = 8
 const FONT_SIZE_MAX = 32
 const APP_WINDOW_TITLE = 'legal-terminal'
@@ -272,6 +274,8 @@ interface TermTab {
   suggestedRecords?: string // 페어링으로 추천된 소송기록 폴더 (사용자가 '열기' 눌러야 적용)
   suggestedRecordOptions?: FolderMatchSuggestion[]
   autoClaude?: boolean // 명시적으로 터미널을 열 때만 claude 자동 실행
+  autoAgent?: AgentProvider
+  agentProvider?: AgentProvider
   // JuriSupport 사건에서 연 세션의 메타 (자동 명명·사건별 필터용)
   jsId?: string
   court?: string
@@ -305,6 +309,11 @@ interface FolderMatchSuggestion {
 const docSide = (tab?: DocTab): DockSide => tab?.side ?? 'left'
 const termSide = (tab?: TermTab): DockSide => tab?.side ?? 'right'
 const isAgentTab = (tab?: TermTab): tab is TermTab & { kind: 'agent' } => tab?.kind === 'agent'
+const isAgentProvider = (value: unknown): value is AgentProvider => value === 'claude' || value === 'codex'
+const resolveAgentProvider = (value: unknown, _ssh?: SshConn): AgentProvider =>
+  isAgentProvider(value) ? value : DEFAULT_AGENT_PROVIDER
+const agentProviderLabel = (term: TermTab): string =>
+  resolveAgentProvider(term.agentProvider, term.ssh) === 'codex' ? 'Codex Agent' : 'Claude Agent'
 const otherSide = (side: DockSide): DockSide => (side === 'left' ? 'right' : 'left')
 const docKey = (id: string): WorkTabKey => `doc:${id}`
 const termKeyOf = (id: string): WorkTabKey => `terminal:${id}`
@@ -714,12 +723,18 @@ const describeTermStatus = (term: TermTab | undefined, status?: TermRunStatus): 
         : status === 'done'
           ? agent
             ? 'Agent 완료'
-            : 'Claude 완료'
+            : term.autoAgent === 'codex'
+              ? 'Codex 완료'
+              : term.autoClaude
+                ? 'Claude 완료'
+                : '터미널 완료'
           : agent
             ? 'Agent 대기'
-            : term.autoClaude
-              ? 'Claude 대기'
-              : '터미널 대기'
+            : term.autoAgent === 'codex'
+              ? 'Codex 대기'
+              : term.autoClaude
+                ? 'Claude 대기'
+                : '터미널 대기'
   const connection = term.ssh ? `원격 ${term.sshLabel ?? term.ssh.host}` : '로컬'
   return joinStatus([run, connection])
 }
@@ -959,6 +974,7 @@ const currentCaseSessionSource = (
     cwd,
     recordsFolder: currentCase.records,
     autoClaude: true,
+    agentProvider: 'claude',
     jsId: currentCase.meta?.jsId,
     court: currentCase.meta?.court,
     caseNumber: currentCase.meta?.caseNumber,
@@ -1366,6 +1382,7 @@ export default function App(): JSX.Element {
   const [draftsRoot, setDraftsRoot] = useState<string | undefined>()
   const [recordsRoot, setRecordsRoot] = useState<string | undefined>()
   const [caseOpenTarget, setCaseOpenTarget] = useState<string>(CASE_OPEN_LOCAL)
+  const [agentDefaultProvider, setAgentDefaultProvider] = useState<AgentProvider>(DEFAULT_AGENT_PROVIDER)
   const [notificationSound, setNotificationSound] =
     useState<NotificationSound>(DEFAULT_NOTIFICATION_SOUND)
   const [notificationVolume, setNotificationVolume] = useState(DEFAULT_NOTIFICATION_VOLUME)
@@ -1428,6 +1445,7 @@ export default function App(): JSX.Element {
       setRecordsRoot(s.recordsRoot)
       setSshProfiles(profiles)
       setCaseOpenTarget(resolveCaseOpenTarget(s.caseOpenTarget, profiles))
+      setAgentDefaultProvider(resolveAgentProvider(s.agentDefaultProvider))
       setNotificationSound(resolveNotificationSound(s.notificationSound))
       setNotificationVolume(clampNotificationVolume(s.notificationVolume))
     }
@@ -2192,6 +2210,7 @@ export default function App(): JSX.Element {
       const tab = {
         ...rawTab,
         caseTabId: rawTab.caseTabId ?? caseTabId(receivedCase),
+        agentProvider: rawTab.kind === 'agent' ? resolveAgentProvider(rawTab.agentProvider, rawTab.ssh) : undefined,
         side: rawTab.side ?? 'right'
       }
       setTermTabs((tabs) =>
@@ -2378,6 +2397,7 @@ export default function App(): JSX.Element {
       suggestedRecords: suggested,
       suggestedRecordOptions: suggestedOptions,
       autoClaude: kind === 'terminal',
+      agentProvider: kind === 'agent' ? resolveAgentProvider(agentDefaultProvider) : undefined,
       createdAt: Date.now(),
       side,
       ...caseMeta
@@ -2466,6 +2486,7 @@ export default function App(): JSX.Element {
       cwd: remotePath,
       recordsFolder: records,
       autoClaude: kind === 'terminal',
+      agentProvider: kind === 'agent' ? resolveAgentProvider(agentDefaultProvider, ssh) : undefined,
       createdAt: Date.now(),
       ssh,
       sshLabel: profile.label,
@@ -2697,6 +2718,7 @@ export default function App(): JSX.Element {
       cwd,
       recordsFolder: base?.records ?? source?.recordsFolder,
       autoClaude: false,
+      agentProvider: 'claude',
       createdAt: Date.now(),
       resumeSessionId: sessionId,
       renamed: !!title, // 과거 세션 제목을 그대로 쓰면 자동 갱신 안 함
@@ -2757,6 +2779,12 @@ export default function App(): JSX.Element {
       }
       return
     }
+    const terminalAutoAgent = isAgentTab(cur)
+      ? options?.reuseAgentTab
+        ? resolveAgentProvider(cur.agentProvider, cur.ssh)
+        : undefined
+      : cur.autoAgent
+    const terminalAutoClaude = terminalAutoAgent ? terminalAutoAgent === 'claude' : !isAgentTab(cur)
     if (options?.reuseAgentTab && isAgentTab(cur)) {
       void window.lt.agent.close(cur.id)
       setAgentAttachmentRequests((requests) => {
@@ -2783,7 +2811,9 @@ export default function App(): JSX.Element {
             ? {
                 ...t,
                 kind: 'terminal',
-                autoClaude: true,
+                autoClaude: terminalAutoClaude,
+                autoAgent: terminalAutoAgent,
+                agentProvider: undefined,
                 createdAt: Date.now(),
                 sessionTitle: undefined,
                 side
@@ -2793,7 +2823,7 @@ export default function App(): JSX.Element {
       )
       setActiveTerm(cur.id)
       setWorkActive(side, termKeyOf(cur.id))
-      registerCaseTabFromTerm({ ...cur, kind: 'terminal', autoClaude: true, side })
+      registerCaseTabFromTerm({ ...cur, kind: 'terminal', autoClaude: terminalAutoClaude, autoAgent: terminalAutoAgent, side })
       return
     }
     const tab: TermTab = {
@@ -2804,7 +2834,8 @@ export default function App(): JSX.Element {
       recordsFolder: cur.recordsFolder,
       suggestedRecords: cur.suggestedRecords,
       suggestedRecordOptions: cur.suggestedRecordOptions,
-      autoClaude: true, // 새 터미널도 일괄적으로 claude 실행
+      autoClaude: terminalAutoClaude,
+      autoAgent: terminalAutoAgent,
       createdAt: Date.now(),
       jsId: cur.jsId,
       court: cur.court,
@@ -2844,6 +2875,7 @@ export default function App(): JSX.Element {
       cwd,
       recordsFolder: cur?.recordsFolder ?? currentCase?.records,
       autoClaude: false,
+      agentProvider: resolveAgentProvider(cur?.agentProvider ?? agentDefaultProvider, ssh),
       createdAt: Date.now(),
       jsId: cur?.jsId ?? currentCase?.meta?.jsId,
       court: cur?.court ?? currentCase?.meta?.court,
@@ -2859,6 +2891,27 @@ export default function App(): JSX.Element {
     setActiveTerm(tab.id)
     setWorkActive(side, termKeyOf(tab.id))
     registerCaseTabFromTerm(tab)
+  }
+
+  const changeAgentProvider = (termId: string, provider: AgentProvider): void => {
+    const current = termTabsRef.current.find((term) => term.id === termId)
+    if (!current || !isAgentTab(current)) return
+    const nextProvider = resolveAgentProvider(provider, current.ssh)
+    if (current.agentProvider === nextProvider) return
+    void window.lt.agent.close(termId)
+    setTermTabs((tabs) =>
+      tabs.map((term) =>
+        term.id === termId
+          ? {
+              ...term,
+              agentProvider: nextProvider,
+              resumeSessionId: undefined,
+              sessionTitle: undefined,
+              createdAt: Date.now()
+            }
+          : term
+      )
+    )
   }
 
   const resolveForkResumeSessionId = async (source: TermTab): Promise<string | undefined> => {
@@ -2901,6 +2954,7 @@ export default function App(): JSX.Element {
       kind: 'agent',
       cwd: opts.cwd,
       autoClaude: false,
+      agentProvider: resolveAgentProvider(source.agentProvider, opts.ssh),
       createdAt: Date.now(),
       resumeSessionId: opts.resumeSessionId,
       sessionTitle: undefined,
@@ -3329,6 +3383,7 @@ export default function App(): JSX.Element {
         suggestedRecords: resolved.records ? undefined : resolved.suggestions?.[0]?.path,
         suggestedRecordOptions: resolved.records ? undefined : resolved.suggestions,
         autoClaude: false,
+        agentProvider: resolveAgentProvider(agentDefaultProvider, sshConnFromProfile(profile)),
         createdAt: Date.now(),
         ssh: sshConnFromProfile(profile),
         sshLabel: profile.label,
@@ -3360,6 +3415,7 @@ export default function App(): JSX.Element {
       recordsFolder: keepRecords,
       suggestedRecords: keepRecords ? undefined : paired,
       autoClaude: false,
+      agentProvider: resolveAgentProvider(agentDefaultProvider),
       createdAt: Date.now(),
       side: 'right'
     }
@@ -3555,6 +3611,8 @@ export default function App(): JSX.Element {
             .slice(0, 6)
         : undefined,
       autoClaude: t.kind === 'agent' ? false : (t.autoClaude ?? true),
+      autoAgent: t.kind === 'agent' ? undefined : isAgentProvider(t.autoAgent) ? t.autoAgent : undefined,
+      agentProvider: t.kind === 'agent' ? resolveAgentProvider(t.agentProvider, t.ssh) : undefined,
       jsId: typeof t.jsId === 'string' ? t.jsId : undefined,
       court: typeof t.court === 'string' ? t.court : undefined,
       caseNumber: typeof t.caseNumber === 'string' ? t.caseNumber : undefined,
@@ -5349,7 +5407,7 @@ export default function App(): JSX.Element {
           renamable: true,
           dragPayload: { kind: 'terminal', tab: { ...t } } as TabPayload,
           tooltip: [
-            isAgentTab(t) && 'Claude Agent',
+            isAgentTab(t) && agentProviderLabel(t),
             t.ssh && `🔗 ${t.sshLabel ?? '원격'} (${t.ssh.user}@${t.ssh.host})`,
             t.court && `${t.court}`,
             t.caseNumber,
@@ -5471,6 +5529,7 @@ export default function App(): JSX.Element {
                 id={t.id}
                 cwd={t.cwd}
                 title={t.title}
+                provider={resolveAgentProvider(t.agentProvider, t.ssh)}
                 resumeSessionId={t.resumeSessionId}
                 ssh={t.ssh}
                 profileId={t.profileId}
@@ -5483,6 +5542,7 @@ export default function App(): JSX.Element {
                 }
                 onStatus={(s) => onTermStatus(t.id, s)}
                 onFork={() => void forkAgentTab(t.id, termSide(t))}
+                onProviderChange={(provider) => changeAgentProvider(t.id, provider)}
                 onWorktreeFork={() => void forkAgentWorktreeTab(t.id, termSide(t))}
                 onOpenTerminal={() => addTermSame(termSide(t), t.id, { reuseAgentTab: true })}
                 onOpenDiff={openAgentDiff}
@@ -5493,6 +5553,7 @@ export default function App(): JSX.Element {
                 id={t.id}
                 cwd={t.cwd}
                 autoClaude={t.autoClaude ?? false}
+                autoAgent={t.autoAgent}
                 resumeSessionId={t.resumeSessionId}
                 ssh={t.ssh}
                 visible={t.id === activeTerm}
@@ -5582,7 +5643,7 @@ export default function App(): JSX.Element {
         renamable: true,
         dragPayload: { kind: 'terminal', tab: { ...t, side } } as TabPayload,
         tooltip: [
-          isAgentTab(t) && 'Claude Agent',
+          isAgentTab(t) && agentProviderLabel(t),
           t.ssh && `🔗 ${t.sshLabel ?? '원격'} (${t.ssh.user}@${t.ssh.host})`,
           t.court && `${t.court}`,
           t.caseNumber,
@@ -5816,6 +5877,7 @@ export default function App(): JSX.Element {
                   id={t.id}
                   cwd={t.cwd}
                   title={t.title}
+                  provider={resolveAgentProvider(t.agentProvider, t.ssh)}
                   resumeSessionId={t.resumeSessionId}
                   ssh={t.ssh}
                   profileId={t.profileId}
@@ -5828,6 +5890,7 @@ export default function App(): JSX.Element {
                   }
                   onStatus={(s) => onTermStatus(t.id, s)}
                   onFork={() => void forkAgentTab(t.id, side)}
+                  onProviderChange={(provider) => changeAgentProvider(t.id, provider)}
                   onWorktreeFork={() => void forkAgentWorktreeTab(t.id, side)}
                   onOpenTerminal={() => addTermSame(side, t.id, { reuseAgentTab: true })}
                   onOpenDiff={openAgentDiff}
@@ -5838,6 +5901,7 @@ export default function App(): JSX.Element {
                   id={t.id}
                   cwd={t.cwd}
                   autoClaude={t.autoClaude ?? false}
+                  autoAgent={t.autoAgent}
                   resumeSessionId={t.resumeSessionId}
                   ssh={t.ssh}
                   visible={t.id === visibleTermId}
@@ -8502,6 +8566,7 @@ function SettingsView(): JSX.Element {
   const caseOpenValue = resolveCaseOpenTarget(s.caseOpenTarget, profiles)
   const notificationSound = resolveNotificationSound(s.notificationSound)
   const notificationVolume = clampNotificationVolume(notificationVolumeInput)
+  const agentProviderValue = resolveAgentProvider(s.agentDefaultProvider)
   const mdFontValue = s.mdFont === DEFAULT_MD_FONT ? '' : s.mdFont ?? ''
   const mdFontOptions =
     mdFontValue && !MD_FONT_OPTIONS.some((option) => option.value === mdFontValue)
@@ -8800,6 +8865,24 @@ function SettingsView(): JSX.Element {
             }}
           />
           <span className="muted small">px</span>
+        </div>
+      </section>
+
+      <section className="setting-row">
+        <div className="setting-label">
+          새 Agent 기본 AI <span className="muted small">— 새 Agent 탭부터 적용</span>
+        </div>
+        <div className="setting-value">
+          <select
+            className="setting-select"
+            value={agentProviderValue}
+            onChange={(e) => {
+              void savePatch({ agentDefaultProvider: e.currentTarget.value as AgentProvider })
+            }}
+          >
+            <option value="claude">Claude</option>
+            <option value="codex">Codex</option>
+          </select>
         </div>
       </section>
 

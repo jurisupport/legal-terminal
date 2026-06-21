@@ -1,5 +1,7 @@
 export type AgentPermissionMode = 'ask' | 'plan' | 'acceptEdits' | 'bypassPermissions' | 'dontAsk'
 
+export type AgentProvider = 'claude' | 'codex'
+
 export type AgentSource = 'local' | 'ssh'
 
 export interface AgentSshConn {
@@ -25,6 +27,7 @@ export interface AgentCreateOptions {
   id: string
   cwd: string
   title?: string
+  provider?: AgentProvider
   model?: string
   permissionMode?: AgentPermissionMode
   resumeSessionId?: string
@@ -50,12 +53,34 @@ export interface AgentSessionSnapshot {
   id: string
   cwd: string
   title?: string
+  provider: AgentProvider
   source: AgentSource
   resumeSessionId?: string
 }
 
 export interface AgentSessionSnapshotResult extends AgentCommandResult {
   session?: AgentSessionSnapshot
+}
+
+export interface AgentModelOption {
+  id: string
+  model: string
+  displayName: string
+  description?: string
+  isDefault?: boolean
+  supportedReasoningEfforts?: AgentReasoningEffortOption[]
+  defaultReasoningEffort?: string
+}
+
+export interface AgentModelListResult extends AgentCommandResult {
+  models?: AgentModelOption[]
+  selectedModel?: string
+  selectedReasoningEffort?: string
+}
+
+export interface AgentReasoningEffortOption {
+  reasoningEffort: string
+  description?: string
 }
 
 export interface AgentSendInput {
@@ -192,6 +217,7 @@ export type AgentEvent =
       sessionId: string
       title?: string
       cwd: string
+      provider?: AgentProvider
       source: AgentSource
       slashCommands?: AgentSlashCommand[]
     }
@@ -252,6 +278,7 @@ export type AgentEvent =
       usage?: AgentTokenUsage
       context?: AgentContextUsage
       rateLimit?: AgentRateLimitUsage
+      rateLimits?: AgentRateLimitUsage[]
     }
   | { type: 'status'; sessionId: string; status: AgentStatus }
   | { type: 'error'; sessionId: string; message: string; recoverable: boolean }

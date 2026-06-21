@@ -2147,6 +2147,7 @@ ipcMain.handle('export:mdToPdf', async (e, p: { html: string; defaultPath?: stri
     await writeFile(tmp, p.html, 'utf8')
     await printWindow.loadFile(tmp)
     const pdf = await printWindow.webContents.printToPDF({
+      displayHeaderFooter: false,
       printBackground: true,
       pageSize: 'A4',
       margins: { top: 0.6, bottom: 0.6, left: 0.6, right: 0.6 }

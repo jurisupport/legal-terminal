@@ -50,6 +50,7 @@ export interface CreatePtyOptions {
   cwd?: string
   cols: number
   rows: number
+  autoLaunchAgent?: 'claude' | 'codex'
   autoLaunchClaude?: boolean
   resumeSessionId?: string // 주어지면 `claude --resume <id>`로 과거 세션 이어서 실행
   ssh?: SshConn // 주어지면 로컬 셸 대신 ssh로 원격 접속 (cwd는 원격 경로)
@@ -79,10 +80,11 @@ function buildSshArgs(opts: CreatePtyOptions): string[] {
 
   // 원격 시작 명령 (inner): (cd 사건폴더 →) claude 실행 → 끝나면 로그인 셸 유지.
   // cd 실패 시에도(&&) claude는 건너뛰되 셸은 유지(;)되어 사용자가 상황을 본다.
+  const agent = opts.autoLaunchAgent ?? (opts.autoLaunchClaude ? 'claude' : undefined)
   const launch = opts.resumeSessionId
     ? `claude --resume ${shq(opts.resumeSessionId)}`
-    : opts.autoLaunchClaude
-      ? 'claude'
+    : agent
+      ? agent
       : ''
   let inner: string
   if (opts.cwd && opts.cwd.length > 0) {
@@ -101,7 +103,7 @@ function buildSshArgs(opts: CreatePtyOptions): string[] {
 }
 
 export function createPty(opts: CreatePtyOptions, webContents: WebContents): void {
-  const { id, cols, rows, autoLaunchClaude, resumeSessionId, ssh } = opts
+  const { id, cols, rows, autoLaunchAgent, autoLaunchClaude, resumeSessionId, ssh } = opts
   const cwd = opts.cwd && opts.cwd.length > 0 ? opts.cwd : os.homedir()
 
   const existing = sessions.get(id)
@@ -167,9 +169,9 @@ export function createPty(opts: CreatePtyOptions, webContents: WebContents): voi
   if (resumeSessionId) {
     // 과거 세션 이어서 실행
     proc.write(`claude --resume ${resumeSessionId}\r`)
-  } else if (autoLaunchClaude) {
-    // 셸이 뜨면 곧바로 Claude Code CLI 실행 (VS Code 확장과 동일한 경험)
-    proc.write('claude\r')
+  } else {
+    const agent = autoLaunchAgent ?? (autoLaunchClaude ? 'claude' : undefined)
+    if (agent) proc.write(`${agent}\r`)
   }
 }
 

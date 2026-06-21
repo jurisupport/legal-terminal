@@ -72,6 +72,7 @@ interface PtyCreateOpts {
   cwd?: string
   cols: number
   rows: number
+  autoLaunchAgent?: AgentProvider
   autoLaunchClaude?: boolean
   resumeSessionId?: string
   ssh?: SshConn
@@ -87,6 +88,8 @@ interface TerminalTabPayload {
   suggestedRecords?: string
   suggestedRecordOptions?: FolderMatchSuggestion[]
   autoClaude?: boolean
+  autoAgent?: AgentProvider
+  agentProvider?: AgentProvider
   jsId?: string
   court?: string
   caseNumber?: string
@@ -300,6 +303,7 @@ interface SessionTranscript {
 }
 
 type AgentPermissionMode = 'ask' | 'plan' | 'acceptEdits' | 'bypassPermissions' | 'dontAsk'
+type AgentProvider = 'claude' | 'codex'
 
 interface AppSettings {
   draftsRoot?: string
@@ -314,6 +318,7 @@ interface AppSettings {
   mdFontSize?: number
   agentFontSize?: number
   agentDefaultPermissionMode?: AgentPermissionMode
+  agentDefaultProvider?: AgentProvider
   explorerSortMode?: string
   remotePickerSortMode?: string
   remoteDirectoryCache?: boolean
@@ -410,6 +415,7 @@ interface AgentCreateOptions {
   id: string
   cwd: string
   title?: string
+  provider?: AgentProvider
   model?: string
   permissionMode?: AgentPermissionMode
   resumeSessionId?: string
@@ -435,12 +441,34 @@ interface AgentSessionSnapshot {
   id: string
   cwd: string
   title?: string
+  provider: AgentProvider
   source: 'local' | 'ssh'
   resumeSessionId?: string
 }
 
 interface AgentSessionSnapshotResult extends AgentCommandResult {
   session?: AgentSessionSnapshot
+}
+
+interface AgentModelOption {
+  id: string
+  model: string
+  displayName: string
+  description?: string
+  isDefault?: boolean
+  supportedReasoningEfforts?: AgentReasoningEffortOption[]
+  defaultReasoningEffort?: string
+}
+
+interface AgentModelListResult extends AgentCommandResult {
+  models?: AgentModelOption[]
+  selectedModel?: string
+  selectedReasoningEffort?: string
+}
+
+interface AgentReasoningEffortOption {
+  reasoningEffort: string
+  description?: string
 }
 
 interface AgentSendInput {
@@ -796,6 +824,12 @@ const api = {
       ipcRenderer.invoke('agent:worktreeFork', input),
     send: (sessionId: string, input: AgentSendInput): Promise<AgentCommandResult> =>
       ipcRenderer.invoke('agent:send', { sessionId, input }),
+    models: (sessionId: string): Promise<AgentModelListResult> =>
+      ipcRenderer.invoke('agent:models', sessionId),
+    setModel: (sessionId: string, model?: string, reasoningEffort?: string): Promise<AgentCommandResult> =>
+      ipcRenderer.invoke('agent:setModel', { sessionId, model, reasoningEffort }),
+    slashCommand: (sessionId: string, command: string, argument?: string): Promise<AgentCommandResult> =>
+      ipcRenderer.invoke('agent:slashCommand', { sessionId, command, argument }),
     mcpStatus: (sessionId: string): Promise<AgentCommandResult> =>
       ipcRenderer.invoke('agent:mcpStatus', sessionId),
     promoteQueued: (sessionId: string, queueId: string): Promise<AgentCommandResult> =>
