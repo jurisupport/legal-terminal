@@ -40,9 +40,9 @@ curl -fsSL https://raw.githubusercontent.com/jurisupport/legal-terminal/main/ins
 
 ## 이번 업데이트
 
-최신 릴리스: [v0.1.103](https://github.com/jurisupport/legal-terminal/releases/tag/v0.1.103)
+최신 릴리스: [v0.1.104](https://github.com/jurisupport/legal-terminal/releases/tag/v0.1.104)
 
-- **사건 목록 불러오기 복구**: JuriSupport 사건 조회 페이지 크기를 서버 한도에 맞춰 등록된 사건이 표시됩니다.
+- **사건 목록 불러오기 복구**: JuriSupport MCP의 여러 SSE 응답 이벤트 중 실제 도구 결과를 읽어 등록된 사건이 표시됩니다.
 
 ## 처음 쓰는 순서
 

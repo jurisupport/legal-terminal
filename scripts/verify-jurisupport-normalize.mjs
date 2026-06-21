@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 
 const { normalizeCaseList } = await import('../src/main/jurisupportNormalize.ts')
+const { parseRpc } = await import('../src/main/mcpResponse.ts')
 
 const cases = normalizeCaseList({
   data: {
@@ -35,3 +36,15 @@ assert.equal(cases[0].parties[0].party.name, '홍길동')
 assert.equal(cases[0].hearings[0].dateTime, '2026-07-03T10:30:00+09:00')
 assert.equal(cases[0].hearings[0].location, '404호')
 assert.equal(cases[0]._count?.hearings, 1)
+
+const rpc = parseRpc(
+  [
+    'event: ping',
+    'data: {"jsonrpc":"2.0","id":0,"result":{"content":[{"type":"text","text":"[]" }]}}',
+    '',
+    'event: message',
+    'data: {"jsonrpc":"2.0","id":2,"result":{"content":[{"type":"text","text":"[{\\"id\\":\\"case-2\\"}]" }]}}'
+  ].join('\n')
+)
+
+assert.equal(rpc.result.content[0].text, '[{"id":"case-2"}]')

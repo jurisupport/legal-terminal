@@ -6,6 +6,7 @@ import {
   type JsCase,
   type JsParty
 } from './jurisupportNormalize'
+import { parseRpc } from './mcpResponse'
 
 export type { JsCase, JsHearing, JsParty } from './jurisupportNormalize'
 
@@ -94,17 +95,6 @@ async function rawPost(
   }
 }
 
-// SSE/JSON 응답에서 JSON-RPC 객체 추출
-function parseRpc(text: string): { result?: unknown; error?: { code: number; message: string } } | null {
-  const dataLine = text.split(/\r?\n/).find((l) => l.startsWith('data:'))
-  const raw = dataLine ? dataLine.slice(5).trim() : text
-  try {
-    return JSON.parse(raw)
-  } catch {
-    return null
-  }
-}
-
 async function ensureSession(token: string): Promise<string> {
   const init = await rawPost(token, {
     jsonrpc: '2.0',
@@ -144,9 +134,13 @@ async function callToolNow(name: string, args: Record<string, unknown>): Promise
     resp = await call()
     rpc = parseRpc(resp.text)
   }
+  if (!rpc) throw new Error(`JuriSupport 응답을 해석하지 못했습니다. (HTTP ${resp.status})`)
   if (rpc?.error) throw new Error(rpc.error.message)
   // MCP 도구 결과: result.content[0].text = JSON 문자열
-  const result = rpc?.result as { content?: { type: string; text: string }[] } | undefined
+  if (!('result' in rpc)) {
+    throw new Error(`JuriSupport 응답에 result가 없습니다. (HTTP ${resp.status})`)
+  }
+  const result = rpc.result as { content?: { type: string; text: string }[] } | undefined
   const textPart = result?.content?.find((c) => c.type === 'text')?.text
   if (textPart) {
     try {
