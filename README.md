@@ -40,9 +40,9 @@ curl -fsSL https://raw.githubusercontent.com/jurisupport/legal-terminal/main/ins
 
 ## 이번 업데이트
 
-최신 릴리스: [v0.1.104](https://github.com/jurisupport/legal-terminal/releases/tag/v0.1.104)
+최신 릴리스: [v0.1.105](https://github.com/jurisupport/legal-terminal/releases/tag/v0.1.105)
 
-- **사건 목록 불러오기 복구**: JuriSupport MCP의 여러 SSE 응답 이벤트 중 실제 도구 결과를 읽어 등록된 사건이 표시됩니다.
+- **원격 Claude 로그인 상태 복구**: 로그인 성공 후 Agent 패널이 계속 로그인을 요구하던 상태 확인을 바로잡았습니다.
 
 ## 처음 쓰는 순서
 

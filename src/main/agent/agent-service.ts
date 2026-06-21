@@ -136,7 +136,10 @@ const MCP_STATUS_TIMEOUT_MS = 20_000
 const GIT_WORKTREE_TIMEOUT_MS = 60_000
 const CLAUDE_USAGE_PROBE_COOLDOWN_MS = 60_000
 const MIN_TEXT_OVERLAP = 4
-const sshBin = process.platform === 'win32' ? 'ssh.exe' : 'ssh'
+const sshBin =
+  process.platform === 'win32'
+    ? resolveWindowsOpenSsh() || 'ssh.exe'
+    : 'ssh'
 const codexBin = process.platform === 'win32' ? 'codex.cmd' : 'codex'
 const CLAUDE_AGENT_SDK_BINARY_BY_PLATFORM: Partial<Record<NodeJS.Platform, string>> = {
   darwin: 'claude',
@@ -172,6 +175,19 @@ function resolveAgentProvider(provider: AgentProvider | undefined, _source: Agen
 
 function shq(value: string): string {
   return `'${value.replace(/'/g, "'\\''")}'`
+}
+
+function resolveWindowsOpenSsh(): string | undefined {
+  const winDir = process.env.SystemRoot || process.env.WINDIR || 'C:\\Windows'
+  const candidate = join(winDir, 'System32', 'OpenSSH', 'ssh.exe')
+  return existsSync(candidate) ? candidate : undefined
+}
+
+function sshErrorMessage(error: Error): string {
+  if ((error as NodeJS.ErrnoException).code === 'ENOENT' && /ssh/i.test(error.message)) {
+    return '로컬 Windows OpenSSH Client(ssh.exe)를 찾을 수 없습니다. Windows 설정 > 시스템 > 선택적 기능에서 OpenSSH Client를 설치한 뒤 앱을 다시 시작하세요.'
+  }
+  return error.message
 }
 
 function sshArgs(ssh: AgentSshConn, opts: SshArgsOptions = {}): string[] {
@@ -400,13 +416,18 @@ function isAuthFailureOutput(value: string): boolean {
 function loggedInFromAuthStatusOutput(output: string): boolean | undefined {
   const trimmed = output.trim()
   if (!trimmed) return undefined
+  const jsonStart = trimmed.indexOf('{')
+  const jsonEnd = trimmed.lastIndexOf('}')
+  const jsonText = jsonStart >= 0 && jsonEnd > jsonStart ? trimmed.slice(jsonStart, jsonEnd + 1) : trimmed
   try {
-    const parsed = JSON.parse(trimmed) as unknown
+    const parsed = JSON.parse(jsonText) as unknown
     const record = asRecord(parsed)
     if (typeof record?.loggedIn === 'boolean') return record.loggedIn
   } catch {
     /* Older Claude builds may print plain text. */
   }
+  if (/"loggedIn"\s*:\s*true/i.test(trimmed)) return true
+  if (/"loggedIn"\s*:\s*false/i.test(trimmed)) return false
   if (isAuthFailureOutput(trimmed)) return false
   if (/(logged|signed)\s+in|authenticated|claude\.ai/i.test(trimmed)) return true
   return undefined
@@ -430,7 +451,7 @@ function refreshAgentAuthStatus(session: AgentSession): void {
               env: cleanEnv()
             })
     } catch (error) {
-      emitAuthStatus(session, 'error', error instanceof Error ? error.message : String(error))
+      emitAuthStatus(session, 'error', error instanceof Error ? sshErrorMessage(error) : String(error))
       return
     }
     let output = ''
@@ -439,10 +460,17 @@ function refreshAgentAuthStatus(session: AgentSession): void {
     }
     proc.stdout.on('data', append)
     proc.stderr.on('data', append)
+    let failedToStart = false
     proc.on('error', (error) => {
-      emitAuthStatus(session, error.message.includes('ENOENT') ? 'unavailable' : 'error', error.message)
+      failedToStart = true
+      emitAuthStatus(
+        session,
+        (error as NodeJS.ErrnoException).code === 'ENOENT' ? 'unavailable' : 'error',
+        sshErrorMessage(error)
+      )
     })
     proc.on('close', (code) => {
+      if (failedToStart) return
       const loggedIn = loggedInFromAuthStatusOutput(output)
       if (loggedIn === true) {
         emitAuthStatus(session, 'authenticated')
@@ -470,7 +498,7 @@ function refreshAgentAuthStatus(session: AgentSession): void {
       env: cleanEnv()
     })
   } catch (error) {
-    emitAuthStatus(session, 'error', error instanceof Error ? error.message : String(error))
+    emitAuthStatus(session, 'error', error instanceof Error ? sshErrorMessage(error) : String(error))
     return
   }
 
@@ -480,8 +508,17 @@ function refreshAgentAuthStatus(session: AgentSession): void {
   }
   proc.stdout.on('data', append)
   proc.stderr.on('data', append)
-  proc.on('error', (error) => emitAuthStatus(session, 'error', error.message))
+  let failedToStart = false
+  proc.on('error', (error) => {
+    failedToStart = true
+    emitAuthStatus(
+      session,
+      (error as NodeJS.ErrnoException).code === 'ENOENT' ? 'unavailable' : 'error',
+      sshErrorMessage(error)
+    )
+  })
   proc.on('close', (code) => {
+    if (failedToStart) return
     const loggedIn = loggedInFromAuthStatusOutput(output)
     if (loggedIn === true) {
       emitAuthStatus(session, 'authenticated')
@@ -2842,7 +2879,7 @@ export function startAgentAuthLogin(sessionId: string): AgentCommandResult {
       })
     }
   } catch (error) {
-    return { ok: false, error: error instanceof Error ? error.message : String(error) }
+    return { ok: false, error: error instanceof Error ? sshErrorMessage(error) : String(error) }
   }
 
   session.authProcess = proc
@@ -2857,12 +2894,13 @@ export function startAgentAuthLogin(sessionId: string): AgentCommandResult {
   proc.on('error', (error) => {
     if (session.authProcess !== proc) return
     if (session.authProcess === proc) session.authProcess = undefined
+    const message = sshErrorMessage(error)
     emit(session, {
       type: 'auth:done',
       sessionId: session.id,
       ok: false,
       exitCode: null,
-      message: error.message
+      message
     })
     emit(session, { type: 'status', sessionId: session.id, status: 'error' })
     refreshAgentAuthStatus(session)
@@ -2878,6 +2916,7 @@ export function startAgentAuthLogin(sessionId: string): AgentCommandResult {
       exitCode: code,
       message: ok ? `${label} 로그인이 완료되었습니다.` : `${label} 로그인 종료: code=${code ?? 'unknown'}`
     })
+    if (ok) emitAuthStatus(session, 'authenticated', `${label} 로그인이 완료되었습니다.`)
     emit(session, { type: 'status', sessionId: session.id, status: ok ? 'idle' : 'error' })
     refreshAgentAuthStatus(session)
   })
