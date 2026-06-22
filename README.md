@@ -12,8 +12,6 @@
 
 ![legal-terminal demo](screenshots/demo.gif)
 
-[고화질 사용 영상 보기](screenshots/demo.mp4)
-
 legal-terminal은 따로 떠 있던 `claude` 터미널, 문서 에디터, 전자소송기록 뷰어, 사건·기일 대시보드를 하나로 묶습니다. 기존 `jurisupport-plugins`의 `songmu-legal` 플러그인, korean-law MCP, 판례·법령·사건기록 검색 도구, PII 보호 훅도 그대로 사용할 수 있습니다.
 
 ## 빠른 설치
