@@ -5646,6 +5646,26 @@ body {
   gap: 8px;
   margin-bottom: 10px;
 }
+.ssh-card-head .setting-input {
+  flex: 1;
+}
+.ssh-test-result {
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--fg-muted);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  margin-bottom: 10px;
+  padding: 6px 8px;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+.ssh-test-result.ok {
+  color: #6fbf8f;
+}
+.ssh-test-result.fail {
+  color: #e0785c;
+}
 .ssh-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;

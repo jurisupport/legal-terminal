@@ -40,9 +40,9 @@ curl -fsSL https://raw.githubusercontent.com/jurisupport/legal-terminal/main/ins
 
 ## 이번 업데이트
 
-최신 릴리스: [v0.1.106](https://github.com/jurisupport/legal-terminal/releases/tag/v0.1.106)
+최신 릴리스: [v0.1.107](https://github.com/jurisupport/legal-terminal/releases/tag/v0.1.107)
 
-- **원격 Claude 로그인 상태 복구**: 로그인 성공 후 Agent 패널이 계속 로그인을 요구하던 상태 확인을 바로잡았습니다.
+- **사건 기록 수동 연결**: PC 사건 목록·기일·할일·사건탭 메뉴에서 소송기록 폴더를 바로 지정할 수 있게 했습니다.
 
 ## 처음 쓰는 순서
 

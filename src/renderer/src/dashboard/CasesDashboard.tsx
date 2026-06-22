@@ -40,6 +40,7 @@ export default function CasesDashboard({
   onOpenRemote,
   sshProfiles = [],
   defaultOpenProfileId,
+  onPickRecords,
   onBrief,
   onHearingRecord,
   onChanged
@@ -49,6 +50,7 @@ export default function CasesDashboard({
   onOpenRemote?: (c: JsCase, profile: SshProfile) => void
   sshProfiles?: SshProfile[]
   defaultOpenProfileId?: string
+  onPickRecords?: (c: JsCase) => void | Promise<void>
   onBrief: (c: JsCase) => void
   onHearingRecord?: (c: JsCase) => void
   onChanged?: () => void
@@ -305,6 +307,7 @@ export default function CasesDashboard({
           onOpenRemote={onOpenRemote}
           sshProfiles={sshProfiles}
           defaultOpenProfileId={defaultOpenProfileId}
+          onPickRecords={onPickRecords}
           onBrief={onBrief}
           onHearingRecord={onHearingRecord}
           onDetail={toggleDetail}

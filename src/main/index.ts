@@ -21,7 +21,8 @@ import {
   clearRemoteDirCache as clearRemotePickerDirCache,
   invalidateRemoteDirCacheForProfile,
   listRemoteDir,
-  searchRemoteDirs
+  searchRemoteDirs,
+  testSshConnection
 } from './ssh'
 import { remoteRcloneInfo, runRemoteSync, cancelSync, type RemoteSyncOpts } from './sync'
 import {
@@ -633,6 +634,7 @@ ipcMain.handle(
       limit: p.limit
     })
 )
+ipcMain.handle('ssh:test', (_e, profile: SshProfile) => testSshConnection(profile))
 ipcMain.handle('ssh:clearDirCache', () => {
   clearRemotePickerDirCache()
   clearRemoteFsDirCache()

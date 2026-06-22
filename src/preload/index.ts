@@ -774,6 +774,10 @@ const api = {
       | { ok: true; entries: RemoteEntry[]; cwd: string; truncated?: boolean }
       | { ok: false; error: string }
     > => ipcRenderer.invoke('ssh:searchDirs', { profile, path, ...opts }),
+    test: (
+      profile: SshProfile
+    ): Promise<{ ok: true; cwd: string } | { ok: false; error: string }> =>
+      ipcRenderer.invoke('ssh:test', profile),
     clearDirCache: (): Promise<{ ok: boolean; error?: string }> =>
       ipcRenderer.invoke('ssh:clearDirCache')
   },

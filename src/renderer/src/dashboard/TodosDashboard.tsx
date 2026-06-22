@@ -339,6 +339,7 @@ export default function TodosDashboard({
   onOpenRemote,
   sshProfiles = [],
   defaultOpenProfileId,
+  onPickRecords,
   onBrief,
   onAskClaudeTodoUpdate
 }: {
@@ -349,6 +350,7 @@ export default function TodosDashboard({
   onOpenRemote?: (c: JsCase, profile: SshProfile) => void
   sshProfiles?: SshProfile[]
   defaultOpenProfileId?: string
+  onPickRecords?: (c: JsCase) => void | Promise<void>
   onBrief?: (c: JsCase) => void
   onAskClaudeTodoUpdate?: (prompt: string) => void
 }): JSX.Element {
@@ -906,6 +908,7 @@ export default function TodosDashboard({
           onOpenRemote={onOpenRemote}
           sshProfiles={sshProfiles}
           defaultOpenProfileId={defaultOpenProfileId}
+          onPickRecords={onPickRecords}
           onBrief={onBrief ?? (() => {})}
         />
       )}

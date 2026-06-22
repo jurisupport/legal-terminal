@@ -11,6 +11,7 @@ import Terminal from './terminal/Terminal'
 import AgentPanel, {
   DiffPreview,
   type AgentAttachmentRequest,
+  type AgentDraftState,
   type AgentDiffOpenRequest
 } from './agent/AgentPanel'
 import FileTree, { LT_PATH, sortEntries, type PendingCreateRequest, type SortMode } from './filetree/FileTree'
@@ -479,6 +480,7 @@ interface CurrentCase {
   profileId?: string
   remotePath?: string
 }
+type OpenedCase = CurrentCase & { term?: TermTab; termId?: string }
 
 interface ClaudeDraftPromptOptions {
   sourcePath?: string
@@ -1313,6 +1315,17 @@ let docSeq = 0
 const newId = (): string =>
   typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : `id-${Date.now()}-${++docSeq}`
 
+const hasAgentDraft = (draft?: AgentDraftState): draft is AgentDraftState =>
+  !!draft && (draft.input.trim().length > 0 || draft.attachments.length > 0)
+
+const sameAgentDraft = (a: AgentDraftState | undefined, b: AgentDraftState): boolean =>
+  !!a && a.input === b.input && a.attachments === b.attachments
+
+const agentAttachmentKey = (attachment: AgentAttachment): string =>
+  attachment.kind === 'selection'
+    ? `${attachment.kind}:${attachment.label}:${attachment.text ?? ''}`
+    : `${attachment.kind}:${attachment.path ?? attachment.label}`
+
 export default function App(): JSX.Element {
   const docOnly = window.location.hash.includes('docOnly')
   const termOnly = window.location.hash.includes('termOnly')
@@ -1348,6 +1361,8 @@ export default function App(): JSX.Element {
     tabId: string
   } | null>(null)
   const [agentAttachmentRequests, setAgentAttachmentRequests] = useState<Record<string, AgentAttachmentRequest[]>>({})
+  const [agentDrafts, setAgentDrafts] = useState<Record<string, AgentDraftState>>({})
+  const [agentDraftClearNonce, setAgentDraftClearNonce] = useState<Record<string, number>>({})
   const [termFocusNonce, setTermFocusNonce] = useState<Record<string, number>>({})
   const [termBracketedPasteMode, setTermBracketedPasteMode] = useState<Record<string, boolean>>({})
   const termBracketedPasteModeRef = useRef<Record<string, boolean>>({})
@@ -1370,6 +1385,8 @@ export default function App(): JSX.Element {
     })
   }, [caseTabs])
   const termTabsRef = useRef<TermTab[]>([])
+  const agentAttachmentRequestsRef = useRef<Record<string, AgentAttachmentRequest[]>>({})
+  const agentDraftsRef = useRef<Record<string, AgentDraftState>>({})
   const selectionAttachmentSeqRef = useRef(0)
   const rememberedSessionsRef = useRef<Set<string>>(new Set())
   const forceWindowCloseRef = useRef(false)
@@ -1396,6 +1413,8 @@ export default function App(): JSX.Element {
     draftsPath?: string
     title?: string
     startPath?: string
+    termId?: string
+    source?: CurrentCase
   } | null>(null)
   const [syncInit, setSyncInit] = useState<{
     profile: SshProfile
@@ -1493,6 +1512,8 @@ export default function App(): JSX.Element {
   docTabsRef.current = docTabs
   dirtyDocsRef.current = dirtyDocs
   termTabsRef.current = termTabs
+  agentAttachmentRequestsRef.current = agentAttachmentRequests
+  agentDraftsRef.current = agentDrafts
   useEffect(() => {
     const killWindowTerms = (): void => {
       for (const t of termTabsRef.current) {
@@ -1666,9 +1687,9 @@ export default function App(): JSX.Element {
     })
   }
   const openAgentDiff = useCallback(
-    (request: AgentDiffOpenRequest): void => {
+    (request: AgentDiffOpenRequest, sourceCaseTabId?: string): void => {
       const id = `agent-diff-${request.id}`
-      const caseTabIdValue = currentCaseTabIdForNewTab(termTabs.find((t) => t.id === activeTerm))
+      const caseTabIdValue = sourceCaseTabId ?? currentCaseTabIdForNewTab(termTabs.find((t) => t.id === activeTerm))
       setAgentDiffs((diffs) => ({ ...diffs, [request.id]: request }))
       setDocTabs((tabs) => {
         const existing = tabs.find((tab) => tab.kind === 'diff' && tab.diffId === request.id)
@@ -2384,7 +2405,7 @@ export default function App(): JSX.Element {
     caseMeta?: CaseMeta,
     side: DockSide = 'right',
     suggestedOptions?: FolderMatchSuggestion[]
-  ): void => {
+  ): TermTab => {
     const source: CurrentCase = { drafts, records, name, meta: caseMeta }
     const caseTabIdValue = caseTabId(source)
     const tab: TermTab = {
@@ -2407,6 +2428,7 @@ export default function App(): JSX.Element {
     setWorkActive(side, termKeyOf(tab.id))
     rememberLocalCase(drafts, records, name, caseMeta, tab.id)
     preloadPastSessions(tab.cwd, tab)
+    return tab
   }
 
   const createCase = (
@@ -2417,7 +2439,7 @@ export default function App(): JSX.Element {
     caseMeta?: CaseMeta,
     side: DockSide = 'right',
     suggestedOptions?: FolderMatchSuggestion[]
-  ): void => createLocalCaseTab('agent', drafts, name, records, suggested, caseMeta, side, suggestedOptions)
+  ): TermTab => createLocalCaseTab('agent', drafts, name, records, suggested, caseMeta, side, suggestedOptions)
 
   const createCaseTerminal = (
     drafts: string,
@@ -2427,7 +2449,7 @@ export default function App(): JSX.Element {
     caseMeta?: CaseMeta,
     side: DockSide = 'right',
     suggestedOptions?: FolderMatchSuggestion[]
-  ): void => createLocalCaseTab('terminal', drafts, name, records, suggested, caseMeta, side, suggestedOptions)
+  ): TermTab => createLocalCaseTab('terminal', drafts, name, records, suggested, caseMeta, side, suggestedOptions)
 
   const historyDraftsForTerm = (t: TermTab): string =>
     t.ssh && t.profileId ? remoteUri(t.profileId, t.cwd) : t.cwd
@@ -2793,6 +2815,18 @@ export default function App(): JSX.Element {
         delete next[cur.id]
         return next
       })
+      setAgentDrafts((drafts) => {
+        if (!drafts[cur.id]) return drafts
+        const next = { ...drafts }
+        delete next[cur.id]
+        return next
+      })
+      setAgentDraftClearNonce((nonces) => {
+        if (!(cur.id in nonces)) return nonces
+        const next = { ...nonces }
+        delete next[cur.id]
+        return next
+      })
       setTermAttention((current) => {
         if (!current.has(cur.id)) return current
         const next = new Set(current)
@@ -2888,6 +2922,7 @@ export default function App(): JSX.Element {
       side
     }
     setTermTabs((tabs) => [...tabs, tab])
+    moveAgentDraft(isAgentTab(cur) ? cur.id : undefined, tab.id)
     setActiveTerm(tab.id)
     setWorkActive(side, termKeyOf(tab.id))
     registerCaseTabFromTerm(tab)
@@ -2965,6 +3000,7 @@ export default function App(): JSX.Element {
       side: opts.side
     }
     setTermTabs((tabs) => [...tabs, tab])
+    moveAgentDraft(source.id, tab.id)
     setActiveTerm(tab.id)
     setWorkActive(opts.side, termKeyOf(tab.id))
     registerCaseTabFromTerm(tab)
@@ -3074,6 +3110,18 @@ export default function App(): JSX.Element {
       const n = { ...m }
       delete n[id]
       return n
+    })
+    setAgentDrafts((drafts) => {
+      if (!drafts[id]) return drafts
+      const next = { ...drafts }
+      delete next[id]
+      return next
+    })
+    setAgentDraftClearNonce((nonces) => {
+      if (!(id in nonces)) return nonces
+      const next = { ...nonces }
+      delete next[id]
+      return next
     })
     setTermAttention((s) => {
       if (!s.has(id)) return s
@@ -3226,24 +3274,39 @@ export default function App(): JSX.Element {
     activateWorkTab(fallbackSide, scoped[ni])
   }
 
-  // 활성 사건(또는 마지막 사건)에 소송기록 폴더를 지정/탐색 → 뷰어 연결 + 페어링 기억.
-  // 터미널이 닫혀 있어도 현재 사건 컨텍스트에 적용된다.
-  const pickRecords = async (): Promise<void> => {
-    const cur = termTabs.find((t) => t.id === activeTerm)
+  const saveJsRecordsPairing = (source: CurrentCase | undefined, drafts: string, records: string): void => {
+    const jsId = source?.meta?.jsId
+    if (!jsId) return
+    const key = source?.profileId ? remoteJsPairingKey(source.profileId, jsId) : jsId
+    void window.lt.case.setJsPairing(key, drafts, records)
+  }
+
+  // 활성 사건(또는 지정한 사건)에 소송기록 폴더를 지정/탐색 → 뷰어 연결 + 페어링 기억.
+  // 터미널이 닫혀 있어도 사건 컨텍스트에 적용된다.
+  const pickRecords = async (target?: { term?: TermTab; termId?: string; source?: CurrentCase }): Promise<void> => {
+    let cur: TermTab | undefined
+    if (target?.term) cur = target.term
+    else if (target?.termId) cur = termTabs.find((t) => t.id === target.termId)
+    else if (!target?.source) cur = termTabs.find((t) => t.id === activeTerm)
+    const source = target?.source ?? (cur ? currentCaseFromTerm(cur) : currentCase ?? undefined)
     const remoteCtx =
       cur?.ssh && cur.profileId
         ? {
             profileId: cur.profileId,
             draftsPath: cur.cwd,
             title: cur.title,
-            records: cur.recordsFolder
+            records: cur.recordsFolder,
+            source: currentCaseFromTerm(cur),
+            termId: cur.id
           }
-        : !cur && currentCase?.ssh && currentCase.profileId && currentCase.remotePath
+        : source?.ssh && source.profileId && source.remotePath
           ? {
-              profileId: currentCase.profileId,
-              draftsPath: currentCase.remotePath,
-              title: currentCase.name,
-              records: currentCase.records
+              profileId: source.profileId,
+              draftsPath: source.remotePath,
+              title: source.name,
+              records: source.records,
+              source,
+              termId: target?.termId
             }
           : null
     if (remoteCtx) {
@@ -3264,23 +3327,25 @@ export default function App(): JSX.Element {
           profile: prof,
           draftsPath: remoteCtx.draftsPath,
           title: remoteCtx.title,
-          startPath: currentRecords || prof.recordsRoot || '~'
+          startPath: currentRecords || prof.recordsRoot || '~',
+          termId: remoteCtx.termId,
+          source: remoteCtx.source
         })
       } else {
         window.alert('이 사건에 연결된 SSH 프로필을 찾을 수 없습니다. 설정에서 SSH 프로필을 확인하세요.')
       }
       return
     }
-    const draftsForPair = cur?.cwd ?? currentCase?.drafts
+    const draftsForPair = cur ? historyDraftsForTerm(cur) : source?.drafts
     const r = await window.lt.dialog.pickFolder({
       title: '소송기록 폴더 선택',
-      defaultPath: recordsRoot ?? currentCase?.records
+      defaultPath: recordsRoot ?? source?.records
     })
     if (!r) return
     if (cur) {
       setTermTabs((tabs) =>
         tabs.map((t) =>
-          t.id === activeTerm
+          t.id === cur.id
             ? {
                 ...t,
                 recordsFolder: r.path,
@@ -3291,16 +3356,23 @@ export default function App(): JSX.Element {
         )
       )
     }
-    // 터미널 유무와 무관하게 현재 사건 컨텍스트에도 반영(뷰어가 이걸 참조)
-    setCurrentCase((c) => (c ? { ...c, records: r.path } : c))
+    const nextSource = source ? { ...source, records: r.path } : undefined
+    // 터미널 유무와 무관하게 사건 컨텍스트에도 반영(뷰어가 이걸 참조)
+    setCurrentCase((c) => nextSource ?? (c ? { ...c, records: r.path } : c))
     if (cur) registerCaseTabFromTerm({ ...cur, recordsFolder: r.path })
-    else if (currentCase) registerCaseTab({ ...currentCase, records: r.path })
+    else if (nextSource) registerCaseTab(nextSource)
     if (draftsForPair) {
       window.lt.case.setPairing(draftsForPair, r.path)
+      saveJsRecordsPairing(
+        nextSource ?? (cur ? currentCaseFromTerm({ ...cur, recordsFolder: r.path }) : undefined),
+        draftsForPair,
+        r.path
+      )
       window.lt.case
-        .addHistory({ drafts: draftsForPair, records: r.path, name: cur?.title ?? currentCase?.name ?? '사건' })
+        .addHistory({ drafts: draftsForPair, records: r.path, name: cur?.title ?? source?.name ?? '사건' })
         .then(setRecent)
     }
+    setMode('viewer')
   }
 
   const onOutline = (path: string, parsed: ParsedRecord): void => setPdfRecord({ path, parsed })
@@ -3438,6 +3510,53 @@ export default function App(): JSX.Element {
   )
   const isViewer = mode === 'viewer'
   const sessionCaseSource = currentCaseSessionSource(currentCase, sshProfiles)
+
+  const handleAgentDraftChange = (termId: string, draft: AgentDraftState): void => {
+    setAgentDrafts((current) => {
+      if (!hasAgentDraft(draft)) {
+        if (!current[termId]) return current
+        const next = { ...current }
+        delete next[termId]
+        return next
+      }
+      if (sameAgentDraft(current[termId], draft)) return current
+      return { ...current, [termId]: draft }
+    })
+  }
+
+  const moveAgentDraft = (fromId: string | undefined, toId: string): void => {
+    if (!fromId || fromId === toId) return
+    const draft = agentDraftsRef.current[fromId]
+    const pendingRequests = agentAttachmentRequestsRef.current[fromId] ?? []
+    if (!hasAgentDraft(draft) && pendingRequests.length === 0) return
+    if (hasAgentDraft(draft)) {
+      setAgentDrafts((current) => {
+        const next = { ...current, [toId]: { input: draft.input, attachments: [...draft.attachments] } }
+        delete next[fromId]
+        return next
+      })
+    }
+    if (pendingRequests.length > 0) {
+      setAgentAttachmentRequests((current) => {
+        const draftKeys = hasAgentDraft(draft) ? new Set(draft.attachments.map(agentAttachmentKey)) : undefined
+        const moving = (current[fromId] ?? pendingRequests).filter(
+          (request) => !draftKeys?.has(agentAttachmentKey(request.attachment))
+        )
+        if (moving.length === 0) {
+          const next = { ...current }
+          delete next[fromId]
+          return next
+        }
+        const next = { ...current, [toId]: [...(current[toId] ?? []), ...moving] }
+        delete next[fromId]
+        return next
+      })
+    }
+    setAgentDraftClearNonce((current) => ({
+      ...current,
+      [fromId]: (current[fromId] ?? 0) + 1
+    }))
+  }
 
   const handleAgentAttachmentRequestsHandled = (
     termId: string,
@@ -3937,20 +4056,17 @@ export default function App(): JSX.Element {
   const onDropFiles = (files: FileList): void => {
     if (activeDraftsFolder) copyFilesTo(activeDraftsFolder, files)
   }
-  const downloadEntry = (path: string, name: string, isDir: boolean): void => {
+  const downloadEntry = (path: string, _name: string, _isDir: boolean): void => {
     if (!isRemotePath(path)) return
-    window.lt.fs.download(path).then((r) => {
-      if (r.canceled) return
-      if (!r.ok) {
-        window.alert('다운로드 실패: ' + (r.error ?? '알 수 없는 오류'))
-        return
-      }
-      window.alert(
-        `${isDir ? '폴더' : '파일'} 다운로드 완료: ${name}` +
-          (r.count !== undefined ? `\n파일 ${r.count}개` : '') +
-          (r.path ? `\n${r.path}` : '')
-      )
-    })
+    window.lt.fs
+      .download(path)
+      .then((r) => {
+        if (!r.canceled && !r.ok) window.alert('다운로드 실패: ' + (r.error ?? '알 수 없는 오류'))
+      })
+      .catch((e) => window.alert('다운로드 실패: ' + String(e)))
+      .finally(() => {
+        if (activeTerm) setTermFocusNonce((current) => bumpFocusNonce(current, activeTerm))
+      })
   }
 
   const replaceAppPathPrefix = (from: string, to: string): void => {
@@ -4615,6 +4731,21 @@ export default function App(): JSX.Element {
     setActiveTerm('')
   }
 
+  const pickRecordsForCaseTab = (tabId: string): void => {
+    const tab = caseTabs.find((item) => item.id === tabId)
+    if (!tab) return
+    const preferred =
+      termsForCaseTab(tab).find((term) => term.id === tab.activeTermId) ??
+      termsForCaseTab(tab)[0]
+    openCaseTab(tab)
+    setCaseTabContextMenu(null)
+    void pickRecords({
+      term: preferred,
+      termId: preferred?.id,
+      source: currentCaseFromCaseTab(tab)
+    })
+  }
+
   const closeCaseTab = (tabId: string): void => {
     const tab = caseTabs.find((item) => item.id === tabId)
     if (!tab) return
@@ -4658,6 +4789,16 @@ export default function App(): JSX.Element {
     })
     setAgentAttachmentRequests((requests) => {
       const next = { ...requests }
+      for (const id of termIds) delete next[id]
+      return next
+    })
+    setAgentDrafts((drafts) => {
+      const next = { ...drafts }
+      for (const id of termIds) delete next[id]
+      return next
+    })
+    setAgentDraftClearNonce((nonces) => {
+      const next = { ...nonces }
       for (const id of termIds) delete next[id]
       return next
     })
@@ -4968,7 +5109,7 @@ export default function App(): JSX.Element {
     (await matchCaseFolders(root, c))[0]?.path
 
   // 좌클릭: 사건 작업환경 열기 (폴더 매칭 → 없으면 직접 지정 → 터미널/뷰어 연결)
-  const openCaseWorkspace = async (c: JsCase, detailLoaded = false): Promise<CurrentCase | null> => {
+  const openCaseWorkspace = async (c: JsCase, detailLoaded = false): Promise<OpenedCase | null> => {
     if (!detailLoaded) c = await loadCaseDetail(c)
     const saved = c.id ? await window.lt.case.getJsPairing(c.id) : undefined
     let drafts = saved?.drafts
@@ -5018,7 +5159,11 @@ export default function App(): JSX.Element {
     const openedCase: CurrentCase = { drafts, records, name, meta }
     setCurrentCase(openedCase)
     const existing = termTabs.find((t) => t.cwd === drafts || (t.jsId && t.jsId === c.id))
+    let term: TermTab | undefined
+    let termId: string | undefined
     if (existing) {
+      term = existing
+      termId = existing.id
       activateTermTab(existing.id)
       registerCaseTab(openedCase, existing.id)
       setTermTabs((tabs) =>
@@ -5036,10 +5181,17 @@ export default function App(): JSX.Element {
         )
       )
     } else {
-      createCase(drafts, name, records, suggested, meta, 'right', recordSuggestions)
+      term = createCase(drafts, name, records, suggested, meta, 'right', recordSuggestions)
+      termId = term.id
     }
     setMode('explorer')
-    return openedCase
+    return { ...openedCase, term, termId }
+  }
+
+  const pickRecordsForCase = async (c: JsCase): Promise<void> => {
+    const opened = await openCaseWorkspace(c)
+    if (!opened) return
+    await pickRecords({ term: opened.term, termId: opened.termId, source: opened })
   }
 
   const openHearingRecordForCase = async (c: JsCase): Promise<void> => {
@@ -5377,6 +5529,7 @@ export default function App(): JSX.Element {
       onOpenRemote={openCaseRemote}
       sshProfiles={sshProfiles}
       defaultOpenProfileId={defaultCaseOpenProfileId}
+      onPickCaseRecords={pickRecordsForCase}
       onBrief={briefCaseToClaude}
       onHearingRecord={(c) => void openHearingRecordForCase(c)}
       jsNonce={jsNonce}
@@ -5536,7 +5689,10 @@ export default function App(): JSX.Element {
                 caseTabId={t.caseTabId}
                 visible={t.id === activeTerm}
                 focusNonce={termFocusNonce[t.id] ?? 0}
+                initialDraft={agentDrafts[t.id]}
+                clearDraftNonce={agentDraftClearNonce[t.id]}
                 attachmentRequests={agentAttachmentRequests[t.id] ?? []}
+                onDraftChange={(draft) => handleAgentDraftChange(t.id, draft)}
                 onAttachmentRequestsHandled={(requestIds) =>
                   handleAgentAttachmentRequestsHandled(t.id, requestIds)
                 }
@@ -5545,7 +5701,7 @@ export default function App(): JSX.Element {
                 onProviderChange={(provider) => changeAgentProvider(t.id, provider)}
                 onWorktreeFork={() => void forkAgentWorktreeTab(t.id, termSide(t))}
                 onOpenTerminal={() => addTermSame(termSide(t), t.id, { reuseAgentTab: true })}
-                onOpenDiff={openAgentDiff}
+                onOpenDiff={(request) => openAgentDiff(request, caseIdForTerm(t))}
                 onOpenFile={(path, title) => openFile(path, title ?? fileNameFromPath(path), 'left', t.caseTabId)}
               />
             ) : (
@@ -5587,6 +5743,7 @@ export default function App(): JSX.Element {
             onOpenRemote={openCaseRemote}
             sshProfiles={sshProfiles}
             defaultOpenProfileId={defaultCaseOpenProfileId}
+            onPickRecords={pickRecordsForCase}
             onBrief={briefCaseToClaude}
             onHearingRecord={(c) => void openHearingRecordForCase(c)}
             onChanged={() => setJsNonce((n) => n + 1)}
@@ -5606,6 +5763,7 @@ export default function App(): JSX.Element {
             onOpenRemote={openCaseRemote}
             sshProfiles={sshProfiles}
             defaultOpenProfileId={defaultCaseOpenProfileId}
+            onPickRecords={pickRecordsForCase}
             onBrief={briefCaseToClaude}
             onAskClaudeTodoUpdate={(prompt) =>
               sendClaude(prompt, { displayText: '할일 변경분을 기준으로 클코 갱신 요청을 보냈습니다.' })
@@ -5884,7 +6042,10 @@ export default function App(): JSX.Element {
                   caseTabId={t.caseTabId}
                   visible={t.id === visibleTermId}
                   focusNonce={termFocusNonce[t.id] ?? 0}
+                  initialDraft={agentDrafts[t.id]}
+                  clearDraftNonce={agentDraftClearNonce[t.id]}
                   attachmentRequests={agentAttachmentRequests[t.id] ?? []}
+                  onDraftChange={(draft) => handleAgentDraftChange(t.id, draft)}
                   onAttachmentRequestsHandled={(requestIds) =>
                     handleAgentAttachmentRequestsHandled(t.id, requestIds)
                   }
@@ -5893,7 +6054,7 @@ export default function App(): JSX.Element {
                   onProviderChange={(provider) => changeAgentProvider(t.id, provider)}
                   onWorktreeFork={() => void forkAgentWorktreeTab(t.id, side)}
                   onOpenTerminal={() => addTermSame(side, t.id, { reuseAgentTab: true })}
-                  onOpenDiff={openAgentDiff}
+                  onOpenDiff={(request) => openAgentDiff(request, caseIdForTerm(t))}
                   onOpenFile={(path, title) => openFile(path, title ?? fileNameFromPath(path), 'left', t.caseTabId)}
                 />
               ) : (
@@ -6122,6 +6283,17 @@ export default function App(): JSX.Element {
                 <button
                   className="tab-context-menu-item"
                   role="menuitem"
+                  title="이 사건의 전자소송기록 폴더를 직접 지정합니다"
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    pickRecordsForCaseTab(caseTabContextMenu.tabId)
+                  }}
+                >
+                  <span>소송기록 폴더 지정</span>
+                </button>
+                <button
+                  className="tab-context-menu-item"
+                  role="menuitem"
                   title="이 사건탭과 여기에 속한 문서/터미널 탭을 닫습니다"
                   onClick={(e) => {
                     e.stopPropagation()
@@ -6280,10 +6452,13 @@ export default function App(): JSX.Element {
           onCancel={() => setRecordsPick(null)}
           onPick={(remotePath) => {
             const uri = remoteUri(recordsPick.profile.id, remotePath)
-            const cur = termTabs.find((t) => t.id === activeTerm)
+            const cur = recordsPick.termId
+              ? termTabs.find((t) => t.id === recordsPick.termId)
+              : termTabs.find((t) => t.id === activeTerm)
+            const source = recordsPick.source ?? (cur ? currentCaseFromTerm(cur) : currentCase ?? undefined)
             setTermTabs((tabs) =>
               tabs.map((t) =>
-                activeTerm && t.id === activeTerm
+                cur && t.id === cur.id
                   ? {
                       ...t,
                       recordsFolder: uri,
@@ -6293,19 +6468,26 @@ export default function App(): JSX.Element {
                   : t
               )
             )
-            setCurrentCase((c) => (c ? { ...c, records: uri } : c))
+            const nextSource = source ? { ...source, records: uri } : undefined
+            setCurrentCase((c) => nextSource ?? (c ? { ...c, records: uri } : c))
             if (cur) registerCaseTabFromTerm({ ...cur, recordsFolder: uri })
-            else if (currentCase) registerCaseTab({ ...currentCase, records: uri })
+            else if (nextSource) registerCaseTab(nextSource)
             // 페어링 기억 → 다음에 이 사건을 열면 자동 적용
-            const draftsPath = recordsPick.draftsPath ?? (cur?.ssh ? cur.cwd : undefined)
+            const draftsPath = recordsPick.draftsPath ?? (cur?.ssh ? cur.cwd : nextSource?.remotePath)
             if (draftsPath) {
               const drafts = remoteUri(recordsPick.profile.id, draftsPath)
               window.lt.case.setPairing(drafts, uri)
+              saveJsRecordsPairing(
+                nextSource ?? (cur ? currentCaseFromTerm({ ...cur, recordsFolder: uri }) : undefined),
+                drafts,
+                uri
+              )
               window.lt.case
-                .addHistory({ drafts, records: uri, name: recordsPick.title ?? cur?.title ?? '사건' })
+                .addHistory({ drafts, records: uri, name: recordsPick.title ?? cur?.title ?? source?.name ?? '사건' })
                 .then(setRecent)
             }
             setRecordsPick(null)
+            setMode('viewer')
           }}
         />
       )}
@@ -6712,6 +6894,7 @@ function DocsPanel({
   onOpenRemote,
   sshProfiles = [],
   defaultOpenProfileId,
+  onPickCaseRecords,
   onBrief,
   onHearingRecord,
   jsNonce,
@@ -6751,6 +6934,7 @@ function DocsPanel({
   onOpenRemote?: (c: JsCase, profile: SshProfile) => void
   sshProfiles?: SshProfile[]
   defaultOpenProfileId?: string
+  onPickCaseRecords?: (c: JsCase) => void | Promise<void>
   onBrief: (c: JsCase) => void
   onHearingRecord?: (c: JsCase) => void
   jsNonce: number
@@ -6977,6 +7161,7 @@ function DocsPanel({
             onOpenRemote={onOpenRemote}
             sshProfiles={sshProfiles}
             defaultOpenProfileId={defaultOpenProfileId}
+            onPickRecords={onPickCaseRecords}
             onBrief={onBrief}
             onHearingRecord={onHearingRecord}
             onTodoChanged={onTodoChanged}
@@ -8902,8 +9087,11 @@ function SettingsView(): JSX.Element {
 }
 
 // 설정 화면의 SSH 프로필 목록 편집기 (추가/수정/삭제 즉시 저장)
+type SshTestResult = { busy?: boolean; ok?: boolean; message: string }
+
 function SshProfilesEditor(): JSX.Element {
   const [profiles, setProfiles] = useState<SshProfile[]>([])
+  const [testResults, setTestResults] = useState<Record<string, SshTestResult>>({})
   // 루트 '찾아보기' — 해당 ssh에 접속해 원격 폴더를 탐색·선택
   const [picking, setPicking] = useState<{
     profile: SshProfile
@@ -8926,25 +9114,60 @@ function SshProfilesEditor(): JSX.Element {
     save([...profiles, { id, label: '새 서버', host: '', user: '' }])
   }
   const remove = (id: string): void => save(profiles.filter((p) => p.id !== id))
+  const testConnection = async (profile: SshProfile): Promise<void> => {
+    setTestResults((current) => ({
+      ...current,
+      [profile.id]: { busy: true, message: '접속 확인 중' }
+    }))
+    try {
+      const result = await window.lt.ssh.test(profile)
+      setTestResults((current) => ({
+        ...current,
+        [profile.id]: result.ok
+          ? { ok: true, message: `연결됨: ${result.cwd}` }
+          : { ok: false, message: result.error }
+      }))
+    } catch (error) {
+      setTestResults((current) => ({
+        ...current,
+        [profile.id]: { ok: false, message: String(error) }
+      }))
+    }
+  }
 
   return (
     <div className="ssh-editor">
       {profiles.length === 0 && (
         <p className="muted small">저장된 프로필이 없습니다. 아래에서 추가하세요.</p>
       )}
-      {profiles.map((p) => (
-        <div key={p.id} className="ssh-card">
-          <div className="ssh-card-head">
-            <input
-              className="setting-input"
-              placeholder="이름 (예: 사무실 서버)"
-              defaultValue={p.label}
-              onBlur={(e) => update(p.id, { label: e.target.value.trim() || '서버' })}
-            />
-            <button className="header-btn danger" onClick={() => remove(p.id)} title="삭제">
-              삭제
-            </button>
-          </div>
+      {profiles.map((p) => {
+        const testResult = testResults[p.id]
+        return (
+          <div key={p.id} className="ssh-card">
+            <div className="ssh-card-head">
+              <input
+                className="setting-input"
+                placeholder="이름 (예: 사무실 서버)"
+                defaultValue={p.label}
+                onBlur={(e) => update(p.id, { label: e.target.value.trim() || '서버' })}
+              />
+              <button
+                className="header-btn"
+                disabled={!p.host || !p.user || testResult?.busy}
+                title={!p.host || !p.user ? '호스트·사용자를 먼저 입력하세요' : 'SSH 접속 확인'}
+                onClick={() => void testConnection(p)}
+              >
+                {testResult?.busy ? '테스트 중' : '접속 테스트'}
+              </button>
+              <button className="header-btn danger" onClick={() => remove(p.id)} title="삭제">
+                삭제
+              </button>
+            </div>
+            {testResult && (
+              <div className={`ssh-test-result ${testResult.ok ? 'ok' : testResult.busy ? '' : 'fail'}`}>
+                {testResult.message}
+              </div>
+            )}
           <div className="ssh-grid">
             <label>
               호스트
@@ -9046,7 +9269,8 @@ function SshProfilesEditor(): JSX.Element {
             </label>
           </div>
         </div>
-      ))}
+        )
+      })}
       <button className="empty-action" onClick={add}>
         ＋ 프로필 추가
       </button>

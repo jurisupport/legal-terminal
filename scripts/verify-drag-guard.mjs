@@ -74,6 +74,13 @@ assert.equal(isPanelPointerDragActive(), false, 'tiny pointer jitter is still a 
 source.fire('pointermove', pointer(1, 15, 10))
 assert.equal(isPanelPointerDragActive(), true, 'real pointer drags arm the native drag guard')
 
+document.fire('pointerdown', pointer(1, 20, 20))
+assert.equal(isPanelPointerDragActive(), false, 'new clicks reusing a mouse pointer id must unlock panel input')
+
+source.fire('pointerdown', pointer(1, 10, 10))
+source.fire('pointermove', pointer(1, 15, 10))
+assert.equal(isPanelPointerDragActive(), true, 'real pointer drags can arm the guard again')
+
 let canceled = false
 let stopped = false
 assert.equal(

@@ -712,6 +712,9 @@ export interface LtApi {
       | { ok: true; entries: RemoteEntry[]; cwd: string; truncated?: boolean }
       | { ok: false; error: string }
     >
+    test: (
+      profile: SshProfile
+    ) => Promise<{ ok: true; cwd: string } | { ok: false; error: string }>
     clearDirCache: () => Promise<{ ok: boolean; error?: string }>
   }
   sync: {

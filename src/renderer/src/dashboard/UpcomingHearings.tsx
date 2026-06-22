@@ -58,6 +58,7 @@ export default function UpcomingHearings({
   onOpenRemote,
   sshProfiles = [],
   defaultOpenProfileId,
+  onPickRecords,
   onBrief,
   onHearingRecord,
   onTodoChanged
@@ -68,6 +69,7 @@ export default function UpcomingHearings({
   onOpenRemote?: (c: JsCase, profile: SshProfile) => void
   sshProfiles?: SshProfile[]
   defaultOpenProfileId?: string
+  onPickRecords?: (c: JsCase) => void | Promise<void>
   onBrief: (c: JsCase) => void
   onHearingRecord?: (c: JsCase) => void
   onTodoChanged?: () => void
@@ -298,6 +300,7 @@ export default function UpcomingHearings({
           onOpenRemote={onOpenRemote}
           sshProfiles={sshProfiles}
           defaultOpenProfileId={defaultOpenProfileId}
+          onPickRecords={onPickRecords}
           onBrief={onBrief}
           onHearingRecord={onHearingRecord}
           onCreateTodo={createTodoForHearing}

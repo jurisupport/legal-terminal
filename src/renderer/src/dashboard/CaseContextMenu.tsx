@@ -21,6 +21,7 @@ export default function CaseContextMenu({
   onOpenRemote,
   sshProfiles = [],
   defaultOpenProfileId,
+  onPickRecords,
   onBrief,
   onHearingRecord,
   onCreateTodo,
@@ -32,6 +33,7 @@ export default function CaseContextMenu({
   onOpenRemote?: (c: JsCase, profile: SshProfile) => void
   sshProfiles?: SshProfile[]
   defaultOpenProfileId?: string
+  onPickRecords?: (c: JsCase) => void | Promise<void>
   onBrief: (c: JsCase) => void
   onHearingRecord?: (c: JsCase) => void
   onCreateTodo?: (c: JsCase, hearing?: JsHearing) => void | Promise<void>
@@ -51,6 +53,7 @@ export default function CaseContextMenu({
           ])
         ] as MenuItem[])
       : []),
+    ...(onPickRecords ? ([['📚 소송기록 폴더 지정', () => onPickRecords(c)]] as MenuItem[]) : []),
     ['—', null],
     ...(c.id ? ([['🌐 JuriSupport에서 보기', () => openExt(caseWebUrl(c.id))]] as MenuItem[]) : []),
     ...(onDetail ? ([['ℹ 상세 보기', () => onDetail(c)]] as MenuItem[]) : []),

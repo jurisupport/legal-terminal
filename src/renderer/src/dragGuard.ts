@@ -77,9 +77,9 @@ export const installPanelPointerDragGuard = (
     markDragActive()
   }
 
-  const onDocumentPointerDown = (event: PointerEvent): void => {
+  const onDocumentPointerDown = (): void => {
     if (!isPanelPointerDragActive()) return
-    if (activePointerId === null || event.pointerId !== activePointerId) clear()
+    clear()
   }
 
   const onPointerDone = (event: PointerEvent): void => {

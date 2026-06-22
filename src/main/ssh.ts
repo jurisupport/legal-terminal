@@ -1,4 +1,6 @@
 import { execFile } from 'child_process'
+import { existsSync } from 'fs'
+import { join } from 'path'
 import type { SshProfile } from './settings'
 import {
   invalidateRemoteDirListCache,
@@ -6,7 +8,10 @@ import {
   rememberRemoteDirListCache
 } from './remoteDirListCache'
 
-const sshBin = process.platform === 'win32' ? 'ssh.exe' : 'ssh'
+const sshBin =
+  process.platform === 'win32'
+    ? resolveWindowsOpenSsh() || 'ssh.exe'
+    : 'ssh'
 const CLOUD_DIR_LIST_TIMEOUT_MS = 15_000
 const CLOUD_DIR_MERGE_TIMEOUT_MS = 2_500
 const REMOTE_DIR_CACHE_TTL_MS = 10 * 60_000
@@ -15,6 +20,20 @@ const REMOTE_DIR_DISK_CACHE_NAMESPACE = 'ssh-picker'
 
 function shq(s: string): string {
   return `'${s.replace(/'/g, "'\\''")}'`
+}
+
+function resolveWindowsOpenSsh(): string | undefined {
+  const winDir = process.env.SystemRoot || process.env.WINDIR || 'C:\\Windows'
+  const candidate = join(winDir, 'System32', 'OpenSSH', 'ssh.exe')
+  return existsSync(candidate) ? candidate : undefined
+}
+
+function sshError(err: unknown, stderr?: string): string {
+  const error = err as NodeJS.ErrnoException
+  if (error?.code === 'ENOENT') {
+    return '로컬 Windows OpenSSH Client(ssh.exe)를 찾을 수 없습니다. Windows 설정 > 시스템 > 선택적 기능에서 OpenSSH Client를 설치한 뒤 앱을 다시 시작하세요.'
+  }
+  return (stderr || error?.message || String(err) || '연결 실패').trim()
 }
 
 function cdTarget(path: string): string {
@@ -256,6 +275,28 @@ function sshArgs(profile: SshProfile, connectTimeout = 12): string[] {
   args.push('-o', 'StrictHostKeyChecking=accept-new')
   args.push(`${profile.user}@${profile.host}`)
   return args
+}
+
+export function testSshConnection(
+  profile: SshProfile
+): Promise<{ ok: true; cwd: string } | { ok: false; error: string }> {
+  if (!profile.host.trim() || !profile.user.trim()) {
+    return Promise.resolve({ ok: false, error: '호스트와 사용자를 입력하세요.' })
+  }
+  return new Promise((resolve) => {
+    execFile(
+      sshBin,
+      [...sshArgs(profile, 8), 'pwd'],
+      { timeout: 10000, windowsHide: true },
+      (err, stdout, stderr) => {
+        if (err) {
+          resolve({ ok: false, error: sshError(err, stderr) })
+          return
+        }
+        resolve({ ok: true, cwd: stdout.trim() || '~' })
+      }
+    )
+  })
 }
 
 function readRemoteDir(

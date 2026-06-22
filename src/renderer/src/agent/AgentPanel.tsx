@@ -68,8 +68,11 @@ interface AgentPanelProps {
   caseTabId?: string
   visible: boolean
   focusNonce?: number
+  initialDraft?: AgentDraftState
+  clearDraftNonce?: number
   attachmentRequests?: AgentAttachmentRequest[]
   onAttachmentRequestsHandled?: (requestIds: string[]) => void
+  onDraftChange?: (draft: AgentDraftState) => void
   onStatus?: (status: AgentRunStatus) => void
   onFork?: () => void
   onProviderChange?: (provider: AgentProvider) => void
@@ -84,6 +87,11 @@ export interface AgentAttachmentRequest {
   attachment: AgentAttachment
   focusPrompt?: boolean
   inputText?: string
+}
+
+export interface AgentDraftState {
+  input: string
+  attachments: AgentAttachment[]
 }
 
 interface TimelineItem {
@@ -1302,6 +1310,29 @@ function diffFallbackText(oldString?: string, newString?: string): string | unde
   return text || undefined
 }
 
+function appendDiffFallbackText(current: string | undefined, next: string | undefined): string | undefined {
+  if (!next) return current
+  if (!current) return next
+  return `${current}\n\n${next}`
+}
+
+function mergeDiffViews(current: DiffView | undefined, next: DiffView | undefined, filePath?: string): DiffView | undefined {
+  if (!current) return next
+  if (!next) return current
+  const hunks = [...current.hunks, ...next.hunks].map((hunk, index, all) => ({
+    ...hunk,
+    label: all.length > 1 ? `Hunk ${index + 1}` : hunk.label
+  }))
+  const stats = diffLineStats(hunks)
+  const revertEdits = [...(next.revertEdits ?? []), ...(current.revertEdits ?? [])]
+  return {
+    filePath: filePath ?? next.filePath ?? current.filePath,
+    hunks,
+    ...stats,
+    ...(revertEdits.length > 0 ? { revertEdits } : {})
+  }
+}
+
 const upsertItem = (
   items: TimelineItem[],
   id: string,
@@ -1588,27 +1619,41 @@ function reduceTimeline(items: TimelineItem[], event: AgentEvent, agentLabel: st
     const newString = stringValue(event.newString)
     const diff = diffViewFromRecord(event)
     const fallbackText = diffFallbackText(oldString, newString)
-    return upsertItem(
-      items,
-      id,
-      () => ({
-        id,
-        kind: 'diff',
-        title: diffTitle('변경 적용', filePath),
-        status: 'applied',
-        filePath,
-        text: diff ? undefined : fallbackText,
-        diff
-      }),
-      (item) => ({
-        ...item,
-        title: filePath ? diffTitle('변경 적용', filePath) : item.title,
-        status: 'applied',
-        filePath: filePath ?? item.filePath,
-        text: diff ? undefined : fallbackText ?? item.text,
-        diff: diff ?? item.diff
-      })
-    )
+    const appliedIndex = filePath
+      ? items.findIndex((item) => item.kind === 'diff' && item.status === 'applied' && item.filePath === filePath)
+      : -1
+    const idIndex = items.findIndex((item) => item.id === id)
+    const index = appliedIndex >= 0 ? appliedIndex : idIndex
+    if (index < 0) {
+      return [
+        ...items,
+        {
+          id,
+          kind: 'diff',
+          title: diffTitle('변경 적용', filePath),
+          status: 'applied',
+          filePath,
+          text: diff ? undefined : fallbackText,
+          diff
+        }
+      ]
+    }
+    return items.flatMap((item, itemIndex) => {
+      if (appliedIndex >= 0 && idIndex >= 0 && itemIndex === idIndex && idIndex !== appliedIndex) return []
+      if (itemIndex !== index) return [item]
+      const append = appliedIndex >= 0 && item.id !== id
+      return [
+        {
+          ...item,
+          id: append ? item.id : id,
+          title: filePath ? diffTitle('변경 적용', filePath) : item.title,
+          status: 'applied',
+          filePath: filePath ?? item.filePath,
+          text: diff ? undefined : append ? appendDiffFallbackText(item.text, fallbackText) : fallbackText ?? item.text,
+          diff: append ? mergeDiffViews(item.diff, diff, filePath) : diff ?? item.diff
+        }
+      ]
+    })
   }
   if (event.type === 'error') {
     return [
@@ -1988,8 +2033,11 @@ export default function AgentPanel({
   caseTabId,
   visible,
   focusNonce = 0,
+  initialDraft,
+  clearDraftNonce,
   attachmentRequests = [],
   onAttachmentRequestsHandled,
+  onDraftChange,
   onStatus,
   onFork,
   onProviderChange,
@@ -2001,7 +2049,7 @@ export default function AgentPanel({
   const usesClaudeRemoteAuth = Boolean(ssh) && provider === 'claude'
   const usesAgentAuth = usesClaudeRemoteAuth || provider === 'codex'
   const [items, setItems] = useState<TimelineItem[]>([])
-  const [input, setInput] = useState('')
+  const [input, setInput] = useState(() => initialDraft?.input ?? '')
   const [mode, setMode] = useState<AgentPermissionMode>(DEFAULT_AGENT_PERMISSION_MODE)
   const [status, setStatus] = useState<AgentPanelStatus>('idle')
   const [error, setError] = useState('')
@@ -2018,7 +2066,7 @@ export default function AgentPanel({
   const [copyFeedback, setCopyFeedback] = useState('')
   const [dialogChoices, setDialogChoices] = useState<Record<string, Record<string, string[]>>>({})
   const [dialogResponses, setDialogResponses] = useState<Record<string, string>>({})
-  const [attachments, setAttachments] = useState<AgentAttachment[]>([])
+  const [attachments, setAttachments] = useState<AgentAttachment[]>(() => initialDraft?.attachments ?? [])
   const [attachmentDropOver, setAttachmentDropOver] = useState(false)
   const [modelOptions, setModelOptions] = useState<AgentModelOption[]>([])
   const [modelPickerOpen, setModelPickerOpen] = useState(false)
@@ -2046,6 +2094,8 @@ export default function AgentPanel({
   const escInterruptArmedRef = useRef(false)
   const escInterruptTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const providerRef = useRef(provider)
+  const clearDraftNonceRef = useRef(clearDraftNonce)
+  const onDraftChangeRef = useRef(onDraftChange)
 
   const clearEscInterruptTimer = useCallback((): void => {
     if (escInterruptTimerRef.current) {
@@ -2113,6 +2163,22 @@ export default function AgentPanel({
     promptHistoryIndexRef.current = null
     promptHistoryDraftRef.current = ''
   }, [])
+
+  useEffect(() => {
+    onDraftChangeRef.current = onDraftChange
+  }, [onDraftChange])
+
+  useEffect(() => {
+    onDraftChangeRef.current?.({ input, attachments })
+  }, [attachments, input])
+
+  useEffect(() => {
+    if (clearDraftNonceRef.current === clearDraftNonce) return
+    clearDraftNonceRef.current = clearDraftNonce
+    resetPromptHistoryCursor()
+    setInput('')
+    setAttachments([])
+  }, [clearDraftNonce, resetPromptHistoryCursor])
 
   const rememberPrompts = useCallback(
     (prompts: string[]): void => {
