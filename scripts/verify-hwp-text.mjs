@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { utils as cfbUtils, write as writeCfb } from 'cfb'
 
 import { createHwpxFromMarkdown } from '../src/main/hwpxExport.ts'
 import { mdToPrintHtml } from '../src/renderer/src/editor/mdExport.ts'
@@ -17,6 +18,13 @@ const hwpx = createHwpxFromMarkdown(
 assert.match(extractHwpText(hwpx, '.hwpx'), /제목/)
 assert.match(extractHwpText(hwpx, '.hwpx'), /본문입니다/)
 assert.match(extractHwpMarkdown(hwpx, '.hwpx'), /\| A \| B \|/)
+
+const previewOnlyHwpx = Buffer.from(
+  hwpx.toString('binary').replaceAll('Contents/section0.xml', 'Contents/notsect0.xml'),
+  'binary'
+)
+assert.match(extractHwpText(previewOnlyHwpx, '.hwpx'), /본문입니다/)
+assert.match(extractHwpMarkdown(previewOnlyHwpx, '.hwpx'), /본문입니다/)
 
 const centered = [
   '<!-- lt-align:center -->',
@@ -65,5 +73,11 @@ const legacyDoc = {
 
 assert.equal(extractHwpDocumentText(legacyDoc), '첫 줄\n둘째 줄\t탭 뒤')
 assert.equal(extractHwpDocumentMarkdown(legacyDoc), '첫 줄\n둘째 줄\t탭 뒤')
+
+const previewOnlyHwp = cfbUtils.cfb_new()
+cfbUtils.cfb_add(previewOnlyHwp, 'PrvText', Buffer.from('\ufeffHWP 미리보기 본문', 'utf16le'))
+const previewOnlyHwpBytes = Buffer.from(writeCfb(previewOnlyHwp, { type: 'buffer' }))
+assert.equal(extractHwpText(previewOnlyHwpBytes, '.hwp'), 'HWP 미리보기 본문')
+assert.equal(extractHwpMarkdown(previewOnlyHwpBytes, '.hwp'), 'HWP 미리보기 본문')
 
 console.log('HWP/HWPX text extraction verified')

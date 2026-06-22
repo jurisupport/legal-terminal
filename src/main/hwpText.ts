@@ -1,4 +1,5 @@
 import { inflateRawSync } from 'zlib'
+import { find as findCfbEntry, read as readCfb } from 'cfb'
 import { parse as parseHwp } from 'hwp.js'
 
 const EOCD_SIGNATURE = 0x06054b50
@@ -120,6 +121,19 @@ function readZipEntry(zip: Buffer, entry: ZipEntry): Buffer {
   if (entry.method === ZIP_STORED) return Buffer.from(compressed)
   if (entry.method === ZIP_DEFLATED) return inflateRawSync(compressed)
   throw new Error(`지원하지 않는 HWPX 압축 방식입니다: ${entry.method}`)
+}
+
+function decodePreviewText(buf: Buffer): string {
+  if (buf[0] === 0xff && buf[1] === 0xfe) return buf.subarray(2).toString('utf16le')
+  if (buf[0] === 0xfe && buf[1] === 0xff && buf.length % 2 === 0)
+    return Buffer.from(buf.subarray(2)).swap16().toString('utf16le')
+
+  const utf8 = buf.toString('utf8')
+  return utf8.includes('\u0000') && buf.length % 2 === 0 ? buf.toString('utf16le') : utf8
+}
+
+function normalizePreviewText(buf: Buffer): string {
+  return decodePreviewText(buf).replace(/^\ufeff/, '').replace(/\u0000+$/g, '').replace(/\r\n?/g, '\n')
 }
 
 function decodeXmlEntity(entity: string): string {
@@ -398,15 +412,18 @@ function sectionNumber(name: string): number {
 
 function extractHwpxText(buf: Buffer): string {
   const entries = listZipEntries(buf)
+  const sectionEntries = entries
     .filter((entry) => /(?:^|\/)section[0-9]+\.xml$/i.test(entry.name))
     .sort((a, b) => sectionNumber(a.name) - sectionNumber(b.name) || a.name.localeCompare(b.name))
 
-  if (entries.length === 0) {
+  if (sectionEntries.length === 0) {
+    const preview = extractHwpxPreviewText(buf, entries)
+    if (preview) return preview
     throw new Error('HWPX 본문 section XML을 찾을 수 없습니다.')
   }
 
   const lines: string[] = []
-  for (const entry of entries) {
+  for (const entry of sectionEntries) {
     const xml = readZipEntry(buf, entry).toString('utf8')
     lines.push(...extractHwpxSectionLines(xml))
   }
@@ -498,20 +515,28 @@ function extractHwpxSectionMarkdownBlocks(xml: string): string[] {
 
 function extractHwpxMarkdown(buf: Buffer): string {
   const entries = listZipEntries(buf)
+  const sectionEntries = entries
     .filter((entry) => /(?:^|\/)section[0-9]+\.xml$/i.test(entry.name))
     .sort((a, b) => sectionNumber(a.name) - sectionNumber(b.name) || a.name.localeCompare(b.name))
 
-  if (entries.length === 0) {
+  if (sectionEntries.length === 0) {
+    const preview = extractHwpxPreviewText(buf, entries)
+    if (preview) return preview
     throw new Error('HWPX 본문 section XML을 찾을 수 없습니다.')
   }
 
   const blocks: string[] = []
-  for (const entry of entries) {
+  for (const entry of sectionEntries) {
     const xml = readZipEntry(buf, entry).toString('utf8')
     blocks.push(...extractHwpxSectionMarkdownBlocks(xml))
   }
 
   return normalizeMarkdown(blocks)
+}
+
+function extractHwpxPreviewText(buf: Buffer, entries: ZipEntry[]): string {
+  const preview = entries.find((entry) => /(?:^|\/)Preview\/PrvText\.txt$/i.test(entry.name))
+  return preview ? normalizePreviewText(readZipEntry(buf, preview)) : ''
 }
 
 export function extractHwpDocumentText(doc: { sections: { content: HwpParagraphLike[] }[] }): string {
@@ -535,13 +560,35 @@ export function extractHwpDocumentMarkdown(doc: { sections: { content: HwpParagr
 }
 
 function extractLegacyHwpText(buf: Buffer): string {
-  const doc = parseHwp(buf as unknown as Parameters<typeof parseHwp>[0])
-  return extractHwpDocumentText(doc)
+  try {
+    const doc = parseHwp(buf as unknown as Parameters<typeof parseHwp>[0])
+    return extractHwpDocumentText(doc)
+  } catch (e) {
+    const preview = extractLegacyHwpPreviewText(buf)
+    if (preview) return preview
+    throw e
+  }
 }
 
 function extractLegacyHwpMarkdown(buf: Buffer): string {
-  const doc = parseHwp(buf as unknown as Parameters<typeof parseHwp>[0])
-  return extractHwpDocumentMarkdown(doc)
+  try {
+    const doc = parseHwp(buf as unknown as Parameters<typeof parseHwp>[0])
+    return extractHwpDocumentMarkdown(doc)
+  } catch (e) {
+    const preview = extractLegacyHwpPreviewText(buf)
+    if (preview) return preview
+    throw e
+  }
+}
+
+function extractLegacyHwpPreviewText(buf: Buffer): string {
+  try {
+    const container = readCfb(buf)
+    const preview = findCfbEntry(container, 'PrvText')
+    return preview ? normalizePreviewText(Buffer.from(preview.content)) : ''
+  } catch {
+    return ''
+  }
 }
 
 export function extractHwpText(buf: Buffer, ext: string): string {
