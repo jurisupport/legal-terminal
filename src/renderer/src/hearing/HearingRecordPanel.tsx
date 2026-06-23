@@ -61,9 +61,6 @@ interface HearingRecordTemplate {
   label: string
   hint: string
   speakers: HearingSpeaker[]
-  draft: string
-  requests: string[]
-  nextActions: string[]
 }
 
 interface HearingRecordData {
@@ -93,6 +90,9 @@ interface SavedRecordSummary {
   data: HearingRecordData
 }
 
+const withSequentialShortcuts = (speakers: HearingSpeaker[]): HearingSpeaker[] =>
+  speakers.map((speaker, index) => ({ ...speaker, shortcut: index < 9 ? String(index + 1) : undefined }))
+
 export interface HearingRecordPanelProps {
   draftsDir?: string
   initialCase?: HearingRecordCase
@@ -104,12 +104,12 @@ export interface HearingRecordPanelProps {
   onSummarizeReport?: (path: string, title: string) => void
 }
 
-const DEFAULT_SPEAKERS: HearingSpeaker[] = [
-  { id: 'court', label: '재판부', role: 'court', shortcut: '1' },
-  { id: 'plaintiff', label: '원고', role: 'plaintiff', shortcut: '2' },
-  { id: 'defendant', label: '피고', role: 'defendant', shortcut: '3' },
-  { id: 'preparation', label: '사전준비', role: 'preparation', shortcut: '4' }
-]
+const DEFAULT_SPEAKERS: HearingSpeaker[] = withSequentialShortcuts([
+  { id: 'court', label: '재판부', role: 'court' },
+  { id: 'plaintiff', label: '원고', role: 'plaintiff' },
+  { id: 'defendant', label: '피고', role: 'defendant' },
+  { id: 'etc', label: '기타', role: 'other' }
+])
 
 const RESULT_OPTIONS = ['변론종결', '속행', '추후지정', '선고기일', '조정회부']
 
@@ -117,44 +117,26 @@ const RECORD_TEMPLATES: HearingRecordTemplate[] = [
   {
     id: 'trial',
     label: '재판',
-    hint: '재판부/상대방/우리/다음 기일',
-    speakers: [
-      { id: 'court', label: '재판부', role: 'court', shortcut: '1' },
-      { id: 'plaintiff', label: '의뢰인', role: 'plaintiff', shortcut: '2' },
-      { id: 'defendant', label: '상대방', role: 'defendant', shortcut: '3' },
-      { id: 'preparation', label: '대리인', role: 'preparation', shortcut: '4' }
-    ],
-    draft: '재판부:\n상대방:\n우리:\n다음 기일까지:',
-    requests: ['재판부 석명·지시사항 확인', '상대방 주장 및 제출자료 확인', '다음 기일까지 제출할 자료 확인'],
-    nextActions: ['기일 후 제출자료 정리', '다음 기일 전 쟁점 메모 업데이트']
+    hint: '재판부/원고/피고/기타',
+    speakers: DEFAULT_SPEAKERS
   },
   {
     id: 'investigation',
     label: '조사',
-    hint: '질문/답변/조서 반영',
-    speakers: [
-      { id: 'court', label: '조사관', role: 'court', shortcut: '1' },
-      { id: 'plaintiff', label: '의뢰인', role: 'plaintiff', shortcut: '2' },
-      { id: 'preparation', label: '변호인/대리인', role: 'preparation', shortcut: '3' },
-      { id: 'defendant', label: '상대방/참고인', role: 'defendant', shortcut: '4' }
-    ],
-    draft: '질문:\n답변:\n조사관 반응:\n조서 반영:\n보완자료:',
-    requests: ['질문 취지가 불명확하면 재질문 요청', '조서 열람 후 수정 요구사항 확인', '추가 제출자료 필요 여부 확인'],
-    nextActions: ['조서와 실제 진술 불일치 확인', '추가 제출자료 정리']
+    hint: '수사관/피의자/변호인/고소인/고소대리인',
+    speakers: withSequentialShortcuts([
+      { id: 'investigator', label: '수사관', role: 'court' },
+      { id: 'suspect', label: '피의자', role: 'defendant' },
+      { id: 'counsel', label: '변호인', role: 'preparation' },
+      { id: 'complainant', label: '고소인', role: 'plaintiff' },
+      { id: 'complainant-counsel', label: '고소대리인', role: 'preparation' }
+    ])
   },
   {
     id: 'meeting',
     label: '조정·면담',
-    hint: '제안/입장/합의 가능성',
-    speakers: [
-      { id: 'court', label: '진행자', role: 'court', shortcut: '1' },
-      { id: 'plaintiff', label: '의뢰인', role: 'plaintiff', shortcut: '2' },
-      { id: 'defendant', label: '상대방', role: 'defendant', shortcut: '3' },
-      { id: 'preparation', label: '대리인', role: 'preparation', shortcut: '4' }
-    ],
-    draft: '상대 제안:\n우리 입장:\n합의 가능 범위:\n추가 확인:',
-    requests: ['상대방 제안 조건 확인', '합의 가능 범위와 유보사항 확인'],
-    nextActions: ['의뢰인에게 선택지 보고', '후속 제안 문안 정리']
+    hint: '직접 입력',
+    speakers: []
   }
 ]
 
@@ -246,19 +228,8 @@ function caseSubtitle(caseContext?: HearingRecordCase, hearing?: JsHearing): str
     .join(' · ')
 }
 
-function resolveSpeakerPreset(
-  speakers: HearingSpeaker[] = DEFAULT_SPEAKERS,
-  caseContext?: HearingRecordCase
-): HearingSpeaker[] {
-  return speakers.map((speaker) => ({
-    ...speaker,
-    label:
-      speaker.id === 'plaintiff' && caseContext?.client
-        ? caseContext.client
-        : speaker.id === 'defendant' && caseContext?.opponent
-          ? caseContext.opponent
-          : speaker.label
-  }))
+function resolveSpeakerPreset(speakers: HearingSpeaker[] = DEFAULT_SPEAKERS): HearingSpeaker[] {
+  return withSequentialShortcuts(speakers)
 }
 
 function createInitialRecord(
@@ -267,13 +238,14 @@ function createInitialRecord(
 ): HearingRecordData {
   const now = new Date().toISOString()
   const hearing = initialHearing ?? { type: 'hearing', dateTime: now }
+  const speakers = resolveSpeakerPreset(RECORD_TEMPLATES[0]?.speakers)
   return {
     version: 1,
     id: newId('hearing'),
     case: initialCase ?? {},
     hearing,
-    speakers: resolveSpeakerPreset(RECORD_TEMPLATES[0]?.speakers, initialCase),
-    activeSpeakerId: 'court',
+    speakers,
+    activeSpeakerId: speakers[0]?.id ?? '',
     requests: [],
     entries: [],
     result: { nextActions: [] },
@@ -283,7 +255,7 @@ function createInitialRecord(
 }
 
 function normalizeSpeakerId(id: string | undefined): string {
-  return id === 'delegate' || id === 'other' ? 'preparation' : (id ?? 'preparation')
+  return id === 'delegate' ? 'preparation' : (id ?? '')
 }
 
 function normalizeSpeakerRole(role: string | undefined): SpeakerRole {
@@ -293,48 +265,18 @@ function normalizeSpeakerRole(role: string | undefined): SpeakerRole {
   return 'other'
 }
 
-function normalizeSpeakers(value: unknown, caseContext?: HearingRecordCase): HearingSpeaker[] {
-  const rawSpeakers = Array.isArray(value)
-    ? value.filter((item): item is Partial<HearingSpeaker> => !!item && typeof item === 'object')
-    : []
-  const reservedIds = new Set(DEFAULT_SPEAKERS.map((speaker) => speaker.id))
-  const seenReservedIds = new Set<string>()
-  const defaults: HearingSpeaker[] = []
-  for (const speaker of rawSpeakers) {
-    const id = normalizeSpeakerId(speaker.id)
-    if (!speaker.id || !speaker.label || !reservedIds.has(id) || seenReservedIds.has(id)) continue
-    seenReservedIds.add(id)
-    defaults.push({
-      id,
-      label: speaker.label,
-      role: normalizeSpeakerRole(speaker.role),
-      shortcut: speaker.shortcut && /^[1-9]$/.test(speaker.shortcut) ? speaker.shortcut : undefined
-    })
-  }
-  for (const speaker of resolveSpeakerPreset(RECORD_TEMPLATES[0]?.speakers, caseContext)) {
-    if (!seenReservedIds.has(speaker.id)) defaults.push(speaker)
-  }
-  const reserved = new Set(defaults.map((speaker) => speaker.id))
-  const usedShortcuts = new Set(defaults.map((speaker) => speaker.shortcut).filter(Boolean))
-  const custom = rawSpeakers
-    .filter((speaker) => {
+function normalizeSpeakers(value: unknown): HearingSpeaker[] {
+  if (!Array.isArray(value)) return resolveSpeakerPreset(RECORD_TEMPLATES[0]?.speakers)
+  const seenIds = new Set<string>()
+  const speakers = value
+    .filter((item): item is Partial<HearingSpeaker> => !!item && typeof item === 'object')
+    .flatMap((speaker): HearingSpeaker[] => {
       const id = normalizeSpeakerId(speaker.id)
-      return !!speaker.id && !!speaker.label && !reserved.has(id)
+      if (!id || !speaker.label || seenIds.has(id)) return []
+      seenIds.add(id)
+      return [{ id, label: speaker.label, role: normalizeSpeakerRole(speaker.role) }]
     })
-    .map((speaker): HearingSpeaker => {
-      const shortcut =
-        speaker.shortcut && /^[1-9]$/.test(speaker.shortcut) && !usedShortcuts.has(speaker.shortcut)
-          ? speaker.shortcut
-          : undefined
-      if (shortcut) usedShortcuts.add(shortcut)
-      return {
-        id: speaker.id as string,
-        label: speaker.label as string,
-        role: normalizeSpeakerRole(speaker.role),
-        shortcut
-      }
-    })
-  return [...defaults, ...custom]
+  return withSequentialShortcuts(speakers)
 }
 
 function sanitizeRecord(
@@ -346,7 +288,7 @@ function sanitizeRecord(
   if (!value || typeof value !== 'object') return base
   const raw = value as Partial<HearingRecordData>
   const caseContext = { ...base.case, ...(raw.case && typeof raw.case === 'object' ? raw.case : {}) }
-  const speakers = normalizeSpeakers(raw.speakers, caseContext)
+  const speakers = normalizeSpeakers(raw.speakers)
   const rawActiveSpeakerId = normalizeSpeakerId(raw.activeSpeakerId)
   const activeSpeakerId = speakers.some((speaker) => speaker.id === rawActiveSpeakerId)
     ? rawActiveSpeakerId
@@ -469,7 +411,6 @@ export default function HearingRecordPanel({
   const [draft, setDraft] = useState('')
   const [requestDraft, setRequestDraft] = useState('')
   const [speakerFormOpen, setSpeakerFormOpen] = useState(false)
-  const [speakerShortcutDraft, setSpeakerShortcutDraft] = useState('')
   const [speakerLabelDraft, setSpeakerLabelDraft] = useState('')
   const [speakerFormMessage, setSpeakerFormMessage] = useState('')
   const [readerOpen, setReaderOpen] = useState(false)
@@ -646,6 +587,7 @@ export default function HearingRecordPanel({
   }
 
   const cycleSpeaker = (direction: 1 | -1): void => {
+    if (speakers.length === 0) return
     const currentIndex = Math.max(0, speakers.findIndex((speaker) => speaker.id === record.activeSpeakerId))
     const nextIndex = (currentIndex + direction + speakers.length) % speakers.length
     setActiveSpeaker(speakers[nextIndex].id)
@@ -655,61 +597,63 @@ export default function HearingRecordPanel({
     speakers.find((speaker) => speaker.shortcut === shortcut)
 
   const applyTemplate = (template: HearingRecordTemplate): void => {
+    const presetSpeakers = resolveSpeakerPreset(template.speakers)
     touch((current) => {
-      const presetSpeakers = resolveSpeakerPreset(template.speakers, current.case)
-      const presetIds = new Set(presetSpeakers.map((speaker) => speaker.id))
-      const presetShortcuts = new Set(presetSpeakers.map((speaker) => speaker.shortcut).filter(Boolean))
-      const customSpeakers = current.speakers.filter(
-        (speaker) => !presetIds.has(speaker.id) && !presetShortcuts.has(speaker.shortcut)
-      )
-      const requestTexts = new Set(current.requests.map((request) => request.text))
-      const nextActions = current.result.nextActions ?? []
-      const nextActionTexts = new Set(nextActions)
       return {
         ...current,
-        speakers: [...presetSpeakers, ...customSpeakers],
-        activeSpeakerId: presetSpeakers[0]?.id ?? current.activeSpeakerId,
-        requests: [
-          ...current.requests,
-          ...template.requests
-            .filter((text) => !requestTexts.has(text))
-            .map((text) => ({ id: newId('request'), text, spoken: false }))
-        ],
-        result: {
-          ...current.result,
-          nextActions: [
-            ...nextActions,
-            ...template.nextActions.filter((text) => !nextActionTexts.has(text))
-          ]
-        }
+        speakers: presetSpeakers,
+        activeSpeakerId: presetSpeakers[0]?.id ?? ''
       }
     })
-    setDraft((current) => (current.trim() ? current : template.draft))
+    setSpeakerFormOpen(presetSpeakers.length === 0)
+    setSpeakerFormMessage('')
     setSaveMessage(`${template.label} 템플릿 추가됨`)
     focusInput()
   }
 
   const addCustomSpeaker = (): void => {
-    const shortcut = speakerShortcutDraft.trim()
     const label = speakerLabelDraft.trim()
-    if (!/^[1-9]$/.test(shortcut) || !label) {
-      setSpeakerFormMessage('번호 1-9와 대화자명을 입력하세요.')
+    if (!label) {
+      setSpeakerFormMessage('대화자명을 입력하세요.')
       return
     }
-    if (speakerByShortcut(shortcut)) {
-      setSpeakerFormMessage('이미 쓰는 번호입니다.')
-      return
-    }
-    const speaker: HearingSpeaker = { id: newId('speaker'), label, role: 'other', shortcut }
+    const speaker: HearingSpeaker = { id: newId('speaker'), label, role: 'other' }
     touch((current) => ({
       ...current,
-      speakers: [...current.speakers, speaker],
+      speakers: withSequentialShortcuts([...current.speakers, speaker]),
       activeSpeakerId: speaker.id
     }))
-    setSpeakerShortcutDraft('')
     setSpeakerLabelDraft('')
     setSpeakerFormMessage('')
-    setSpeakerFormOpen(false)
+    focusInput()
+  }
+
+  const moveSpeaker = (speakerId: string, direction: 1 | -1): void => {
+    touch((current) => {
+      const index = current.speakers.findIndex((speaker) => speaker.id === speakerId)
+      const nextIndex = index + direction
+      if (index < 0 || nextIndex < 0 || nextIndex >= current.speakers.length) return current
+      const speakers = [...current.speakers]
+      const currentSpeaker = speakers[index]
+      speakers[index] = speakers[nextIndex]
+      speakers[nextIndex] = currentSpeaker
+      return { ...current, speakers: withSequentialShortcuts(speakers) }
+    })
+    focusInput()
+  }
+
+  const removeSpeaker = (speakerId: string): void => {
+    touch((current) => {
+      const index = current.speakers.findIndex((speaker) => speaker.id === speakerId)
+      if (index < 0) return current
+      const speakers = withSequentialShortcuts(current.speakers.filter((speaker) => speaker.id !== speakerId))
+      const hasActiveSpeaker = speakers.some((speaker) => speaker.id === current.activeSpeakerId)
+      const activeSpeakerId =
+        current.activeSpeakerId === speakerId || !hasActiveSpeaker
+          ? speakers[index]?.id ?? speakers[index - 1]?.id ?? speakers[0]?.id ?? ''
+          : current.activeSpeakerId
+      return { ...current, speakers, activeSpeakerId }
+    })
     focusInput()
   }
 
@@ -805,6 +749,11 @@ export default function HearingRecordPanel({
 
     const prefix = escaped ? null : body.match(/^([1-9])\s+([\s\S]+)$/)
     const prefixedSpeaker = prefix ? speakerByShortcut(prefix[1]) : undefined
+    if (!prefixedSpeaker && !record.activeSpeakerId && speakers.length === 0) {
+      setSpeakerFormOpen(true)
+      setSpeakerFormMessage('대화자를 먼저 추가하세요.')
+      return
+    }
     const speakerId = prefixedSpeaker?.id ?? record.activeSpeakerId
     const text = (prefix && prefixedSpeaker ? prefix[2] : body).trim()
     if (!text) return
@@ -1098,7 +1047,7 @@ export default function HearingRecordPanel({
         <section className="hearing-section">
           <div className="hearing-section-head">
             <span>템플릿</span>
-            <small>화자 + 요청사항 + 입력틀</small>
+            <small>대상</small>
           </div>
           <div className="hearing-template-list">
             {RECORD_TEMPLATES.map((template) => (
@@ -1126,7 +1075,7 @@ export default function HearingRecordPanel({
               onKeyDown={(event) => {
                 if (event.key === 'Enter') addRequest(requestDraft)
               }}
-              placeholder="예: 변론 종결 요청"
+              placeholder="요청사항 입력"
             />
             <button className="hearing-small-btn" onClick={() => addRequest(requestDraft)}>
               추가
@@ -1231,14 +1180,19 @@ export default function HearingRecordPanel({
             <select
               value={record.activeSpeakerId}
               title="화자 선택"
+              disabled={speakers.length === 0}
               onChange={(event) => setActiveSpeaker(event.target.value)}
             >
-              {speakers.map((speaker) => (
-                <option key={speaker.id} value={speaker.id}>
-                  {speaker.shortcut ? `${speaker.shortcut}. ` : ''}
-                  {speaker.label}
-                </option>
-              ))}
+              {speakers.length === 0 ? (
+                <option value="">대화자 없음</option>
+              ) : (
+                speakers.map((speaker) => (
+                  <option key={speaker.id} value={speaker.id}>
+                    {speaker.shortcut ? `${speaker.shortcut}. ` : ''}
+                    {speaker.label}
+                  </option>
+                ))
+              )}
             </select>
           </label>
           <button
@@ -1265,21 +1219,6 @@ export default function HearingRecordPanel({
         {speakerFormOpen && (
           <div className="hearing-speaker-form">
             <input
-              value={speakerShortcutDraft}
-              inputMode="numeric"
-              maxLength={1}
-              onChange={(event) =>
-                setSpeakerShortcutDraft(event.target.value.replace(/[^1-9]/g, '').slice(0, 1))
-              }
-              onKeyDown={(event) => {
-                if (event.key === 'Enter') {
-                  event.preventDefault()
-                  addCustomSpeaker()
-                }
-              }}
-              placeholder="번호"
-            />
-            <input
               value={speakerLabelDraft}
               onChange={(event) => setSpeakerLabelDraft(event.target.value)}
               onKeyDown={(event) => {
@@ -1294,6 +1233,28 @@ export default function HearingRecordPanel({
               추가
             </button>
             {speakerFormMessage && <small>{speakerFormMessage}</small>}
+            {speakers.length > 0 && (
+              <div className="hearing-speaker-list">
+                {speakers.map((speaker, index) => (
+                  <div key={speaker.id} className="hearing-speaker-row">
+                    <span>
+                      {speaker.shortcut ? `${speaker.shortcut}. ` : ''}
+                      {speaker.label}
+                    </span>
+                    <button disabled={index === 0} onClick={() => moveSpeaker(speaker.id, -1)}>
+                      ↑
+                    </button>
+                    <button
+                      disabled={index === speakers.length - 1}
+                      onClick={() => moveSpeaker(speaker.id, 1)}
+                    >
+                      ↓
+                    </button>
+                    <button onClick={() => removeSpeaker(speaker.id)}>×</button>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         )}
       </div>

@@ -1,0 +1,3666 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>legal-terminal Android UI sample</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #161616;
+      --panel: #202020;
+      --panel-2: #262626;
+      --line: #3a3a3a;
+      --text: #eeeeee;
+      --muted: #a8a8a8;
+      --accent: #0f8b8d;
+      --accent-2: #d39d38;
+      --danger: #d75f5f;
+      --ok: #58a96b;
+      --shadow: 0 16px 40px rgba(0, 0, 0, 0.36);
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", "Apple SD Gothic Neo", "Malgun Gothic", sans-serif;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background: #101010;
+      color: var(--text);
+    }
+
+    button,
+    input,
+    select,
+    textarea {
+      font: inherit;
+    }
+
+    button {
+      border: 0;
+      color: inherit;
+      background: transparent;
+      cursor: pointer;
+    }
+
+    .app {
+      width: min(100vw, 430px);
+      min-height: 100vh;
+      margin: 0 auto;
+      background: var(--bg);
+      border-left: 1px solid #000;
+      border-right: 1px solid #000;
+      display: grid;
+      grid-template-rows: 44px 1fr 58px;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .topbar {
+      display: grid;
+      grid-template-columns: 44px 1fr auto;
+      align-items: center;
+      gap: 4px;
+      padding: 0 8px;
+      border-bottom: 1px solid var(--line);
+      background: #1c1c1c;
+    }
+
+    .icon-btn {
+      width: 36px;
+      height: 36px;
+      display: grid;
+      place-items: center;
+      border-radius: 6px;
+      color: var(--muted);
+    }
+
+    .icon-btn:hover,
+    .icon-btn.active {
+      background: var(--panel-2);
+      color: var(--text);
+    }
+
+    .titlebar {
+      min-width: 0;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .title-main {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-weight: 700;
+      font-size: 14px;
+    }
+
+    .title-sub {
+      color: var(--muted);
+      font-size: 12px;
+      white-space: nowrap;
+    }
+
+    .case-strip {
+      display: none;
+      gap: 6px;
+      overflow: auto;
+      padding: 7px 10px;
+      border-bottom: 1px solid var(--line);
+      background: #1b1b1b;
+    }
+
+    .case-strip.show {
+      display: flex;
+    }
+
+    .case-chip {
+      flex: 0 0 auto;
+      height: 30px;
+      padding: 0 10px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      color: var(--muted);
+      background: #1f1f1f;
+      max-width: 180px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .case-chip.active {
+      color: var(--text);
+      border-color: var(--accent);
+      background: #183233;
+    }
+
+    .main {
+      min-height: 0;
+      display: grid;
+      grid-template-rows: auto auto 1fr;
+      position: relative;
+    }
+
+    .view {
+      min-height: 0;
+      display: none;
+      overflow: auto;
+    }
+
+    .view.active {
+      display: block;
+    }
+
+    .blank {
+      height: 100%;
+      display: grid;
+      place-items: center;
+      color: #777;
+      font-size: 13px;
+    }
+
+    .section-head {
+      position: sticky;
+      top: 0;
+      z-index: 1;
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 8px;
+      align-items: center;
+      padding: 10px;
+      border-bottom: 1px solid var(--line);
+      background: var(--bg);
+    }
+
+    .section-title {
+      font-weight: 700;
+      font-size: 15px;
+    }
+
+    .search {
+      width: 100%;
+      height: 34px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #111;
+      color: var(--text);
+      padding: 0 10px;
+      outline: none;
+    }
+
+    .search:focus {
+      border-color: var(--accent);
+    }
+
+    .list {
+      padding: 8px;
+      display: grid;
+      gap: 8px;
+    }
+
+    .row {
+      min-height: 72px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+      padding: 10px;
+      display: grid;
+      gap: 7px;
+      text-align: left;
+    }
+
+    .row:active {
+      border-color: var(--accent);
+    }
+
+    .token-box {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+      padding: 12px;
+      display: grid;
+      gap: 10px;
+    }
+
+    .token-input {
+      width: 100%;
+      min-height: 92px;
+      resize: vertical;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #111;
+      color: var(--text);
+      padding: 10px;
+      outline: none;
+    }
+
+    .row-title {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      min-width: 0;
+      font-size: 14px;
+      font-weight: 700;
+    }
+
+    .row-title span:first-child {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .meta {
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.35;
+    }
+
+    .pill {
+      flex: 0 0 auto;
+      border-radius: 999px;
+      padding: 2px 7px;
+      font-size: 11px;
+      color: #111;
+      background: var(--accent-2);
+    }
+
+    .pill.ok {
+      background: var(--ok);
+    }
+
+    .toolbar {
+      display: flex;
+      gap: 6px;
+      overflow: auto;
+      padding: 8px 10px;
+      border-bottom: 1px solid var(--line);
+      background: #181818;
+    }
+
+    .tool {
+      height: 32px;
+      padding: 0 10px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      color: var(--muted);
+      background: var(--panel);
+      white-space: nowrap;
+    }
+
+    .tool.active {
+      color: var(--text);
+      border-color: var(--accent);
+      background: #173233;
+    }
+
+    .workspace {
+      min-height: 0;
+      display: none;
+      grid-template-rows: auto 1fr;
+    }
+
+    .workspace.active {
+      display: grid;
+    }
+
+    .doc-view {
+      min-height: 0;
+      display: grid;
+      grid-template-rows: auto 1fr;
+      overflow: hidden;
+    }
+
+    .doc-view.record-pdf-mode {
+      grid-template-rows: 1fr;
+    }
+
+    .doc-view.record-pdf-mode .section-head {
+      display: none;
+    }
+
+    .file-list {
+      overflow: auto;
+      padding: 8px;
+      display: grid;
+      gap: 6px;
+    }
+
+    .file-list.hidden,
+    .file-viewer.hidden {
+      display: none;
+    }
+
+    .file {
+      display: grid;
+      grid-template-columns: 26px 1fr auto;
+      align-items: center;
+      gap: 8px;
+      min-height: 42px;
+      padding: 0 8px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: var(--panel);
+      touch-action: manipulation;
+      user-select: none;
+    }
+
+    .explorer-actions {
+      display: flex;
+      gap: 6px;
+      overflow: auto;
+      padding: 0 0 6px;
+      min-height: 38px;
+    }
+
+    .explorer-actions .tool {
+      flex: 0 0 auto;
+    }
+
+    .explorer-note {
+      padding: 0 2px 6px;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.35;
+    }
+
+    .file-name {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-size: 13px;
+    }
+
+    .file-viewer {
+      overflow: auto;
+      padding: 10px;
+    }
+
+    .doc-view.record-pdf-mode .file-viewer {
+      padding: 0;
+      overflow: hidden;
+    }
+
+    .viewer-card {
+      min-height: 100%;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+      display: grid;
+      grid-template-rows: auto 1fr;
+      overflow: hidden;
+    }
+
+    .viewer-toolbar {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 8px;
+      border-bottom: 1px solid var(--line);
+      background: #1b1b1b;
+      overflow: auto;
+    }
+
+    .viewer-text {
+      margin: 0;
+      padding: 12px;
+      overflow: auto;
+      white-space: pre-wrap;
+      font-family: "SFMono-Regular", Consolas, "Liberation Mono", "D2Coding", monospace;
+      font-size: 13px;
+      line-height: 1.55;
+      color: #e6e6e6;
+    }
+
+    .viewer-editor {
+      width: 100%;
+      min-height: 100%;
+      resize: none;
+      border: 0;
+      outline: none;
+      padding: 12px;
+      background: #151515;
+      color: #eeeeee;
+      font-family: "SFMono-Regular", Consolas, "Liberation Mono", "D2Coding", monospace;
+      font-size: 13px;
+      line-height: 1.55;
+    }
+
+    .viewer-md {
+      overflow: auto;
+      padding: 18px 18px 36px;
+      color: #eeeeee;
+      font-size: 14px;
+      line-height: 1.7;
+    }
+
+    .viewer-md h1,
+    .viewer-md h2,
+    .viewer-md h3 {
+      color: #fff;
+      font-weight: 650;
+      line-height: 1.3;
+      margin: 1.25em 0 0.5em;
+    }
+
+    .viewer-md h1 {
+      margin-top: 0;
+      padding-bottom: 0.32em;
+      border-bottom: 1px solid var(--line);
+      font-size: 1.65em;
+    }
+
+    .viewer-md h2 {
+      padding-bottom: 0.24em;
+      border-bottom: 1px solid var(--line);
+      font-size: 1.28em;
+    }
+
+    .viewer-md h3 {
+      font-size: 1.1em;
+    }
+
+    .viewer-md p {
+      margin: 0.75em 0;
+    }
+
+    .viewer-md ul {
+      margin: 0.65em 0;
+      padding-left: 1.45em;
+    }
+
+    .viewer-md li {
+      margin: 0.25em 0;
+    }
+
+    .viewer-md code {
+      border-radius: 4px;
+      padding: 1px 5px;
+      background: #151515;
+      font-family: "SFMono-Regular", Consolas, "Liberation Mono", "D2Coding", monospace;
+      font-size: 0.88em;
+    }
+
+    .viewer-md blockquote {
+      margin: 0.9em 0;
+      padding: 3px 13px;
+      border-left: 3px solid var(--accent);
+      color: var(--muted);
+      background: #1a1a1a;
+    }
+
+    .viewer-md table {
+      width: 100%;
+      margin: 0.9em 0;
+      border-collapse: collapse;
+      font-size: 13px;
+    }
+
+    .viewer-md th,
+    .viewer-md td {
+      border: 1px solid var(--line);
+      padding: 7px 8px;
+      text-align: left;
+      vertical-align: top;
+    }
+
+    .viewer-md th {
+      background: #191919;
+      color: #fff;
+    }
+
+    .record-view {
+      min-height: 100%;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+      overflow: hidden;
+      display: grid;
+      grid-template-rows: auto 1fr;
+    }
+
+    .record-head {
+      padding: 10px;
+      border-bottom: 1px solid var(--line);
+      background: #1b1b1b;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      justify-content: space-between;
+    }
+
+    .record-body {
+      overflow: auto;
+      padding: 10px;
+      display: grid;
+      gap: 10px;
+    }
+
+    .record-section {
+      display: grid;
+      gap: 6px;
+    }
+
+    .record-section-title {
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 700;
+    }
+
+    .record-columns {
+      position: relative;
+      min-height: min(62vh, 560px);
+      overflow: hidden;
+    }
+
+    .record-pdf {
+      position: relative;
+    }
+
+    .record-pdf .record-columns {
+      position: absolute;
+      inset: 44px 0 0 0;
+      z-index: 5;
+      min-height: 0;
+      pointer-events: none;
+    }
+
+    .record-pdf .record-grip,
+    .record-pdf .record-panel.open {
+      pointer-events: auto;
+    }
+
+    .record-panel {
+      position: absolute;
+      top: 0;
+      bottom: 0;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #181818;
+      overflow: hidden;
+      transition: transform 180ms ease;
+    }
+
+    .record-panel.docs {
+      left: 38px;
+      width: calc(50% - 43px);
+    }
+
+    .record-panel.evidence {
+      right: 38px;
+      width: calc(50% - 43px);
+    }
+
+    .record-panel.docs.closed {
+      transform: translateX(calc(-100% - 38px));
+    }
+
+    .record-panel.evidence.closed {
+      transform: translateX(calc(100% + 38px));
+    }
+
+    .record-panel.closed {
+      pointer-events: none;
+    }
+
+    .record-grip {
+      position: absolute;
+      top: 8px;
+      z-index: 2;
+      width: 32px;
+      min-height: 120px;
+      padding: 8px 4px;
+      display: flex;
+      justify-content: center;
+      gap: 8px;
+      align-items: center;
+      background: #242424;
+      font-size: 12px;
+      font-weight: 700;
+      writing-mode: vertical-rl;
+      text-align: center;
+      border: 1px solid var(--line);
+    }
+
+    .record-grip.docs {
+      left: 0;
+      border-radius: 0 6px 6px 0;
+    }
+
+    .record-grip.evidence {
+      right: 0;
+      border-radius: 6px 0 0 6px;
+    }
+
+    .record-panel-body {
+      height: 100%;
+      overflow: auto;
+      padding: 8px;
+      display: grid;
+      gap: 8px;
+    }
+
+    .record-panel.docs .record-panel-body {
+      padding-left: 0;
+    }
+
+    .record-panel.evidence .record-panel-body {
+      padding-right: 0;
+    }
+
+    .record-view.pdf-mode {
+      height: 100%;
+      border: 0;
+      border-radius: 0;
+    }
+
+    .record-view.pdf-mode .record-body {
+      min-height: 0;
+      padding: 0;
+    }
+
+    .record-view.pdf-mode .record-pdf {
+      min-height: 100%;
+      border: 0;
+      border-radius: 0;
+    }
+
+    .record-item {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 8px;
+      align-items: center;
+      min-height: 44px;
+      padding: 8px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #1f1f1f;
+      text-align: left;
+    }
+
+    .record-item.active {
+      border-color: var(--accent);
+      background: #173233;
+    }
+
+    .record-item.plaintiff {
+      border-left: 4px solid #d75f5f;
+    }
+
+    .record-item.defendant {
+      border-left: 4px solid #4f8fd8;
+    }
+
+    .record-party {
+      border-radius: 999px;
+      padding: 2px 7px;
+      font-size: 11px;
+      color: #fff;
+      background: #666;
+    }
+
+    .record-party.plaintiff {
+      background: #b94343;
+    }
+
+    .record-party.defendant {
+      background: #2f6fb7;
+    }
+
+    .record-item .meta {
+      grid-column: 1 / -1;
+    }
+
+    .record-pdf {
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      display: grid;
+      grid-template-rows: auto 1fr;
+      overflow: hidden;
+      background: #101010;
+    }
+
+    .pdf-toolbar {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 8px;
+      border-bottom: 1px solid var(--line);
+      background: #1b1b1b;
+      overflow: auto;
+    }
+
+    .pdf-viewer {
+      overflow: auto;
+      padding: 12px;
+      display: grid;
+      gap: 12px;
+      justify-items: center;
+      background: #121212;
+    }
+
+    .pdf-viewer.fit-width {
+      justify-items: stretch;
+      padding-left: 0;
+      padding-right: 0;
+    }
+
+    .pdf-viewer.fit-width .pdf-page {
+      width: 100%;
+      max-width: none;
+    }
+
+    .pdf-viewer.fit-page .pdf-page {
+      width: min(100%, 240px);
+      min-height: 340px;
+      font-size: 10px;
+    }
+
+    .pdf-viewer.crop .pdf-page {
+      padding-top: 12px;
+      padding-bottom: 12px;
+      min-height: 390px;
+    }
+
+    .pdf-viewer.crop .pdf-page.image-page {
+      padding: 0;
+      overflow: hidden;
+    }
+
+    .pdf-viewer.crop .pdf-page.image-page img {
+      width: calc(100% + 24px);
+      max-width: none;
+      margin: -12px;
+    }
+
+    .pdf-viewer.fit-page.crop .pdf-page {
+      min-height: 300px;
+    }
+
+    .pdf-viewer.single {
+      position: relative;
+      touch-action: pan-y;
+    }
+
+    .pdf-viewer.single .pdf-page {
+      grid-area: 1 / 1;
+    }
+
+    .pdf-nav {
+      position: sticky;
+      top: 45%;
+      z-index: 2;
+      width: 36px;
+      height: 48px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: rgba(16, 16, 16, 0.82);
+      color: #fff;
+      font-size: 24px;
+    }
+
+    .pdf-nav.prev {
+      justify-self: start;
+      grid-area: 1 / 1;
+    }
+
+    .pdf-nav.next {
+      justify-self: end;
+      grid-area: 1 / 1;
+    }
+
+    .pdf-page {
+      width: min(100%, 320px);
+      min-height: 450px;
+      padding: 24px 22px;
+      background: #f7f7f2;
+      color: #111;
+      box-shadow: 0 8px 20px rgba(0, 0, 0, 0.4);
+      font-family: "Times New Roman", "Batang", serif;
+      font-size: 12px;
+      line-height: 1.65;
+    }
+
+    .pdf-page.image-page {
+      min-height: 0;
+      padding: 0;
+      background: #fff;
+    }
+
+    .pdf-page h3 {
+      margin: 0 0 18px;
+      text-align: center;
+      font-size: 18px;
+    }
+
+    .pdf-page img {
+      display: block;
+      width: 100%;
+    }
+
+    .pdf-meta {
+      margin-bottom: 14px;
+      padding-bottom: 10px;
+      border-bottom: 1px solid #b9b9b0;
+      color: #333;
+    }
+
+    .pdf-party {
+      display: inline-block;
+      margin-bottom: 8px;
+      border-radius: 999px;
+      padding: 2px 8px;
+      color: #fff;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      font-size: 11px;
+    }
+
+    .pdf-party.plaintiff {
+      background: #b94343;
+    }
+
+    .pdf-party.defendant {
+      background: #2f6fb7;
+    }
+
+    .pdf-party.court {
+      background: #666;
+    }
+
+    .pdf-page p {
+      margin: 0 0 10px;
+    }
+
+    .viewer-empty {
+      padding: 28px 12px;
+      color: var(--muted);
+      text-align: center;
+      font-size: 13px;
+    }
+
+    .bottom-tabs {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      border-top: 1px solid var(--line);
+      background: #1c1c1c;
+    }
+
+    .nav {
+      display: grid;
+      gap: 2px;
+      place-items: center;
+      color: var(--muted);
+      font-size: 11px;
+    }
+
+    .nav .mark {
+      font-size: 18px;
+      line-height: 1;
+    }
+
+    .nav.active {
+      color: var(--text);
+      background: #252525;
+      box-shadow: inset 0 3px var(--accent);
+    }
+
+    .android-app,
+    .android-app body {
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background: var(--bg);
+    }
+
+    .android-app .app {
+      width: 100vw;
+      height: 100dvh;
+      min-height: 100dvh;
+      margin: 0;
+      border: 0;
+      grid-template-rows: calc(44px + env(safe-area-inset-top, 0px)) minmax(0, 1fr) calc(58px + max(env(safe-area-inset-bottom, 0px), 8px));
+    }
+
+    .android-app .topbar {
+      padding-top: env(safe-area-inset-top, 0px);
+    }
+
+    .android-app .bottom-tabs {
+      padding-bottom: max(env(safe-area-inset-bottom, 0px), 8px);
+    }
+
+    .sheet {
+      position: absolute;
+      inset: auto 0 0 0;
+      height: min(88vh, 720px);
+      background: #181818;
+      border-top: 1px solid var(--line);
+      box-shadow: var(--shadow);
+      transform: translateY(105%);
+      transition: transform 180ms ease;
+      display: grid;
+      grid-template-rows: 44px auto 1fr;
+      z-index: 5;
+    }
+
+    .sheet.open {
+      transform: translateY(0);
+    }
+
+    .sheet-head {
+      display: grid;
+      grid-template-columns: 44px 1fr auto auto;
+      align-items: center;
+      border-bottom: 1px solid var(--line);
+      background: #202020;
+    }
+
+    .sheet-title {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-size: 14px;
+      font-weight: 700;
+    }
+
+    .mode-toggle {
+      margin: 8px;
+      height: 36px;
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      overflow: hidden;
+    }
+
+    .mode-toggle button {
+      color: var(--muted);
+      background: var(--panel);
+    }
+
+    .mode-toggle button.active {
+      color: var(--text);
+      background: #173233;
+    }
+
+    .panel-body {
+      min-height: 0;
+      overflow: hidden;
+    }
+
+    .agent,
+    .terminal {
+      height: 100%;
+      display: none;
+      grid-template-rows: 1fr auto;
+    }
+
+    .agent.active,
+    .terminal.active {
+      display: grid;
+    }
+
+    .terminal {
+      grid-template-rows: auto 1fr auto;
+    }
+
+    .agent {
+      grid-template-rows: auto 1fr auto;
+    }
+
+    .agent-tabs {
+      display: flex;
+      gap: 6px;
+      overflow: auto;
+      padding: 8px;
+      border-bottom: 1px solid var(--line);
+      background: #181818;
+    }
+
+    .terminal-route {
+      display: grid;
+      grid-template-columns: auto 1fr;
+      gap: 8px;
+      align-items: center;
+      padding: 8px 10px;
+      border-bottom: 1px solid var(--line);
+      background: #181818;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .terminal-route select {
+      min-width: 0;
+      height: 30px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #111;
+      color: var(--text);
+      padding: 0 8px;
+      outline: none;
+    }
+
+    .timeline {
+      overflow: auto;
+      padding: 10px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .bubble {
+      max-width: 92%;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 9px 10px;
+      background: var(--panel);
+      font-size: 13px;
+      line-height: 1.45;
+    }
+
+    .bubble.user {
+      align-self: flex-end;
+      background: #173233;
+      border-color: #245c5e;
+    }
+
+    .bubble.tool {
+      border-color: #594a2d;
+      background: #2a2418;
+    }
+
+    .prompt {
+      display: grid;
+      grid-template-columns: 1fr 42px;
+      gap: 8px;
+      padding: 8px;
+      border-top: 1px solid var(--line);
+      background: #1d1d1d;
+    }
+
+    .prompt textarea,
+    .terminal-input {
+      min-height: 42px;
+      max-height: 120px;
+      resize: none;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #111;
+      color: var(--text);
+      padding: 9px;
+      outline: none;
+    }
+
+    .send {
+      border-radius: 6px;
+      background: var(--accent);
+      color: white;
+      font-weight: 800;
+    }
+
+    .term-screen {
+      overflow: auto;
+      padding: 12px;
+      background: #0e0e0e;
+      color: #d8d8d8;
+      font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+      font-size: 12px;
+      line-height: 1.5;
+      white-space: pre-wrap;
+    }
+
+    .overlay {
+      position: absolute;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.45);
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 180ms ease;
+      z-index: 4;
+    }
+
+    .overlay.show {
+      opacity: 1;
+      pointer-events: auto;
+    }
+
+    @media (min-width: 760px) {
+      .app {
+        width: min(100vw, 1180px);
+        height: min(100vh, 760px);
+        min-height: 680px;
+        margin: 24px auto;
+        grid-template-columns: 50px 280px 1fr;
+        grid-template-rows: 44px 1fr;
+        border: 1px solid #000;
+      }
+
+      .topbar {
+        grid-column: 2 / 4;
+      }
+
+      .bottom-tabs {
+        grid-row: 1 / 3;
+        grid-column: 1;
+        grid-template-columns: 1fr;
+        grid-auto-rows: 58px;
+        align-content: start;
+        border-top: 0;
+        border-right: 1px solid var(--line);
+      }
+
+      .main {
+        grid-column: 2 / 4;
+      }
+
+      .android-app .app {
+        width: 100vw;
+        height: 100dvh;
+        min-height: 100dvh;
+        margin: 0;
+        border: 0;
+        grid-template-rows: calc(44px + env(safe-area-inset-top, 0px)) minmax(0, 1fr);
+      }
+
+      .android-app .bottom-tabs {
+        padding-top: env(safe-area-inset-top, 0px);
+        padding-bottom: 0;
+      }
+
+      .sheet {
+        left: auto;
+        top: 44px;
+        right: 0;
+        bottom: 0;
+        width: 46%;
+        height: auto;
+        border-top: 0;
+        border-left: 1px solid var(--line);
+        transform: translateX(105%);
+      }
+
+      .sheet.open {
+        transform: translateX(0);
+      }
+    }
+
+    .sheet.fullscreen {
+      inset: 0;
+      width: auto;
+      height: auto;
+      border: 0;
+      transform: translateY(105%);
+    }
+
+    .sheet.fullscreen.open {
+      transform: none;
+    }
+
+    .ssh-sheet,
+    .remote-sheet {
+      position: fixed;
+      inset: auto 0 0;
+      z-index: 11;
+      height: min(82vh, 680px);
+      border-top: 1px solid var(--line);
+      background: var(--panel);
+      box-shadow: var(--shadow);
+      display: grid;
+      grid-template-rows: auto 1fr auto;
+      transform: translateY(105%);
+      transition: transform 0.18s ease;
+    }
+
+    .ssh-sheet.open,
+    .remote-sheet.open {
+      transform: none;
+    }
+
+    .ssh-form {
+      overflow: auto;
+      padding: 10px;
+      display: grid;
+      gap: 10px;
+    }
+
+    .field {
+      display: grid;
+      gap: 4px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .field input,
+    .field select {
+      width: 100%;
+      height: 36px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #111;
+      color: var(--text);
+      padding: 0 10px;
+      outline: none;
+    }
+
+    .field input:focus,
+    .field select:focus {
+      border-color: var(--accent);
+    }
+
+    .browse-row {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 8px;
+    }
+
+    .browse-row .tool {
+      height: 36px;
+      white-space: nowrap;
+    }
+
+    .ssh-actions {
+      display: flex;
+      gap: 8px;
+      padding: 10px;
+      border-top: 1px solid var(--line);
+      background: #1b1b1b;
+      overflow: auto;
+    }
+
+    .ssh-status {
+      border-top: 1px solid var(--line);
+      color: var(--muted);
+      font-size: 12px;
+      min-height: 34px;
+      padding: 9px 10px;
+    }
+
+    .remote-path {
+      border-bottom: 1px solid var(--line);
+      color: var(--muted);
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 12px;
+      padding: 10px;
+      word-break: break-all;
+    }
+
+    .remote-list {
+      overflow: auto;
+      padding: 10px;
+      display: grid;
+      gap: 8px;
+    }
+
+    .remote-item {
+      width: 100%;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #111;
+      color: var(--text);
+      font: inherit;
+      padding: 10px;
+      text-align: left;
+    }
+
+    .remote-empty {
+      color: var(--muted);
+      padding: 10px;
+    }
+  </style>
+</head>
+<body>
+  <div class="app" data-view="blank" data-panel="agent">
+    <header class="topbar">
+      <button class="icon-btn" id="caseListButton" title="SSH 설정">▤</button>
+      <div class="titlebar">
+        <div class="title-main" id="titleMain">legal-terminal mobile</div>
+        <div class="title-sub" id="titleSub">SSH</div>
+      </div>
+      <button class="icon-btn" id="openPanelButton" title="작업 패널">＋</button>
+    </header>
+
+    <main class="main">
+      <div class="case-strip" id="caseStrip"></div>
+
+      <section class="view active" data-view-panel="blank">
+        <div class="blank">빈 작업면</div>
+      </section>
+
+      <section class="view" data-view-panel="cases">
+        <div class="section-head">
+          <input class="search" id="caseSearch" placeholder="사건 검색" autocomplete="off">
+          <button class="tool" id="refreshCases">새로고침</button>
+        </div>
+        <div class="list" id="caseList"></div>
+      </section>
+
+      <section class="view" data-view-panel="hearings">
+        <div class="section-head">
+          <div class="section-title">기일</div>
+          <button class="tool">오늘</button>
+        </div>
+        <div class="list" id="hearingList"></div>
+      </section>
+
+      <section class="view" data-view-panel="todos">
+        <div class="section-head">
+          <div class="section-title">할일</div>
+          <button class="tool">추가</button>
+        </div>
+        <div class="list" id="todoList"></div>
+      </section>
+
+      <section class="view workspace" data-view-panel="workspace">
+        <div class="toolbar" id="docTabs"></div>
+        <div class="doc-view">
+          <div class="section-head">
+            <div>
+              <div class="section-title" id="docTitle">작성서류</div>
+              <div class="meta" id="docMeta"></div>
+            </div>
+            <button class="tool" id="openWorkPanelFromDoc">작업</button>
+          </div>
+          <div class="file-list" id="fileList"></div>
+          <div class="file-viewer hidden" id="fileViewer"></div>
+        </div>
+      </section>
+    </main>
+
+    <nav class="bottom-tabs">
+      <button class="nav" data-nav="cases"><span class="mark">§</span><span>사건</span></button>
+      <button class="nav" data-nav="todos"><span class="mark">✓</span><span>할일</span></button>
+      <button class="nav" data-nav="hearings"><span class="mark">◷</span><span>기일</span></button>
+      <button class="nav" data-nav="blank"><span class="mark">□</span><span>작업</span></button>
+    </nav>
+
+    <div class="overlay" id="overlay"></div>
+    <aside class="ssh-sheet" id="sshSheet" aria-label="SSH 설정">
+      <div class="sheet-head">
+        <button class="icon-btn" id="closeSshSheet" title="닫기">×</button>
+        <div class="sheet-title">SSH 1번 접속</div>
+        <button class="icon-btn" id="newSshProfile" title="새 프로필">＋</button>
+      </div>
+      <div class="ssh-form">
+        <label class="field">
+          프로필
+          <select id="sshProfileSelect"></select>
+        </label>
+        <label class="field">
+          이름
+          <input id="sshLabel" autocomplete="off" placeholder="사무실 서버">
+        </label>
+        <label class="field">
+          호스트
+          <input id="sshHost" autocomplete="off" placeholder="example.com">
+        </label>
+        <label class="field">
+          사용자
+          <input id="sshUser" autocomplete="off" placeholder="ubuntu">
+        </label>
+        <label class="field">
+          비밀번호
+          <input id="sshPassword" type="password" autocomplete="off" placeholder="처음 키 등록 때만 사용">
+        </label>
+        <label class="field">
+          포트
+          <input id="sshPort" inputmode="numeric" autocomplete="off" placeholder="22">
+        </label>
+        <label class="field" id="sshIdentityField">
+          개인키 경로
+          <div class="browse-row">
+            <input id="sshIdentityFile" autocomplete="off" placeholder="앱 저장소에 복사됨">
+            <button class="tool" id="pickIdentityFile">찾아보기</button>
+          </div>
+        </label>
+        <label class="field" id="sshDraftsField">
+          작성서류 루트
+          <div class="browse-row">
+            <input id="sshDraftsRoot" autocomplete="off" placeholder="/home/me/cases">
+            <button class="tool" data-remote-browse="draftsRoot">찾아보기</button>
+          </div>
+        </label>
+        <label class="field" id="sshRecordsField">
+          소송기록 루트
+          <div class="browse-row">
+            <input id="sshRecordsRoot" autocomplete="off" placeholder="/home/me/records">
+            <button class="tool" data-remote-browse="recordsRoot">찾아보기</button>
+          </div>
+        </label>
+        <div class="field" id="sshFavoritesField">
+          즐겨찾는 폴더
+          <div class="explorer-actions" id="sshQuickStarts"></div>
+        </div>
+      </div>
+      <div class="ssh-actions">
+        <button class="tool" id="saveSshProfile">저장</button>
+        <button class="tool" id="useSshProfile">키로 접속</button>
+        <button class="tool" id="passwordSshProfile">1. 터미널 로그인 후 키 저장</button>
+        <button class="tool" id="openSshTerminal">터미널 열기</button>
+        <button class="tool" id="deleteSshProfile">접속 초기화</button>
+      </div>
+      <div class="ssh-status" id="sshStatus"></div>
+    </aside>
+    <aside class="remote-sheet" id="remoteSheet" aria-label="원격 경로 선택">
+      <div class="sheet-head">
+        <button class="icon-btn" id="closeRemoteSheet" title="닫기">×</button>
+        <div class="sheet-title" id="remoteTitle">원격 경로 선택</div>
+        <button class="icon-btn" data-remote-reload title="새로고침">↻</button>
+      </div>
+      <div class="remote-path" id="remotePath">~</div>
+      <div class="remote-list" id="remoteList"></div>
+      <div class="ssh-actions">
+        <button class="tool" id="chooseRemotePath">이 경로 사용</button>
+        <button class="tool" id="addRemoteFavorite">즐겨찾기 추가</button>
+      </div>
+    </aside>
+    <aside class="sheet" id="sheet" aria-label="작업 패널">
+      <div class="sheet-head">
+        <button class="icon-btn" id="closeSheet" title="닫기">×</button>
+        <div class="sheet-title" id="panelTitle">Agent</div>
+        <button class="icon-btn" id="fullscreenSheet" title="전체화면">⛶</button>
+        <button class="icon-btn" id="historyButton" title="히스토리">☰</button>
+      </div>
+      <div class="mode-toggle">
+        <button class="active" data-panel-mode="agent">Agent</button>
+        <button data-panel-mode="terminal">터미널</button>
+      </div>
+      <div class="panel-body">
+        <div class="agent active" id="agentPanel">
+          <div class="agent-tabs" id="agentTabs"></div>
+          <div class="timeline" id="timeline"></div>
+          <div class="prompt">
+            <textarea id="agentInput" rows="1">준비서면 초안 검토해줘</textarea>
+            <button class="send" id="sendAgent">↵</button>
+          </div>
+        </div>
+        <div class="terminal" id="terminalPanel">
+          <div class="terminal-route">
+            <label for="terminalSelect">터미널</label>
+            <select id="terminalSelect"></select>
+          </div>
+          <div class="term-screen" id="termScreen"></div>
+          <div class="prompt">
+            <input class="terminal-input" id="terminalInput" placeholder="ssh ubuntu@example.com -p 22">
+            <button class="send" id="sendTerminal">↵</button>
+          </div>
+        </div>
+      </div>
+    </aside>
+  </div>
+
+  <script>
+    const sampleCases = [
+      {
+        id: 'case-1',
+        title: '2026가합10432 손해배상',
+        court: '서울중앙지방법원',
+        parties: '의뢰인 김민준 · 상대 주식회사 한빛',
+        folder: '/srv/cases/2026가합10432',
+        docs: [
+          { id: 'doc-1', title: '준비서면.md', meta: '작성서류 · 18KB' },
+          { id: 'doc-2', title: '증거설명.md', meta: '작성서류 · 6KB' }
+        ],
+        files: ['준비서면.md', '증거설명.md', '사실관계.md', 'memo.txt'],
+        records: {
+          folder: '/srv/records/2026가합10432',
+          documents: [
+            ['소장', '2026.03.02 · 원고', '계약 체결, 채무불이행, 손해 발생을 청구원인으로 정리한 최초 제출서면입니다.'],
+            ['답변서', '2026.04.08 · 피고', '피고는 손해액과 인과관계를 다투고 일부 사실관계를 부인합니다.'],
+            ['준비서면(1)', '2026.05.21 · 원고', '답변서 반박과 메시지 내역을 근거로 귀책사유를 보강합니다.']
+          ],
+          evidences: [
+            ['갑 제1호증 계약서', 'PDF · 12쪽 · 원고', '계약 체결일, 목적물, 지급 조건이 확인되는 핵심 서증입니다.'],
+            ['갑 제2호증 메시지 내역', 'PDF · 38쪽 · 원고', '이행 지체 통지와 상대방의 답변 경과가 시간순으로 정리되어 있습니다.']
+          ],
+          attachments: [
+            ['송달증명원', 'PDF · 1쪽 · 법원', '상대방 송달 완료 여부 확인용 문서입니다.'],
+            ['위임장', 'PDF · 2쪽 · 원고', '소송대리권 확인 서류입니다.']
+          ]
+        },
+        terminals: [
+          { id: 'term-case-1-review', name: '작성 검토 · 최근', cwd: '/srv/cases/2026가합10432', log: '$ cd /srv/cases/2026가합10432\n$ ls -la\n준비서면.md\n증거설명.md\n사실관계.md' },
+          { id: 'term-case-1-shell', name: '원격 쉘', cwd: '/srv/cases/2026가합10432', log: '$ pwd\n/srv/cases/2026가합10432\n$ claude --version\nClaude Code v2.1.158' }
+        ],
+        sessions: ['오전 검토', '증거정리', '청구취지 수정']
+      },
+      {
+        id: 'case-2',
+        title: '2025나88721 대여금',
+        court: '서울고등법원',
+        parties: '의뢰인 박서연 · 상대 이도윤',
+        folder: '/srv/cases/2025나88721',
+        docs: [
+          { id: 'doc-3', title: '항소이유서.md', meta: '작성서류 · 24KB' }
+        ],
+        files: ['항소이유서.md', '쟁점정리.md', '계산표.txt'],
+        records: {
+          folder: '/srv/records/2025나88721',
+          documents: [
+            ['제1심 판결문', '2025.11.18 · 법원', '원심 판단 이유와 항소심에서 다툴 쟁점의 출발점입니다.'],
+            ['항소장', '2025.12.02 · 원고', '원심 판단 중 변제 인정 부분을 다투는 항소 제기 문서입니다.']
+          ],
+          evidences: [
+            ['갑 제1호증 차용증', 'PDF · 3쪽 · 원고', '대여 원금과 변제기 약정이 표시된 서증입니다.']
+          ],
+          attachments: [
+            ['소송위임장', 'PDF · 1쪽 · 원고', '항소심 대리권 확인 서류입니다.']
+          ]
+        },
+        terminals: [
+          { id: 'term-case-2-appeal', name: '항소 검토 · 최근', cwd: '/srv/cases/2025나88721', log: '$ cd /srv/cases/2025나88721\n$ ls\n항소이유서.md\n쟁점정리.md\n계산표.txt' }
+        ],
+        sessions: ['항소이유 검토']
+      }
+    ]
+
+    let cases = sampleCases.slice()
+
+    const hearings = [
+      ['2026.07.03', '변론기일', '2026가합10432 손해배상'],
+      ['2026.07.11', '조정기일', '2025나88721 대여금'],
+      ['2026.07.19', '선고기일', '2026카단4401 가압류']
+    ]
+
+    const todos = [
+      ['오늘', '준비서면 초안 최종 검토', '2026가합10432'],
+      ['내일', '증거설명서 누락 파일 확인', '2026가합10432'],
+      ['이번 주', '항소이유서 목차 정리', '2025나88721']
+    ]
+
+    const state = {
+      view: 'blank',
+      caseId: '',
+      docId: 'files',
+      openCaseIds: [],
+      caseDocIds: {},
+      panelOpen: false,
+      panelMode: 'agent',
+      panelFullscreen: false,
+      lastAgentName: '오전 검토',
+      lastTerminalId: 'term-case-1-review',
+      recordLabel: '',
+      pdfFit: 'width',
+      pdfFlow: 'continuous',
+      pdfPage: 1,
+      pdfCrop: false,
+      recordDocsPanelOpen: true,
+      recordEvidencePanelOpen: true,
+      recordSyncBusy: false,
+      sshSheetOpen: false,
+      sshProfiles: [],
+      editingSshProfileId: '',
+      sshAutoConnected: false,
+      remoteBrowseOpen: false,
+      remoteBrowseField: '',
+      remoteBrowsePath: '~',
+      remoteBrowseEntries: [],
+      remoteBrowseError: '',
+      remoteBrowseLoading: false,
+      remoteFilesByCase: {},
+      remoteRecordsByCase: {},
+      rawDocIds: {},
+      casesLoaded: false,
+      casesLoading: false,
+      casesError: '',
+      caseTokenReady: null,
+      terminalLog: '$ whoami',
+      sshShellActive: false,
+      pendingSshProfile: null,
+      suppressFileClick: false,
+      selectedText: '',
+      bridge: { ok: false, lastProfileId: '', message: 'browser' }
+    }
+
+    const $ = (selector) => document.querySelector(selector)
+    const $$ = (selector) => Array.from(document.querySelectorAll(selector))
+    const EXPLORER_STATE_KEY = 'legal-terminal-mobile-explorer'
+
+    function nativeRequest(method, payload = {}) {
+      const bridge = window.LegalTerminalAndroid
+      if (!bridge || typeof bridge.request !== 'function') return { ok: false, error: 'Android bridge unavailable' }
+      try {
+        return JSON.parse(bridge.request(JSON.stringify({ method, payload })))
+      } catch (error) {
+        return { ok: false, error: 'Android bridge failed' }
+      }
+    }
+
+    function explorerState() {
+      try {
+        return JSON.parse(localStorage.getItem(EXPLORER_STATE_KEY) || '{}')
+      } catch {
+        return {}
+      }
+    }
+
+    function saveExplorerState(patch) {
+      localStorage.setItem(EXPLORER_STATE_KEY, JSON.stringify({ ...explorerState(), ...patch }))
+    }
+
+    function remotePairingKey(caseItem = activeCase()) {
+      const profile = activeSshProfile()
+      return profile && caseItem ? `remote:${profile.id}:${caseItem.id}` : ''
+    }
+
+    function casePairing(caseItem = activeCase()) {
+      const key = remotePairingKey(caseItem)
+      return key ? explorerState().jsPairings?.[key] || null : null
+    }
+
+    function setCasePairing(patch, caseItem = activeCase()) {
+      const key = remotePairingKey(caseItem)
+      if (!key || !caseItem) return null
+      const stateBox = explorerState()
+      const jsPairings = { ...(stateBox.jsPairings || {}) }
+      jsPairings[key] = { ...(jsPairings[key] || {}), ...patch }
+      saveExplorerState({ jsPairings })
+      if (jsPairings[key].drafts) caseItem.folder = jsPairings[key].drafts
+      if (jsPairings[key].records) caseItem.records.folder = jsPairings[key].records
+      return jsPairings[key]
+    }
+
+    function clearCasePairing(caseItem = activeCase()) {
+      const key = remotePairingKey(caseItem)
+      if (!key) return
+      const stateBox = explorerState()
+      const jsPairings = { ...(stateBox.jsPairings || {}) }
+      if (!jsPairings[key]) return
+      delete jsPairings[key]
+      saveExplorerState({ jsPairings })
+    }
+
+    function pathLeaf(path) {
+      const cleaned = String(path || '').replace(/\/+$/, '')
+      return cleaned.split('/').filter(Boolean).pop() || cleaned || '~'
+    }
+
+    function normalizeRemoteQuickStartPaths(paths) {
+      const seen = new Set()
+      return (Array.isArray(paths) ? paths : [])
+        .map((path) => String(path || '').trim())
+        .filter(Boolean)
+        .filter((path) => {
+          const key = path.replace(/\/+$/, '') || '/'
+          if (seen.has(key)) return false
+          seen.add(key)
+          return true
+        })
+    }
+
+    function activeRemoteStarts(profile = activeSshProfile()) {
+      if (!profile) return []
+      const starts = []
+      const seen = new Set()
+      const add = (label, path) => {
+        const value = String(path || '').trim()
+        const key = value.replace(/\/+$/, '') || '/'
+        if (!value || seen.has(key)) return
+        seen.add(key)
+        starts.push({ label, path: value })
+      }
+      normalizeRemoteQuickStartPaths(profile.quickStartPaths).forEach((path) => add(pathLeaf(path), path))
+      add('작성서류 루트', profile.draftsRoot)
+      add('소송기록 루트', profile.recordsRoot)
+      add('홈', '~')
+      return starts
+    }
+
+    function initNativeBridge() {
+      const result = nativeRequest('getSshProfiles')
+      if (!result.ok) return
+      document.documentElement.classList.add('android-app')
+      state.bridge = {
+        ok: true,
+        lastProfileId: result.lastProfileId || '',
+        message: result.lastProfileId ? 'connected profile' : 'no profile'
+      }
+      state.sshProfiles = Array.isArray(result.profiles) ? result.profiles : []
+      state.editingSshProfileId = state.bridge.lastProfileId || state.sshProfiles[0]?.id || ''
+      const token = nativeRequest('hasToken')
+      state.caseTokenReady = token.ok ? Boolean(token.hasToken) : null
+      if (state.caseTokenReady) setTimeout(() => loadCases(false), 0)
+      setTimeout(autoConnectSsh, 0)
+    }
+
+    function activeSshProfile() {
+      return state.sshProfiles.find((profile) => profile.id === state.bridge.lastProfileId) || null
+    }
+
+    function editingSshProfile() {
+      return state.sshProfiles.find((profile) => profile.id === state.editingSshProfileId) || state.sshProfiles[0] || null
+    }
+
+    function currentProfileFromForm(passwordOnly = false) {
+      const identityFile = $('#sshIdentityFile').value.trim()
+      const previous = editingSshProfile()
+      const quickStartPaths = normalizeRemoteQuickStartPaths(previous?.quickStartPaths)
+      const profile = {
+        id: state.editingSshProfileId || `ssh-${Date.now()}`,
+        label: $('#sshLabel').value.trim() || '서버',
+        host: $('#sshHost').value.trim(),
+        user: $('#sshUser').value.trim(),
+        password: passwordOnly || !identityFile ? $('#sshPassword').value : '',
+        port: Number.parseInt($('#sshPort').value, 10) || undefined,
+        identityFile: passwordOnly ? undefined : identityFile || undefined,
+        draftsRoot: $('#sshDraftsRoot').value.trim() || undefined,
+        recordsRoot: $('#sshRecordsRoot').value.trim() || undefined,
+        quickStartPaths
+      }
+      if (!profile.quickStartPaths.length) delete profile.quickStartPaths
+      if (passwordOnly) profile.passwordOnly = true
+      return profile
+    }
+
+    function sshFormReady() {
+      return Boolean($('#sshHost').value.trim() && $('#sshUser').value.trim())
+    }
+
+    function updateSshActionState() {
+      const hasPassword = Boolean($('#sshPassword').value)
+      const hasKey = Boolean($('#sshIdentityFile').value.trim())
+      $('#useSshProfile').disabled = !sshFormReady() || !hasKey
+      $('#useSshProfile').style.display = hasKey && !hasPassword ? '' : 'none'
+      $('#passwordSshProfile').disabled = !sshFormReady()
+      $('#passwordSshProfile').style.display = !hasKey || hasPassword ? '' : 'none'
+      $('#openSshTerminal').disabled = !sshFormReady() || !hasKey
+    }
+
+    function setSshBusy(busy, message = '') {
+      $('#passwordSshProfile').disabled = busy || !sshFormReady()
+      $('#useSshProfile').disabled = busy || !sshFormReady()
+      $('#openSshTerminal').disabled = busy || !sshFormReady()
+      $('#sshStatus').textContent = message
+    }
+
+    function sshErrorMessage(error) {
+      const message = String(error || 'SSH 실패')
+      if (/Operation timed out|SSH_FX_FAILURE/i.test(message)) {
+        return `${message}\n원격 OneDrive 파일이 아직 로컬에 다운로드되지 않았을 수 있습니다. 원격 Mac에서 해당 PDF를 먼저 내려받은 뒤 다시 여세요.`
+      }
+      if (/EACCES|Permission denied|storage\/emulated|sdcard|직접 읽을 수 없습니다|개인키를 읽을 수 없습니다/i.test(message)) {
+        return `${message}\n저장된 키 경로가 깨졌습니다. 접속 초기화 후 1번부터 다시 진행하세요.`
+      }
+      if (/publickey/i.test(message) && activeSshProfile()?.identityFile) {
+        return `${message}\n저장된 키가 서버에서 거부됐습니다. 접속 초기화 후 1번부터 다시 진행하세요.`
+      }
+      return message
+    }
+
+    function overlayVisible() {
+      return state.panelOpen || state.sshSheetOpen || state.remoteBrowseOpen
+    }
+
+    window.__ltIdentityFilePicked = (result) => {
+      if (result?.ok && result.path) {
+        $('#sshIdentityFile').value = result.path
+        return
+      }
+      if (result?.error) alert(result.error)
+    }
+
+    function savedSshProfile(profile) {
+      const saved = { ...profile }
+      delete saved.password
+      delete saved.passwordOnly
+      return saved
+    }
+
+    function saveSshProfiles() {
+      nativeRequest('saveSshProfiles', { profiles: state.sshProfiles.map(savedSshProfile) })
+    }
+
+    function setEditingQuickStartPath(path, enabled) {
+      const profile = currentProfileFromForm()
+      if (!profile || !path) return
+      const key = path.replace(/\/+$/, '') || '/'
+      profile.quickStartPaths = enabled
+        ? normalizeRemoteQuickStartPaths([...(profile.quickStartPaths || []), path])
+        : normalizeRemoteQuickStartPaths(profile.quickStartPaths).filter((item) => (item.replace(/\/+$/, '') || '/') !== key)
+      if (!profile.quickStartPaths.length) delete profile.quickStartPaths
+      upsertEditingSshProfile(profile)
+    }
+
+    function upsertEditingSshProfile(profile = currentProfileFromForm()) {
+      const saved = savedSshProfile(profile)
+      const index = state.sshProfiles.findIndex((item) => item.id === saved.id)
+      if (index >= 0) state.sshProfiles[index] = saved
+      else state.sshProfiles.push(saved)
+      state.editingSshProfileId = saved.id
+      saveSshProfiles()
+      renderAll()
+      return saved
+    }
+
+    function openKeyTerminal(profile, prefix = '', openPanel = true) {
+      const result = nativeRequest('startSshShell', { profile })
+      state.panelMode = 'terminal'
+      state.panelFullscreen = false
+      state.panelOpen = openPanel
+      state.sshSheetOpen = false
+      state.sshShellActive = Boolean(result.ok)
+      state.terminalLog = prefix + (result.ok ? result.output : sshErrorMessage(result.error || 'SSH 접속 실패'))
+      renderAll()
+      return result
+    }
+
+    function autoConnectSsh() {
+      if (state.sshAutoConnected) return
+      const profile = activeSshProfile()
+      if (!profile?.identityFile) return
+      state.sshAutoConnected = true
+      openKeyTerminal(profile, `$ ssh ${profile.user}@${profile.host} -p ${profile.port || 22}\n키 자동접속\n`, false)
+    }
+
+    function renderSshSheet() {
+      $('#sshSheet').classList.toggle('open', state.sshSheetOpen)
+      $('#overlay').classList.toggle('show', overlayVisible())
+      const profile = editingSshProfile()
+      const hasKey = Boolean(profile?.identityFile)
+      $('#sshProfileSelect').innerHTML = state.sshProfiles.length
+        ? state.sshProfiles.map((item) => `<option value="${item.id}" ${item.id === profile?.id ? 'selected' : ''}>${escapeHtml(item.label || item.host || '서버')}</option>`).join('')
+        : '<option value="">새 프로필</option>'
+      $('#sshLabel').value = profile?.label || ''
+      $('#sshHost').value = profile?.host || ''
+      $('#sshUser').value = profile?.user || ''
+      $('#sshPassword').value = ''
+      $('#sshPort').value = profile?.port || ''
+      $('#sshIdentityFile').value = profile?.identityFile || ''
+      $('#sshDraftsRoot').value = profile?.draftsRoot || ''
+      $('#sshRecordsRoot').value = profile?.recordsRoot || ''
+      $('#sshQuickStarts').innerHTML = normalizeRemoteQuickStartPaths(profile?.quickStartPaths).map((path) =>
+        `<button class="tool" data-remove-ssh-favorite="${escapeHtml(path)}">${escapeHtml(pathLeaf(path))} ×</button>`
+      ).join('') || '<span class="meta">찾아보기에서 추가</span>'
+      $('#sshIdentityField').style.display = ''
+      $('#sshDraftsField').style.display = hasKey ? '' : 'none'
+      $('#sshRecordsField').style.display = hasKey ? '' : 'none'
+      $('#sshFavoritesField').style.display = hasKey ? '' : 'none'
+      $('#saveSshProfile').style.display = hasKey ? '' : 'none'
+      $('#openSshTerminal').style.display = hasKey ? '' : 'none'
+      $('#deleteSshProfile').disabled = !profile
+      updateSshActionState()
+    }
+
+    function remoteFieldLabel() {
+      return state.remoteBrowseField === 'recordsRoot' ? '소송기록 루트' : '작성서류 루트'
+    }
+
+    function renderRemoteSheet() {
+      $('#remoteSheet').classList.toggle('open', state.remoteBrowseOpen)
+      $('#overlay').classList.toggle('show', overlayVisible())
+      $('#remoteTitle').textContent = remoteFieldLabel()
+      $('#remotePath').textContent = state.remoteBrowsePath || '~'
+      $('#chooseRemotePath').disabled = state.remoteBrowseLoading || Boolean(state.remoteBrowseError)
+      $('#addRemoteFavorite').disabled = state.remoteBrowseLoading || Boolean(state.remoteBrowseError)
+      if (state.remoteBrowseLoading) {
+        $('#remoteList').innerHTML = '<div class="remote-empty">불러오는 중...</div>'
+        return
+      }
+      if (state.remoteBrowseError) {
+        $('#remoteList').innerHTML = `<div class="remote-empty">${escapeHtml(state.remoteBrowseError)}</div>`
+        return
+      }
+      $('#remoteList').innerHTML = [
+        `<button class="remote-item" data-remote-dir="${escapeHtml(state.remoteBrowseParent || '/')}">..</button>`,
+        ...state.remoteBrowseEntries.map((entry) => `<button class="remote-item" data-remote-dir="${escapeHtml(entry.path)}">${escapeHtml(entry.name)}</button>`)
+      ].join('') || '<div class="remote-empty">하위 폴더가 없습니다.</div>'
+    }
+
+    function loadRemoteDirs(path) {
+      state.remoteBrowseLoading = true
+      state.remoteBrowseError = ''
+      renderRemoteSheet()
+      setTimeout(() => {
+        const result = nativeRequest('listRemoteDirs', {
+          profile: currentProfileFromForm(),
+          path
+        })
+        state.remoteBrowseLoading = false
+        if (result.ok) {
+          state.remoteBrowsePath = result.path || path || '~'
+          state.remoteBrowseParent = result.parent || '/'
+          state.remoteBrowseEntries = Array.isArray(result.entries) ? result.entries : []
+        } else {
+          state.remoteBrowseError = sshErrorMessage(result.error || '원격 경로를 열 수 없습니다.')
+        }
+        renderRemoteSheet()
+      }, 0)
+    }
+
+    function firstText(obj, keys) {
+      for (const key of keys) {
+        const value = obj?.[key]
+        if (typeof value === 'string' && value.trim()) return value.trim()
+      }
+      return ''
+    }
+
+    function caseArray(value) {
+      if (Array.isArray(value)) return value
+      if (!value || typeof value !== 'object') return []
+      for (const key of ['cases', 'caseList', 'case_list', 'items', 'data', 'results']) {
+        const found = caseArray(value[key])
+        if (found.length) return found
+      }
+      return []
+    }
+
+    function partyNames(parties) {
+      if (!Array.isArray(parties)) return ''
+      return parties.map((item) => item?.party?.name || item?.partyName || item?.name).filter(Boolean).join(' · ')
+    }
+
+    function normalizeCase(item, index) {
+      const id = firstText(item, ['id', 'caseId', 'case_id']) || `case-${index + 1}`
+      const caseNumber = firstText(item, ['caseNumber', 'case_number', 'number'])
+      const caseName = firstText(item, ['caseName', 'case_name', 'name', 'title'])
+      const title = [caseNumber, caseName].filter(Boolean).join(' ') || '(사건명 없음)'
+      const profile = activeSshProfile()
+      const key = profile ? `remote:${profile.id}:${id}` : ''
+      const paired = key ? explorerState().jsPairings?.[key] : null
+      const folder = paired?.drafts || profile?.draftsRoot || '~'
+      return {
+        id,
+        title,
+        caseNumber,
+        caseName,
+        court: firstText(item, ['court', 'courtName', 'court_name']) || '법원 미정',
+        parties: partyNames(item?.parties) || firstText(item, ['partyNames', 'party_names']) || '당사자 미정',
+        folder,
+        docs: [],
+        files: [],
+        records: { folder: paired?.records || profile?.recordsRoot || folder, documents: [], evidences: [], attachments: [] },
+        terminals: [{ id: `term-${id}`, name: '원격 쉘', cwd: folder, log: `$ cd ${folder}` }],
+        sessions: ['새 Agent'],
+        raw: item
+      }
+    }
+
+    function loadCases(refresh = false) {
+      if (!state.bridge.ok) return
+      state.casesLoading = true
+      state.casesError = ''
+      renderCases()
+      setTimeout(() => {
+        const result = nativeRequest('listCases', {
+          search: $('#caseSearch')?.value.trim() || '',
+          refresh,
+          page: 1,
+          limit: 50
+        })
+        state.casesLoading = false
+        if (result.ok) {
+          state.caseTokenReady = true
+          state.casesLoaded = true
+          cases = caseArray(result.cases).map(normalizeCase)
+        } else {
+          if (/토큰/i.test(result.error || '')) state.caseTokenReady = false
+          state.casesError = result.error || '사건을 불러오지 못했습니다.'
+        }
+        renderAll()
+      }, 0)
+    }
+
+    function activeCase() {
+      return cases.find((item) => item.id === state.caseId) || null
+    }
+
+    function activeDoc() {
+      const c = activeCase()
+      if (state.docId === 'files' || state.docId === 'records') return null
+      return c?.docs.find((item) => item.id === state.docId) || c?.docs[0] || null
+    }
+
+    function activeTerminal(caseItem = activeCase()) {
+      const terminals = caseItem?.terminals || []
+      return terminals.find((item) => item.id === state.lastTerminalId) || terminals[0] || null
+    }
+
+    function activeAgentName(caseItem = activeCase()) {
+      const sessions = caseItem?.sessions || []
+      return sessions.includes(state.lastAgentName) ? state.lastAgentName : sessions[0] || '새 Agent'
+    }
+
+    function fileDocId(name) {
+      return `file:${name}`
+    }
+
+    function remoteFileState(caseItem = activeCase()) {
+      const key = caseItem?.id || 'global'
+      if (!state.remoteFilesByCase[key]) {
+        const paired = casePairing(caseItem)
+        state.remoteFilesByCase[key] = {
+          path: paired?.drafts || activeSshProfile()?.draftsRoot || '~',
+          entries: [],
+          error: '',
+          loading: false
+        }
+      }
+      return state.remoteFilesByCase[key]
+    }
+
+    function remoteRecordState(caseItem = activeCase()) {
+      const key = caseItem?.id || 'global'
+      if (!state.remoteRecordsByCase[key]) {
+        const paired = casePairing(caseItem)
+        const profile = activeSshProfile()
+        state.remoteRecordsByCase[key] = {
+          path: paired?.records || profile?.recordsRoot || caseItem?.records?.folder || '~',
+          entries: [],
+          error: '',
+          loading: false,
+          syncMessage: ''
+        }
+      }
+      return state.remoteRecordsByCase[key]
+    }
+
+    function looksLikeOneDrivePath(path) {
+      return String(path || '').split(/[\\/]/).some((part) => part.toLowerCase().startsWith('onedrive'))
+    }
+
+    function cloudPathFromOneDrivePath(path) {
+      const parts = String(path || '').split(/[\\/]/).filter(Boolean)
+      const index = parts.findIndex((part) => part.toLowerCase().startsWith('onedrive'))
+      return index >= 0 ? parts.slice(index + 1).join('/') : ''
+    }
+
+    function escapeHtml(value) {
+      return String(value).replace(/[&<>"']/g, (char) => ({
+        '&': '&amp;',
+        '<': '&lt;',
+        '>': '&gt;',
+        '"': '&quot;',
+        "'": '&#39;'
+      })[char])
+    }
+
+    function renderInlineMarkdown(value) {
+      return escapeHtml(value)
+        .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+        .replace(/`([^`]+)`/g, '<code>$1</code>')
+    }
+
+    function renderMarkdown(value) {
+      const lines = String(value).split('\n')
+      const html = []
+      let list = []
+      let table = []
+
+      const flushList = () => {
+        if (!list.length) return
+        html.push(`<ul>${list.map((item) => `<li>${renderInlineMarkdown(item)}</li>`).join('')}</ul>`)
+        list = []
+      }
+
+      const flushTable = () => {
+        if (table.length < 2) {
+          table = []
+          return
+        }
+        const rows = table.filter((line) => !/^\s*\|?\s*-{3,}/.test(line))
+        const cells = rows.map((line) => line.replace(/^\||\|$/g, '').split('|').map((cell) => renderInlineMarkdown(cell.trim())))
+        html.push(`<table><thead><tr>${cells[0].map((cell) => `<th>${cell}</th>`).join('')}</tr></thead><tbody>${cells.slice(1).map((row) => `<tr>${row.map((cell) => `<td>${cell}</td>`).join('')}</tr>`).join('')}</tbody></table>`)
+        table = []
+      }
+
+      lines.forEach((line) => {
+        if (/^\s*\|.*\|\s*$/.test(line)) {
+          flushList()
+          table.push(line)
+          return
+        }
+
+        flushTable()
+
+        if (!line.trim()) {
+          flushList()
+          return
+        }
+        if (line.startsWith('### ')) {
+          flushList()
+          html.push(`<h3>${renderInlineMarkdown(line.slice(4))}</h3>`)
+          return
+        }
+        if (line.startsWith('## ')) {
+          flushList()
+          html.push(`<h2>${renderInlineMarkdown(line.slice(3))}</h2>`)
+          return
+        }
+        if (line.startsWith('# ')) {
+          flushList()
+          html.push(`<h1>${renderInlineMarkdown(line.slice(2))}</h1>`)
+          return
+        }
+        if (line.startsWith('> ')) {
+          flushList()
+          html.push(`<blockquote>${renderInlineMarkdown(line.slice(2))}</blockquote>`)
+          return
+        }
+        if (line.startsWith('- ')) {
+          list.push(line.slice(2))
+          return
+        }
+        flushList()
+        html.push(`<p>${renderInlineMarkdown(line)}</p>`)
+      })
+
+      flushList()
+      flushTable()
+      return html.join('')
+    }
+
+    function fileContent(name) {
+      if (/\.md$/i.test(name)) {
+        return `# ${name.replace(/\.md$/i, '')}\n\n## 쟁점\n\n- **손해 발생** 사실과 금액 산정\n- 인과관계에 관한 상대방 반박 예상\n- 입증자료 정리 및 누락 증거 확인\n\n## 주요 항목\n\n| 항목 | 상태 | 메모 |\n| --- | --- | --- |\n| 청구원인 | 정리 중 | 계약서와 메시지 대조 필요 |\n| 증거 | 보강 | 증거설명서 번호 확인 |\n| 다음 제출 | 예정 | 변론기일 전 최종 검토 |\n\n> Agent 패널에서 현재 문서를 기준으로 검토를 요청합니다.\n\n## 다음 작업\n\n\`Agent\` 패널에서 쟁점별 보강안을 만들고, 필요한 경우 터미널로 원격 폴더 상태를 확인합니다.`
+      }
+      return `${name}\n\n원격 텍스트 파일 미리보기입니다.\n\n이 화면은 Android v1의 파일 뷰어 자리입니다.\nHWP/PDF는 v1에서 열지 않고, 텍스트와 Markdown만 엽니다.`
+    }
+
+    function ensureFileDoc(caseItem, name) {
+      const id = fileDocId(name)
+      let doc = caseItem.docs.find((item) => item.id === id || item.title === name)
+      if (!doc) {
+        doc = { id, title: name, meta: '원격 텍스트', content: fileContent(name) }
+        caseItem.docs.push(doc)
+      } else if (!doc.content) {
+        doc.content = fileContent(name)
+      }
+      state.docId = doc.id
+      state.caseDocIds[caseItem.id] = doc.id
+    }
+
+    function ensureRemoteFileDoc(caseItem, entry) {
+      const result = nativeRequest('readRemoteText', {
+        profile: activeSshProfile(),
+        path: entry.path
+      })
+      if (!result.ok) {
+        alert(sshErrorMessage(result.error || '파일을 열 수 없습니다.'))
+        return
+      }
+      const id = `remote:${result.path}`
+      let doc = caseItem.docs.find((item) => item.id === id)
+      if (!doc) {
+        doc = { id, title: result.name || entry.name, meta: result.path, content: result.content, remotePath: result.path }
+        caseItem.docs.push(doc)
+      } else {
+        doc.content = result.content
+        doc.remotePath = result.path
+        doc.meta = result.path
+      }
+      state.docId = doc.id
+      state.caseDocIds[caseItem.id] = doc.id
+    }
+
+    function loadRemoteFiles(path = remoteFileState().path) {
+      const c = activeCase()
+      const profile = activeSshProfile()
+      if (!c || !profile) return
+      const box = remoteFileState(c)
+      box.loading = true
+      box.error = ''
+      renderWorkspace()
+      setTimeout(() => {
+        const result = nativeRequest('listRemoteFiles', { profile, path })
+        box.loading = false
+        if (result.ok) {
+          box.path = result.path || path || '~'
+          box.parent = result.parent || '/'
+          box.entries = (Array.isArray(result.entries) ? result.entries : []).sort((a, b) =>
+            Number(Boolean(b.dir)) - Number(Boolean(a.dir))
+              || Number(String(a.name).startsWith('.')) - Number(String(b.name).startsWith('.'))
+              || String(a.name).localeCompare(String(b.name), 'ko')
+          )
+        } else {
+          box.error = sshErrorMessage(result.error || '원격 파일 목록을 불러올 수 없습니다.')
+        }
+        renderWorkspace()
+      }, 0)
+    }
+
+    function maybeLoadRemoteFiles() {
+      const c = activeCase()
+      const remote = remoteFileState(c)
+      if (state.docId !== 'files' || !activeSshProfile() || remote.loading || remote.entries.length || remote.error) return
+      loadRemoteFiles(remote.path)
+    }
+
+    function loadRemoteRecords(path = remoteRecordState().path) {
+      const c = activeCase()
+      const profile = activeSshProfile()
+      if (!c || !profile) return
+      const box = remoteRecordState(c)
+      box.loading = true
+      box.error = ''
+      renderWorkspace()
+      setTimeout(() => {
+        const result = nativeRequest('listRemoteFiles', { profile, path, mode: 'records' })
+        box.loading = false
+        if (result.ok) {
+          const entries = Array.isArray(result.entries) ? result.entries : []
+          const currentPath = String(result.path || path || '~').replace(/\/+$/, '')
+          const rootPath = String(profile.recordsRoot || '').replace(/\/+$/, '')
+          const paired = casePairing(c)
+          const matchedDir = !paired?.records && rootPath && currentPath === rootPath ? matchRecordCaseDir(entries, c) : null
+          if (matchedDir) {
+            setCasePairing({ records: matchedDir.path }, c)
+            box.path = matchedDir.path
+            box.parent = currentPath || '/'
+            box.entries = []
+            c.records.folder = matchedDir.path
+            renderWorkspace()
+            loadRemoteRecords(matchedDir.path)
+            return
+          }
+          box.path = result.path || path || '~'
+          box.parent = result.parent || '/'
+          box.entries = entries.sort((a, b) =>
+            Number(Boolean(b.dir)) - Number(Boolean(a.dir))
+              || String(a.name).localeCompare(String(b.name), 'ko')
+          )
+          c.records.folder = box.path
+        } else {
+          box.error = sshErrorMessage(result.error || '원격 기록 목록을 불러올 수 없습니다.')
+        }
+        renderWorkspace()
+      }, 0)
+    }
+
+    function maybeLoadRemoteRecords() {
+      const c = activeCase()
+      const records = remoteRecordState(c)
+      if (state.docId !== 'records' || !activeSshProfile() || records.loading || records.entries.length || records.error || state.recordLabel) return
+      loadRemoteRecords(records.path)
+    }
+
+    function syncRemoteRecords(direction) {
+      const c = activeCase()
+      const records = remoteRecordState(c)
+      const path = records.path || c?.records?.folder || ''
+      if (!path || !looksLikeOneDrivePath(path)) {
+        alert('OneDrive 기록 폴더에서만 사용할 수 있습니다.')
+        return
+      }
+      const cloudPath = prompt('rclone OneDrive 클라우드 경로', cloudPathFromOneDrivePath(path))
+      if (cloudPath === null) return
+      if (direction === 'push' && !confirm('현재 원격 기록 폴더에서 실제 다운로드된 파일만 OneDrive 클라우드로 올릴까요? 클라우드 전용 파일과 삭제 동기화는 건너뜁니다.')) return
+      state.recordSyncBusy = true
+      records.syncMessage = `OneDrive ${direction === 'pull' ? '내리기' : '올리기'} 실행 중...`
+      renderWorkspace()
+      setTimeout(() => {
+        const result = nativeRequest('syncOneDriveFolder', {
+          profile: activeSshProfile(),
+          path,
+          cloudPath: cloudPath.trim(),
+          direction
+        })
+        state.recordSyncBusy = false
+        if (result.ok) {
+          records.syncMessage = `OneDrive ${direction === 'pull' ? '내리기' : '올리기'} 완료`
+          if (direction === 'pull') {
+            state.recordLabel = ''
+            records.selected = null
+            records.entries = []
+            loadRemoteRecords(path)
+            return
+          }
+        } else {
+          records.syncMessage = sshErrorMessage(result.error || 'OneDrive 동기화 실패')
+        }
+        renderWorkspace()
+      }, 0)
+    }
+
+    function syncActiveEditor() {
+      const editor = $('#docEditor')
+      const doc = activeDoc()
+      if (editor && doc && editor.dataset.docId === doc.id) doc.content = editor.value
+    }
+
+    function saveActiveDoc() {
+      syncActiveEditor()
+      const doc = activeDoc()
+      if (!doc) return
+      if (!doc.remotePath) {
+        alert('원격 파일만 저장할 수 있습니다.')
+        return
+      }
+      const result = nativeRequest('writeRemoteText', {
+        profile: activeSshProfile(),
+        path: doc.remotePath,
+        content: doc.content || ''
+      })
+      if (!result.ok) {
+        alert(sshErrorMessage(result.error || '파일 저장 실패'))
+        return
+      }
+      doc.meta = `${result.path || doc.remotePath} · 저장됨`
+      renderWorkspace()
+    }
+
+    function openTerminalQuestion(fileName) {
+      const c = activeCase()
+      const terminal = activeTerminal(c)
+      if (!c || !terminal) return
+      state.lastTerminalId = terminal.id
+      state.panelMode = 'terminal'
+      state.panelFullscreen = false
+      state.panelOpen = true
+      renderPanel()
+      $('#terminalInput').value = `claude "${fileName}" 파일 기준으로 쟁점과 다음 작업 정리해줘`
+    }
+
+    function askClaudeAboutSelection() {
+      const doc = activeDoc()
+      const selected = window.getSelection().toString().trim() || state.selectedText
+      const text = selected || `${doc?.title || '현재 문서'} 전체`
+      state.panelMode = 'agent'
+      state.panelOpen = true
+      renderPanel()
+      $('#agentInput').value = `${doc?.title || '현재 문서'}에서 다음 내용을 검토해줘:\n\n${text}`
+      $('#timeline').insertAdjacentHTML('beforeend', `<div class="bubble tool">선택 내용 · ${escapeHtml(text.slice(0, 80))}${text.length > 80 ? '...' : ''}</div>`)
+      $('#timeline').scrollTop = $('#timeline').scrollHeight
+    }
+
+    function askClaudeAboutRecord(label) {
+      state.panelMode = 'agent'
+      state.panelOpen = true
+      renderPanel()
+      $('#agentInput').value = `전자소송기록 "${label}" 기준으로 주장/증거상 의미를 정리해줘`
+    }
+
+    const RECORD_CASE_RE = /\d{4}[가-힣]{1,5}\d{1,6}/
+    const RECORD_DATE_RE = /(\d{4})\.\s*(\d{1,2})\.\s*(\d{1,2})/
+    const RECORD_EVID_RE = /(?:^|[\s_\-–—(（])([갑을])\s*제?\s*(\d+(?:-\d+)?)\s*호?증?(?=$|[\s_\-–—()（）.])/
+    const RECORD_SEQUENCE_RE = /^\s*(\d{1,6})\s*$/
+
+    function recordText(value) {
+      return String(value || '').normalize('NFC')
+    }
+
+    function recordCompact(value) {
+      return recordText(value).normalize('NFKC').toLowerCase().replace(/[\s_\-.,()[\]{}·]+/g, '')
+    }
+
+    function recordNameTitle(name) {
+      return recordText(name).replace(/\.[^.]+$/, '')
+    }
+
+    function recordDateNum(value) {
+      const m = recordText(value).match(RECORD_DATE_RE)
+      if (!m) return 0
+      return Number(m[1]) * 10000 + Number(m[2]) * 100 + Number(m[3])
+    }
+
+    function recordTopBrackets(value) {
+      const text = recordText(value).replace(/（/g, '(').replace(/）/g, ')')
+      const result = []
+      let i = 0
+      while (i < text.length) {
+        if (text[i] !== '(') {
+          i += 1
+          continue
+        }
+        let depth = 1
+        const start = i + 1
+        i += 1
+        while (i < text.length && depth > 0) {
+          if (text[i] === '(') depth += 1
+          else if (text[i] === ')') depth -= 1
+          i += 1
+        }
+        if (depth === 0) result.push(text.slice(start, i - 1))
+      }
+      return result
+    }
+
+    function recordSequence(tokens, dateIdx) {
+      const candidates = [dateIdx > 0 ? tokens[dateIdx - 1] : '', tokens[2] || '']
+      for (const candidate of candidates) {
+        const m = String(candidate || '').match(RECORD_SEQUENCE_RE)
+        if (m) return Number(m[1])
+      }
+      return 0
+    }
+
+    function recordEvidenceName(title, prefix) {
+      const num = prefix.match(/(\d+(?:-\d+)?)/)?.[1] || ''
+      const type = prefix.startsWith('갑') ? '갑' : prefix.startsWith('을') ? '을' : ''
+      const brackets = recordTopBrackets(title)
+      for (const bracket of brackets) {
+        const p1 = new RegExp(`${type}\\s*제?\\s*${num}\\s*호?증?\\s*\\(([^)]+)\\)`)
+        const m1 = bracket.match(p1)
+        if (m1?.[1]?.trim().length >= 2) return m1[1].trim()
+        const p2 = new RegExp(`${type}\\s*제?\\s*${num}[_\\s]+(.+)`)
+        const m2 = bracket.match(p2)
+        if (m2) {
+          const name = m2[1].replace(/\s*\([^)]*\)\s*$/, '').trim()
+          if (name.length >= 2 && !name.endsWith(')')) return name
+        }
+      }
+      const fallback = new RegExp(`${type}\\s*제?\\s*${num}\\s*호?증?\\s*[_\\s\\-–—]+(.+)`)
+      const fm = title.match(fallback)
+      if (fm) {
+        const name = fm[1].replace(/\.[^.]+$/, '').replace(/^[\s_\-–—]+/, '').replace(/\s*\([^)]*\)\s*$/, '').trim()
+        if (name.length >= 2) return name
+      }
+      if (brackets.length >= 2) {
+        const second = brackets[1].trim()
+        if (second.length >= 2 && !/[갑을]/.test(second)) return second
+      }
+      return ''
+    }
+
+    function recordPartyTuple(party) {
+      if (party === 'plaintiff') return ['원고', 'plaintiff']
+      if (party === 'defendant') return ['피고', 'defendant']
+      return ['법원', 'court']
+    }
+
+    function parseRemoteRecordEntry(entry, index = 0) {
+      if (entry.rawTitle && entry.category) return entry
+      const title = recordNameTitle(entry.name || entry.path || '')
+      const tokens = title.split('_').map((token) => token.trim()).filter(Boolean)
+      const dateIdx = tokens.findIndex((token) => RECORD_DATE_RE.test(token))
+      const date = title.match(RECORD_DATE_RE)?.[0] || ''
+      const docType = (dateIdx >= 0 && tokens[dateIdx + 1]) ? tokens[dateIdx + 1] : (tokens[2] || '문서')
+      const sequence = recordSequence(tokens, dateIdx)
+      const em = title.match(RECORD_EVID_RE)
+      const isEvidence = tokens.some((token) => token === '서증' || token === '서증서류') || /_서증_/.test(title) || Boolean(em)
+      const isAttachment = !isEvidence && tokens.some((token) => /첨부|별첨/.test(token))
+      const brackets = recordTopBrackets(title)
+      const firstDetail = brackets[0]?.trim()
+
+      let category = 'document'
+      let label = ''
+      let evidencePrefix = ''
+      let sortKey = sequence
+
+      if (isEvidence) {
+        category = 'evidence'
+        if (em) {
+          evidencePrefix = `${em[1]}${em[2]}`
+          const major = em[1] === '갑' ? 0 : 1
+          const n = Number.parseInt(em[2], 10) || 0
+          const sub = em[2].includes('-') ? (Number.parseInt(em[2].split('-')[1], 10) || 0) : 0
+          sortKey = major * 100000 + n * 100 + sub
+        }
+        const name = evidencePrefix ? recordEvidenceName(title, evidencePrefix) : firstDetail
+        label = [evidencePrefix || '서증', name].filter(Boolean).join('  ')
+      } else if (isAttachment) {
+        category = 'attachment'
+        const name = firstDetail && !firstDetail.includes('첨부') ? firstDetail : ''
+        label = `${date ? date + ' | ' : ''}${name || docType}`
+      } else {
+        category = 'document'
+        const detail = firstDetail && recordCompact(firstDetail) !== recordCompact(docType) ? firstDetail : ''
+        label = `${date ? date + ' | ' : ''}${docType}${detail ? ' - ' + detail : ''}`
+      }
+
+      let party = ''
+      if (evidencePrefix.startsWith('갑')) party = 'plaintiff'
+      else if (evidencePrefix.startsWith('을')) party = 'defendant'
+      else if (/원고/.test(title)) party = 'plaintiff'
+      else if (/피고/.test(title)) party = 'defendant'
+
+      if (!sortKey) sortKey = 1000000000 + (category === 'document' && /(?:^|[_\s|(（-])소장(?:$|[_\s|)）-])/.test(title) ? 0 : 1000000) + index
+      const [, partyClass] = recordPartyTuple(party)
+      return {
+        ...entry,
+        rawTitle: title,
+        label: label || title,
+        category,
+        evidencePrefix,
+        party,
+        partyClass,
+        dateNum: recordDateNum(title),
+        sortKey
+      }
+    }
+
+    function sortRecordByDate(a, b) {
+      const da = a.dateNum || Infinity
+      const db = b.dateNum || Infinity
+      return da - db || a.sortKey - b.sortKey || String(a.name).localeCompare(String(b.name), 'ko')
+    }
+
+    function parseRemoteRecordEntries(entries) {
+      const out = { dirs: [], documents: [], evidences: [], attachments: [] }
+      ;(entries || []).forEach((entry, index) => {
+        if (entry.dir) out.dirs.push(entry)
+        else {
+          const parsed = parseRemoteRecordEntry(entry, index)
+          if (parsed.category === 'evidence') out.evidences.push(parsed)
+          else if (parsed.category === 'attachment') out.attachments.push(parsed)
+          else out.documents.push(parsed)
+        }
+      })
+      out.dirs.sort((a, b) => String(a.name).localeCompare(String(b.name), 'ko'))
+      out.documents.sort(sortRecordByDate)
+      out.attachments.sort(sortRecordByDate)
+      out.evidences.sort((a, b) => a.sortKey - b.sortKey || String(a.name).localeCompare(String(b.name), 'ko'))
+      return out
+    }
+
+    function recordCaseNumber(caseItem) {
+      return caseItem?.caseNumber || firstText(caseItem?.raw, ['caseNumber', 'case_number', 'number']) || caseItem?.title?.match(RECORD_CASE_RE)?.[0] || ''
+    }
+
+    function matchRecordCaseDir(entries, caseItem) {
+      const no = recordCompact(recordCaseNumber(caseItem))
+      if (!no) return null
+      const dirs = (entries || []).filter((entry) => entry.dir)
+      return dirs
+        .map((entry) => {
+          const name = recordCompact(entry.name)
+          return { entry, score: name === no ? 120 : (name.includes(no) ? 100 : 0) }
+        })
+        .filter((item) => item.score > 0)
+        .sort((a, b) => b.score - a.score || String(a.entry.name).localeCompare(String(b.entry.name), 'ko'))[0]?.entry || null
+    }
+
+    function recordPartyFromName(name) {
+      return recordPartyTuple(parseRemoteRecordEntry({ name }, 0).party)
+    }
+
+    function remoteRecordMeta(entry) {
+      const parsed = parseRemoteRecordEntry(entry, 0)
+      const [party] = recordPartyTuple(parsed.party)
+      return `PDF · ${Math.ceil((entry.size || 0) / 1024)}KB · ${party}`
+    }
+
+    function recordParty(meta) {
+      if (meta.includes('원고')) return ['원고', 'plaintiff']
+      if (meta.includes('피고')) return ['피고', 'defendant']
+      return ['법원', 'court']
+    }
+
+    function pdfPageNumbers(count) {
+      const total = Math.max(1, count || 1)
+      if (state.pdfFlow !== 'single') return Array.from({ length: total }, (_, index) => index + 1)
+      state.pdfPage = Math.min(Math.max(1, state.pdfPage || 1), total)
+      return [state.pdfPage]
+    }
+
+    function activePdfPageCount() {
+      const c = activeCase()
+      if (state.docId !== 'records' || !c) return 1
+      if (activeSshProfile()) {
+        const selected = remoteRecordState(c).selected
+        return Math.max(1, selected?.pages?.length || selected?.pageCount || 1)
+      }
+      return 2
+    }
+
+    function turnPdfPage(delta) {
+      if (state.pdfFlow !== 'single') return
+      const count = activePdfPageCount()
+      const next = Math.min(Math.max(1, (state.pdfPage || 1) + delta), count)
+      if (next === state.pdfPage) return
+      state.pdfPage = next
+      renderWorkspace()
+    }
+
+    function renderPdfNav(count) {
+      if (state.pdfFlow !== 'single' || count <= 1) return ''
+      return `<button class="pdf-nav prev" data-pdf-prev aria-label="이전 페이지">‹</button><button class="pdf-nav next" data-pdf-next aria-label="다음 페이지">›</button>`
+    }
+
+    function renderPdfPages(record) {
+      const [label, meta, body] = record
+      const [party, partyClass] = recordParty(meta)
+      return `${renderPdfNav(2)}${pdfPageNumbers(2).map((page) => `<section class="pdf-page">
+        <h3>${escapeHtml(label)}</h3>
+        <div class="pdf-meta">
+          <span class="pdf-party ${partyClass}">${party}</span><br>
+          제출정보: ${escapeHtml(meta)}<br>
+          페이지: ${page} / 2
+        </div>
+        ${page === 1
+          ? `<p>${escapeHtml(body)}</p>
+             <p>1. 사건의 경위와 제출 목적을 기재합니다.</p>
+             <p>2. 관련 사실과 증거의 연결 관계를 기재합니다.</p>`
+          : `<p>3. 상대방 주장에 대한 대응 또는 확인할 사항을 기재합니다.</p>
+             <p>4. 결론 및 신청 취지를 기재합니다.</p>
+             <p>첨부 및 참조 기록은 같은 기록 폴더의 연관 서류와 함께 검토합니다.</p>`}
+      </section>`).join('')}`
+    }
+
+    function renderRemotePdfPages(record) {
+      if (record.loading) return '<div class="viewer-empty">PDF 불러오는 중...</div>'
+      if (record.error) return `<div class="viewer-empty">${escapeHtml(record.error)}</div>`
+      const pages = record.pages || []
+      const count = pages.length
+      if (!count) return '<div class="viewer-empty">PDF 페이지가 없습니다.</div>'
+      const pageByNumber = new Map(pages.map((page) => [page.number, page]))
+      const body = pdfPageNumbers(count).map((pageNumber) => {
+        const page = pageByNumber.get(pageNumber) || pages[pageNumber - 1]
+        return `<section class="pdf-page image-page">
+          <img src="${page.src}" alt="${escapeHtml(record.name)} ${page.number}쪽">
+        </section>`
+      }).join('')
+      return `${renderPdfNav(count)}${body}`
+    }
+
+    function openRemoteRecordPdf(entry) {
+      const c = activeCase()
+      const box = remoteRecordState(c)
+      const parsed = parseRemoteRecordEntry(entry, 0)
+      box.selected = {
+        path: entry.path,
+        name: entry.name,
+        label: parsed.label,
+        meta: remoteRecordMeta(parsed),
+        pages: [],
+        loading: true,
+        error: ''
+      }
+      state.recordLabel = entry.path
+      state.pdfPage = 1
+      state.recordDocsPanelOpen = false
+      state.recordEvidencePanelOpen = false
+      renderWorkspace()
+      setTimeout(() => {
+        const result = nativeRequest('renderRemotePdf', {
+          profile: activeSshProfile(),
+          path: entry.path,
+          maxPages: 50
+        })
+        box.selected.loading = false
+        if (result.ok) {
+          box.selected.name = result.name || entry.name
+          box.selected.pages = Array.isArray(result.pages) ? result.pages : []
+          box.selected.pageCount = result.pageCount || box.selected.pages.length
+          box.selected.truncated = Boolean(result.truncated)
+        } else {
+          box.selected.error = sshErrorMessage(result.error || 'PDF를 열 수 없습니다.')
+        }
+        renderWorkspace()
+      }, 0)
+    }
+
+    function setView(view) {
+      state.view = view
+      $$('.view').forEach((el) => el.classList.toggle('active', el.dataset.viewPanel === view))
+      $$('.nav').forEach((el) => el.classList.toggle('active', el.dataset.nav === view))
+      renderHeader()
+      if (view === 'cases' && state.caseTokenReady && !state.casesLoaded && !state.casesLoading) loadCases(false)
+    }
+
+    function openCase(caseId) {
+      const c = cases.find((item) => item.id === caseId)
+      if (!c) return
+      const paired = casePairing(c)
+      if (paired?.drafts) {
+        c.folder = paired.drafts
+        remoteFileState(c).path = paired.drafts
+      }
+      if (paired?.records) c.records.folder = paired.records
+      state.caseId = c.id
+      state.docId = state.caseDocIds[c.id] || 'files'
+      if (!state.openCaseIds.includes(c.id)) state.openCaseIds.push(c.id)
+      setView('workspace')
+      renderAll()
+      setTimeout(maybeLoadRemoteFiles, 0)
+      setTimeout(maybeLoadRemoteRecords, 0)
+    }
+
+    function renderHeader() {
+      const c = activeCase()
+      const profile = activeSshProfile()
+      const bridgeText = state.bridge.ok ? `SSH · ${profile?.label || state.bridge.lastProfileId || '프로필 없음'}` : 'SSH'
+      $('#titleMain').textContent = c ? c.title : 'legal-terminal mobile'
+      $('#titleSub').textContent = c ? `${c.court} · ${bridgeText}` : bridgeText
+      $('#openPanelButton').style.visibility = 'visible'
+    }
+
+    function renderCases() {
+      const q = $('#caseSearch').value.trim()
+      if (state.bridge.ok && state.caseTokenReady === false) {
+        $('#caseList').innerHTML = `<div class="token-box">
+          <div class="section-title">JuriSupport 연결</div>
+          <div class="meta">MCP 토큰은 JuriSupport 사이트의 프로필 → MCP 연결에서 발급합니다.</div>
+          <button class="tool" data-open-url="https://jurisupport.com/profile">JuriSupport에서 토큰 발급</button>
+          <textarea class="token-input" id="jsTokenInput" placeholder="MCP 토큰"></textarea>
+          <button class="tool" id="saveJsToken">연결</button>
+        </div>`
+        return
+      }
+      if (state.casesLoading) {
+        $('#caseList').innerHTML = '<div class="viewer-empty">사건 불러오는 중...</div>'
+        return
+      }
+      if (state.casesError) {
+        $('#caseList').innerHTML = `<div class="viewer-empty">${escapeHtml(state.casesError)}</div>`
+        return
+      }
+      const rows = cases.filter((c) => !q || `${c.title} ${c.court} ${c.parties}`.includes(q))
+      $('#caseList').innerHTML = rows.map((c) => `
+        <button class="row" data-open-case="${c.id}">
+          <div class="row-title"><span>${c.title}</span><span class="pill">진행중</span></div>
+          <div class="meta">${c.court}<br>${c.parties}</div>
+        </button>
+      `).join('') || '<div class="viewer-empty">사건이 없습니다.</div>'
+    }
+
+    function renderHearings() {
+      $('#hearingList').innerHTML = hearings.map(([date, kind, title]) => `
+        <button class="row">
+          <div class="row-title"><span>${date} · ${kind}</span><span class="pill ok">기일</span></div>
+          <div class="meta">${title}</div>
+        </button>
+      `).join('')
+    }
+
+    function renderTodos() {
+      $('#todoList').innerHTML = todos.map(([due, title, caseNo]) => `
+        <button class="row">
+          <div class="row-title"><span>${title}</span><span class="pill">${due}</span></div>
+          <div class="meta">${caseNo}</div>
+        </button>
+      `).join('')
+    }
+
+    function renderCaseStrip() {
+      const strip = $('#caseStrip')
+      strip.classList.toggle('show', state.openCaseIds.length > 0)
+      strip.innerHTML = state.openCaseIds.map((id) => {
+        const c = cases.find((item) => item.id === id)
+        if (!c) return ''
+        return `<button class="case-chip ${id === state.caseId ? 'active' : ''}" data-open-case="${id}">${c.title}</button>`
+      }).join('')
+    }
+
+    function renderRecordPanel(key, title, body) {
+      const open = key === 'docs' ? state.recordDocsPanelOpen : state.recordEvidencePanelOpen
+      return `<section class="record-panel ${key} ${open ? 'open' : 'closed'}">
+        <div class="record-panel-body"><div class="record-section-title">${title}</div>${body || '<div class="viewer-empty">없음</div>'}</div>
+      </section>`
+    }
+
+    function renderRecordColumns(docsRows, evidenceRows) {
+      return `<div class="record-columns">
+        <button class="record-grip docs" data-record-panel="docs">소송문서</button>
+        <button class="record-grip evidence" data-record-panel="evidence">서증/첨부</button>
+        ${renderRecordPanel('docs', '소송문서', docsRows)}
+        ${renderRecordPanel('evidence', '서증/첨부서류', evidenceRows)}
+      </div>`
+    }
+
+    function renderOneDriveSyncButtons(path) {
+      if (!looksLikeOneDrivePath(path)) return ''
+      const disabled = state.recordSyncBusy ? ' disabled' : ''
+      return `<button class="tool" data-sync-records="pull"${disabled}>OneDrive 내리기</button><button class="tool" data-sync-records="push"${disabled}>올리기(받은 파일)</button>`
+    }
+
+    function renderRemoteRecordRows(items) {
+      return items.map((entry) => {
+        const [party, partyClass] = recordPartyTuple(entry.party)
+        return `<button class="record-item ${partyClass}" data-open-record-pdf="${escapeHtml(entry.path)}" data-record-name="${escapeHtml(entry.name)}" data-record-size="${entry.size || 0}">
+          <span>${escapeHtml(entry.label)}</span>
+          <span class="record-party ${partyClass}">${party}</span>
+          <span class="meta">${escapeHtml(remoteRecordMeta(entry))} · ${escapeHtml(entry.name)}</span>
+        </button>`
+      }).join('')
+    }
+
+    function renderSampleRecordRows(items) {
+      return items.map(([label, meta]) => {
+        const [party, partyClass] = recordParty(meta)
+        return `<button class="record-item ${partyClass}" data-record-item="${label}">
+          <span>${label}</span>
+          <span class="record-party ${partyClass}">${party}</span>
+          <span class="meta">${meta}</span>
+        </button>`
+      }).join('')
+    }
+
+    function renderRecords(caseItem) {
+      if (activeSshProfile()) {
+        const remote = remoteRecordState(caseItem)
+        const selected = remote.selected && state.recordLabel === remote.selected.path ? remote.selected : null
+        const parsedRecords = parseRemoteRecordEntries(remote.entries)
+        const docsRows = renderRemoteRecordRows(parsedRecords.documents)
+        const evidenceRows = [
+          parsedRecords.evidences.length ? `<div class="record-section-title">서증</div>${renderRemoteRecordRows(parsedRecords.evidences)}` : '',
+          parsedRecords.attachments.length ? `<div class="record-section-title">첨부서류</div>${renderRemoteRecordRows(parsedRecords.attachments)}` : ''
+        ].join('')
+        const bookmarkRows = (docsRows || evidenceRows) ? renderRecordColumns(docsRows, evidenceRows) : ''
+        if (selected) {
+          const pageTotal = Math.max(1, selected.pages?.length || selected.pageCount || 1)
+          const pageMeta = state.pdfFlow === 'single' ? ` · ${Math.min(state.pdfPage || 1, pageTotal)}/${pageTotal}쪽` : ''
+          return `<div class="record-view pdf-mode">
+          <div class="record-body">
+            <div class="record-pdf">
+              <div class="pdf-toolbar">
+                <button class="tool" data-record-list>목록</button>
+                ${renderOneDriveSyncButtons(remote.path || caseItem.records.folder || '')}
+                <button class="tool active">PDF</button>
+                <button class="tool ${state.pdfFlow === 'continuous' ? 'active' : ''}" data-pdf-flow="continuous">연달아보기</button>
+                <button class="tool ${state.pdfFlow === 'single' ? 'active' : ''}" data-pdf-flow="single">한쪽보기</button>
+                <button class="tool ${state.pdfFit === 'width' ? 'active' : ''}" data-pdf-fit="width">폭맞춤</button>
+                <button class="tool ${state.pdfFit === 'page' ? 'active' : ''}" data-pdf-fit="page">쪽맞춤</button>
+                <button class="tool ${state.pdfCrop ? 'active' : ''}" data-pdf-crop>자르기</button>
+                <button class="tool" data-ask-record="${escapeHtml(selected.label || selected.name)}">Agent에게 기록 묻기</button>
+                <span class="meta">${escapeHtml(selected.meta || '')}${selected.pageCount ? ` · ${selected.pages.length}/${selected.pageCount}쪽${selected.truncated ? ' · 앞 50쪽' : ''}` : ''}${pageMeta}</span>
+              </div>
+              <div class="pdf-viewer fit-${state.pdfFit} ${state.pdfFlow === 'single' ? 'single' : 'continuous'} ${state.pdfCrop ? 'crop' : ''}">${renderRemotePdfPages(selected)}</div>
+              ${bookmarkRows}
+            </div>
+          </div>
+        </div>`
+        }
+        const folderRows = parsedRecords.dirs.map((entry) => `<button class="record-item folder" data-open-record-dir="${escapeHtml(entry.path)}">
+                <span>${escapeHtml(entry.name)}</span>
+                <span class="meta">폴더</span>
+              </button>`).join('')
+        const recordColumns = bookmarkRows
+        const rows = `${folderRows}${recordColumns}`
+        return `<div class="record-view">
+          <div class="record-head">
+            <div>
+              <div class="section-title">전자소송기록</div>
+              <div class="meta">${escapeHtml(remote.path || caseItem.records.folder || '~')}</div>
+            </div>
+            ${renderOneDriveSyncButtons(remote.path || caseItem.records.folder || '')}
+            <button class="tool" data-refresh-remote-records>새로고침</button>
+          </div>
+          <div class="record-body">
+            ${remote.syncMessage ? `<div class="viewer-empty">${escapeHtml(remote.syncMessage)}</div>` : ''}
+            ${remote.error ? `<div class="viewer-empty">${escapeHtml(remote.error)}</div>` : ''}
+            ${remote.loading ? '<div class="viewer-empty">불러오는 중...</div>' : ''}
+            ${!remote.loading ? `<button class="record-item" data-open-record-dir="${escapeHtml(remote.parent || '~')}"><span>..</span><span class="meta">상위 폴더</span></button>` : ''}
+            ${rows || (!remote.loading ? '<div class="viewer-empty">PDF가 없습니다.</div>' : '')}
+          </div>
+        </div>`
+      }
+      const sections = [
+        ['본안 문서', caseItem.records.documents],
+        ['서증', caseItem.records.evidences],
+        ['첨부서류', caseItem.records.attachments]
+      ]
+      const selected = state.recordLabel ? sections.flatMap(([, items]) => items).find(([label]) => label === state.recordLabel) : null
+      const docsRows = renderSampleRecordRows(caseItem.records.documents)
+      const evidenceRows = [
+        caseItem.records.evidences.length ? `<div class="record-section-title">서증</div>${renderSampleRecordRows(caseItem.records.evidences)}` : '',
+        caseItem.records.attachments.length ? `<div class="record-section-title">첨부서류</div>${renderSampleRecordRows(caseItem.records.attachments)}` : ''
+      ].join('')
+      const listHtml = renderRecordColumns(docsRows, evidenceRows)
+      if (!selected) return `<div class="record-view">
+        <div class="record-head">
+          <div class="section-title">전자소송기록</div>
+          <div class="meta">${caseItem.records.folder}</div>
+        </div>
+        <div class="record-body">${listHtml}</div>
+      </div>`
+      return `<div class="record-view pdf-mode">
+        <div class="record-body">
+          <div class="record-pdf">
+            <div class="pdf-toolbar">
+              <button class="tool" data-record-list>목록</button>
+              <button class="tool active">PDF</button>
+              <button class="tool ${state.pdfFlow === 'continuous' ? 'active' : ''}" data-pdf-flow="continuous">연달아보기</button>
+              <button class="tool ${state.pdfFlow === 'single' ? 'active' : ''}" data-pdf-flow="single">한쪽보기</button>
+              <button class="tool ${state.pdfFit === 'width' ? 'active' : ''}" data-pdf-fit="width">폭맞춤</button>
+              <button class="tool ${state.pdfFit === 'page' ? 'active' : ''}" data-pdf-fit="page">쪽맞춤</button>
+              <button class="tool ${state.pdfCrop ? 'active' : ''}" data-pdf-crop>자르기</button>
+              <button class="tool" data-ask-record="${selected[0]}">Agent에게 기록 묻기</button>
+              <span class="meta">${selected[1]}${state.pdfFlow === 'single' ? ` · ${state.pdfPage || 1}/2쪽` : ''}</span>
+            </div>
+            <div class="pdf-viewer fit-${state.pdfFit} ${state.pdfFlow === 'single' ? 'single' : 'continuous'} ${state.pdfCrop ? 'crop' : ''}">${renderPdfPages(selected)}</div>
+            ${listHtml}
+          </div>
+        </div>
+      </div>`
+    }
+
+    function renderWorkspace() {
+      const c = activeCase()
+      if (!c) return
+      const doc = activeDoc()
+      $('#docTabs').innerHTML = [
+        `<button class="tool ${state.docId === 'files' ? 'active' : ''}" data-doc="files">파일</button>`,
+        `<button class="tool ${state.docId === 'records' ? 'active' : ''}" data-doc="records">기록</button>`,
+        ...c.docs.map((d) => `<button class="tool ${d.id === doc?.id ? 'active' : ''}" data-doc="${d.id}">${d.title}</button>`),
+        `<button class="tool" data-open-panel>Agent</button>`,
+        `<button class="tool" data-open-panel-terminal>터미널</button>`
+      ].join('')
+      $('#docTitle').textContent = state.docId === 'records' ? '전자소송기록' : doc?.title || '원격 파일'
+      $('#docMeta').textContent = state.docId === 'records' ? c.records.folder : doc ? `${c.folder} · ${doc.meta || ''}` : c.folder
+      $('.doc-view').classList.toggle('record-pdf-mode', state.docId === 'records' && Boolean(state.recordLabel))
+      $('#fileList').classList.toggle('hidden', state.docId !== 'files')
+      $('#fileViewer').classList.toggle('hidden', state.docId === 'files')
+      const profile = activeSshProfile()
+      const remote = remoteFileState(c)
+      const paired = casePairing(c)
+      const quickStarts = activeRemoteStarts(profile)
+      const remoteRows = profile
+        ? [
+            `<div class="section-head"><div class="meta">${escapeHtml(remote.path || '~')}</div><button class="tool" data-refresh-remote-files>원격 새로고침</button></div>`,
+            `<div class="explorer-note">사건 폴더: ${escapeHtml(paired?.drafts || '미지정')} · 기록 폴더: ${escapeHtml(paired?.records || '미지정')}</div>`,
+            `<div class="explorer-actions">
+              ${quickStarts.map((item) => `<button class="tool" data-open-remote-dir="${escapeHtml(item.path)}">${escapeHtml(item.label)}</button>`).join('')}
+            </div>`,
+            `<div class="explorer-actions">
+              <button class="tool" data-map-case-drafts>현재=사건폴더</button>
+              <button class="tool" data-map-case-records>현재=기록폴더</button>
+              <button class="tool" data-clear-case-pairing>매핑 해제</button>
+            </div>`,
+            remote.error ? `<div class="viewer-empty">${escapeHtml(remote.error)}</div>` : '',
+            remote.loading ? '<div class="viewer-empty">불러오는 중...</div>' : '',
+            !remote.loading ? `<button class="file" data-open-remote-dir="${escapeHtml(remote.parent || '~')}"><span>D</span><span class="file-name">..</span><span class="meta">상위 폴더</span></button>` : '',
+            ...remote.entries.map((entry) => `<button class="file" ${entry.dir ? `data-open-remote-dir="${escapeHtml(entry.path)}"` : `data-open-remote-file="${escapeHtml(entry.path)}"`} data-remote-name="${escapeHtml(entry.name)}">
+              <span>${entry.dir ? 'D' : entry.name.endsWith('.md') ? 'M' : 'T'}</span>
+              <span class="file-name">${escapeHtml(entry.name)}</span>
+              <span class="meta">${entry.dir ? '폴더' : `${Math.ceil((entry.size || 0) / 1024)}KB`}</span>
+            </button>`)
+          ].join('')
+        : ''
+      const localRows = c.files.map((name) => `
+        <button class="file" data-open-file="${name}">
+          <span>${name.endsWith('.md') ? 'M' : 'T'}</span>
+          <span class="file-name">${name}</span>
+          <span class="meta">길게 눌러 질문</span>
+        </button>
+      `).join('')
+      const docContent = doc ? (doc.content ?? fileContent(doc.title)) : ''
+      const rawMode = doc ? (!/\.md$/i.test(doc.title) || state.rawDocIds[doc.id]) : false
+      $('#fileList').innerHTML = remoteRows || localRows
+      $('#fileViewer').innerHTML = state.docId === 'records'
+        ? renderRecords(c)
+        : doc
+        ? `<div class="viewer-card">
+            <div class="viewer-toolbar">
+              <button class="tool" data-doc="files">목록</button>
+              <button class="tool ${rawMode ? '' : 'active'}" data-doc-preview>미리보기</button>
+              <button class="tool ${rawMode ? 'active' : ''}" data-doc-raw>원문</button>
+              <button class="tool" data-ask-claude>Claude에게 묻기</button>
+              <button class="tool" data-save-doc>저장</button>
+            </div>
+            ${rawMode
+              ? `<textarea class="viewer-editor" id="docEditor" data-doc-id="${escapeHtml(doc.id)}" spellcheck="false">${escapeHtml(docContent)}</textarea>`
+              : `<div class="viewer-md">${renderMarkdown(docContent)}</div>`}
+          </div>`
+        : '<div class="viewer-empty">파일을 선택하세요</div>'
+    }
+
+    function renderPanel() {
+      const c = activeCase()
+      $('#panelTitle').textContent = c ? `${state.panelMode === 'agent' ? 'Agent' : '터미널'} · ${c.title}` : 'SSH 터미널'
+      $('#sheet').classList.toggle('open', state.panelOpen)
+      $('#sheet').classList.toggle('fullscreen', state.panelMode === 'agent' && state.panelFullscreen)
+      $('#overlay').classList.toggle('show', overlayVisible())
+      $('#fullscreenSheet').style.display = state.panelMode === 'agent' ? 'grid' : 'none'
+      $('#fullscreenSheet').textContent = state.panelFullscreen ? '↙' : '⛶'
+      $$('.mode-toggle button').forEach((button) => button.classList.toggle('active', button.dataset.panelMode === state.panelMode))
+      $('#agentPanel').classList.toggle('active', state.panelMode === 'agent')
+      $('#terminalPanel').classList.toggle('active', state.panelMode === 'terminal')
+      const sessions = c?.sessions || []
+      const agentName = activeAgentName(c)
+      const terminal = activeTerminal(c)
+      $('#agentTabs').innerHTML = [
+        ...sessions.map((name) => `<button class="tool ${name === agentName ? 'active' : ''}" data-agent-session="${name}">${name}</button>`),
+        '<button class="tool" data-new-agent>＋</button>'
+      ].join('')
+      $('#terminalSelect').innerHTML = c
+        ? (c.terminals || []).map((item) => `<option value="${item.id}" ${item.id === terminal?.id ? 'selected' : ''}>${item.name}</option>`).join('')
+        : '<option>SSH</option>'
+      $('#timeline').innerHTML = [
+        `<div class="bubble tool">Agent 탭 · ${agentName}</div>`,
+        '<div class="bubble user">준비서면 초안 검토해줘</div>',
+        '<div class="bubble">쟁점은 손해 발생과 인과관계입니다. 최신 문서 기준으로 주장 구조를 먼저 정리하겠습니다.</div>',
+        '<div class="bubble tool">diff · 준비서면.md</div>'
+      ].join('')
+      $('#termScreen').textContent = c ? (terminal?.log || `$ cd ${c.folder}`) : state.terminalLog
+    }
+
+    function sendAgentPrompt() {
+      const prompt = $('#agentInput').value.trim()
+      if (!prompt) return
+      const result = nativeRequest('agentPrompt', {
+        caseId: state.caseId,
+        session: activeAgentName(),
+        prompt
+      })
+      const fallback = '문서 탭의 현재 초안을 기준으로 계속 보겠습니다.'
+      const message = result.ok ? result.message : (result.error === 'Android bridge unavailable' ? fallback : result.error)
+      $('#timeline').insertAdjacentHTML(
+        'beforeend',
+        `<div class="bubble user">${escapeHtml(prompt)}</div><div class="bubble">${escapeHtml(message)}</div>`
+      )
+      $('#timeline').scrollTop = $('#timeline').scrollHeight
+    }
+
+    function sendTerminalCommand() {
+      const terminal = activeTerminal()
+      const command = $('#terminalInput').value.trim()
+      if (!command) return
+      $('#terminalInput').value = ''
+      if (state.pendingSshProfile) {
+        const profile = { ...state.pendingSshProfile, password: command, passwordOnly: true }
+        state.pendingSshProfile = null
+        $('#terminalInput').type = 'text'
+        $('#terminalInput').placeholder = 'ssh ubuntu@example.com -p 22'
+        const saved = upsertEditingSshProfile(profile)
+        state.bridge.lastProfileId = saved.id
+        nativeRequest('setLastSshProfileId', { profileId: saved.id })
+        openKeyTerminal(profile, '\n')
+        return
+      }
+      if (/^ssh\s+/i.test(command) && handleSshCommand(command)) return
+      const result = nativeRequest(state.sshShellActive ? 'shellInput' : 'terminalCommand', {
+        caseId: state.caseId,
+        terminalId: terminal?.id || '',
+        profile: activeSshProfile() || currentProfileFromForm(),
+        command,
+        input: command
+      })
+      const output = result.ok
+        ? result.output
+        : (result.error === 'Android bridge unavailable' ? `$ ${command}\n실행 완료` : `$ ${command}\n${result.error}`)
+      const line = `\n${output}`
+      if (terminal) terminal.log += line
+      else state.terminalLog += line
+      $('#termScreen').textContent += line
+      $('#termScreen').scrollTop = $('#termScreen').scrollHeight
+    }
+
+    function parseSshCommand(command) {
+      const parts = command.match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g)?.map((part) => part.replace(/^['"]|['"]$/g, '')) || []
+      let port = 22
+      let identityFile = ''
+      let target = ''
+      for (let i = 1; i < parts.length; i += 1) {
+        if (parts[i] === '-p') port = Number.parseInt(parts[++i], 10) || 22
+        else if (parts[i].startsWith('-p')) port = Number.parseInt(parts[i].slice(2), 10) || 22
+        else if (parts[i] === '-i') identityFile = parts[++i] || ''
+        else if (!parts[i].startsWith('-') && !target) target = parts[i]
+      }
+      const at = target.indexOf('@')
+      if (at <= 0) return null
+      return { user: target.slice(0, at), host: target.slice(at + 1), port, identityFile }
+    }
+
+    function handleSshCommand(command) {
+      const parsed = parseSshCommand(command)
+      if (!parsed) {
+        state.terminalLog += `\n$ ${command}\n형식: ssh 사용자@호스트 -p 22`
+        renderPanel()
+        return true
+      }
+      const matched = state.sshProfiles.find((profile) =>
+        profile.host === parsed.host && profile.user === parsed.user && Number(profile.port || 22) === parsed.port
+      )
+      if (matched?.identityFile) {
+        state.bridge.lastProfileId = matched.id
+        nativeRequest('setLastSshProfileId', { profileId: matched.id })
+        openKeyTerminal(matched, `$ ${command}\n키 자동접속\n`)
+        return true
+      }
+      const profile = {
+        ...(matched || {}),
+        id: matched?.id || `ssh-${Date.now()}`,
+        label: matched?.label || parsed.host,
+        host: parsed.host,
+        user: parsed.user,
+        port: parsed.port,
+        identityFile: parsed.identityFile || matched?.identityFile
+      }
+      upsertEditingSshProfile(profile)
+      if (profile.identityFile) {
+        openKeyTerminal(profile, `$ ${command}\n`)
+        return true
+      }
+      state.pendingSshProfile = profile
+      state.panelMode = 'terminal'
+      state.panelOpen = true
+      state.terminalLog += `\n$ ${command}\n${profile.user}@${profile.host}'s password: `
+      renderPanel()
+      $('#terminalInput').type = 'password'
+      $('#terminalInput').placeholder = 'password'
+      return true
+    }
+
+    function renderAll() {
+      renderHeader()
+      renderCases()
+      renderHearings()
+      renderTodos()
+      renderCaseStrip()
+      renderWorkspace()
+      renderPanel()
+      renderSshSheet()
+      renderRemoteSheet()
+    }
+
+    document.addEventListener('click', (event) => {
+      const target = event.target.closest('button')
+      if (!target) return
+
+      if (target.dataset.nav) {
+        setView(target.dataset.nav)
+        return
+      }
+
+      if (target.matches('#refreshCases')) {
+        if (state.caseTokenReady === false) renderCases()
+        else loadCases(true)
+        return
+      }
+
+      if (target.dataset.openUrl) {
+        const result = nativeRequest('openUrl', { url: target.dataset.openUrl })
+        if (!result.ok) alert(result.error || '브라우저를 열 수 없습니다.')
+        return
+      }
+
+      if (target.matches('#saveJsToken')) {
+        const token = $('#jsTokenInput')?.value.trim() || ''
+        if (!token) return
+        const result = nativeRequest('setToken', { token })
+        if (!result.ok) {
+          alert(result.error || '토큰 저장 실패')
+          return
+        }
+        state.caseTokenReady = true
+        loadCases(true)
+        return
+      }
+
+      if (target.dataset.openCase) {
+        openCase(target.dataset.openCase)
+        return
+      }
+
+      if (target.dataset.doc) {
+        syncActiveEditor()
+        state.docId = target.dataset.doc
+        if (state.caseId) state.caseDocIds[state.caseId] = state.docId
+        renderWorkspace()
+        if (state.docId === 'files') setTimeout(maybeLoadRemoteFiles, 0)
+        if (state.docId === 'records') setTimeout(maybeLoadRemoteRecords, 0)
+        return
+      }
+
+      if (target.dataset.openFile) {
+        if (state.suppressFileClick) {
+          state.suppressFileClick = false
+          return
+        }
+        const c = activeCase()
+        if (!c) return
+        ensureFileDoc(c, target.dataset.openFile)
+        renderWorkspace()
+        return
+      }
+
+      if (target.dataset.refreshRemoteFiles !== undefined) {
+        loadRemoteFiles()
+        return
+      }
+
+      if (target.dataset.openRemoteDir) {
+        loadRemoteFiles(target.dataset.openRemoteDir)
+        return
+      }
+
+      if (target.dataset.openRemoteFile) {
+        const c = activeCase()
+        if (!c) return
+        ensureRemoteFileDoc(c, { path: target.dataset.openRemoteFile, name: target.dataset.remoteName || target.dataset.openRemoteFile })
+        renderWorkspace()
+        return
+      }
+
+      if (target.dataset.mapCaseDrafts !== undefined) {
+        const c = activeCase()
+        if (!c) return
+        const remote = remoteFileState(c)
+        setCasePairing({ drafts: remote.path }, c)
+        renderAll()
+        return
+      }
+
+      if (target.dataset.mapCaseRecords !== undefined) {
+        const c = activeCase()
+        if (!c) return
+        const path = remoteFileState(c).path
+        setCasePairing({ records: path }, c)
+        const records = remoteRecordState(c)
+        records.path = path
+        records.entries = []
+        records.error = ''
+        records.selected = null
+        renderAll()
+        return
+      }
+
+      if (target.dataset.clearCasePairing !== undefined) {
+        const c = activeCase()
+        const profile = activeSshProfile()
+        if (!c) return
+        clearCasePairing(c)
+        c.folder = profile?.draftsRoot || '~'
+        c.records.folder = profile?.recordsRoot || c.folder
+        remoteFileState(c).path = c.folder
+        const records = remoteRecordState(c)
+        records.path = c.records.folder
+        records.entries = []
+        records.error = ''
+        records.selected = null
+        renderAll()
+        return
+      }
+
+      if (target.dataset.askClaude !== undefined) {
+        askClaudeAboutSelection()
+        return
+      }
+
+      if (target.dataset.docPreview !== undefined) {
+        const doc = activeDoc()
+        syncActiveEditor()
+        if (doc) state.rawDocIds[doc.id] = false
+        renderWorkspace()
+        return
+      }
+
+      if (target.dataset.docRaw !== undefined) {
+        const doc = activeDoc()
+        if (doc) state.rawDocIds[doc.id] = true
+        renderWorkspace()
+        return
+      }
+
+      if (target.dataset.saveDoc !== undefined) {
+        saveActiveDoc()
+        return
+      }
+
+      if (target.dataset.refreshRemoteRecords !== undefined) {
+        loadRemoteRecords()
+        return
+      }
+
+      if (target.dataset.syncRecords) {
+        syncRemoteRecords(target.dataset.syncRecords)
+        return
+      }
+
+      if (target.dataset.openRecordDir) {
+        state.recordLabel = ''
+        const records = remoteRecordState()
+        records.selected = null
+        loadRemoteRecords(target.dataset.openRecordDir)
+        return
+      }
+
+      if (target.dataset.openRecordPdf) {
+        openRemoteRecordPdf({
+          path: target.dataset.openRecordPdf,
+          name: target.dataset.recordName || target.dataset.openRecordPdf,
+          size: Number(target.dataset.recordSize || 0)
+        })
+        return
+      }
+
+      if (target.dataset.recordItem) {
+        state.recordLabel = target.dataset.recordItem
+        state.pdfPage = 1
+        state.recordDocsPanelOpen = false
+        state.recordEvidencePanelOpen = false
+        renderWorkspace()
+        return
+      }
+
+      if (target.dataset.recordList !== undefined) {
+        state.recordLabel = ''
+        const records = remoteRecordState()
+        if (records.selected) records.selected = null
+        renderWorkspace()
+        setTimeout(maybeLoadRemoteRecords, 0)
+        return
+      }
+
+      if (target.dataset.recordPanel) {
+        if (target.dataset.recordPanel === 'docs') state.recordDocsPanelOpen = !state.recordDocsPanelOpen
+        else state.recordEvidencePanelOpen = !state.recordEvidencePanelOpen
+        renderWorkspace()
+        return
+      }
+
+      if (target.dataset.pdfFit) {
+        state.pdfFit = target.dataset.pdfFit
+        renderWorkspace()
+        return
+      }
+
+      if (target.dataset.pdfFlow) {
+        state.pdfFlow = target.dataset.pdfFlow
+        state.pdfPage = Math.min(Math.max(1, state.pdfPage || 1), activePdfPageCount())
+        renderWorkspace()
+        return
+      }
+
+      if (target.dataset.pdfPrev !== undefined) {
+        turnPdfPage(-1)
+        return
+      }
+
+      if (target.dataset.pdfNext !== undefined) {
+        turnPdfPage(1)
+        return
+      }
+
+      if (target.dataset.pdfCrop !== undefined) {
+        state.pdfCrop = !state.pdfCrop
+        renderWorkspace()
+        return
+      }
+
+      if (target.dataset.askRecord) {
+        askClaudeAboutRecord(target.dataset.askRecord)
+        return
+      }
+
+      if (target.matches('#caseListButton')) {
+        state.sshSheetOpen = true
+        renderSshSheet()
+        return
+      }
+
+      if (target.matches('#openPanelButton') || target.matches('#openWorkPanelFromDoc') || target.dataset.openPanel !== undefined) {
+        state.panelMode = activeCase() ? 'agent' : 'terminal'
+        state.panelOpen = true
+        renderPanel()
+        return
+      }
+
+      if (target.dataset.openPanelTerminal !== undefined) {
+        state.panelMode = 'terminal'
+        state.panelFullscreen = false
+        state.panelOpen = true
+        renderPanel()
+        return
+      }
+
+      if (target.matches('#closeSshSheet')) {
+        state.sshSheetOpen = false
+        renderSshSheet()
+        return
+      }
+
+      if (target.matches('#newSshProfile')) {
+        state.editingSshProfileId = `ssh-${Date.now()}`
+        renderSshSheet()
+        return
+      }
+
+      if (target.matches('#saveSshProfile')) {
+        upsertEditingSshProfile()
+        return
+      }
+
+      if (target.matches('#pickIdentityFile')) {
+        const result = nativeRequest('pickIdentityFile')
+        if (!result.ok) alert(result.error || '개인키 파일을 열 수 없습니다.')
+        return
+      }
+
+      if (target.dataset.remoteBrowse) {
+        if (!sshFormReady()) {
+          alert('호스트와 사용자를 먼저 입력하세요.')
+          return
+        }
+        state.remoteBrowseField = target.dataset.remoteBrowse
+        state.remoteBrowseOpen = true
+        state.remoteBrowsePath = $(`#ssh${state.remoteBrowseField === 'recordsRoot' ? 'Records' : 'Drafts'}Root`).value.trim() || '~'
+        state.remoteBrowseEntries = []
+        state.remoteBrowseError = ''
+        renderRemoteSheet()
+        loadRemoteDirs(state.remoteBrowsePath)
+        return
+      }
+
+      if (target.matches('#closeRemoteSheet')) {
+        state.remoteBrowseOpen = false
+        renderRemoteSheet()
+        return
+      }
+
+      if (target.dataset.remoteReload !== undefined) {
+        loadRemoteDirs(state.remoteBrowsePath)
+        return
+      }
+
+      if (target.dataset.remoteDir) {
+        loadRemoteDirs(target.dataset.remoteDir)
+        return
+      }
+
+      if (target.dataset.removeSshFavorite) {
+        setEditingQuickStartPath(target.dataset.removeSshFavorite, false)
+        return
+      }
+
+      if (target.matches('#chooseRemotePath')) {
+        const input = state.remoteBrowseField === 'recordsRoot' ? $('#sshRecordsRoot') : $('#sshDraftsRoot')
+        input.value = state.remoteBrowsePath
+        state.remoteBrowseOpen = false
+        renderRemoteSheet()
+        return
+      }
+
+      if (target.matches('#addRemoteFavorite')) {
+        setEditingQuickStartPath(state.remoteBrowsePath, true)
+        renderRemoteSheet()
+        return
+      }
+
+      if (target.matches('#passwordSshProfile')) {
+        if (!sshFormReady() || !$('#sshPassword').value) {
+          alert('호스트, 사용자, 비밀번호를 입력하세요.')
+          return
+        }
+        const profile = { ...currentProfileFromForm(true), identityFile: undefined, passwordOnly: true }
+        setSshBusy(true, '비밀번호로 접속해서 키 등록 중...')
+        setTimeout(() => {
+          const issued = nativeRequest('provisionSshKey', { profile })
+          if (!issued.ok) {
+            const error = sshErrorMessage(issued.error || '키 등록 실패')
+            setSshBusy(false, error)
+            alert(error)
+            return
+          }
+          profile.identityFile = issued.identityFile
+          $('#sshIdentityFile').value = issued.identityFile
+          $('#sshPassword').value = ''
+          const saved = upsertEditingSshProfile(profile)
+          state.bridge.lastProfileId = saved.id
+          nativeRequest('setLastSshProfileId', { profileId: saved.id })
+          setSshBusy(false, '')
+          const prefix = `$ ssh ${saved.user}@${saved.host} -p ${saved.port || 22}\n비밀번호 로그인 성공\n키 저장 완료\n`
+          const check = openKeyTerminal(saved, prefix)
+          if (!check.ok) alert(sshErrorMessage(check.error || '키 접속 실패'))
+          else alert('키 저장 완료. 이제부터 키로 접속합니다.')
+        }, 0)
+        return
+      }
+
+      if (target.matches('#openSshTerminal')) {
+        $('#useSshProfile').click()
+        return
+      }
+
+      if (target.matches('#useSshProfile')) {
+        if (!sshFormReady()) {
+          alert('호스트와 사용자를 입력하세요.')
+          return
+        }
+        if ($('#sshPassword').value) {
+          $('#passwordSshProfile').click()
+          return
+        }
+        const profile = currentProfileFromForm()
+        if (!profile.identityFile) {
+          alert('1번 터미널 로그인 후 키 저장을 먼저 하세요.')
+          return
+        }
+        const saved = upsertEditingSshProfile(profile)
+        state.bridge.lastProfileId = saved.id
+        nativeRequest('setLastSshProfileId', { profileId: saved.id })
+        const check = openKeyTerminal(saved, `$ ssh ${saved.user}@${saved.host} -p ${saved.port || 22}\n`)
+        if (!check.ok) alert(sshErrorMessage(check.error || '키 접속 실패'))
+        return
+      }
+
+      if (target.matches('#deleteSshProfile')) {
+        if (!confirm('SSH 접속 정보를 모두 초기화할까요?')) return
+        nativeRequest('clearSshSetup')
+        state.sshProfiles = []
+        state.bridge.lastProfileId = ''
+        state.editingSshProfileId = ''
+        renderAll()
+        return
+      }
+
+      if (target.matches('#closeSheet') || target.matches('#overlay')) {
+        state.panelOpen = false
+        state.sshSheetOpen = false
+        state.remoteBrowseOpen = false
+        renderPanel()
+        renderSshSheet()
+        renderRemoteSheet()
+        return
+      }
+
+      if (target.dataset.panelMode) {
+        state.panelMode = target.dataset.panelMode
+        if (state.panelMode !== 'agent') state.panelFullscreen = false
+        renderPanel()
+        return
+      }
+
+      if (target.matches('#fullscreenSheet')) {
+        state.panelFullscreen = !state.panelFullscreen
+        state.panelMode = 'agent'
+        state.panelOpen = true
+        renderPanel()
+        return
+      }
+
+      if (target.dataset.agentSession) {
+        state.lastAgentName = target.dataset.agentSession
+        renderPanel()
+        return
+      }
+
+      if (target.dataset.newAgent !== undefined) {
+        const c = activeCase()
+        if (!c) return
+        const name = `새 Agent ${c.sessions.length + 1}`
+        c.sessions.push(name)
+        state.lastAgentName = name
+        renderPanel()
+        return
+      }
+
+      if (target.matches('#historyButton')) {
+        const c = activeCase()
+        alert(c ? c.sessions.join('\\n') : '')
+        return
+      }
+
+      if (target.matches('#sendAgent')) {
+        sendAgentPrompt()
+        return
+      }
+
+      if (target.matches('#sendTerminal')) {
+        sendTerminalCommand()
+      }
+    })
+
+    let longPressTimer = 0
+    let pdfSwipeStart = null
+
+    document.addEventListener('pointerdown', (event) => {
+      const fileButton = event.target.closest('[data-open-file]')
+      if (!fileButton) return
+      clearTimeout(longPressTimer)
+      longPressTimer = setTimeout(() => {
+        state.suppressFileClick = true
+        openTerminalQuestion(fileButton.dataset.openFile)
+      }, 550)
+    })
+
+    document.addEventListener('pointerdown', (event) => {
+      const viewer = event.target.closest('.pdf-viewer.single')
+      if (!viewer) return
+      pdfSwipeStart = { x: event.clientX, y: event.clientY }
+    })
+
+    document.addEventListener('pointerup', (event) => {
+      clearTimeout(longPressTimer)
+      if (!pdfSwipeStart) return
+      const dx = event.clientX - pdfSwipeStart.x
+      const dy = event.clientY - pdfSwipeStart.y
+      pdfSwipeStart = null
+      if (Math.abs(dx) < 45 || Math.abs(dx) < Math.abs(dy) * 1.2) return
+      turnPdfPage(dx < 0 ? 1 : -1)
+    })
+
+    document.addEventListener('pointercancel', () => {
+      clearTimeout(longPressTimer)
+      pdfSwipeStart = null
+    })
+
+    document.addEventListener('wheel', (event) => {
+      const viewer = event.target.closest('.pdf-viewer.single')
+      if (!viewer || Math.abs(event.deltaX) < 24 || Math.abs(event.deltaX) < Math.abs(event.deltaY)) return
+      event.preventDefault()
+      turnPdfPage(event.deltaX > 0 ? 1 : -1)
+    }, { passive: false })
+
+    document.addEventListener('contextmenu', (event) => {
+      const fileButton = event.target.closest('[data-open-file]')
+      if (!fileButton) return
+      event.preventDefault()
+      openTerminalQuestion(fileButton.dataset.openFile)
+    })
+
+    $('#terminalSelect').addEventListener('change', (event) => {
+      state.lastTerminalId = event.target.value
+      renderPanel()
+    })
+
+    $('#sshProfileSelect').addEventListener('change', (event) => {
+      state.editingSshProfileId = event.target.value
+      renderSshSheet()
+    })
+
+    $('.ssh-form').addEventListener('input', updateSshActionState)
+
+    document.addEventListener('input', (event) => {
+      if (!event.target.matches('#docEditor')) return
+      const doc = activeDoc()
+      if (doc && event.target.dataset.docId === doc.id) doc.content = event.target.value
+    })
+
+    document.addEventListener('selectionchange', () => {
+      const selected = window.getSelection().toString().trim()
+      if (selected) state.selectedText = selected
+    })
+
+    $('#caseSearch').addEventListener('input', renderCases)
+
+    initNativeBridge()
+    renderAll()
+  </script>
+</body>
+</html>

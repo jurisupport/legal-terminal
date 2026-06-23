@@ -3535,7 +3535,7 @@ body {
   grid-column: 1 / -1;
   min-width: 0;
   display: grid;
-  grid-template-columns: 64px minmax(0, 1fr) auto minmax(0, auto);
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, auto);
   align-items: center;
   gap: 6px;
 }
@@ -3559,6 +3559,44 @@ body {
   min-width: 0;
   color: #f0a0a0;
   font-size: 11px;
+}
+.hearing-speaker-list {
+  grid-column: 1 / -1;
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+.hearing-speaker-row {
+  min-width: 0;
+  display: inline-grid;
+  grid-template-columns: minmax(72px, 1fr) 24px 24px 24px;
+  align-items: center;
+  gap: 3px;
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: #252526;
+}
+.hearing-speaker-row span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+}
+.hearing-speaker-row button {
+  width: 24px;
+  height: 24px;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  color: var(--fg);
+  background: var(--bg);
+  cursor: pointer;
+}
+.hearing-speaker-row button:disabled {
+  opacity: 0.35;
+  cursor: default;
 }
 @container (max-width: 520px) {
   .hearing-head {
@@ -3584,7 +3622,7 @@ body {
     grid-template-columns: minmax(0, 1fr);
   }
   .hearing-speaker-form {
-    grid-template-columns: 56px minmax(0, 1fr) auto;
+    grid-template-columns: minmax(0, 1fr) auto;
   }
   .hearing-speaker-form small {
     grid-column: 1 / -1;
@@ -3608,7 +3646,7 @@ body {
     grid-template-columns: minmax(0, 1fr);
   }
   .hearing-speaker-form {
-    grid-template-columns: 56px minmax(0, 1fr) auto;
+    grid-template-columns: minmax(0, 1fr) auto;
   }
   .hearing-speaker-form small {
     grid-column: 1 / -1;

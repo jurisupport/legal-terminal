@@ -1735,26 +1735,35 @@ function transcriptToTimeline(transcript: SessionTranscript, agentLabel: string)
   }))
 }
 
-export function DiffPreview({ diff, fallbackText }: { diff?: DiffView; fallbackText?: string }): JSX.Element | null {
+export function DiffPreview({
+  diff,
+  fallbackText,
+  alwaysExpanded = false
+}: {
+  diff?: DiffView
+  fallbackText?: string
+  alwaysExpanded?: boolean
+}): JSX.Element | null {
   const [expanded, setExpanded] = useState(false)
+  const isExpanded = alwaysExpanded || expanded
 
   if (!diff || diff.hunks.length === 0) {
     if (!fallbackText) return null
     const fallbackPreview = visibleDiffFallbackText(fallbackText)
     const isLongFallback = fallbackPreview.truncated
-    const visibleText = isLongFallback && !expanded ? fallbackPreview.text : fallbackText
+    const visibleText = isLongFallback && !isExpanded ? fallbackPreview.text : fallbackText
 
     return (
       <div className="agent-diff-fallback">
         <pre className="agent-card-text">{visibleText}</pre>
-        {isLongFallback && (
+        {isLongFallback && !alwaysExpanded && (
           <button
             type="button"
             className="agent-diff-toggle"
-            aria-expanded={expanded}
+            aria-expanded={isExpanded}
             onClick={() => setExpanded((value) => !value)}
           >
-            {expanded ? '접기' : '전체 펼쳐보기'}
+            {isExpanded ? '접기' : '전체 펼쳐보기'}
           </button>
         )}
       </div>
@@ -1766,16 +1775,18 @@ export function DiffPreview({ diff, fallbackText }: { diff?: DiffView; fallbackT
       <div className="agent-diff-summary">
         <span className="agent-diff-count add">+{diff.additions}</span>
         <span className="agent-diff-count remove">-{diff.deletions}</span>
-        <button
-          type="button"
-          className="agent-diff-toggle"
-          aria-expanded={expanded}
-          onClick={() => setExpanded((value) => !value)}
-        >
-          {expanded ? '접기' : '펼쳐보기'}
-        </button>
+        {!alwaysExpanded && (
+          <button
+            type="button"
+            className="agent-diff-toggle"
+            aria-expanded={isExpanded}
+            onClick={() => setExpanded((value) => !value)}
+          >
+            {isExpanded ? '접기' : '펼쳐보기'}
+          </button>
+        )}
       </div>
-      {expanded && (
+      {isExpanded && (
         <>
           <div className="agent-diff-labels" aria-hidden="true">
             <span>변경 전</span>

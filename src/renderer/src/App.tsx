@@ -1991,6 +1991,14 @@ export default function App(): JSX.Element {
       const macCtrlTab = platform === 'darwin' && e.ctrlKey && !e.metaKey && k === 'tab'
       const macCtrlTInWorkArea =
         platform === 'darwin' && !!(termId || workSideForShortcut) && e.ctrlKey && !e.metaKey && isT
+      if (primary && !e.altKey && !e.shiftKey && isKey('s', 'KeyS')) {
+        const handler = markdownSaveHandlersRef.current.get(activeDoc)
+        if (!handler) return
+        e.preventDefault()
+        e.stopPropagation()
+        void handler()
+        return
+      }
       if (primary && e.altKey && !e.shiftKey && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) {
         e.preventDefault()
         e.stopPropagation()
@@ -5468,7 +5476,7 @@ export default function App(): JSX.Element {
             onStatus={(status) => updatePdfStatus(tab.id, status)}
           />
         ))}
-      {tab?.kind === 'diff' && <DiffPreview diff={agentDiffs[tab.diffId ?? '']?.diff} />}
+      {tab?.kind === 'diff' && <DiffPreview diff={agentDiffs[tab.diffId ?? '']?.diff} alwaysExpanded />}
       {tab?.kind === 'settings' && <SettingsView />}
     </>
   )
@@ -5819,6 +5827,9 @@ export default function App(): JSX.Element {
     const activeParsed = parseWorkKey(activeKey)
     const activeDocForPane =
       activeParsed?.kind === 'doc' ? docs.find((t) => t.id === activeParsed.id) : undefined
+    const mountedDocs = docs.filter(
+      (t) => t.id === activeDocForPane?.id || t.kind === 'mdview' || t.kind === 'markdown'
+    )
     const visibleTermId = activeParsed?.kind === 'terminal' ? activeParsed.id : ''
     const hasTerms = terms.length > 0
     const sessionListSide = termSide(activeTermTab)
@@ -5997,21 +6008,23 @@ export default function App(): JSX.Element {
             ) : (
               <Empty label="왼쪽에 열린 탭이 없습니다" actionLabel="새 문서" onAction={() => addDoc(side)} />
             ))}
-          {activeDocForPane && (
+          {mountedDocs.map((doc) => (
             <div
+              key={doc.id}
               className="doc-content"
-              data-doc-id={activeDocForPane.id}
+              data-doc-id={doc.id}
               data-work-side={side}
               tabIndex={-1}
               onMouseDown={(e) => {
-                activateDocTab(activeDocForPane.id)
+                activateDocTab(doc.id)
                 const target = e.target as HTMLElement
                 if (shouldFocusDocContainer(target)) e.currentTarget.focus()
               }}
+              style={{ display: doc.id === activeDocForPane?.id ? 'block' : 'none' }}
             >
-              {renderDocContent(activeDocForPane)}
+              {renderDocContent(doc)}
             </div>
-          )}
+          ))}
           {mountedTerms.map((t) => (
             <div
               key={t.id}
