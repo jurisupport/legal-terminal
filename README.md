@@ -40,11 +40,11 @@ curl -fsSL https://raw.githubusercontent.com/jurisupport/legal-terminal/main/ins
 
 ## 이번 업데이트
 
-최신 릴리스: [v0.1.108](https://github.com/jurisupport/legal-terminal/releases/tag/v0.1.108)
+최신 릴리스: [v0.1.109](https://github.com/jurisupport/legal-terminal/releases/tag/v0.1.109)
 
-- **기일 기록 대상 템플릿 정리**: 재판·조사·조정/면담 대상자를 현장 입력 흐름에 맞게 바꿨습니다.
-- **문서 작업 안정화**: 저장 단축키와 diff 확인, 열린 문서 유지 동작을 다듬었습니다.
-- **Android 동반 앱 초안**: SSH 기반 모바일 작업을 검증할 네이티브 WebView 스캐폴드를 추가했습니다.
+- **열린 사건 폴더 변경**: 사건을 연 뒤에도 작성서류 폴더와 소송기록 폴더를 바로 다시 지정할 수 있습니다.
+- **원격 사건 폴더 변경**: SSH 원격 사건에서도 작성서류·소송기록 폴더를 원격 폴더 선택기로 바꿀 수 있습니다.
+- **사건 매핑 유지**: 바뀐 폴더는 최근 사건, 사건탭, JuriSupport 사건 매핑에 함께 저장됩니다.
 
 ## 처음 쓰는 순서
 

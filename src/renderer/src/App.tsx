@@ -30,7 +30,8 @@ import {
   IconSync,
   IconWorkspace,
   IconSearch,
-  IconSave
+  IconSave,
+  IconSaveAs
 } from './icons/Icons'
 import MarkdownEditor, {
   MARKDOWN_CENTER_SELECTION_EVENT,
@@ -1408,6 +1409,12 @@ export default function App(): JSX.Element {
   const [connMenu, setConnMenu] = useState(false)
   const [newCaseOpen, setNewCaseOpen] = useState(false)
   const [remotePick, setRemotePick] = useState<SshProfile | null>(null)
+  const [draftsPick, setDraftsPick] = useState<{
+    profile: SshProfile
+    startPath?: string
+    termId?: string
+    source?: CurrentCase
+  } | null>(null)
   const [recordsPick, setRecordsPick] = useState<{
     profile: SshProfile
     draftsPath?: string
@@ -3282,11 +3289,118 @@ export default function App(): JSX.Element {
     activateWorkTab(fallbackSide, scoped[ni])
   }
 
-  const saveJsRecordsPairing = (source: CurrentCase | undefined, drafts: string, records: string): void => {
+  const saveJsPairing = (
+    source: CurrentCase | undefined,
+    drafts: string,
+    records?: string
+  ): void => {
     const jsId = source?.meta?.jsId
     if (!jsId) return
     const key = source?.profileId ? remoteJsPairingKey(source.profileId, jsId) : jsId
     void window.lt.case.setJsPairing(key, drafts, records)
+  }
+
+  const applyDraftsFolder = (
+    target: { term?: TermTab; termId?: string; source?: CurrentCase } | undefined,
+    next: {
+      drafts: string
+      cwd: string
+      name: string
+      ssh?: SshConn
+      sshLabel?: string
+      profileId?: string
+      remotePath?: string
+    }
+  ): void => {
+    const cur =
+      target?.term ??
+      (target?.termId ? termTabs.find((t) => t.id === target.termId) : undefined) ??
+      termTabs.find((t) => t.id === activeTerm)
+    const source = target?.source ?? (cur ? currentCaseFromTerm(cur) : currentCase ?? undefined)
+    const caseTabIdValue = cur?.caseTabId ?? activeCaseTabId ?? (source ? caseTabId(source) : undefined)
+    const records = cur?.recordsFolder ?? source?.records
+    const name = source?.meta?.jsId ? source.name : next.name
+    const nextSource: CurrentCase = {
+      drafts: next.drafts,
+      records,
+      name,
+      meta: source?.meta,
+      ssh: next.ssh,
+      sshLabel: next.sshLabel,
+      profileId: next.profileId,
+      remotePath: next.remotePath
+    }
+
+    setTermTabs((tabs) =>
+      tabs.map((t) =>
+        caseTabIdValue && caseIdForTerm(t) === caseTabIdValue
+          ? {
+              ...t,
+              title: t.id === cur?.id ? name : t.title,
+              cwd: next.cwd,
+              recordsFolder: records,
+              suggestedRecords: undefined,
+              suggestedRecordOptions: undefined,
+              ssh: next.ssh,
+              sshLabel: next.sshLabel,
+              profileId: next.profileId
+            }
+          : t
+      )
+    )
+    setCurrentCase(nextSource)
+    setCaseTabs((tabs) =>
+      upsertCaseTab(tabs, {
+        ...caseTabFromCurrentCase(nextSource, cur?.id),
+        id: caseTabIdValue ?? caseTabId(nextSource)
+      })
+    )
+    setActiveCaseTabId(caseTabIdValue ?? caseTabId(nextSource))
+    void window.lt.case.addHistory({ drafts: next.drafts, records, name }).then(setRecent)
+    if (records) void window.lt.case.setPairing(next.drafts, records)
+    saveJsPairing(nextSource, next.drafts, records)
+    setTreeRefresh((n) => n + 1)
+    setMode('explorer')
+  }
+
+  const pickDrafts = async (): Promise<void> => {
+    const cur = termTabs.find((t) => t.id === activeTerm)
+    const source = cur ? currentCaseFromTerm(cur) : currentCase ?? undefined
+    if (!source) return
+    const remoteCtx =
+      cur?.ssh && cur.profileId
+        ? { profileId: cur.profileId, path: cur.cwd, termId: cur.id, source: currentCaseFromTerm(cur) }
+        : source.ssh && source.profileId && source.remotePath
+          ? { profileId: source.profileId, path: source.remotePath, source }
+          : null
+    if (remoteCtx) {
+      let prof = sshProfiles.find((p) => p.id === remoteCtx.profileId)
+      if (!prof) {
+        const s = await window.lt.settings.get()
+        setSshProfiles(s.sshProfiles ?? [])
+        prof = s.sshProfiles?.find((p) => p.id === remoteCtx.profileId)
+      }
+      if (!prof) {
+        window.alert('이 사건에 연결된 SSH 프로필을 찾을 수 없습니다. 설정에서 SSH 프로필을 확인하세요.')
+        return
+      }
+      setDraftsPick({
+        profile: prof,
+        startPath: remoteCtx.path || prof.draftsRoot || '~',
+        termId: remoteCtx.termId,
+        source: remoteCtx.source
+      })
+      return
+    }
+    const picked = await window.lt.dialog.pickFolder({
+      title: '작성서류 폴더 선택',
+      defaultPath: source.drafts || draftsRoot
+    })
+    if (!picked) return
+    applyDraftsFolder(
+      { term: cur, source },
+      { drafts: picked.path, cwd: picked.path, name: picked.name || pathLeaf(picked.path) || '사건' }
+    )
   }
 
   // 활성 사건(또는 지정한 사건)에 소송기록 폴더를 지정/탐색 → 뷰어 연결 + 페어링 기억.
@@ -3371,7 +3485,7 @@ export default function App(): JSX.Element {
     else if (nextSource) registerCaseTab(nextSource)
     if (draftsForPair) {
       window.lt.case.setPairing(draftsForPair, r.path)
-      saveJsRecordsPairing(
+      saveJsPairing(
         nextSource ?? (cur ? currentCaseFromTerm({ ...cur, recordsFolder: r.path }) : undefined),
         draftsForPair,
         r.path
@@ -5523,6 +5637,7 @@ export default function App(): JSX.Element {
       onPasteTo={pasteFilesTo}
       onDownload={downloadEntry}
       onOpenWorkspaceFromFolder={openFolderInNewWorkspace}
+      onPickDrafts={pickDrafts}
       onPickRecords={pickRecords}
       onSyncRecords={sshProfiles.length > 0 ? openRecordsSync : undefined}
       onApplySuggested={applySuggested}
@@ -6424,6 +6539,33 @@ export default function App(): JSX.Element {
         />
       )}
 
+      {/* 열린 사건의 원격 작성서류 폴더 변경 */}
+      {draftsPick && (
+        <RemoteFolderPicker
+          profile={draftsPick.profile}
+          title="작성서류 폴더 선택"
+          confirmLabel="이 폴더로 지정"
+          startPath={draftsPick.startPath}
+          onCancel={() => setDraftsPick(null)}
+          onPick={(remotePath) => {
+            const profile = draftsPick.profile
+            setDraftsPick(null)
+            applyDraftsFolder(
+              { termId: draftsPick.termId, source: draftsPick.source },
+              {
+                drafts: remoteUri(profile.id, remotePath),
+                cwd: remotePath,
+                name: pathLeaf(remotePath) || profile.label,
+                ssh: sshConnFromProfile(profile),
+                sshLabel: profile.label,
+                profileId: profile.id,
+                remotePath
+              }
+            )
+          }}
+        />
+      )}
+
       {/* 사건(JuriSupport) 원격 열기 — 자동 매칭 실패 시 폴더 직접 선택 */}
       {remoteCasePick && (
         <RemoteFolderPicker
@@ -6490,7 +6632,7 @@ export default function App(): JSX.Element {
             if (draftsPath) {
               const drafts = remoteUri(recordsPick.profile.id, draftsPath)
               window.lt.case.setPairing(drafts, uri)
-              saveJsRecordsPairing(
+              saveJsPairing(
                 nextSource ?? (cur ? currentCaseFromTerm({ ...cur, recordsFolder: uri }) : undefined),
                 drafts,
                 uri
@@ -6893,6 +7035,7 @@ function DocsPanel({
   onPasteTo,
   onDownload,
   onOpenWorkspaceFromFolder,
+  onPickDrafts,
   onPickRecords,
   onSyncRecords,
   onApplySuggested,
@@ -6933,6 +7076,7 @@ function DocsPanel({
   onPasteTo: (dir: string) => void
   onDownload: (path: string, name: string, isDir: boolean) => void
   onOpenWorkspaceFromFolder: (path: string, name: string) => void
+  onPickDrafts: () => void
   onPickRecords: () => void
   onSyncRecords?: () => void
   onApplySuggested: (path?: string) => void
@@ -7032,6 +7176,24 @@ function DocsPanel({
                 <button className="tool-btn" title="새 사건 추가" onClick={onOpenWorkspace}>
                   <IconWorkspace size={15} />
                   <span className="sr-only">새 사건 추가</span>
+                </button>
+                <button
+                  className="tool-btn"
+                  title="작성서류 폴더 변경"
+                  disabled={!draftsFolder}
+                  onClick={onPickDrafts}
+                >
+                  <IconSaveAs size={15} />
+                  <span className="sr-only">작성서류 폴더 변경</span>
+                </button>
+                <button
+                  className="tool-btn"
+                  title="소송기록 폴더 변경"
+                  disabled={!draftsFolder}
+                  onClick={onPickRecords}
+                >
+                  <IconViewer size={15} />
+                  <span className="sr-only">소송기록 폴더 변경</span>
                 </button>
                 <button className="tool-btn" title="새 파일" disabled={!draftsFolder} onClick={onNewFile}>
                   <IconNewFile size={15} />
