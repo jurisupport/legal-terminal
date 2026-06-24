@@ -40,11 +40,11 @@ curl -fsSL https://raw.githubusercontent.com/jurisupport/legal-terminal/main/ins
 
 ## 이번 업데이트
 
-최신 릴리스: [v0.1.109](https://github.com/jurisupport/legal-terminal/releases/tag/v0.1.109)
+최신 릴리스: [v0.1.110](https://github.com/jurisupport/legal-terminal/releases/tag/v0.1.110)
 
-- **열린 사건 폴더 변경**: 사건을 연 뒤에도 작성서류 폴더와 소송기록 폴더를 바로 다시 지정할 수 있습니다.
-- **원격 사건 폴더 변경**: SSH 원격 사건에서도 작성서류·소송기록 폴더를 원격 폴더 선택기로 바꿀 수 있습니다.
-- **사건 매핑 유지**: 바뀐 폴더는 최근 사건, 사건탭, JuriSupport 사건 매핑에 함께 저장됩니다.
+- **사건기록 쪽맞춤 개선**: 세로 기준 계산이 튀어도 PDF가 비정상적으로 작아지지 않습니다.
+- **사건기록 폭맞춤 안정화**: 스크롤바 변동으로 PDF가 흔들리며 재렌더되는 현상을 줄였습니다.
+- **뷰어 검증**: 타입 검사와 프로덕션 빌드를 통과한 상태로 배포됩니다.
 
 ## 처음 쓰는 순서
 

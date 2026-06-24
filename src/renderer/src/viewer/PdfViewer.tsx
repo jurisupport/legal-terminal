@@ -15,6 +15,7 @@ export interface PdfViewStatus {
   cropRatio: number
 }
 const CROP_OPTIONS = [0.05, 0.1, 0.15, 0.2, 0.25]
+const MIN_FIT_PAGE_SCALE = 0.75
 const WHEEL_SCROLL_SENSITIVITY = 0.45
 const WHEEL_PAGE_TURN_THRESHOLD_PX = 90
 const WHEEL_PAGE_TURN_LOCK_MS = 450
@@ -99,6 +100,7 @@ export default function PdfViewer({
   const prevDocRef = useRef<(() => void) | undefined>(onPrevDoc)
   const initialStatusRef = useRef<PdfViewStatus | undefined>(initialStatus)
   const passwordCallbackRef = useRef<((password: string) => void) | null>(null)
+  const wrapSizeRef = useRef('')
 
   const [numPages, setNumPages] = useState(0)
   const [page, setPage] = useState(1)
@@ -297,7 +299,10 @@ export default function PdfViewer({
         const availH = (wrap?.clientHeight ?? contentH) - pad
         const sW = availW / contentW
         const sH = availH / contentH
-        scale = mode === 'fit_width' ? sW : Math.min(sW, sH)
+        scale =
+          mode === 'fit_width'
+            ? sW
+            : Math.max(Math.min(sW, sH), Math.min(sW, MIN_FIT_PAGE_SCALE))
       }
       scale = Math.max(0.1, Math.min(scale, 6))
       setEffPct(Math.round(scale * 100))
@@ -354,7 +359,14 @@ export default function PdfViewer({
   useEffect(() => {
     const wrap = wrapRef.current
     if (!wrap) return
-    const ro = new ResizeObserver(() => setWrapTick((t) => t + 1))
+    const updateSize = (): void => {
+      const key = `${wrap.clientWidth}x${wrap.clientHeight}`
+      if (key === wrapSizeRef.current) return
+      wrapSizeRef.current = key
+      setWrapTick((t) => t + 1)
+    }
+    updateSize()
+    const ro = new ResizeObserver(updateSize)
     ro.observe(wrap)
     return () => ro.disconnect()
   }, [])
