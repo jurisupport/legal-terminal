@@ -40,11 +40,11 @@ curl -fsSL https://raw.githubusercontent.com/jurisupport/legal-terminal/main/ins
 
 ## 이번 업데이트
 
-최신 릴리스: [v0.1.112](https://github.com/jurisupport/legal-terminal/releases/tag/v0.1.112)
+최신 릴리스: [v0.1.113](https://github.com/jurisupport/legal-terminal/releases/tag/v0.1.113)
 
-- **사건 저장소 안정화**: 최근 사건·JuriSupport 매핑 저장을 원자적으로 처리하고 손상된 매핑 파일을 최대한 복구합니다.
-- **Agent 새 대화 정리**: Fork는 기존 세션 재개가 아니라 같은 폴더의 새 Agent 대화로 열립니다.
-- **선택 본문 전달 개선**: Agent 패널에서 선택한 텍스트를 문서 경로로 오인하지 않습니다.
+- **PDF 쪽맞춤 높이 복구**: 사건기록 PDF가 위쪽 일부 영역에만 맞춰져 18%처럼 작게 보이던 문제를 고쳤습니다.
+- **문서 탭 레이아웃 고정**: 활성 문서 탭이 원래 flex 높이 구조를 유지하게 해 PDF 캔버스가 전체 문서 영역을 사용합니다.
+- **PDF 레이아웃 회귀 검사 추가**: 쪽맞춤 높이 전달이 다시 깨지면 검증 단계에서 실패합니다.
 
 ## 처음 쓰는 순서
 

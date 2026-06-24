@@ -6118,7 +6118,7 @@ export default function App(): JSX.Element {
                 const target = e.target as HTMLElement
                 if (shouldFocusDocContainer(target)) e.currentTarget.focus()
               }}
-              style={{ display: doc.id === activeDocForPane?.id ? 'block' : 'none' }}
+              style={{ display: doc.id === activeDocForPane?.id ? 'flex' : 'none' }}
             >
               {renderDocContent(doc)}
             </div>
