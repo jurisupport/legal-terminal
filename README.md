@@ -40,7 +40,7 @@ curl -fsSL https://raw.githubusercontent.com/jurisupport/legal-terminal/main/ins
 
 ## 이번 업데이트
 
-최신 릴리스: [v0.1.113](https://github.com/jurisupport/legal-terminal/releases/tag/v0.1.113)
+최신 릴리스: [v0.1.114](https://github.com/jurisupport/legal-terminal/releases/tag/v0.1.114)
 
 - **PDF 쪽맞춤 높이 복구**: 사건기록 PDF가 위쪽 일부 영역에만 맞춰져 18%처럼 작게 보이던 문제를 고쳤습니다.
 - **문서 탭 레이아웃 고정**: 활성 문서 탭이 원래 flex 높이 구조를 유지하게 해 PDF 캔버스가 전체 문서 영역을 사용합니다.

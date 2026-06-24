@@ -1012,6 +1012,10 @@ function isEditableKeyboardTarget(target: EventTarget | null): boolean {
   )
 }
 
+function isAgentPromptKeyboardTarget(target: EventTarget | null): boolean {
+  return target instanceof Element && Boolean(target.closest('.agent-prompt'))
+}
+
 function dataTransferPaths(dataTransfer: DataTransfer): string[] {
   const internal = readLtPaths(dataTransfer)
   if (internal.length) return internal
@@ -2022,7 +2026,7 @@ function MarkdownMessage({
   }
 
   return (
-    <div className="agent-md-wrap">
+    <div className={`agent-md-wrap${streaming ? ' streaming' : ''}`}>
       <div
         className="md-body agent-md-body"
         onClick={onClick}
@@ -2262,11 +2266,14 @@ export default function AgentPanel({
   )
 
   const scrollTimelineToBottom = useCallback((): void => {
-    const timeline = scrollRef.current
-    if (!timeline) return
     shouldFollowTimelineRef.current = true
-    timeline.scrollTo({ top: timeline.scrollHeight })
     setShowNewOutputNotice(false)
+    const scroll = (): void => {
+      const timeline = scrollRef.current
+      timeline?.scrollTo({ top: timeline.scrollHeight })
+    }
+    scroll()
+    window.requestAnimationFrame(scroll)
   }, [])
 
   const updateTimelineFollowState = useCallback((): void => {
@@ -2636,6 +2643,19 @@ export default function AgentPanel({
     [profileId, ssh]
   )
 
+  const attachmentPathForInputPath = useCallback(
+    async (path: string): Promise<string> => {
+      if (!ssh || !profileId || parseRemoteUri(path)) return path
+      try {
+        const copied = await window.lt.fs.copyInto(remoteUri(profileId, cwd), [path])
+        return copied.copied[0] ?? path
+      } catch {
+        return path
+      }
+    },
+    [cwd, profileId, ssh]
+  )
+
   const addPathAttachments = useCallback(
     (paths: string[], source: 'drop' | 'paste'): void => {
       const unique = uniqueStrings(paths)
@@ -2644,7 +2664,7 @@ export default function AgentPanel({
       void (async () => {
         const nextAttachments: AgentAttachment[] = []
         for (const path of unique) {
-          nextAttachments.push(await attachmentForPath(path))
+          nextAttachments.push(await attachmentForPath(await attachmentPathForInputPath(path)))
         }
         return nextAttachments
       })()
@@ -2656,7 +2676,7 @@ export default function AgentPanel({
         })
         .catch((e) => setError(String(e instanceof Error ? e.message : e)))
     },
-    [attachmentForPath, authActive, focusPrompt, showTransientFeedback]
+    [attachmentForPath, attachmentPathForInputPath, authActive, focusPrompt, showTransientFeedback]
   )
 
   useEffect(() => {
@@ -2735,6 +2755,7 @@ export default function AgentPanel({
         setError(sendBlockedReason)
         return
       }
+      scrollTimelineToBottom()
       if (commandName === '/model') {
         const tokens = slashArgument.split(/\s+/).filter(Boolean)
         const effortFlagIndex = tokens.findIndex((token) => token === 'effort' || token === '--effort')
@@ -2770,6 +2791,7 @@ export default function AgentPanel({
         setError(sendBlockedReason)
         return
       }
+      scrollTimelineToBottom()
       const result = await window.lt.agent.mcpStatus(id)
       if (!result.ok) {
         setError(result.error ?? 'MCP 상태를 확인할 수 없습니다.')
@@ -2788,6 +2810,7 @@ export default function AgentPanel({
       if (sendBlockedReason) setError(sendBlockedReason)
       return
     }
+    scrollTimelineToBottom()
     const nextMode = expanded.mode ?? mode
     if (expanded.mode) selectPermissionMode(expanded.mode, false)
     if (rawText) rememberPrompts([rawText])
@@ -2998,7 +3021,7 @@ export default function AgentPanel({
         event.defaultPrevented ||
         event.isComposing ||
         event.keyCode === 229 ||
-        isEditableKeyboardTarget(event.target)
+        (isEditableKeyboardTarget(event.target) && !isAgentPromptKeyboardTarget(event.target))
       ) {
         disarmEscInterrupt()
         return
@@ -3133,12 +3156,13 @@ export default function AgentPanel({
     addPathAttachments(dataTransferPaths(event.dataTransfer), 'drop')
   }
 
-  const onAttachmentPaste = (event: ClipboardEvent<HTMLTextAreaElement>): void => {
-    if (authActive) return
+  const onAttachmentPaste = (event: ClipboardEvent<HTMLElement>): void => {
+    if (event.defaultPrevented || authActive) return
     const clipboard = event.clipboardData
     const directPaths = dataTransferPaths(clipboard)
     if (directPaths.length > 0) {
       event.preventDefault()
+      event.stopPropagation()
       addPathAttachments(directPaths, 'paste')
       return
     }
@@ -3146,11 +3170,13 @@ export default function AgentPanel({
     const text = clipboard.getData('text/plain')
     if (pathLikeText(text)) {
       event.preventDefault()
+      event.stopPropagation()
       addPathAttachments(pathsFromPathLikeText(text), 'paste')
       return
     }
     if (!types.some(fileLikeClipboardType)) return
     event.preventDefault()
+    event.stopPropagation()
     void window.lt.fs
       .clipboardFiles()
       .then((clip) => {
@@ -3227,6 +3253,7 @@ export default function AgentPanel({
         setAttachmentDropOver(false)
       }}
       onDrop={onAttachmentDrop}
+      onPaste={onAttachmentPaste}
     >
       {attachmentDropOver && (
         <div className="drop-guide agent-drop-guide" role="status" aria-live="polite">
@@ -3335,6 +3362,7 @@ export default function AgentPanel({
             if (item.kind === 'process') {
               const expanded = expandedProcessIds.has(item.id)
               const steps = item.processSteps ?? []
+              const liveStep = steps[steps.length - 1]
               return (
                 <section key={item.id} className={`agent-card process ${item.status ?? ''}`}>
                   <button
@@ -3348,6 +3376,13 @@ export default function AgentPanel({
                     <span className="agent-process-summary">{item.text ?? '진행 중'}</span>
                     <span className="agent-process-count">{steps.length}</span>
                   </button>
+                  {!expanded && liveStep && (
+                    <div className="agent-process-live" aria-hidden="true">
+                      <span key={`${liveStep.id}-${liveStep.status ?? ''}-${liveStep.text ?? liveStep.title}`}>
+                        {stepSummary(liveStep)}
+                      </span>
+                    </div>
+                  )}
                   {expanded && (
                     <div className="agent-process-details">
                       {steps.map((step) => (

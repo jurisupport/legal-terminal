@@ -29,6 +29,7 @@ import {
   IconNewFolder,
   IconSync,
   IconWorkspace,
+  IconParentFolder,
   IconSearch,
   IconSave,
   IconSaveAs
@@ -546,6 +547,16 @@ const pathLeaf = (path?: string): string | undefined => {
   if (!path) return undefined
   const clean = path.replace(/[\\/]+$/, '')
   return clean.split(/[\\/]/).filter(Boolean).pop() || clean
+}
+
+const parentLocalPath = (path: string): string | undefined => {
+  const clean = path.replace(/[\\/]+$/, '')
+  const slash = Math.max(clean.lastIndexOf('/'), clean.lastIndexOf('\\'))
+  if (slash < 0) return undefined
+  if (slash === 0) return clean === '/' ? undefined : '/'
+  const parent = clean.slice(0, slash)
+  if (/^[A-Za-z]:$/.test(parent)) return `${parent}${clean[slash]}`
+  return parent
 }
 
 const remoteStartPointKey = (path: string): string => path.trim().replace(/\/+$/, '') || '/'
@@ -3603,6 +3614,41 @@ export default function App(): JSX.Element {
       name: source.name
     }).then(setRecent)
   }
+
+  const goParentDraftsFolder = (): void => {
+    const current = activeDraftsFolder
+    const cur = termTabs.find((t) => t.id === activeTerm)
+    const source = cur ? currentCaseFromTerm(cur) : currentCase ?? undefined
+    if (!current || !source) return
+
+    const remote = parseRemoteUri(current)
+    if (remote) {
+      const parent = parentRemotePath(remote.path)
+      if (parent === remote.path) return
+      const profile = sshProfiles.find((p) => p.id === remote.profileId)
+      applyDraftsFolder(
+        { term: cur, source },
+        {
+          drafts: remoteUri(remote.profileId, parent),
+          cwd: parent,
+          name: pathLeaf(parent) || source.name,
+          ssh: profile ? sshConnFromProfile(profile) : source.ssh,
+          sshLabel: profile?.label ?? source.sshLabel,
+          profileId: remote.profileId,
+          remotePath: parent
+        }
+      )
+      return
+    }
+
+    const parent = parentLocalPath(current)
+    if (!parent || parent === current) return
+    applyDraftsFolder(
+      { term: cur, source },
+      { drafts: parent, cwd: parent, name: pathLeaf(parent) || source.name }
+    )
+  }
+
   const defaultCaseOpenProfileId = caseOpenProfileId(
     resolveCaseOpenTarget(caseOpenTarget, sshProfiles)
   )
@@ -5620,6 +5666,7 @@ export default function App(): JSX.Element {
       onPasteTo={pasteFilesTo}
       onDownload={downloadEntry}
       onOpenWorkspaceFromFolder={openFolderInNewWorkspace}
+      onGoParentFolder={goParentDraftsFolder}
       onPickDrafts={pickDrafts}
       onPickRecords={pickRecords}
       onSyncRecords={sshProfiles.length > 0 ? openRecordsSync : undefined}
@@ -6440,7 +6487,7 @@ export default function App(): JSX.Element {
             <IconSync />
           </button>
           <button className="activity-item" title="설정" onClick={openSettings}>
-            <IconSettings />
+            <IconSettings size={20} />
           </button>
         </div>
       </div>
@@ -7032,6 +7079,7 @@ function DocsPanel({
   onPasteTo,
   onDownload,
   onOpenWorkspaceFromFolder,
+  onGoParentFolder,
   onPickDrafts,
   onPickRecords,
   onSyncRecords,
@@ -7073,6 +7121,7 @@ function DocsPanel({
   onPasteTo: (dir: string) => void
   onDownload: (path: string, name: string, isDir: boolean) => void
   onOpenWorkspaceFromFolder: (path: string, name: string) => void
+  onGoParentFolder: () => void
   onPickDrafts: () => void
   onPickRecords: () => void
   onSyncRecords?: () => void
@@ -7173,6 +7222,15 @@ function DocsPanel({
                 <button className="tool-btn" title="새 사건 추가" onClick={onOpenWorkspace}>
                   <IconWorkspace size={15} />
                   <span className="sr-only">새 사건 추가</span>
+                </button>
+                <button
+                  className="tool-btn"
+                  title="상위 폴더로 이동"
+                  disabled={!draftsFolder}
+                  onClick={onGoParentFolder}
+                >
+                  <IconParentFolder size={15} />
+                  <span className="sr-only">상위 폴더로 이동</span>
                 </button>
                 <button
                   className="tool-btn"

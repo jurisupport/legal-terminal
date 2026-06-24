@@ -130,6 +130,16 @@ export function IconWorkspace({ size = 16 }: IconProps): JSX.Element {
   )
 }
 
+export function IconParentFolder({ size = 16 }: IconProps): JSX.Element {
+  return (
+    <svg {...base(size)}>
+      <path d="M4 18V6h16v12" />
+      <path d="M8 10l4-4 4 4" />
+      <path d="M12 6v10" />
+    </svg>
+  )
+}
+
 export function IconSearch({ size = 16 }: IconProps): JSX.Element {
   return (
     <svg {...base(size)}>
