@@ -4899,6 +4899,13 @@ body {
 .pdf-canvas-wrap.pannable {
   cursor: grab;
 }
+.pdf-canvas-wrap.fit-page {
+  align-items: center;
+  justify-content: center;
+}
+.pdf-canvas-wrap.fit-page .pdf-page {
+  margin: 0;
+}
 .pdf-canvas-wrap.pannable .textLayer {
   user-select: none;
   -webkit-user-drag: none;

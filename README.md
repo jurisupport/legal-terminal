@@ -40,10 +40,10 @@ curl -fsSL https://raw.githubusercontent.com/jurisupport/legal-terminal/main/ins
 
 ## 이번 업데이트
 
-최신 릴리스: [v0.1.110](https://github.com/jurisupport/legal-terminal/releases/tag/v0.1.110)
+최신 릴리스: [v0.1.111](https://github.com/jurisupport/legal-terminal/releases/tag/v0.1.111)
 
-- **사건기록 쪽맞춤 개선**: 세로 기준 계산이 튀어도 PDF가 비정상적으로 작아지지 않습니다.
-- **사건기록 폭맞춤 안정화**: 스크롤바 변동으로 PDF가 흔들리며 재렌더되는 현상을 줄였습니다.
+- **사건기록 쪽맞춤 복원**: PDF 전체 페이지가 상하·좌우 안에 들어오도록 원래의 쪽맞춤 계산을 지켰습니다.
+- **사건기록 맞춤 계산 안정화**: 뷰어 크기가 아직 잡히지 않은 순간에는 잘못된 초소형 배율로 렌더하지 않습니다.
 - **뷰어 검증**: 타입 검사와 프로덕션 빌드를 통과한 상태로 배포됩니다.
 
 ## 처음 쓰는 순서

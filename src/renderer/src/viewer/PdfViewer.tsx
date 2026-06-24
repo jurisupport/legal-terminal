@@ -15,7 +15,6 @@ export interface PdfViewStatus {
   cropRatio: number
 }
 const CROP_OPTIONS = [0.05, 0.1, 0.15, 0.2, 0.25]
-const MIN_FIT_PAGE_SCALE = 0.75
 const WHEEL_SCROLL_SENSITIVITY = 0.45
 const WHEEL_PAGE_TURN_THRESHOLD_PX = 90
 const WHEEL_PAGE_TURN_LOCK_MS = 450
@@ -294,15 +293,17 @@ export default function PdfViewer({
       let scale = customScale
       if (mode === 'fit_width' || mode === 'fit_page') {
         const wrap = wrapRef.current
-        const pad = 32
-        const availW = (wrap?.clientWidth ?? contentW) - pad
-        const availH = (wrap?.clientHeight ?? contentH) - pad
+        let availW = contentW
+        let availH = contentH
+        if (wrap) {
+          const style = window.getComputedStyle(wrap)
+          availW = wrap.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight)
+          availH = wrap.clientHeight - parseFloat(style.paddingTop) - parseFloat(style.paddingBottom)
+          if (availW <= 0 || availH <= 0) return
+        }
         const sW = availW / contentW
         const sH = availH / contentH
-        scale =
-          mode === 'fit_width'
-            ? sW
-            : Math.max(Math.min(sW, sH), Math.min(sW, MIN_FIT_PAGE_SCALE))
+        scale = mode === 'fit_width' ? sW : Math.min(sW, sH)
       }
       scale = Math.max(0.1, Math.min(scale, 6))
       setEffPct(Math.round(scale * 100))
@@ -687,7 +688,7 @@ export default function PdfViewer({
         )}
       </div>
       <div
-        className={`pdf-canvas-wrap ${panMode ? 'pannable' : ''}`}
+        className={`pdf-canvas-wrap ${mode === 'fit_page' ? 'fit-page' : ''} ${panMode ? 'pannable' : ''}`}
         ref={wrapRef}
         tabIndex={0}
         onKeyDown={onKeyDown}
