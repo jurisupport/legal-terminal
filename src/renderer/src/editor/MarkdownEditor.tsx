@@ -1180,9 +1180,6 @@ export default function MarkdownEditor({
           if (r.error) window.alert(`PDF 내보내기 실패: ${r.error}`)
           return
         }
-        if (layout === 'proof-of-content') {
-          window.alert("내용증명 PDF를 인쇄할 때는 PDF 뷰어/프린터 옵션에서 '이미지로 인쇄'를 선택하세요.")
-        }
       })
       .catch((e) => window.alert(`PDF 내보내기 실패: ${String(e)}`))
   }

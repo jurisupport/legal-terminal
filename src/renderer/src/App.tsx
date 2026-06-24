@@ -488,6 +488,10 @@ interface ClaudeDraftPromptOptions {
   sourceTitle?: string
   instruction?: string
 }
+interface ClaudeAskOptions extends ClaudeDraftPromptOptions {
+  docPath?: string | null
+  sourceLabel?: string
+}
 
 type CaseWorkspaceTab = WorkspaceCaseTabPayload
 
@@ -2964,34 +2968,12 @@ export default function App(): JSX.Element {
     )
   }
 
-  const resolveForkResumeSessionId = async (source: TermTab): Promise<string | undefined> => {
-    if (source.resumeSessionId) return source.resumeSessionId
-    const current = await window.lt.sessions
-      .current(source.cwd, (source.createdAt ?? 0) - 3000, source.ssh)
-      .catch(() => null)
-    if (!current?.sessionId) return undefined
-    rememberSessionForTerm(source, current.sessionId, current.title)
-    setTermTabs((tabs) =>
-      tabs.map((t) =>
-        t.id === source.id
-          ? {
-              ...t,
-              resumeSessionId: current.sessionId,
-              sessionTitle: t.renamed ? t.sessionTitle : current.title ?? t.sessionTitle
-            }
-          : t
-      )
-    )
-    return current.sessionId
-  }
-
   const openForkedAgentTab = (
     source: TermTab,
     opts: {
       cwd: string
       title: string
       side: DockSide
-      resumeSessionId?: string
       ssh?: SshConn
       sshLabel?: string
       profileId?: string
@@ -3006,7 +2988,7 @@ export default function App(): JSX.Element {
       autoClaude: false,
       agentProvider: resolveAgentProvider(source.agentProvider, opts.ssh),
       createdAt: Date.now(),
-      resumeSessionId: opts.resumeSessionId,
+      resumeSessionId: undefined,
       sessionTitle: undefined,
       renamed: true,
       ssh: opts.ssh,
@@ -3026,12 +3008,10 @@ export default function App(): JSX.Element {
     const source = termTabsRef.current.find((t) => t.id === sourceTermId)
     if (!source || !isAgentTab(source)) return
     const side = preferredSide ?? termSide(source)
-    const resumeSessionId = await resolveForkResumeSessionId(source)
     openForkedAgentTab(source, {
       cwd: source.cwd,
-      title: `${source.title} · fork`,
+      title: `${source.title} · 새 대화`,
       side,
-      resumeSessionId,
       ssh: source.ssh,
       sshLabel: source.sshLabel,
       profileId: source.profileId
@@ -3049,10 +3029,7 @@ export default function App(): JSX.Element {
       return
     }
     const side = preferredSide ?? termSide(source)
-    const [resumeSessionId, result] = await Promise.all([
-      resolveForkResumeSessionId(source),
-      window.lt.agent.worktreeFork({ cwd: source.cwd })
-    ])
+    const result = await window.lt.agent.worktreeFork({ cwd: source.cwd })
     if (!result.ok || !result.path) {
       window.alert(result.error || 'Git worktree 생성에 실패했습니다.')
       return
@@ -3060,8 +3037,7 @@ export default function App(): JSX.Element {
     openForkedAgentTab(source, {
       cwd: result.path,
       title: `${source.title} · worktree`,
-      side,
-      resumeSessionId
+      side
     })
   }
 
@@ -3071,7 +3047,7 @@ export default function App(): JSX.Element {
     return [
       {
         label: 'Fork',
-        title: '현재 Agent 세션 맥락을 같은 폴더의 새 탭으로 열기',
+        title: '같은 폴더에서 새 Agent 대화로 열기',
         onClick: () => void forkAgentTab(termId, side)
       },
       {
@@ -3726,13 +3702,14 @@ export default function App(): JSX.Element {
 
   const selectionAttachmentForAgent = (
     text: string,
-    opts: { docPath?: string; docName?: string },
+    opts: { docPath?: string; docName?: string; sourceLabel?: string },
     term: TermTab
   ): AgentAttachment => {
     const trimmed = text.trim()
     const readablePath = opts.docPath ? claudeReadablePath(opts.docPath, term) : undefined
+    const sourceLabel = opts.sourceLabel ?? opts.docName
     const body = [
-      opts.docName ? `문서: ${opts.docName}` : undefined,
+      sourceLabel ? `${opts.docPath ? '문서' : '출처'}: ${sourceLabel}` : undefined,
       readablePath ? `문서 경로: ${readablePath}` : undefined,
       `선택 길이: ${formatCharCount(trimmed.length)}자`,
       '',
@@ -3742,7 +3719,7 @@ export default function App(): JSX.Element {
       .join('\n')
     return {
       kind: 'selection',
-      label: selectionAttachmentLabel(opts.docName),
+      label: selectionAttachmentLabel(sourceLabel),
       path: readablePath,
       text: body
     }
@@ -4542,7 +4519,7 @@ export default function App(): JSX.Element {
     const target = activeTermTab ?? sessionCaseSource
     const content = [
       '# legal-terminal 선택 본문',
-      opts.docName ? `문서: ${opts.docName}` : undefined,
+      opts.docName ? `${opts.docPath ? '문서' : '출처'}: ${opts.docName}` : undefined,
       opts.docPath ? `문서 경로: ${claudeReadablePath(opts.docPath, target)}` : undefined,
       `생성: ${new Date().toLocaleString('ko-KR')}`,
       '',
@@ -4599,15 +4576,21 @@ export default function App(): JSX.Element {
   }
 
   // 활성 문서명+경로 + (있으면) 선택 텍스트로 claude 프롬프트 주입. 텍스트 없으면 문서 전체에 대해 묻기.
-  const askClaude = (text: string, opts?: { docPath?: string } & ClaudeDraftPromptOptions): void => {
+  const askClaude = (text: string, opts?: ClaudeAskOptions): void => {
     void (async () => {
       const d = docTabs.find((x) => x.id === activeDoc)
-      const docPath = opts?.docPath ?? d?.path
-      const docName = opts?.docPath ? (opts.docPath.split(/[\\/]/).pop() ?? d?.title) : d?.title
-      const ref = docName ? `「${docName}」${docPath ? `(${docPath})` : ''}` : ''
+      const docPath = opts?.docPath === null ? undefined : (opts?.docPath ?? d?.path)
+      const docName =
+        opts?.docPath === null
+          ? undefined
+          : opts?.docPath
+            ? (opts.docPath.split(/[\\/]/).pop() ?? d?.title)
+            : d?.title
+      const sourceLabel = opts?.sourceLabel ?? docName
+      const ref = sourceLabel ? `「${sourceLabel}」${docPath ? `(${docPath})` : ''}` : ''
       const t = text.trim()
       if (t && activeTermTab && isAgentTab(activeTermTab)) {
-        const attachment = selectionAttachmentForAgent(t, { docPath, docName }, activeTermTab)
+        const attachment = selectionAttachmentForAgent(t, { docPath, docName, sourceLabel }, activeTermTab)
         queueAgentAttachment(activeTermTab, attachment, agentSelectionInputText(attachment))
         return
       }
@@ -4621,8 +4604,8 @@ export default function App(): JSX.Element {
       let payload: string
       let displayText: string | undefined
       if (t) {
-        displayText = hiddenSelectionDisplay(docName, t)
-        const selectionContext = await createClaudeSelectionContext(t, { docPath, docName })
+        displayText = hiddenSelectionDisplay(sourceLabel, t)
+        const selectionContext = await createClaudeSelectionContext(t, { docPath, docName: sourceLabel })
         payload = selectionContext
           ? [
               filePrompt || (ref ? `${ref} 중 다음 선택 본문:` : '다음 선택 본문:'),
@@ -6751,8 +6734,14 @@ const centerMarkdownSelection = (draftId?: string): void => {
   window.dispatchEvent(new CustomEvent(MARKDOWN_CENTER_SELECTION_EVENT, { detail: { draftId } }))
 }
 
+const askOptionsForSelectionElement = (element: Element | null): ClaudeAskOptions | undefined =>
+  element?.closest('.agent-panel') ? { docPath: null, sourceLabel: 'Agent 패널' } : undefined
+
+type SelectionAskHandler = (text: string, opts?: ClaudeAskOptions) => void
+type SelectionActionBox = TextSelectionOverlayDetail & { askOpts?: ClaudeAskOptions }
+
 // 본문에서 텍스트 선택 후 우클릭 → 컨텍스트 메뉴 (Claude/법제처/법고을/엘박스)
-function SelectionMenu({ onAsk }: { onAsk: (text: string) => void }): JSX.Element | null {
+function SelectionMenu({ onAsk }: { onAsk: SelectionAskHandler }): JSX.Element | null {
   const [menu, setMenu] = useState<{
     x: number
     y: number
@@ -6760,6 +6749,7 @@ function SelectionMenu({ onAsk }: { onAsk: (text: string) => void }): JSX.Elemen
     queryText: string
     markdown?: string
     editorDraftId?: string
+    askOpts?: ClaudeAskOptions
   } | null>(null)
   const editorSelectionRef = useRef<TextSelectionOverlayDetail | null>(null)
 
@@ -6787,7 +6777,8 @@ function SelectionMenu({ onAsk }: { onAsk: (text: string) => void }): JSX.Elemen
         text,
         queryText: markdown ? markdownToPlainText(markdown) || text : text,
         markdown,
-        editorDraftId: editorDetail?.editorDraftId
+        editorDraftId: editorDetail?.editorDraftId,
+        askOpts: askOptionsForSelectionElement(el)
       })
     }
     const onEditorSelection = (event: Event): void => {
@@ -6831,7 +6822,7 @@ function SelectionMenu({ onAsk }: { onAsk: (text: string) => void }): JSX.Elemen
           }
         ]
       : []),
-    { label: '✳ Claude에 물어보기', act: () => onAsk(menu.text) },
+    { label: '✳ Claude에 물어보기', act: () => onAsk(menu.text, menu.askOpts) },
     { label: '법제처 검색', act: () => open(`https://www.law.go.kr/LSW/lsSc.do?menuId=1&query=${q}`) },
     {
       label: '법고을 검색',
@@ -6862,8 +6853,8 @@ function SelectionMenu({ onAsk }: { onAsk: (text: string) => void }): JSX.Elemen
 }
 
 // 본문에서 텍스트를 선택하면 떠오르는 "Claude에 묻기" 버튼
-function SelectionAsk({ onAsk }: { onAsk: (text: string) => void }): JSX.Element | null {
-  const [box, setBox] = useState<TextSelectionOverlayDetail | null>(null)
+function SelectionAsk({ onAsk }: { onAsk: SelectionAskHandler }): JSX.Element | null {
+  const [box, setBox] = useState<SelectionActionBox | null>(null)
 
   useEffect(() => {
     let frame = 0
@@ -6890,7 +6881,13 @@ function SelectionAsk({ onAsk }: { onAsk: (text: string) => void }): JSX.Element
         setBox(null)
         return
       }
-      setBox({ x: rect.left + rect.width / 2, y: rect.top - 6, text, count: Array.from(visibleText).length })
+      setBox({
+        x: rect.left + rect.width / 2,
+        y: rect.top - 6,
+        text,
+        count: Array.from(visibleText).length,
+        askOpts: askOptionsForSelectionElement(el)
+      })
     }
 
     const scheduleUpdate = (): void => {
@@ -6989,7 +6986,7 @@ function SelectionAsk({ onAsk }: { onAsk: (text: string) => void }): JSX.Element
       <button
         type="button"
         onClick={() => {
-          onAsk(box.text)
+          onAsk(box.text, box.askOpts)
           setBox(null)
           window.getSelection()?.removeAllRanges()
         }}

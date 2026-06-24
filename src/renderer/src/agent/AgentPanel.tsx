@@ -3298,7 +3298,7 @@ export default function AgentPanel({
           {onFork && (
             <button
               className="agent-icon-btn"
-              title="현재 Agent 세션 맥락을 같은 폴더의 새 탭으로 열기"
+              title="같은 폴더에서 새 Agent 대화로 열기"
               aria-label="Fork"
               onClick={onFork}
             >
