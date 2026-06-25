@@ -412,7 +412,7 @@ export default function MarkdownEditor({
   const findOpenRef = useRef(false)
   const findQueryRef = useRef('')
   const findIndexRef = useRef(-1)
-  const applyFindRef = useRef<(query: string, requestedIndex: number) => void>(() => {})
+  const applyFindRef = useRef<(query: string, requestedIndex: number, moveSelection?: boolean) => void>(() => {})
   const openFindRef = useRef<() => void>(() => {})
   const reportScrollPosition = (view = viewRef.current): void => {
     const key = scrollKeyRef.current
@@ -435,6 +435,8 @@ export default function MarkdownEditor({
   const [saved, setSaved] = useState(!!path)
   const [findOpen, setFindOpen] = useState(false)
   const [findQuery, setFindQuery] = useState('')
+  const [replaceOpen, setReplaceOpen] = useState(false)
+  const [replaceText, setReplaceText] = useState('')
   const [findCount, setFindCount] = useState(0)
   const [findIndex, setFindIndex] = useState(-1)
   const [printLayout, setPrintLayout] = useState<PrintLayoutProfile>('default')
@@ -479,7 +481,7 @@ export default function MarkdownEditor({
     setFindIndexState(-1)
   }
 
-  const applyFind = (query: string, requestedIndex: number): void => {
+  const applyFind = (query: string, requestedIndex: number, moveSelection = true): void => {
     const view = viewRef.current
     if (!view) return
     const ranges = findEditorRanges(view.state.doc.toString(), query)
@@ -492,7 +494,7 @@ export default function MarkdownEditor({
       effects: setFindDecorations.of(
         ranges.map((range, i) => ({ ...range, active: i === index }))
       ),
-      ...(index >= 0
+      ...(moveSelection && index >= 0
         ? {
             selection: EditorSelection.range(ranges[index].from, ranges[index].to),
             scrollIntoView: true
@@ -501,6 +503,34 @@ export default function MarkdownEditor({
     })
   }
   applyFindRef.current = applyFind
+
+  const replaceCurrent = (): void => {
+    const view = viewRef.current
+    const query = findQueryRef.current
+    if (!view || !query.trim()) return
+    const ranges = findEditorRanges(view.state.doc.toString(), query)
+    if (!ranges.length) return
+    const sel = view.state.selection.main
+    let index = ranges.findIndex((range) => range.from === sel.from && range.to === sel.to)
+    if (index < 0)
+      index =
+        findIndexRef.current >= 0 && findIndexRef.current < ranges.length ? findIndexRef.current : 0
+    const range = ranges[index]
+    view.dispatch({ changes: { from: range.from, to: range.to, insert: replaceText } })
+    window.setTimeout(() => applyFindRef.current(findQueryRef.current, index), 0)
+  }
+
+  const replaceAll = (): void => {
+    const view = viewRef.current
+    const query = findQueryRef.current
+    if (!view || !query.trim()) return
+    const ranges = findEditorRanges(view.state.doc.toString(), query)
+    if (!ranges.length) return
+    view.dispatch({
+      changes: ranges.map((range) => ({ from: range.from, to: range.to, insert: replaceText }))
+    })
+    window.setTimeout(() => applyFindRef.current(findQueryRef.current, 0, false), 0)
+  }
 
   const openFind = (): void => {
     const view = viewRef.current
@@ -941,7 +971,7 @@ export default function MarkdownEditor({
                 }
                 if (findOpenRef.current) {
                   window.setTimeout(
-                    () => applyFindRef.current(findQueryRef.current, findIndexRef.current),
+                    () => applyFindRef.current(findQueryRef.current, findIndexRef.current, false),
                     0
                   )
                 }
@@ -1122,10 +1152,14 @@ export default function MarkdownEditor({
     )
 
   const onEditorKeyDown = (e: KeyboardEvent<HTMLDivElement>): void => {
-    if (e.defaultPrevented || !(e.ctrlKey || e.metaKey) || e.altKey || e.key.toLocaleLowerCase() !== 's') return
+    if (e.defaultPrevented || !(e.ctrlKey || e.metaKey) || e.altKey) return
+    const key = e.key.toLocaleLowerCase()
+    if (key !== 's' && key !== 'f') return
+    if (key === 'f' && e.shiftKey) return
     e.preventDefault()
     e.stopPropagation()
-    if (e.shiftKey) void saveAsNow()
+    if (key === 'f') openFind()
+    else if (e.shiftKey) void saveAsNow()
     else void saveNow()
   }
   const saveShortcut = platform === 'darwin' ? '⌘S' : 'Ctrl+S'
@@ -1336,10 +1370,16 @@ export default function MarkdownEditor({
           value={findQuery}
           placeholder="문서에서 찾기"
           resultLabel={findQuery.trim() ? (findCount ? `${findIndex + 1}/${findCount}` : '0/0') : ''}
+          replaceOpen={replaceOpen}
+          replaceValue={replaceText}
           onChange={(value) => {
             setFindQueryState(value)
             setFindIndexState(0)
           }}
+          onReplaceOpenChange={setReplaceOpen}
+          onReplaceChange={setReplaceText}
+          onReplace={replaceCurrent}
+          onReplaceAll={replaceAll}
           onPrev={() => applyFind(findQuery, findIndex - 1)}
           onNext={() => applyFind(findQuery, findIndex + 1)}
           onClose={() => {

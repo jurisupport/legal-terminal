@@ -635,7 +635,8 @@ body {
 }
 .find-bar {
   display: flex;
-  align-items: center;
+  flex-direction: column;
+  align-items: stretch;
   gap: 4px;
   width: 100%;
   min-width: 0;
@@ -645,6 +646,13 @@ body {
   border: 1px solid var(--border);
   border-radius: 4px;
   box-shadow: 0 6px 18px rgba(0, 0, 0, 0.35);
+}
+.find-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  width: 100%;
+  min-width: 0;
 }
 .find-input {
   flex: 1;
@@ -684,6 +692,18 @@ body {
   background: rgba(255, 255, 255, 0.08);
   color: var(--fg);
   border-color: var(--fg-muted);
+}
+.find-toggle {
+  font-size: 15px;
+  line-height: 1;
+}
+.find-toggle-spacer {
+  width: 24px;
+  flex: 0 0 auto;
+}
+.find-replace-btn {
+  width: 46px;
+  font-size: 11px;
 }
 .sr-only {
   position: absolute;
@@ -1099,6 +1119,12 @@ body {
   word-break: break-word;
   overflow: hidden;
 }
+.cm-md-cell-content {
+  display: block;
+  min-height: 1.7em;
+  outline: none;
+  white-space: break-spaces;
+}
 .cm-md-colresize {
   position: absolute;
   top: 0;
@@ -1116,8 +1142,8 @@ body {
   background: var(--bg-alt);
   font-weight: 600;
 }
-.cm-md-table th:focus,
-.cm-md-table td:focus {
+.cm-md-table th:focus-within,
+.cm-md-table td:focus-within {
   box-shadow: inset 0 0 0 2px var(--accent);
 }
 .cm-md-table-bar {

@@ -196,9 +196,12 @@ function tokenText(token: Token): string {
   switch (token.type) {
     case 'strong':
     case 'em':
-    case 'del':
     case 'link':
       return inlineText(token.tokens)
+    case 'del': {
+      const raw = String(token.raw ?? '')
+      return raw.startsWith('~') && !raw.startsWith('~~') ? raw : inlineText(token.tokens)
+    }
     case 'codespan':
     case 'text':
     case 'escape':

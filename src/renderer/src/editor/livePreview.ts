@@ -1,6 +1,8 @@
 import { syntaxTree } from '@codemirror/language'
 import { Decoration, type DecorationSet, EditorView, WidgetType } from '@codemirror/view'
 import { StateField, type EditorState, type Range } from '@codemirror/state'
+import DOMPurify from 'dompurify'
+import { LOOSE_STRONG_RE, parseInlineMarkdown } from './markdownCompat'
 
 const strong = Decoration.mark({ class: 'cm-md-strong' })
 const emphasis = Decoration.mark({ class: 'cm-md-em' })
@@ -232,6 +234,75 @@ function toMarkdown(m: TableModel): string {
   return [head, sep, body].filter((l) => l.length).join('\n')
 }
 
+function renderInlineMarkdown(src: string): string {
+  const html = parseInlineMarkdown(src)
+  return DOMPurify.sanitize(html, {
+    ALLOWED_TAGS: ['a', 'br', 'code', 'del', 'em', 'kbd', 'mark', 's', 'span', 'strong', 'sub', 'sup'],
+    ALLOWED_ATTR: ['href', 'rel', 'target', 'title']
+  })
+}
+
+function renderCellContent(el: HTMLElement): void {
+  el.innerHTML = renderInlineMarkdown(el.dataset.markdown ?? '')
+}
+
+function caretRangeFromPoint(x: number, y: number): globalThis.Range | null {
+  const doc = document as Document & {
+    caretPositionFromPoint?: (x: number, y: number) => { offsetNode: Node; offset: number } | null
+    caretRangeFromPoint?: (x: number, y: number) => globalThis.Range | null
+  }
+  const pos = doc.caretPositionFromPoint?.(x, y)
+  if (pos) {
+    const range = document.createRange()
+    range.setStart(pos.offsetNode, pos.offset)
+    range.collapse(true)
+    return range
+  }
+  return doc.caretRangeFromPoint?.(x, y) ?? null
+}
+
+function placeCaretFromPoint(el: HTMLElement, x: number, y: number): void {
+  const range = caretRangeFromPoint(x, y)
+  if (!range || !el.contains(range.startContainer)) return
+  const selection = window.getSelection()
+  if (!selection) return
+  selection.removeAllRanges()
+  selection.addRange(range)
+}
+
+function makeCellContent(markdown: string): HTMLElement {
+  const el = document.createElement('span')
+  el.className = 'cm-md-cell-content'
+  el.contentEditable = 'true'
+  el.dataset.markdown = markdown
+  renderCellContent(el)
+  el.addEventListener('mousedown', (e) => {
+    e.stopPropagation()
+    if (document.activeElement === el) return
+    e.preventDefault()
+    el.focus()
+    placeCaretFromPoint(el, e.clientX, e.clientY)
+  })
+  el.addEventListener('mouseup', (e) => e.stopPropagation())
+  el.addEventListener('click', (e) => e.stopPropagation())
+  el.addEventListener('focus', () => {
+    el.textContent = el.dataset.markdown ?? ''
+  })
+  el.addEventListener('input', () => {
+    el.dataset.markdown = el.innerText
+  })
+  el.addEventListener('blur', () => {
+    el.dataset.markdown = el.innerText
+    renderCellContent(el)
+  })
+  return el
+}
+
+function cellMarkdown(el: Element): string {
+  const content = el.querySelector<HTMLElement>('.cm-md-cell-content')
+  return content?.dataset.markdown ?? (el as HTMLElement).innerText
+}
+
 class TableWidget extends WidgetType {
   constructor(
     readonly src: string,
@@ -276,9 +347,9 @@ class TableWidget extends WidgetType {
     const tbody = table.createTBody()
 
     const readModel = (): TableModel => ({
-      headers: Array.from(htr.children).map((el) => (el as HTMLElement).innerText),
+      headers: Array.from(htr.children).map(cellMarkdown),
       aligns: model.aligns,
-      rows: Array.from(tbody.rows).map((tr) => Array.from(tr.cells).map((td) => td.innerText))
+      rows: Array.from(tbody.rows).map((tr) => Array.from(tr.cells).map(cellMarkdown))
     })
     const applyAll = (m: TableModel, w: ColWidthSlot[] | null): void => {
       let md = toMarkdown(m)
@@ -322,8 +393,8 @@ class TableWidget extends WidgetType {
 
     model.headers.forEach((h, c) => {
       const th = document.createElement('th')
-      th.contentEditable = 'true'
-      th.textContent = h
+      th.contentEditable = 'false'
+      th.appendChild(makeCellContent(h))
       if (model.aligns[c] !== 'none') th.style.textAlign = model.aligns[c]
       if (c < ncol - 1) {
         const handle = document.createElement('div')
@@ -338,8 +409,8 @@ class TableWidget extends WidgetType {
       const tr = tbody.insertRow()
       row.forEach((cell, c) => {
         const td = tr.insertCell()
-        td.contentEditable = 'true'
-        td.textContent = cell
+        td.contentEditable = 'false'
+        td.appendChild(makeCellContent(cell))
         if (model.aligns[c] !== 'none') td.style.textAlign = model.aligns[c]
       })
     })
@@ -444,10 +515,33 @@ function addAlignDecorations(
   }
 }
 
+function addLooseStrongDecorations(
+  state: EditorState,
+  active: Set<number>,
+  tableRanges: Array<[number, number]>,
+  strongRanges: Array<[number, number]>,
+  deco: Range<Decoration>[]
+): void {
+  if (state.doc.length >= 300000) return
+  LOOSE_STRONG_RE.lastIndex = 0
+  for (const match of state.doc.toString().matchAll(LOOSE_STRONG_RE)) {
+    const from = (match.index ?? 0) + match[1].length
+    const to = from + match[2].length
+    if (tableRanges.some(([a, b]) => from >= a && from < b)) continue
+    if (strongRanges.some(([a, b]) => from === a && to === b)) continue
+    deco.push(strong.range(from, to))
+    if (!active.has(state.doc.lineAt(from).number)) {
+      deco.push(hidden.range(from, from + 2))
+      deco.push(hidden.range(to - 2, to))
+    }
+  }
+}
+
 function build(state: EditorState): DecorationSet {
   const active = activeLines(state)
   const deco: Range<Decoration>[] = []
   const tableRanges: Array<[number, number]> = []
+  const strongRanges: Array<[number, number]> = []
 
   try {
     addAlignDecorations(state, active, deco)
@@ -569,7 +663,10 @@ function build(state: EditorState): DecorationSet {
           )
           return undefined
         }
-        if (name === 'StrongEmphasis') deco.push(strong.range(node.from, node.to))
+        if (name === 'StrongEmphasis') {
+          strongRanges.push([node.from, node.to])
+          deco.push(strong.range(node.from, node.to))
+        }
         else if (name === 'Emphasis') deco.push(emphasis.range(node.from, node.to))
         else if (name === 'Strikethrough') deco.push(strike.range(node.from, node.to))
         else if (name === 'InlineCode') deco.push(code.range(node.from, node.to))
@@ -587,6 +684,8 @@ function build(state: EditorState): DecorationSet {
         return undefined
       }
     })
+
+    addLooseStrongDecorations(state, active, tableRanges, strongRanges, deco)
 
     // 탭 문자 숨김 (표 블록 내부는 제외 — 겹치는 replace 방지)
     if (state.doc.length < 300000) {

@@ -1,4 +1,4 @@
-import { marked } from 'marked'
+import { parseMarkdown } from './markdownCompat'
 
 type ColWidth = { value: number; unit: '%' | 'cm' }
 type ColWidthSlot = ColWidth | null
@@ -124,7 +124,7 @@ function applyAlignBlocks(html: string): string {
 /** 마크다운 → 인쇄용 전체 HTML 문서. 표 colw 주석은 colgroup 너비로 반영. */
 export function mdToPrintHtml(md: string, title = '문서', profile: PrintLayoutProfile = 'default'): string {
   const { md: clean, widths } = extractColw(md)
-  let body = applyAlignBlocks(marked.parse(clean, { gfm: true, breaks: true }) as string)
+  let body = applyAlignBlocks(parseMarkdown(clean))
   const queue = [...widths]
   body = body.replace(/<table>/g, () => {
     const w = queue.shift()

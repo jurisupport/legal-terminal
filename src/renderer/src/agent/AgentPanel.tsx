@@ -63,6 +63,7 @@ interface AgentPanelProps {
   title: string
   provider: AgentProvider
   resumeSessionId?: string
+  forkFromSessionId?: string
   ssh?: SshConn
   profileId?: string
   caseTabId?: string
@@ -1739,6 +1740,23 @@ function transcriptToTimeline(transcript: SessionTranscript, agentLabel: string)
   }))
 }
 
+function forkContextPrompt(transcript: SessionTranscript): string {
+  const body = transcript.messages
+    .map((message) => `### ${message.role}\n${message.text}`)
+    .join('\n\n')
+  const context =
+    body.length > CONTEXT_ATTACHMENT_TEXT_LIMIT
+      ? `[앞부분 일부 생략]\n${body.slice(-CONTEXT_ATTACHMENT_TEXT_LIMIT)}`
+      : body
+  return [
+    '다음은 새 독립 세션으로 fork한 원본 대화 transcript입니다.',
+    '이 내용은 배경 맥락으로만 사용하고, 원본 세션에 이어붙이거나 원본 세션을 수정하지 마세요.',
+    '아직 새 작업을 시작하지 말고 한 문장으로 맥락을 가져왔다는 사실만 확인하세요.',
+    '',
+    context
+  ].join('\n')
+}
+
 export function DiffPreview({
   diff,
   fallbackText,
@@ -2043,6 +2061,7 @@ export default function AgentPanel({
   title,
   provider,
   resumeSessionId,
+  forkFromSessionId,
   ssh,
   profileId,
   caseTabId,
@@ -2374,11 +2393,19 @@ export default function AgentPanel({
         source: ssh ? 'ssh' : 'local',
         ssh
       })
-      .then((result) => {
+      .then(async (result) => {
         if (!result.ok) setError(result.error ?? 'Agent 세션을 만들 수 없습니다.')
+        if (!result.ok || !forkFromSessionId || resumeSessionId) return
+        const transcript = await window.lt.sessions.transcript(forkFromSessionId, ssh).catch(() => null)
+        if (!transcript || transcript.messages.length === 0) return
+        const sendResult = await window.lt.agent.send(id, {
+          text: forkContextPrompt(transcript),
+          displayText: `Fork 맥락 가져오기 · ${transcript.messages.length}개 메시지`
+        })
+        if (!sendResult.ok) setError(sendResult.error ?? 'Fork 맥락을 가져올 수 없습니다.')
       })
       .catch((e) => setError(String(e instanceof Error ? e.message : e)))
-  }, [cwd, id, mode, provider, resumeSessionId, settingsLoaded, ssh, title])
+  }, [cwd, forkFromSessionId, id, mode, provider, resumeSessionId, settingsLoaded, ssh, title])
 
   useEffect(() => {
     if (provider !== 'claude') return
@@ -3325,7 +3352,7 @@ export default function AgentPanel({
           {onFork && (
             <button
               className="agent-icon-btn"
-              title="같은 폴더에서 새 Agent 대화로 열기"
+              title="현재 대화 맥락을 새 Agent 세션으로 fork"
               aria-label="Fork"
               onClick={onFork}
             >

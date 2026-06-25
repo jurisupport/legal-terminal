@@ -292,6 +292,7 @@ interface TermTab {
   renamed?: boolean // 사용자가 직접 이름 변경 → 자동 반영 중단
   createdAt?: number // 세션 시작 시각 — 이 이후의 transcript만 현재 세션으로 매칭
   resumeSessionId?: string // 과거 세션 이어서 열기
+  forkFromSessionId?: string // 새 세션에 맥락만 주입할 원본 세션
   ssh?: SshConn // 주어지면 원격(SSH) 사건 — cwd는 원격 경로, claude도 원격에서 실행
   sshLabel?: string // 접속 프로필 이름 (탭 툴팁/표시용)
   profileId?: string // 원격 파일 패널 라우팅용 (ssh://<profileId>/<경로>)
@@ -2971,6 +2972,7 @@ export default function App(): JSX.Element {
               ...term,
               agentProvider: nextProvider,
               resumeSessionId: undefined,
+              forkFromSessionId: undefined,
               sessionTitle: undefined,
               createdAt: Date.now()
             }
@@ -2985,6 +2987,7 @@ export default function App(): JSX.Element {
       cwd: string
       title: string
       side: DockSide
+      forkFromSessionId?: string
       ssh?: SshConn
       sshLabel?: string
       profileId?: string
@@ -3000,6 +3003,7 @@ export default function App(): JSX.Element {
       agentProvider: resolveAgentProvider(source.agentProvider, opts.ssh),
       createdAt: Date.now(),
       resumeSessionId: undefined,
+      forkFromSessionId: opts.forkFromSessionId,
       sessionTitle: undefined,
       renamed: true,
       ssh: opts.ssh,
@@ -3015,14 +3019,45 @@ export default function App(): JSX.Element {
     preloadPastSessions(tab.cwd, tab)
   }
 
+  const resolveForkSourceSessionId = async (source: TermTab): Promise<string | undefined> => {
+    const agentSnapshot = await window.lt.agent.snapshot(source.id).catch(() => null)
+    const snapshotSessionId =
+      agentSnapshot?.ok && agentSnapshot.session?.resumeSessionId
+        ? agentSnapshot.session.resumeSessionId
+        : undefined
+    const current = snapshotSessionId
+      ? null
+      : await window.lt.sessions
+          .current(source.cwd, (source.createdAt ?? 0) - 3000, source.ssh)
+          .catch(() => null)
+    const sessionId = snapshotSessionId ?? current?.sessionId
+    if (!sessionId) return undefined
+    const title = agentSnapshot?.ok ? agentSnapshot.session?.title : current?.title
+    rememberSessionForTerm(source, sessionId, title)
+    setTermTabs((tabs) =>
+      tabs.map((t) =>
+        t.id === source.id
+          ? {
+              ...t,
+              resumeSessionId: sessionId,
+              sessionTitle: t.renamed ? t.sessionTitle : title ?? t.sessionTitle
+            }
+          : t
+      )
+    )
+    return sessionId
+  }
+
   const forkAgentTab = async (sourceTermId: string, preferredSide?: DockSide): Promise<void> => {
     const source = termTabsRef.current.find((t) => t.id === sourceTermId)
     if (!source || !isAgentTab(source)) return
     const side = preferredSide ?? termSide(source)
+    const forkFromSessionId = await resolveForkSourceSessionId(source)
     openForkedAgentTab(source, {
       cwd: source.cwd,
-      title: `${source.title} · 새 대화`,
+      title: `${source.title} · fork`,
       side,
+      forkFromSessionId,
       ssh: source.ssh,
       sshLabel: source.sshLabel,
       profileId: source.profileId
@@ -3040,7 +3075,10 @@ export default function App(): JSX.Element {
       return
     }
     const side = preferredSide ?? termSide(source)
-    const result = await window.lt.agent.worktreeFork({ cwd: source.cwd })
+    const [forkFromSessionId, result] = await Promise.all([
+      resolveForkSourceSessionId(source),
+      window.lt.agent.worktreeFork({ cwd: source.cwd })
+    ])
     if (!result.ok || !result.path) {
       window.alert(result.error || 'Git worktree 생성에 실패했습니다.')
       return
@@ -3048,7 +3086,8 @@ export default function App(): JSX.Element {
     openForkedAgentTab(source, {
       cwd: result.path,
       title: `${source.title} · worktree`,
-      side
+      side,
+      forkFromSessionId
     })
   }
 
@@ -3058,7 +3097,7 @@ export default function App(): JSX.Element {
     return [
       {
         label: 'Fork',
-        title: '같은 폴더에서 새 Agent 대화로 열기',
+        title: '현재 대화 맥락을 새 Agent 세션으로 fork',
         onClick: () => void forkAgentTab(termId, side)
       },
       {
@@ -5837,6 +5876,7 @@ export default function App(): JSX.Element {
                 title={t.title}
                 provider={resolveAgentProvider(t.agentProvider, t.ssh)}
                 resumeSessionId={t.resumeSessionId}
+                forkFromSessionId={t.forkFromSessionId}
                 ssh={t.ssh}
                 profileId={t.profileId}
                 caseTabId={t.caseTabId}
@@ -6195,6 +6235,7 @@ export default function App(): JSX.Element {
                   title={t.title}
                   provider={resolveAgentProvider(t.agentProvider, t.ssh)}
                   resumeSessionId={t.resumeSessionId}
+                  forkFromSessionId={t.forkFromSessionId}
                   ssh={t.ssh}
                   profileId={t.profileId}
                   caseTabId={t.caseTabId}
