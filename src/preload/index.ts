@@ -507,6 +507,7 @@ let fsWatchSeq = 0
 const api = {
   app: {
     info: (): Promise<{
+      version: string
       platform: string
       versions: { electron: string; node: string; chrome: string }
     }> => ipcRenderer.invoke('app:info'),

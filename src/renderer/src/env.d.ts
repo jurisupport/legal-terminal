@@ -567,6 +567,7 @@ export interface LtApi {
   }
   app: {
     info: () => Promise<{
+      version: string
       platform: string
       versions: { electron: string; node: string; chrome: string }
     }>

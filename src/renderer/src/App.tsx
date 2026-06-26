@@ -9165,6 +9165,7 @@ function ImageViewer({
 function SettingsView(): JSX.Element {
   const [s, setS] = useState<AppSettings>({})
   const [loaded, setLoaded] = useState(false)
+  const [appVersion, setAppVersion] = useState('확인 중...')
   const [termFontSizeInput, setTermFontSizeInput] = useState(String(DEFAULT_TERM_FONT_SIZE))
   const [mdFontSizeInput, setMdFontSizeInput] = useState(String(DEFAULT_MD_FONT_SIZE))
   const [agentFontSizeInput, setAgentFontSizeInput] = useState(String(DEFAULT_AGENT_FONT_SIZE))
@@ -9179,6 +9180,7 @@ function SettingsView(): JSX.Element {
       setLoaded(true)
     }
     window.lt.settings.get().then(applySettings)
+    window.lt.app.info().then((info) => setAppVersion(info.version)).catch(() => setAppVersion('알 수 없음'))
     const onSettingsUpdated = (e: Event): void => applySettings((e as CustomEvent<AppSettings>).detail)
     window.addEventListener(SETTINGS_UPDATED_EVENT, onSettingsUpdated)
     return () => window.removeEventListener(SETTINGS_UPDATED_EVENT, onSettingsUpdated)
@@ -9257,6 +9259,13 @@ function SettingsView(): JSX.Element {
     <div className="settings">
       <h1>설정</h1>
       <p className="muted">사건을 열 때 두 폴더를 자동으로 짝지으려면 아래 두 루트를 지정하세요.</p>
+
+      <section className="setting-row">
+        <div className="setting-label">현재 버전</div>
+        <div className="setting-value">
+          <code>{appVersion}</code>
+        </div>
+      </section>
 
       <section className="setting-row">
         <div className="setting-label">

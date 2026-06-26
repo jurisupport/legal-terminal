@@ -104,21 +104,35 @@ export interface HearingRecordPanelProps {
   onSummarizeReport?: (path: string, title: string) => void
 }
 
-const DEFAULT_SPEAKERS: HearingSpeaker[] = withSequentialShortcuts([
+const CIVIL_TRIAL_SPEAKERS: HearingSpeaker[] = withSequentialShortcuts([
   { id: 'court', label: '재판부', role: 'court' },
   { id: 'plaintiff', label: '원고', role: 'plaintiff' },
-  { id: 'defendant', label: '피고', role: 'defendant' },
-  { id: 'etc', label: '기타', role: 'other' }
+  { id: 'defendant', label: '피고', role: 'defendant' }
 ])
+
+const CRIMINAL_TRIAL_SPEAKERS: HearingSpeaker[] = withSequentialShortcuts([
+  { id: 'court', label: '재판부', role: 'court' },
+  { id: 'counsel', label: '변호인', role: 'defendant' },
+  { id: 'prosecutor', label: '검사', role: 'plaintiff' },
+  { id: 'accused', label: '피고인', role: 'defendant' }
+])
+
+const DEFAULT_SPEAKERS = CIVIL_TRIAL_SPEAKERS
 
 const RESULT_OPTIONS = ['변론종결', '속행', '추후지정', '선고기일', '조정회부']
 
 const RECORD_TEMPLATES: HearingRecordTemplate[] = [
   {
-    id: 'trial',
-    label: '재판',
-    hint: '재판부/원고/피고/기타',
-    speakers: DEFAULT_SPEAKERS
+    id: 'civil-trial',
+    label: '민사/행정/가사',
+    hint: '재판부/원고/피고',
+    speakers: CIVIL_TRIAL_SPEAKERS
+  },
+  {
+    id: 'criminal-trial',
+    label: '형사',
+    hint: '재판부/변호인/검사/피고인',
+    speakers: CRIMINAL_TRIAL_SPEAKERS
   },
   {
     id: 'investigation',

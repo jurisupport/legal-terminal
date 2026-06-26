@@ -511,6 +511,7 @@ ipcMain.handle('tabs:endDrag', async (): Promise<TabMoveResult> => {
 ipcMain.handle('app:openExternal', (_e, url: string) => shell.openExternal(url))
 
 ipcMain.handle('app:info', () => ({
+  version: app.getVersion(),
   platform: process.platform,
   versions: {
     electron: process.versions.electron,

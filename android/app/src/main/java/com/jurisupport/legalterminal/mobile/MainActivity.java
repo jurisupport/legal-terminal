@@ -758,7 +758,7 @@ public class MainActivity extends Activity {
                 } catch (Exception sftpFailure) {
                     try (FileOutputStream out = new FileOutputStream(pdf, false)) {
                         String cloudPath = oneDriveCloudPath(realPath);
-                        execToStream(session, cloudPath.isEmpty() ? "cat " + shq(realPath) : rcloneCatCommand(cloudPath), out);
+                        execToStream(session, cloudPath.isEmpty() ? "cat " + shq(realPath) : hydrateOneDriveCatCommand(realPath), out);
                     }
                 }
 
@@ -1053,6 +1053,30 @@ public class MainActivity extends Activity {
                     "done",
                     "cat \"$err\" >&2",
                     "exit 66"
+            );
+        }
+
+        private String hydrateOneDriveCatCommand(String path) {
+            return String.join("\n",
+                    "p=" + shq(path),
+                    "err=\"/tmp/legal-terminal-onedrive-$$.err\"",
+                    "cleanup() { rm -f \"$err\"; }",
+                    "trap cleanup EXIT HUP INT TERM",
+                    "is_dataless() { ls -lO \"$p\" 2>/dev/null | grep -q dataless; }",
+                    "try_read() { python3 - \"$p\" >/dev/null 2>\"$err\" <<'PY'\nimport sys\nwith open(sys.argv[1], 'rb') as f:\n    f.read(4096)\nPY\n}",
+                    "if ! is_dataless && try_read; then cat \"$p\"; exit 0; fi",
+                    "onedrive=\"/Applications/OneDrive.app/Contents/MacOS/OneDrive\"",
+                    "if [ -x \"$onedrive\" ]; then open -ga OneDrive >/dev/null 2>&1 || true; \"$onedrive\" /pin \"$p\" >/dev/null 2>&1 || true; fi",
+                    "fileproviderctl materialize \"$p\" >/dev/null 2>&1 || true",
+                    "brctl download \"$p\" >/dev/null 2>&1 || true",
+                    "deadline=$(( $(date +%s) + 590 ))",
+                    "while [ \"$(date +%s)\" -lt \"$deadline\" ]; do",
+                    "  if ! is_dataless && try_read; then cat \"$p\"; exit 0; fi",
+                    "  sleep 2",
+                    "done",
+                    "cat \"$err\" >&2 2>/dev/null || true",
+                    "ls -lO@ \"$p\" >&2 2>/dev/null || true",
+                    "exit 1"
             );
         }
 

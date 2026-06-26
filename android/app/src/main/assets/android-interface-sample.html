@@ -569,6 +569,10 @@
       pointer-events: none;
     }
 
+    .record-pdf.tools-closed .record-columns {
+      top: 0;
+    }
+
     .record-pdf .record-grip,
     .record-pdf .record-panel.open {
       pointer-events: auto;
@@ -724,6 +728,27 @@
       background: #101010;
     }
 
+    .record-pdf.tools-closed {
+      grid-template-rows: 1fr;
+    }
+
+    .record-pdf.tools-closed .pdf-toolbar {
+      display: none;
+    }
+
+    .pdf-tools-toggle {
+      position: absolute;
+      top: 8px;
+      left: 42px;
+      z-index: 7;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 6px 8px;
+      background: rgba(27, 27, 27, 0.88);
+      color: var(--text);
+      font-size: 12px;
+    }
+
     .pdf-toolbar {
       display: flex;
       align-items: center;
@@ -737,14 +762,15 @@
     .pdf-viewer {
       overflow: auto;
       padding: 12px;
-      display: grid;
+      display: flex;
+      flex-direction: column;
       gap: 12px;
-      justify-items: center;
+      align-items: center;
       background: #121212;
     }
 
     .pdf-viewer.fit-width {
-      justify-items: stretch;
+      align-items: stretch;
       padding-left: 0;
       padding-right: 0;
     }
@@ -786,12 +812,8 @@
       touch-action: pan-y;
     }
 
-    .pdf-viewer.single .pdf-page {
-      grid-area: 1 / 1;
-    }
-
     .pdf-nav {
-      position: sticky;
+      position: absolute;
       top: 45%;
       z-index: 2;
       width: 36px;
@@ -804,13 +826,11 @@
     }
 
     .pdf-nav.prev {
-      justify-self: start;
-      grid-area: 1 / 1;
+      left: 4px;
     }
 
     .pdf-nav.next {
-      justify-self: end;
-      grid-area: 1 / 1;
+      right: 4px;
     }
 
     .pdf-page {
@@ -1588,6 +1608,7 @@
       pdfFlow: 'continuous',
       pdfPage: 1,
       pdfCrop: false,
+      pdfToolsOpen: false,
       recordDocsPanelOpen: true,
       recordEvidencePanelOpen: true,
       recordSyncBusy: false,
@@ -2662,6 +2683,7 @@
       }
       state.recordLabel = entry.path
       state.pdfPage = 1
+      state.pdfToolsOpen = false
       state.recordDocsPanelOpen = false
       state.recordEvidencePanelOpen = false
       renderWorkspace()
@@ -2836,7 +2858,8 @@
           const pageMeta = state.pdfFlow === 'single' ? ` · ${Math.min(state.pdfPage || 1, pageTotal)}/${pageTotal}쪽` : ''
           return `<div class="record-view pdf-mode">
           <div class="record-body">
-            <div class="record-pdf">
+            <div class="record-pdf tools-${state.pdfToolsOpen ? 'open' : 'closed'}">
+              <button class="pdf-tools-toggle" data-pdf-tools>${state.pdfToolsOpen ? '닫기' : '도구'}</button>
               <div class="pdf-toolbar">
                 <button class="tool" data-record-list>목록</button>
                 ${renderOneDriveSyncButtons(remote.path || caseItem.records.folder || '')}
@@ -2900,7 +2923,8 @@
       </div>`
       return `<div class="record-view pdf-mode">
         <div class="record-body">
-          <div class="record-pdf">
+          <div class="record-pdf tools-${state.pdfToolsOpen ? 'open' : 'closed'}">
+            <button class="pdf-tools-toggle" data-pdf-tools>${state.pdfToolsOpen ? '닫기' : '도구'}</button>
             <div class="pdf-toolbar">
               <button class="tool" data-record-list>목록</button>
               <button class="tool active">PDF</button>
@@ -3312,6 +3336,7 @@
       if (target.dataset.recordItem) {
         state.recordLabel = target.dataset.recordItem
         state.pdfPage = 1
+        state.pdfToolsOpen = false
         state.recordDocsPanelOpen = false
         state.recordEvidencePanelOpen = false
         renderWorkspace()
@@ -3336,6 +3361,12 @@
 
       if (target.dataset.pdfFit) {
         state.pdfFit = target.dataset.pdfFit
+        renderWorkspace()
+        return
+      }
+
+      if (target.dataset.pdfTools !== undefined) {
+        state.pdfToolsOpen = !state.pdfToolsOpen
         renderWorkspace()
         return
       }
