@@ -65,6 +65,10 @@
       display: none;
     }
 
+    .app.record-pdf-mode .main {
+      grid-template-rows: 1fr;
+    }
+
     .topbar {
       display: grid;
       grid-template-columns: 44px 1fr auto;
@@ -716,6 +720,15 @@
       border-left: 4px solid #4f8fd8;
     }
 
+    .record-item > span:first-child {
+      min-width: 0;
+      overflow: hidden;
+      display: -webkit-box;
+      -webkit-line-clamp: 2;
+      -webkit-box-orient: vertical;
+      line-height: 1.35;
+    }
+
     .record-party {
       border-radius: 999px;
       padding: 2px 7px;
@@ -739,6 +752,7 @@
     .record-pdf {
       border: 1px solid var(--line);
       border-radius: 6px;
+      min-height: 0;
       display: grid;
       grid-template-rows: auto 1fr;
       overflow: hidden;
@@ -753,19 +767,6 @@
       display: none;
     }
 
-    .pdf-tools-toggle {
-      position: absolute;
-      top: 8px;
-      left: 42px;
-      z-index: 7;
-      border: 1px solid var(--line);
-      border-radius: 6px;
-      padding: 6px 8px;
-      background: rgba(27, 27, 27, 0.88);
-      color: var(--text);
-      font-size: 12px;
-    }
-
     .pdf-toolbar {
       display: flex;
       align-items: center;
@@ -777,17 +778,13 @@
     }
 
     .pdf-viewer {
+      min-height: 0;
       overflow: auto;
       padding: 12px;
-      display: flex;
-      flex-direction: column;
-      gap: 12px;
-      align-items: center;
       background: #121212;
     }
 
     .pdf-viewer.fit-width {
-      align-items: stretch;
       padding-left: 0;
       padding-right: 0;
     }
@@ -829,25 +826,37 @@
       touch-action: pan-y;
     }
 
-    .pdf-nav {
+    .pdf-page-controls {
       position: absolute;
-      top: 45%;
-      z-index: 2;
-      width: 36px;
-      height: 48px;
+      left: 50%;
+      bottom: 14px;
+      z-index: 7;
+      transform: translateX(-50%);
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      padding: 6px;
       border: 1px solid var(--line);
       border-radius: 6px;
-      background: rgba(16, 16, 16, 0.82);
+      background: rgba(16, 16, 16, 0.88);
+      box-shadow: var(--shadow);
+    }
+
+    .pdf-page-controls .pdf-nav,
+    .pdf-page-jump {
+      min-width: 44px;
+      height: 38px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #222;
       color: #fff;
-      font-size: 24px;
+      font-size: 18px;
     }
 
-    .pdf-nav.prev {
-      left: 4px;
-    }
-
-    .pdf-nav.next {
-      right: 4px;
+    .pdf-page-jump {
+      min-width: 86px;
+      padding: 0 10px;
+      font-size: 13px;
     }
 
     .pdf-page {
@@ -861,6 +870,7 @@
       font-family: "Times New Roman", "Batang", serif;
       font-size: 12px;
       line-height: 1.65;
+      margin: 0 auto 12px;
     }
 
     .pdf-page.image-page {
@@ -868,6 +878,10 @@
       padding: 0;
       background: #fff;
       display: block;
+    }
+
+    .pdf-viewer.single .pdf-page {
+      margin-bottom: 0;
     }
 
     .pdf-page h3 {
@@ -2652,14 +2666,19 @@
     }
 
     function renderPdfNav(count) {
-      if (state.pdfFlow !== 'single' || count <= 1) return ''
-      return `<button class="pdf-nav prev" data-pdf-prev aria-label="이전 페이지">‹</button><button class="pdf-nav next" data-pdf-next aria-label="다음 페이지">›</button>`
+      if (!state.pdfToolsOpen || state.pdfFlow !== 'single' || count <= 1) return ''
+      const page = Math.min(Math.max(1, state.pdfPage || 1), count)
+      return `<div class="pdf-page-controls">
+        <button class="pdf-nav" data-pdf-prev aria-label="이전 페이지">‹</button>
+        <button class="pdf-page-jump" data-pdf-jump>${page} / ${count}</button>
+        <button class="pdf-nav" data-pdf-next aria-label="다음 페이지">›</button>
+      </div>`
     }
 
     function renderPdfPages(record) {
       const [label, meta, body] = record
       const [party, partyClass] = recordParty(meta)
-      return `${renderPdfNav(2)}${pdfPageNumbers(2).map((page) => `<section class="pdf-page">
+      return `${pdfPageNumbers(2).map((page) => `<section class="pdf-page">
         <h3>${escapeHtml(label)}</h3>
         <div class="pdf-meta">
           <span class="pdf-party ${partyClass}">${party}</span><br>
@@ -2689,7 +2708,7 @@
           <img src="${page.src}" alt="${escapeHtml(record.name)} ${page.number}쪽">
         </section>`
       }).join('')
-      return `${renderPdfNav(count)}${body}`
+      return body
     }
 
     function openRemoteRecordPdf(entry) {
@@ -2880,7 +2899,6 @@
           return `<div class="record-view pdf-mode">
           <div class="record-body">
             <div class="record-pdf tools-${state.pdfToolsOpen ? 'open' : 'closed'}">
-              <button class="pdf-tools-toggle" data-pdf-tools>${state.pdfToolsOpen ? '닫기' : '도구'}</button>
               <div class="pdf-toolbar">
                 <button class="tool" data-record-list>목록</button>
                 ${renderOneDriveSyncButtons(remote.path || caseItem.records.folder || '')}
@@ -2894,6 +2912,7 @@
                 <span class="meta">${escapeHtml(selected.meta || '')}${selected.pageCount ? ` · ${selected.pages.length}/${selected.pageCount}쪽${selected.truncated ? ' · 앞 50쪽' : ''}` : ''}${pageMeta}</span>
               </div>
               <div class="pdf-viewer fit-${state.pdfFit} ${state.pdfFlow === 'single' ? 'single' : 'continuous'} ${state.pdfCrop ? 'crop' : ''}">${renderRemotePdfPages(selected)}</div>
+              ${renderPdfNav(pageTotal)}
               ${bookmarkRows}
             </div>
           </div>
@@ -2945,7 +2964,6 @@
       return `<div class="record-view pdf-mode">
         <div class="record-body">
           <div class="record-pdf tools-${state.pdfToolsOpen ? 'open' : 'closed'}">
-            <button class="pdf-tools-toggle" data-pdf-tools>${state.pdfToolsOpen ? '닫기' : '도구'}</button>
             <div class="pdf-toolbar">
               <button class="tool" data-record-list>목록</button>
               <button class="tool active">PDF</button>
@@ -2958,6 +2976,7 @@
               <span class="meta">${selected[1]}${state.pdfFlow === 'single' ? ` · ${state.pdfPage || 1}/2쪽` : ''}</span>
             </div>
             <div class="pdf-viewer fit-${state.pdfFit} ${state.pdfFlow === 'single' ? 'single' : 'continuous'} ${state.pdfCrop ? 'crop' : ''}">${renderPdfPages(selected)}</div>
+            ${renderPdfNav(2)}
             ${listHtml}
           </div>
         </div>
@@ -3391,12 +3410,6 @@
         return
       }
 
-      if (target.dataset.pdfTools !== undefined) {
-        state.pdfToolsOpen = !state.pdfToolsOpen
-        renderWorkspace()
-        return
-      }
-
       if (target.dataset.pdfFlow) {
         state.pdfFlow = target.dataset.pdfFlow
         state.pdfPage = Math.min(Math.max(1, state.pdfPage || 1), activePdfPageCount())
@@ -3411,6 +3424,20 @@
 
       if (target.dataset.pdfNext !== undefined) {
         turnPdfPage(1)
+        return
+      }
+
+      if (target.dataset.pdfJump !== undefined) {
+        const count = activePdfPageCount()
+        const value = prompt(`이동할 페이지 (1-${count})`, String(state.pdfPage || 1))
+        if (value === null) return
+        const page = Number.parseInt(value, 10)
+        if (!Number.isFinite(page) || page < 1 || page > count) {
+          alert(`1부터 ${count}까지 입력하세요.`)
+          return
+        }
+        state.pdfPage = page
+        renderWorkspace()
         return
       }
 
@@ -3645,6 +3672,15 @@
 
     let longPressTimer = 0
     let pdfSwipeStart = null
+    let lastPdfSwipeAt = 0
+
+    document.addEventListener('click', (event) => {
+      const pdf = event.target.closest('.record-pdf')
+      if (!pdf || Date.now() - lastPdfSwipeAt < 350) return
+      if (event.target.closest('button, input, textarea, select, a, .record-panel, .record-grip')) return
+      state.pdfToolsOpen = !state.pdfToolsOpen
+      renderWorkspace()
+    })
 
     document.addEventListener('pointerdown', (event) => {
       const fileButton = event.target.closest('[data-open-file]')
@@ -3669,6 +3705,7 @@
       const dy = event.clientY - pdfSwipeStart.y
       pdfSwipeStart = null
       if (Math.abs(dx) < 45 || Math.abs(dx) < Math.abs(dy) * 1.2) return
+      lastPdfSwipeAt = Date.now()
       turnPdfPage(dx < 0 ? 1 : -1)
     })
 

@@ -751,13 +751,17 @@ public class MainActivity extends Activity {
                 String realPath = resolveSftpPath(sftp, path);
                 long size = sftp.stat(realPath).getSize();
                 if (size > 50L * 1024L * 1024L) throw new Exception("50MB 넘는 PDF는 아직 열지 않습니다.");
+                String cloudPath = oneDriveCloudPath(realPath);
                 try (FileOutputStream out = new FileOutputStream(pdf)) {
-                    try (InputStream in = sftp.get(realPath)) {
-                        copy(in, out);
+                    if (!cloudPath.isEmpty()) {
+                        execToStream(session, hydrateOneDriveCatCommand(realPath), out);
+                    } else {
+                        try (InputStream in = sftp.get(realPath)) {
+                            copy(in, out);
+                        }
                     }
                 } catch (Exception sftpFailure) {
                     try (FileOutputStream out = new FileOutputStream(pdf, false)) {
-                        String cloudPath = oneDriveCloudPath(realPath);
                         execToStream(session, cloudPath.isEmpty() ? "cat " + shq(realPath) : hydrateOneDriveCatCommand(realPath), out);
                     }
                 }
@@ -1069,7 +1073,7 @@ public class MainActivity extends Activity {
                     "if [ -x \"$onedrive\" ]; then open -ga OneDrive >/dev/null 2>&1 || true; \"$onedrive\" /pin \"$p\" >/dev/null 2>&1 || true; fi",
                     "fileproviderctl materialize \"$p\" >/dev/null 2>&1 || true",
                     "brctl download \"$p\" >/dev/null 2>&1 || true",
-                    "deadline=$(( $(date +%s) + 590 ))",
+                    "deadline=$(( $(date +%s) + 60 ))",
                     "while [ \"$(date +%s)\" -lt \"$deadline\" ]; do",
                     "  if ! is_dataless && try_read; then cat \"$p\"; exit 0; fi",
                     "  sleep 2",

@@ -3920,6 +3920,9 @@ body {
   border-radius: 0;
   background: transparent;
 }
+.agent-md-wrap.streaming .agent-md-body .agent-code-block pre {
+  max-height: none;
+}
 .agent-md-body table {
   min-width: 100%;
   max-width: 100%;
