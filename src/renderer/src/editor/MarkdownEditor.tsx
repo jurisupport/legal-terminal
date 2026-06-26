@@ -359,6 +359,7 @@ export default function MarkdownEditor({
   draftId,
   platform,
   defaultDir,
+  plainText = false,
   onPath,
   onAsk,
   onSendToJuriSupport,
@@ -373,6 +374,7 @@ export default function MarkdownEditor({
   draftId: string
   platform?: string
   defaultDir?: string
+  plainText?: boolean
   onPath?: (path: string) => void
   onAsk?: (
     draftPath?: string,
@@ -423,7 +425,7 @@ export default function MarkdownEditor({
       left: view.scrollDOM.scrollLeft
     })
   }
-  const [preview, setPreview] = useState(true)
+  const [preview, setPreview] = useState(!plainText)
   const [err, setErr] = useState('')
   const [saveError, setSaveError] = useState('')
   const [dirty, setDirty] = useState(false)
@@ -926,12 +928,11 @@ export default function MarkdownEditor({
               { key: 'Shift-Mod-s', run: () => (void saveAsNow(), true) },
               { key: 'Mod-s', run: () => (void saveNow(), true) }
             ]),
-            markdown({ extensions: GFM }),
-            syntaxHighlighting(defaultHighlightStyle),
+            ...(plainText ? [] : [markdown({ extensions: GFM }), syntaxHighlighting(defaultHighlightStyle)]),
             EditorView.lineWrapping,
             findHighlightField,
             makeTheme(family, size),
-            previewComp.current.of(preview ? livePreview : []),
+            previewComp.current.of(!plainText && preview ? livePreview : []),
             EditorView.domEventHandlers({
               copy(event, view) {
                 if (!event.clipboardData) return false
@@ -1134,9 +1135,9 @@ export default function MarkdownEditor({
 
   useEffect(() => {
     viewRef.current?.dispatch({
-      effects: previewComp.current.reconfigure(preview ? livePreview : [])
+      effects: previewComp.current.reconfigure(!plainText && preview ? livePreview : [])
     })
-  }, [preview])
+  }, [plainText, preview])
 
   useEffect(() => {
     if (findOpen) applyFind(findQuery, 0)
@@ -1233,22 +1234,26 @@ export default function MarkdownEditor({
   return (
     <div className="text-doc" onKeyDown={onEditorKeyDown}>
       <div className="text-toolbar">
-        <button className={`tb-btn ${preview ? 'on' : ''}`} title="서식(라이브 프리뷰)" onClick={() => setPreview(true)}>
-          서식
-        </button>
-        <button className={`tb-btn ${!preview ? 'on' : ''}`} title="원본(소스)" onClick={() => setPreview(false)}>
-          원본
-        </button>
-        <span className="tb-divider" />
-        <button
-          className="tb-btn"
-          title="가운데 정렬"
-          aria-label="가운데 정렬"
-          onClick={centerAlignSelection}
-        >
-          <IconAlignCenter size={14} />
-        </button>
-        <span className="tb-divider" />
+        {!plainText && (
+          <>
+            <button className={`tb-btn ${preview ? 'on' : ''}`} title="서식(라이브 프리뷰)" onClick={() => setPreview(true)}>
+              서식
+            </button>
+            <button className={`tb-btn ${!preview ? 'on' : ''}`} title="원본(소스)" onClick={() => setPreview(false)}>
+              원본
+            </button>
+            <span className="tb-divider" />
+            <button
+              className="tb-btn"
+              title="가운데 정렬"
+              aria-label="가운데 정렬"
+              onClick={centerAlignSelection}
+            >
+              <IconAlignCenter size={14} />
+            </button>
+            <span className="tb-divider" />
+          </>
+        )}
         <button className="tb-btn" title={`저장 (${saveShortcut})`} aria-label="저장" onClick={() => void saveNow()}>
           <IconSave size={14} />
         </button>
@@ -1260,31 +1265,35 @@ export default function MarkdownEditor({
         >
           <IconSaveAs size={14} />
         </button>
-        <span className="tb-divider" />
-        <select
-          className="tb-select"
-          title={printLayoutTitle}
-          aria-label={printLayoutTitle}
-          value={printLayout}
-          onChange={(e) => setPrintLayout(e.target.value as PrintLayoutProfile)}
-        >
-          <option value="default">일반</option>
-          <option value="proof-of-content">내용증명</option>
-        </select>
-        <button
-          className="tb-btn"
-          title={exportPdfTitle}
-          onClick={exportPdfNow}
-        >
-          PDF
-        </button>
-        <button
-          className="tb-btn"
-          title="HWPX로 내보내기"
-          onClick={exportHwpxNow}
-        >
-          HWPX
-        </button>
+        {!plainText && (
+          <>
+            <span className="tb-divider" />
+            <select
+              className="tb-select"
+              title={printLayoutTitle}
+              aria-label={printLayoutTitle}
+              value={printLayout}
+              onChange={(e) => setPrintLayout(e.target.value as PrintLayoutProfile)}
+            >
+              <option value="default">일반</option>
+              <option value="proof-of-content">내용증명</option>
+            </select>
+            <button
+              className="tb-btn"
+              title={exportPdfTitle}
+              onClick={exportPdfNow}
+            >
+              PDF
+            </button>
+            <button
+              className="tb-btn"
+              title="HWPX로 내보내기"
+              onClick={exportHwpxNow}
+            >
+              HWPX
+            </button>
+          </>
+        )}
         <button
           className={`tb-btn ${hasDraftHistory ? 'has-history' : ''}`}
           title="문서 히스토리에서 가져오기"

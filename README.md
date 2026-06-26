@@ -40,11 +40,11 @@ curl -fsSL https://raw.githubusercontent.com/jurisupport/legal-terminal/main/ins
 
 ## 이번 업데이트
 
-최신 릴리스: [v0.1.115](https://github.com/jurisupport/legal-terminal/releases/tag/v0.1.115)
+최신 릴리스: [v0.1.116](https://github.com/jurisupport/legal-terminal/releases/tag/v0.1.116)
 
-- **에디터 찾기/바꾸기 보강**: 표 안에서도 찾기 단축키가 열리고, 찾아바꾸기와 전체 바꾸기를 지원합니다.
-- **표 셀 편집 포커스 복구**: 표 셀을 클릭할 때 커서가 앞쪽으로 튀는 문제를 고쳤습니다.
-- **마크다운 호환성 개선**: 단일 물결표(`~`) 범위 표기는 문자로 유지하고, `~~삭제~~`만 삭선으로 처리합니다.
+- **TXT 파일 편집**: `.txt` 파일을 문서 편집 탭에서 바로 열고 저장할 수 있습니다.
+- **HTML 보기 개선**: `.html/.htm` 파일을 렌더링으로 보여주고, 코드 보기에서는 색상 하이라이트를 지원합니다.
+- **JSON/Markdown 표시 보강**: JSON 파일을 색상 하이라이트로 보여주고, 일부 줄바꿈 포함 굵게 표기 호환성을 보강했습니다.
 
 ## 처음 쓰는 순서
 

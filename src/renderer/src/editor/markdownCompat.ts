@@ -1,6 +1,8 @@
 import { Marked, type Tokens } from 'marked'
 
 export const LOOSE_STRONG_RE = /(^|[^\\*])(\*\*(?=\S)((?:(?!\*\*)[^\n])*?\S)\*\*)(?=[\p{L}\p{N}_])/gu
+export const LOOSE_OPEN_STRONG_RE =
+  /(^|<br\s*\/?>|\n)(\*\*(\d+\.\s+(?:(?!\*\*|<br\s*\/?>)[^\n])*?\S))(?=<br\s*\/?>|\n|$)/giu
 
 const markdown = new Marked({ gfm: true, breaks: true })
 
@@ -33,6 +35,26 @@ markdown.use({
         if (!match) return undefined
         return {
           type: 'looseStrong',
+          raw: match[0],
+          text: match[1],
+          tokens: this.lexer.inlineTokens(match[1])
+        }
+      },
+      renderer(token: Tokens.Generic) {
+        return `<strong>${this.parser.parseInline(token.tokens ?? [])}</strong>`
+      }
+    },
+    {
+      name: 'looseOpenStrong',
+      level: 'inline',
+      start(src) {
+        return src.indexOf('**')
+      },
+      tokenizer(src) {
+        const match = /^\*\*(\d+\.\s+(?:(?!\*\*|<br\s*\/?>)[^\n])*?\S)(?=<br\s*\/?>|\n|$)/iu.exec(src)
+        if (!match) return undefined
+        return {
+          type: 'looseOpenStrong',
           raw: match[0],
           text: match[1],
           tokens: this.lexer.inlineTokens(match[1])

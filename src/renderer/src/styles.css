@@ -978,6 +978,15 @@ body {
   background: rgba(14, 99, 156, 0.75);
   color: #fff;
 }
+.code-json-key { color: #7bdcff; }
+.code-html-tag { color: #ff8f8f; }
+.code-html-attr { color: #ffd166; }
+.code-string { color: #9be38f; }
+.code-number { color: #c9a3ff; }
+.code-atom { color: #ffb86c; }
+.code-punct { color: #8fb7ff; }
+.code-comment { color: #7a858f; }
+.code-doctype { color: #c9a3ff; }
 
 /* CodeMirror 마크다운 편집기 */
 .cm-host {
@@ -1326,6 +1335,23 @@ body {
 .csv-c5 { color: #c9a3ff; }
 .csv-c6 { color: #5ed3d3; }
 .csv-c7 { color: #ff9e64; }
+
+/* HTML 뷰어 */
+.html-doc {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: #fff;
+}
+.html-frame {
+  width: 100%;
+  flex: 1;
+  min-height: 0;
+  border: 0;
+  display: block;
+  background: #fff;
+}
 
 /* 이미지 뷰어 */
 .image-wrap {

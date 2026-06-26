@@ -2,7 +2,7 @@ import { syntaxTree } from '@codemirror/language'
 import { Decoration, type DecorationSet, EditorView, WidgetType } from '@codemirror/view'
 import { StateField, type EditorState, type Range } from '@codemirror/state'
 import DOMPurify from 'dompurify'
-import { LOOSE_STRONG_RE, parseInlineMarkdown } from './markdownCompat'
+import { LOOSE_OPEN_STRONG_RE, LOOSE_STRONG_RE, parseInlineMarkdown } from './markdownCompat'
 
 const strong = Decoration.mark({ class: 'cm-md-strong' })
 const emphasis = Decoration.mark({ class: 'cm-md-em' })
@@ -534,6 +534,14 @@ function addLooseStrongDecorations(
       deco.push(hidden.range(from, from + 2))
       deco.push(hidden.range(to - 2, to))
     }
+  }
+  LOOSE_OPEN_STRONG_RE.lastIndex = 0
+  for (const match of state.doc.toString().matchAll(LOOSE_OPEN_STRONG_RE)) {
+    const from = (match.index ?? 0) + match[1].length
+    const to = from + match[2].length
+    if (tableRanges.some(([a, b]) => from >= a && from < b)) continue
+    deco.push(strong.range(from, to))
+    if (!active.has(state.doc.lineAt(from).number)) deco.push(hidden.range(from, from + 2))
   }
 }
 

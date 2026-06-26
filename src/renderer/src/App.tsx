@@ -1,6 +1,7 @@
 import {
   useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
   type KeyboardEvent as ReactKeyboardEvent,
@@ -815,7 +816,11 @@ const fileNameFromPath = (path: string): string =>
   path.replace(/[\\/]+$/, '').split(/[\\/]/).pop() || path
 
 const MARKDOWN_EXT_RE = /\.(md|markdown)$/i
+const TEXT_EDIT_EXT_RE = /\.txt$/i
+const HTML_EXT_RE = /\.html?$/i
 const FILE_EXT_RE = /\.[A-Za-z][A-Za-z0-9]{0,9}$/
+const isPlainTextEditPath = (path?: string): boolean => !!path && TEXT_EDIT_EXT_RE.test(path)
+const isHtmlPath = (path?: string): path is string => !!path && HTML_EXT_RE.test(path)
 
 const markdownRenameName = (title: string, currentName: string): string => {
   const next = title.trim()
@@ -831,6 +836,7 @@ const docKindForPath = (path: string): DocTab['kind'] => {
   if (/\.(hwp|hwpx)$/.test(lower)) return 'hwp'
   if (lower.endsWith('.docx')) return 'docx'
   if (/\.(md|markdown)$/.test(lower)) return 'mdview'
+  if (TEXT_EDIT_EXT_RE.test(lower)) return 'mdview'
   if (lower.endsWith('.csv')) return 'csv'
   if (lower.endsWith('.hearing.json')) return 'hearing'
   return 'file'
@@ -5525,14 +5531,18 @@ export default function App(): JSX.Element {
     <>
       {!tab && <Empty label="열린 문서가 없습니다" actionLabel="새 문서" onAction={() => addDoc('left')} />}
       {tab?.kind === 'welcome' && <Welcome recent={recent} onOpen={openRecent} />}
-      {tab?.kind === 'file' && (
-        <FileView
-          key={tab.path}
-          path={tab.path as string}
-          scrollKey={docScrollKey(tab)}
-          initialScroll={scrollPositionForDoc(tab)}
-          onScrollPosition={(position) => updateDocScrollPosition(tab.id, position)}
-        />
+      {tab?.kind === 'file' && tab.path && (
+        isHtmlPath(tab.path) ? (
+          <HtmlView key={tab.path} path={tab.path} />
+        ) : (
+          <FileView
+            key={tab.path}
+            path={tab.path}
+            scrollKey={docScrollKey(tab)}
+            initialScroll={scrollPositionForDoc(tab)}
+            onScrollPosition={(position) => updateDocScrollPosition(tab.id, position)}
+          />
+        )
       )}
       {tab?.kind === 'image' && (
         <ImageViewer
@@ -5596,6 +5606,7 @@ export default function App(): JSX.Element {
           draftId={tab.id}
           platform={platform}
           defaultDir={draftsRoot}
+          plainText={isPlainTextEditPath(tab.path)}
           onPath={(p) => setDocPath(tab.id, p)}
           scrollKey={docScrollKey(tab)}
           initialScroll={scrollPositionForDoc(tab)}
@@ -8308,6 +8319,14 @@ interface TextFindRange {
   end: number
 }
 
+type CodeLanguage = 'json' | 'html'
+
+interface CodeTokenRange {
+  start: number
+  end: number
+  className: string
+}
+
 function findTextRanges(text: string, query: string): TextFindRange[] {
   const needle = query.trim()
   if (!needle) return []
@@ -8322,10 +8341,94 @@ function findTextRanges(text: string, query: string): TextFindRange[] {
   return out
 }
 
+function codeLanguageForPath(path: string): CodeLanguage | undefined {
+  const lower = path.toLowerCase()
+  if (lower.endsWith('.json')) return 'json'
+  if (HTML_EXT_RE.test(lower)) return 'html'
+  return undefined
+}
+
+function jsonTokenRanges(text: string): CodeTokenRange[] {
+  const ranges: CodeTokenRange[] = []
+  const tokenRe = /("(?:\\.|[^"\\])*")(\s*:)?|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?|\b(?:true|false|null)\b|[{}\[\],:]/g
+  for (const match of text.matchAll(tokenRe)) {
+    const raw = match[0]
+    const start = match.index ?? 0
+    if (match[1]) {
+      ranges.push({
+        start,
+        end: start + match[1].length,
+        className: match[2] ? 'code-json-key' : 'code-string'
+      })
+    } else if (/^-?\d/.test(raw)) {
+      ranges.push({ start, end: start + raw.length, className: 'code-number' })
+    } else if (/^(?:true|false|null)$/.test(raw)) {
+      ranges.push({ start, end: start + raw.length, className: 'code-atom' })
+    } else {
+      ranges.push({ start, end: start + raw.length, className: 'code-punct' })
+    }
+  }
+  return ranges
+}
+
+function htmlTagTokenRanges(start: number, tag: string): CodeTokenRange[] {
+  const ranges: CodeTokenRange[] = []
+  const tagName = tag.match(/^<\/?\s*([A-Za-z][\w:.-]*)/)
+  ranges.push({ start, end: start + (tag.startsWith('</') ? 2 : 1), className: 'code-punct' })
+  if (tag.endsWith('/>')) ranges.push({ start: start + tag.length - 2, end: start + tag.length, className: 'code-punct' })
+  else ranges.push({ start: start + tag.length - 1, end: start + tag.length, className: 'code-punct' })
+  if (tagName?.index !== undefined) {
+    const nameStart = start + tagName.index + tagName[0].lastIndexOf(tagName[1])
+    ranges.push({ start: nameStart, end: nameStart + tagName[1].length, className: 'code-html-tag' })
+  }
+  const attrStart = tagName ? tagName.index! + tagName[0].length : 1
+  const attrs = tag.slice(attrStart, tag.endsWith('/>') ? -2 : -1)
+  const attrRe = /([:@A-Za-z_][\w:.-]*)(\s*=\s*)?("[^"]*"|'[^']*'|[^\s"'=<>`]+)?/g
+  for (const match of attrs.matchAll(attrRe)) {
+    const name = match[1]
+    const localStart = attrStart + (match.index ?? 0)
+    const absoluteStart = start + localStart
+    ranges.push({ start: absoluteStart, end: absoluteStart + name.length, className: 'code-html-attr' })
+    if (match[2]) {
+      const equalStart = absoluteStart + name.length
+      ranges.push({ start: equalStart, end: equalStart + match[2].length, className: 'code-punct' })
+    }
+    if (match[3]) {
+      const valueStart = absoluteStart + name.length + (match[2]?.length ?? 0)
+      ranges.push({ start: valueStart, end: valueStart + match[3].length, className: 'code-string' })
+    }
+  }
+  return ranges
+}
+
+function htmlTokenRanges(text: string): CodeTokenRange[] {
+  const ranges: CodeTokenRange[] = []
+  const tokenRe = /<!--[\s\S]*?-->|<!doctype[\s\S]*?>|<\/?[A-Za-z][^>]*?>/gi
+  for (const match of text.matchAll(tokenRe)) {
+    const token = match[0]
+    const start = match.index ?? 0
+    if (token.startsWith('<!--')) {
+      ranges.push({ start, end: start + token.length, className: 'code-comment' })
+    } else if (/^<!doctype/i.test(token)) {
+      ranges.push({ start, end: start + token.length, className: 'code-doctype' })
+    } else {
+      ranges.push(...htmlTagTokenRanges(start, token))
+    }
+  }
+  return ranges.sort((a, b) => a.start - b.start || a.end - b.end)
+}
+
+function codeTokenRanges(text: string, language?: CodeLanguage): CodeTokenRange[] {
+  if (language === 'json') return jsonTokenRanges(text)
+  if (language === 'html') return htmlTokenRanges(text)
+  return []
+}
+
 /** 텍스트 문서 표시 — 자동 줄바꿈 기본 ON(토글) */
 function TextDoc({
   text,
   note,
+  language,
   actions,
   scrollKey,
   initialScroll,
@@ -8333,6 +8436,7 @@ function TextDoc({
 }: {
   text: string
   note?: string
+  language?: CodeLanguage
   actions?: ReactNode
   scrollKey?: string
   initialScroll?: DocScrollPosition
@@ -8351,6 +8455,7 @@ function TextDoc({
     text.length
   )
   const ranges = findTextRanges(text, findQuery)
+  const tokenRanges = useMemo(() => codeTokenRanges(text, language), [language, text])
   const activeFindIndex = ranges.length ? Math.max(0, Math.min(findIndex, ranges.length - 1)) : -1
 
   useEffect(() => {
@@ -8385,19 +8490,45 @@ function TextDoc({
     setFindIndex((i) => (ranges.length ? (i - 1 + ranges.length) % ranges.length : -1))
 
   const renderText = (): ReactNode => {
-    if (!ranges.length) return text
+    if (!ranges.length && !tokenRanges.length) return text
+    const bounds = new Set([0, text.length])
+    for (const range of ranges) {
+      bounds.add(range.start)
+      bounds.add(range.end)
+    }
+    for (const range of tokenRanges) {
+      bounds.add(range.start)
+      bounds.add(range.end)
+    }
+    const points = [...bounds].sort((a, b) => a - b)
     const parts: ReactNode[] = []
-    let pos = 0
-    ranges.forEach((range, i) => {
-      if (range.start > pos) parts.push(text.slice(pos, range.start))
+    let tokenCursor = 0
+    let findCursor = 0
+    for (let i = 0; i < points.length - 1; i++) {
+      const start = points[i]
+      const end = points[i + 1]
+      if (start === end) continue
+      while (tokenRanges[tokenCursor] && tokenRanges[tokenCursor].end <= start) tokenCursor++
+      while (ranges[findCursor] && ranges[findCursor].end <= start) findCursor++
+      const token = tokenRanges[tokenCursor]
+      const matchedToken = token && token.start <= start && end <= token.end
+      const findRange = ranges[findCursor]
+      const matchedFind = findRange && findRange.start <= start && end <= findRange.end
+      const chunk = text.slice(start, end)
+      const node = matchedToken ? <span className={token.className}>{chunk}</span> : chunk
       parts.push(
-        <mark key={`${range.start}-${i}`} className={i === activeFindIndex ? 'text-find-active' : 'text-find-match'}>
-          {text.slice(range.start, range.end)}
-        </mark>
+        matchedFind ? (
+          <mark
+            key={`${start}-${end}`}
+            className={findCursor === activeFindIndex ? 'text-find-active' : 'text-find-match'}
+          >
+            {node}
+          </mark>
+        ) : (
+          <span key={`${start}-${end}`}>{node}</span>
+        )
       )
-      pos = range.end
-    })
-    if (pos < text.length) parts.push(text.slice(pos))
+    }
     return parts
   }
 
@@ -8519,10 +8650,103 @@ function FileView({
     <TextDoc
       text={state.text}
       note={state.truncated ? '… (이하 생략, 2MB 초과)' : undefined}
+      language={codeLanguageForPath(path)}
       scrollKey={scrollKey}
       initialScroll={initialScroll}
       onScrollPosition={onScrollPosition}
     />
+  )
+}
+
+function localFileBaseHref(path: string): string | undefined {
+  if (path.startsWith('ssh://')) return undefined
+  const slash = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'))
+  if (slash < 0) return undefined
+  let encoded = path
+    .slice(0, slash + 1)
+    .replace(/\\/g, '/')
+    .split('/')
+    .map((part, index) => (index === 0 && part === '' ? '' : encodeURIComponent(part)))
+    .join('/')
+  encoded = encoded.replace(/^([A-Za-z])%3A\//, '$1:/')
+  return `file://${encoded.startsWith('/') ? '' : '/'}${encoded}`
+}
+
+function htmlWithLocalBase(html: string, path: string): string {
+  if (/<base\b/i.test(html)) return html
+  const base = localFileBaseHref(path)
+  if (!base) return html
+  const tag = `<base href="${base}">`
+  return /<head[\s>]/i.test(html)
+    ? html.replace(/<head(\s[^>]*)?>/i, (head) => head + tag)
+    : tag + html
+}
+
+function HtmlView({ path }: { path: string }): JSX.Element {
+  const remoteVersion = useRemoteFileVersion(path)
+  const [mode, setMode] = useState<'render' | 'code'>('render')
+  const [state, setState] = useState<{ loading: boolean; text: string; truncated: boolean; err: string }>({
+    loading: true,
+    text: '',
+    truncated: false,
+    err: ''
+  })
+
+  useEffect(() => {
+    let alive = true
+    setState({ loading: true, text: '', truncated: false, err: '' })
+    window.lt.fs
+      .readText(path)
+      .then((r) => {
+        if (!alive) return
+        setState({
+          loading: false,
+          text: r.kind === 'text' ? r.text : '',
+          truncated: !!r.truncated,
+          err: r.kind === 'text' ? '' : 'HTML로 볼 수 없는 파일입니다.'
+        })
+      })
+      .catch((e) => alive && setState({ loading: false, text: '', truncated: false, err: String(e) }))
+    return () => {
+      alive = false
+    }
+  }, [path, remoteVersion])
+
+  if (state.loading) return <div className="welcome"><p className="muted">불러오는 중…</p></div>
+  if (state.err) return <div className="welcome"><p className="muted">열기 실패: {state.err}</p></div>
+  if (mode === 'code') {
+    return (
+      <TextDoc
+        text={state.text}
+        note={state.truncated ? '… (이하 생략, 2MB 초과)' : undefined}
+        language="html"
+        actions={
+          <button className="tb-btn" title="HTML 렌더링 보기" onClick={() => setMode('render')}>
+            렌더
+          </button>
+        }
+      />
+    )
+  }
+
+  return (
+    <div className="html-doc">
+      <div className="text-toolbar">
+        <button className="tb-btn on" title="HTML 렌더링 보기">
+          렌더
+        </button>
+        <button className="tb-btn" title="HTML 코드 보기" onClick={() => setMode('code')}>
+          코드
+        </button>
+      </div>
+      <iframe
+        className="html-frame"
+        title={fileNameFromPath(path)}
+        sandbox=""
+        referrerPolicy="no-referrer"
+        srcDoc={htmlWithLocalBase(state.text, path)}
+      />
+    </div>
   )
 }
 
