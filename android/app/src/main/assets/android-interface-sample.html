@@ -57,6 +57,14 @@
       overflow: hidden;
     }
 
+    .app.record-pdf-mode {
+      grid-template-rows: 44px 1fr;
+    }
+
+    .app.record-pdf-mode .bottom-tabs {
+      display: none;
+    }
+
     .topbar {
       display: grid;
       grid-template-columns: 44px 1fr auto;
@@ -305,6 +313,15 @@
 
     .workspace.active {
       display: grid;
+    }
+
+    .workspace.record-pdf-mode {
+      grid-template-rows: 1fr;
+    }
+
+    .workspace.record-pdf-mode #docTabs,
+    .case-strip.pdf-hidden {
+      display: none;
     }
 
     .doc-view {
@@ -836,6 +853,7 @@
     .pdf-page {
       width: min(100%, 320px);
       min-height: 450px;
+      flex: 0 0 auto;
       padding: 24px 22px;
       background: #f7f7f2;
       color: #111;
@@ -849,6 +867,7 @@
       min-height: 0;
       padding: 0;
       background: #fff;
+      display: block;
     }
 
     .pdf-page h3 {
@@ -860,6 +879,7 @@
     .pdf-page img {
       display: block;
       width: 100%;
+      height: auto;
     }
 
     .pdf-meta {
@@ -943,6 +963,10 @@
       margin: 0;
       border: 0;
       grid-template-rows: calc(44px + env(safe-area-inset-top, 0px)) minmax(0, 1fr) calc(58px + max(env(safe-area-inset-bottom, 0px), 8px));
+    }
+
+    .android-app .app.record-pdf-mode {
+      grid-template-rows: calc(44px + env(safe-area-inset-top, 0px)) minmax(0, 1fr);
     }
 
     .android-app .topbar {
@@ -1605,7 +1629,7 @@
       lastTerminalId: 'term-case-1-review',
       recordLabel: '',
       pdfFit: 'width',
-      pdfFlow: 'continuous',
+      pdfFlow: 'single',
       pdfPage: 1,
       pdfCrop: false,
       pdfToolsOpen: false,
@@ -2683,6 +2707,7 @@
       }
       state.recordLabel = entry.path
       state.pdfPage = 1
+      state.pdfFlow = 'single'
       state.pdfToolsOpen = false
       state.recordDocsPanelOpen = false
       state.recordEvidencePanelOpen = false
@@ -2822,22 +2847,18 @@
 
     function renderRemoteRecordRows(items) {
       return items.map((entry) => {
-        const [party, partyClass] = recordPartyTuple(entry.party)
+        const [, partyClass] = recordPartyTuple(entry.party)
         return `<button class="record-item ${partyClass}" data-open-record-pdf="${escapeHtml(entry.path)}" data-record-name="${escapeHtml(entry.name)}" data-record-size="${entry.size || 0}">
           <span>${escapeHtml(entry.label)}</span>
-          <span class="record-party ${partyClass}">${party}</span>
-          <span class="meta">${escapeHtml(remoteRecordMeta(entry))} · ${escapeHtml(entry.name)}</span>
         </button>`
       }).join('')
     }
 
     function renderSampleRecordRows(items) {
       return items.map(([label, meta]) => {
-        const [party, partyClass] = recordParty(meta)
+        const [, partyClass] = recordParty(meta)
         return `<button class="record-item ${partyClass}" data-record-item="${label}">
           <span>${label}</span>
-          <span class="record-party ${partyClass}">${party}</span>
-          <span class="meta">${meta}</span>
         </button>`
       }).join('')
     }
@@ -2956,7 +2977,11 @@
       ].join('')
       $('#docTitle').textContent = state.docId === 'records' ? '전자소송기록' : doc?.title || '원격 파일'
       $('#docMeta').textContent = state.docId === 'records' ? c.records.folder : doc ? `${c.folder} · ${doc.meta || ''}` : c.folder
-      $('.doc-view').classList.toggle('record-pdf-mode', state.docId === 'records' && Boolean(state.recordLabel))
+      const recordPdfMode = state.docId === 'records' && Boolean(state.recordLabel)
+      $('.app').classList.toggle('record-pdf-mode', recordPdfMode)
+      $('[data-view-panel="workspace"]').classList.toggle('record-pdf-mode', recordPdfMode)
+      $('#caseStrip').classList.toggle('pdf-hidden', recordPdfMode)
+      $('.doc-view').classList.toggle('record-pdf-mode', recordPdfMode)
       $('#fileList').classList.toggle('hidden', state.docId !== 'files')
       $('#fileViewer').classList.toggle('hidden', state.docId === 'files')
       const profile = activeSshProfile()
@@ -3336,6 +3361,7 @@
       if (target.dataset.recordItem) {
         state.recordLabel = target.dataset.recordItem
         state.pdfPage = 1
+        state.pdfFlow = 'single'
         state.pdfToolsOpen = false
         state.recordDocsPanelOpen = false
         state.recordEvidencePanelOpen = false
