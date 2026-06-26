@@ -17,6 +17,7 @@ import android.provider.OpenableColumns;
 import android.security.keystore.KeyGenParameterSpec;
 import android.security.keystore.KeyProperties;
 import android.util.Base64;
+import android.util.Log;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.Window;
@@ -70,6 +71,7 @@ public class MainActivity extends Activity {
     private static final String JS_TOKEN_KEY_ALIAS = "legal_terminal_mobile_jurisupport_token";
     private static final String MCP_URL = "https://api.jurisupport.com/mcp";
     private static final int REQUEST_IDENTITY_FILE = 1001;
+    private static final String TAG = "LegalTerminal";
 
     private WebView webView;
 
@@ -331,6 +333,7 @@ public class MainActivity extends Activity {
                         return error("unknown method");
                 }
             } catch (Exception exception) {
+                Log.e(TAG, "bridge request failed", exception);
                 return error(exception.getMessage());
             }
         }
@@ -752,9 +755,10 @@ public class MainActivity extends Activity {
                 long size = sftp.stat(realPath).getSize();
                 if (size > 50L * 1024L * 1024L) throw new Exception("50MB 넘는 PDF는 아직 열지 않습니다.");
                 String cloudPath = oneDriveCloudPath(realPath);
+                Log.d(TAG, "renderRemotePdf cloud=" + !cloudPath.isEmpty() + " size=" + size);
                 try (FileOutputStream out = new FileOutputStream(pdf)) {
                     if (!cloudPath.isEmpty()) {
-                        execToStream(session, hydrateOneDriveCatCommand(realPath), out);
+                        execToStream(session, oneDrivePdfCatCommand(realPath, cloudPath), out);
                     } else {
                         try (InputStream in = sftp.get(realPath)) {
                             copy(in, out);
@@ -762,9 +766,10 @@ public class MainActivity extends Activity {
                     }
                 } catch (Exception sftpFailure) {
                     try (FileOutputStream out = new FileOutputStream(pdf, false)) {
-                        execToStream(session, cloudPath.isEmpty() ? "cat " + shq(realPath) : hydrateOneDriveCatCommand(realPath), out);
+                        execToStream(session, cloudPath.isEmpty() ? "cat " + shq(realPath) : oneDrivePdfCatCommand(realPath, cloudPath), out);
                     }
                 }
+                Log.d(TAG, "renderRemotePdf bytes=" + pdf.length());
 
                 JSONArray pages = new JSONArray();
                 try (ParcelFileDescriptor fd = ParcelFileDescriptor.open(pdf, ParcelFileDescriptor.MODE_READ_ONLY);
@@ -1053,11 +1058,15 @@ public class MainActivity extends Activity {
                     "trap 'rm -f \"$tmp\" \"$err\"' EXIT HUP INT TERM",
                     "for r in $remotes; do",
                     "  rm -f \"$tmp\" \"$err\"",
-                    "  if \"$rclone_bin\" copyto \"${r}${cloud_rel}\" \"$tmp\" --ignore-times --retries=1 --low-level-retries=1 2>\"$err\"; then cat \"$tmp\"; exit 0; fi",
+                    "  if \"$rclone_bin\" copyto \"${r}${cloud_rel}\" \"$tmp\" --ignore-times --retries=1 --low-level-retries=1 --contimeout=10s --timeout=30s 2>\"$err\"; then cat \"$tmp\"; exit 0; fi",
                     "done",
                     "cat \"$err\" >&2",
                     "exit 66"
             );
+        }
+
+        private String oneDrivePdfCatCommand(String path, String cloudPath) {
+            return "(\n" + rcloneCatCommand(cloudPath) + "\n) || (\n" + hydrateOneDriveCatCommand(path) + "\n)";
         }
 
         private String hydrateOneDriveCatCommand(String path) {
@@ -1067,12 +1076,13 @@ public class MainActivity extends Activity {
                     "cleanup() { rm -f \"$err\"; }",
                     "trap cleanup EXIT HUP INT TERM",
                     "is_dataless() { ls -lO \"$p\" 2>/dev/null | grep -q dataless; }",
-                    "try_read() { python3 - \"$p\" >/dev/null 2>\"$err\" <<'PY'\nimport sys\nwith open(sys.argv[1], 'rb') as f:\n    f.read(4096)\nPY\n}",
+                    "try_read() { python3 - \"$p\" >/dev/null 2>\"$err\" <<'PY'\nimport signal, sys\nsignal.alarm(5)\nwith open(sys.argv[1], 'rb') as f:\n    f.read(4096)\nPY\n}",
+                    "run_short() { \"$@\" >/dev/null 2>&1 & pid=$!; end=$(( $(date +%s) + 8 )); while kill -0 \"$pid\" 2>/dev/null; do [ \"$(date +%s)\" -ge \"$end\" ] && { kill \"$pid\" 2>/dev/null || true; wait \"$pid\" 2>/dev/null || true; return 124; }; sleep 1; done; wait \"$pid\" 2>/dev/null || true; }",
                     "if ! is_dataless && try_read; then cat \"$p\"; exit 0; fi",
                     "onedrive=\"/Applications/OneDrive.app/Contents/MacOS/OneDrive\"",
-                    "if [ -x \"$onedrive\" ]; then open -ga OneDrive >/dev/null 2>&1 || true; \"$onedrive\" /pin \"$p\" >/dev/null 2>&1 || true; fi",
-                    "fileproviderctl materialize \"$p\" >/dev/null 2>&1 || true",
-                    "brctl download \"$p\" >/dev/null 2>&1 || true",
+                    "if [ -x \"$onedrive\" ]; then open -ga OneDrive >/dev/null 2>&1 || true; run_short \"$onedrive\" /pin \"$p\" || true; fi",
+                    "run_short fileproviderctl materialize \"$p\" || true",
+                    "run_short brctl download \"$p\" || true",
                     "deadline=$(( $(date +%s) + 60 ))",
                     "while [ \"$(date +%s)\" -lt \"$deadline\" ]; do",
                     "  if ! is_dataless && try_read; then cat \"$p\"; exit 0; fi",
