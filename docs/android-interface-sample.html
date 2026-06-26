@@ -1187,6 +1187,27 @@
       pointer-events: auto;
     }
 
+    .debug-overlay {
+      position: fixed;
+      left: 8px;
+      right: 8px;
+      bottom: calc(62px + env(safe-area-inset-bottom, 0px));
+      z-index: 30;
+      margin: 0;
+      padding: 8px;
+      border-radius: 6px;
+      background: rgba(0, 0, 0, 0.55);
+      color: #9a9a9a;
+      font: 11px/1.35 ui-monospace, SFMono-Regular, Menlo, monospace;
+      white-space: pre-wrap;
+      pointer-events: none;
+      display: none;
+    }
+
+    .debug-overlay.show {
+      display: block;
+    }
+
     @media (min-width: 760px) {
       .app {
         width: min(100vw, 1180px);
@@ -1437,6 +1458,7 @@
     </nav>
 
     <div class="overlay" id="overlay"></div>
+    <pre class="debug-overlay" id="debugOverlay"></pre>
     <aside class="ssh-sheet" id="sshSheet" aria-label="SSH 설정">
       <div class="sheet-head">
         <button class="icon-btn" id="closeSshSheet" title="닫기">×</button>
@@ -1672,6 +1694,7 @@
       pendingSshProfile: null,
       suppressFileClick: false,
       selectedText: '',
+      debugLines: [],
       bridge: { ok: false, lastProfileId: '', message: 'browser' }
     }
 
@@ -1679,12 +1702,39 @@
     const $$ = (selector) => Array.from(document.querySelectorAll(selector))
     const EXPLORER_STATE_KEY = 'legal-terminal-mobile-explorer'
 
+    function renderDebugOverlay() {
+      const el = $('#debugOverlay')
+      if (!el) return
+      el.textContent = state.debugLines.join('\n')
+      el.classList.toggle('show', state.debugLines.length > 0)
+    }
+
+    function debugLog(message) {
+      const time = new Date().toTimeString().slice(0, 8)
+      state.debugLines = [...state.debugLines, `${time} ${message}`].slice(-8)
+      renderDebugOverlay()
+    }
+
     function nativeRequest(method, payload = {}) {
       const bridge = window.LegalTerminalAndroid
-      if (!bridge || typeof bridge.request !== 'function') return { ok: false, error: 'Android bridge unavailable' }
+      const isPdf = method === 'renderRemotePdf'
+      const name = String(payload?.path || '').split('/').pop()
+      const started = Date.now()
+      if (isPdf) debugLog(`PDF 요청: ${name || '(경로 없음)'}`)
+      if (!bridge || typeof bridge.request !== 'function') {
+        if (isPdf) debugLog('PDF 실패: Android bridge 없음')
+        return { ok: false, error: 'Android bridge unavailable' }
+      }
       try {
-        return JSON.parse(bridge.request(JSON.stringify({ method, payload })))
+        const result = JSON.parse(bridge.request(JSON.stringify({ method, payload })))
+        if (isPdf) {
+          const ms = Date.now() - started
+          if (result.ok) debugLog(`PDF 응답: ${(result.pages || []).length}/${result.pageCount || 0}쪽 · ${ms}ms`)
+          else debugLog(`PDF 실패: ${result.error || 'unknown'} · ${ms}ms`)
+        }
+        return result
       } catch (error) {
+        if (isPdf) debugLog(`PDF 오류: ${error?.message || error}`)
         return { ok: false, error: 'Android bridge failed' }
       }
     }
@@ -2715,6 +2765,7 @@
       const c = activeCase()
       const box = remoteRecordState(c)
       const parsed = parseRemoteRecordEntry(entry, 0)
+      debugLog(`PDF 선택: ${parsed.label}`)
       box.selected = {
         path: entry.path,
         name: entry.name,

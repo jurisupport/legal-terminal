@@ -53,6 +53,7 @@ import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
+import java.text.Normalizer;
 import java.security.KeyStore;
 import java.util.Properties;
 import java.util.Vector;
@@ -978,7 +979,7 @@ public class MainActivity extends Activity {
                         if (out.length() > 0) out.append('/');
                         out.append(parts[j]);
                     }
-                    return out.toString();
+                    return Normalizer.normalize(out.toString(), Normalizer.Form.NFC);
                 }
             }
             return "";
@@ -1066,7 +1067,34 @@ public class MainActivity extends Activity {
         }
 
         private String oneDrivePdfCatCommand(String path, String cloudPath) {
-            return "(\n" + rcloneCatCommand(cloudPath) + "\n) || (\n" + hydrateOneDriveCatCommand(path) + "\n)";
+            return "(\n" + rcloneMaterializeCatCommand(path, cloudPath) + "\n) || (\n" + hydrateOneDriveCatCommand(path) + "\n)";
+        }
+
+        private String rcloneMaterializeCatCommand(String path, String cloudPath) {
+            return String.join("\n",
+                    "p=" + shq(path),
+                    "PATH=\"/opt/homebrew/bin:/usr/local/bin:/opt/local/bin:$PATH\"",
+                    "rclone_bin=$(command -v rclone 2>/dev/null || true)",
+                    "if [ -z \"$rclone_bin\" ]; then for pbin in /opt/homebrew/bin/rclone /usr/local/bin/rclone /opt/local/bin/rclone; do [ -x \"$pbin\" ] && rclone_bin=\"$pbin\" && break; done; fi",
+                    "if [ -z \"$rclone_bin\" ]; then echo \"rclone not found\" >&2; exit 127; fi",
+                    "state=$(ls -lO \"$p\" 2>/dev/null || true)",
+                    "if [ -n \"$state\" ] && ! printf '%s\\n' \"$state\" | grep -q dataless; then cat \"$p\"; exit 0; fi",
+                    "cloud_rel=" + shq(cloudPath.replaceFirst("^/+", "")),
+                    "tmp=\"${TMPDIR:-/tmp}/legal-terminal-rclone-pdf.$$\"",
+                    "err=\"${tmp}.err\"",
+                    "trap 'rm -f \"$tmp\" \"$err\"' EXIT HUP INT TERM",
+                    "remotes=$(\"$rclone_bin\" listremotes)",
+                    "for r in $remotes; do",
+                    "  rm -f \"$tmp\" \"$err\"",
+                    "  if \"$rclone_bin\" copyto \"${r}${cloud_rel}\" \"$tmp\" --ignore-times --retries=1 --low-level-retries=1 --contimeout=5s --timeout=15s 2>\"$err\"; then",
+                    "    mv -f \"$tmp\" \"$p\"",
+                    "    cat \"$p\"",
+                    "    exit 0",
+                    "  fi",
+                    "done",
+                    "cat \"$err\" >&2 2>/dev/null || true",
+                    "exit 66"
+            );
         }
 
         private String hydrateOneDriveCatCommand(String path) {
@@ -1083,7 +1111,7 @@ public class MainActivity extends Activity {
                     "if [ -x \"$onedrive\" ]; then open -ga OneDrive >/dev/null 2>&1 || true; run_short \"$onedrive\" /pin \"$p\" || true; fi",
                     "run_short fileproviderctl materialize \"$p\" || true",
                     "run_short brctl download \"$p\" || true",
-                    "deadline=$(( $(date +%s) + 60 ))",
+                    "deadline=$(( $(date +%s) + 20 ))",
                     "while [ \"$(date +%s)\" -lt \"$deadline\" ]; do",
                     "  if ! is_dataless && try_read; then cat \"$p\"; exit 0; fi",
                     "  sleep 2",
