@@ -208,13 +208,13 @@ function classify(title: string): OutlineItem {
     label = `${date ? date + ' | ' : ''}${docType}${detail ? ' - ' + detail : ''}`
   }
 
-  // 원고/피고 판정: 갑호증=원고, 을호증=피고, 그 외 제목의 '원고'/'피고'(작성자)로 판정
+  // 원고계/피고계 판정: 갑호증=원고계, 을호증=피고계, 그 외 작성자명으로 판정
   let party: 'plaintiff' | 'defendant' | undefined
   if (evidencePrefix?.startsWith('갑')) party = 'plaintiff'
   else if (evidencePrefix?.startsWith('을')) party = 'defendant'
   if (!party) {
-    if (/원고/.test(title)) party = 'plaintiff'
-    else if (/피고/.test(title)) party = 'defendant'
+    if (/원고|채권자|신청인|항고인/.test(title)) party = 'plaintiff'
+    else if (/피고|채무자|피신청인|상대방/.test(title)) party = 'defendant'
   }
 
   return { page: 0, rawTitle: title, label, category, evidencePrefix, party, dateNum: dateNum(title), sortKey }

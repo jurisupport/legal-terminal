@@ -2607,6 +2607,16 @@ export default function AgentPanel({
   }, [slashMatches.length])
 
   useLayoutEffect(() => {
+    if (!visible) return
+    const textarea = textareaRef.current
+    if (!textarea) return
+    textarea.style.height = 'auto'
+    const nextHeight = textarea.scrollHeight + textarea.offsetHeight - textarea.clientHeight
+    textarea.style.height = `${nextHeight}px`
+    textarea.style.overflowY = nextHeight > textarea.offsetHeight ? 'auto' : 'hidden'
+  }, [agentFontSize, input, visible])
+
+  useLayoutEffect(() => {
     if (!showSlashMenu) return
     const active = slashMenuRef.current?.querySelector<HTMLElement>('[data-active="true"]')
     active?.scrollIntoView({ block: 'nearest', inline: 'nearest' })

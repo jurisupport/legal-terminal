@@ -4532,8 +4532,9 @@ body {
   width: 100%;
   min-width: 0;
   min-height: var(--agent-input-min-height);
-  max-height: max(160px, calc(var(--agent-font-size, 13px) * 10));
-  resize: vertical;
+  max-height: min(34vh, max(180px, calc(var(--agent-font-size, 13px) * 14)));
+  resize: none;
+  overflow-y: hidden;
   color: var(--fg);
   background: var(--bg);
   border: 1px solid var(--border);
