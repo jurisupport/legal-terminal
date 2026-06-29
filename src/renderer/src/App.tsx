@@ -8672,14 +8672,69 @@ function localFileBaseHref(path: string): string | undefined {
   return `file://${encoded.startsWith('/') ? '' : '/'}${encoded}`
 }
 
+const HTML_VIEWER_DEFAULT_STYLE = `<style data-lt-html-viewer-defaults>
+:root { color-scheme: light; }
+html {
+  min-height: 100%;
+  background: #f3f4f6;
+}
+body {
+  box-sizing: border-box;
+  max-width: 960px;
+  min-height: 100vh;
+  margin: 0 auto;
+  padding: 32px 40px 48px;
+  color: #1f2328;
+  background: #fff;
+  font: 15px/1.72 -apple-system, BlinkMacSystemFont, "Segoe UI", "Apple SD Gothic Neo", "Malgun Gothic", sans-serif;
+}
+*, *::before, *::after { box-sizing: border-box; }
+h1, h2, h3, h4 {
+  line-height: 1.3;
+  margin: 1.35em 0 0.55em;
+}
+p, ul, ol, blockquote, table, pre {
+  margin-top: 0;
+  margin-bottom: 1em;
+}
+ul, ol { padding-left: 1.6em; }
+blockquote {
+  padding-left: 1em;
+  border-left: 3px solid #d0d7de;
+  color: #57606a;
+}
+img, video {
+  max-width: 100%;
+  height: auto;
+}
+table {
+  width: 100%;
+  border-collapse: collapse;
+}
+th, td {
+  padding: 0.5em 0.65em;
+  border: 1px solid #d0d7de;
+}
+pre {
+  overflow: auto;
+  padding: 14px 16px;
+  border-radius: 6px;
+  background: #f6f8fa;
+}
+code {
+  font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
+}
+@media (max-width: 720px) {
+  body { padding: 22px 20px 36px; }
+}
+</style>`
+
 function htmlWithLocalBase(html: string, path: string): string {
-  if (/<base\b/i.test(html)) return html
   const base = localFileBaseHref(path)
-  if (!base) return html
-  const tag = `<base href="${base}">`
+  const tags = `${base && !/<base\b/i.test(html) ? `<base href="${base}">` : ''}${HTML_VIEWER_DEFAULT_STYLE}`
   return /<head[\s>]/i.test(html)
-    ? html.replace(/<head(\s[^>]*)?>/i, (head) => head + tag)
-    : tag + html
+    ? html.replace(/<head(\s[^>]*)?>/i, (head) => head + tags)
+    : tags + html
 }
 
 function HtmlView({ path }: { path: string }): JSX.Element {

@@ -40,11 +40,10 @@ curl -fsSL https://raw.githubusercontent.com/jurisupport/legal-terminal/main/ins
 
 ## 이번 업데이트
 
-최신 릴리스: [v0.1.122](https://github.com/jurisupport/legal-terminal/releases/tag/v0.1.122)
+최신 릴리스: [v0.1.123](https://github.com/jurisupport/legal-terminal/releases/tag/v0.1.123)
 
-- **TXT 파일 편집**: `.txt` 파일을 문서 편집 탭에서 바로 열고 저장할 수 있습니다.
-- **HTML 보기 개선**: `.html/.htm` 파일을 렌더링으로 보여주고, 코드 보기에서는 색상 하이라이트를 지원합니다.
-- **JSON/Markdown 표시 보강**: JSON 파일을 색상 하이라이트로 보여주고, 일부 줄바꿈 포함 굵게 표기 호환성을 보강했습니다.
+- **HTML 렌더 여백 개선**: `.html/.htm` 렌더링 화면에 기본 문서 여백, 줄간격, 표·코드·인용 스타일을 적용했습니다.
+- **HTML 작업면 개선**: 렌더링 iframe 바깥에도 여백과 테두리를 넣어 PC 화면에서 문서 영역이 또렷하게 보입니다.
 
 ## 처음 쓰는 순서
 
