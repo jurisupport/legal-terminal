@@ -4,6 +4,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type ButtonHTMLAttributes,
   type KeyboardEvent as ReactKeyboardEvent,
   type RefObject,
   type ReactNode
@@ -137,6 +138,33 @@ const MD_FONT_OPTIONS: { label: string; value: string }[] = [
 ]
 
 type NotificationSound = 'chime' | 'ding' | 'success' | 'bell' | 'none'
+
+type ExplorerToolButtonProps = Omit<ButtonHTMLAttributes<HTMLButtonElement>, 'aria-label' | 'title'> & {
+  label: string
+  tooltip?: string
+  children: ReactNode
+}
+
+function ExplorerToolButton({
+  label,
+  tooltip = label,
+  className = '',
+  children,
+  ...buttonProps
+}: ExplorerToolButtonProps): JSX.Element {
+  return (
+    <button
+      {...buttonProps}
+      className={['tool-btn', 'explorer-tool-btn', className].filter(Boolean).join(' ')}
+      title={tooltip}
+      aria-label={label}
+      data-tooltip={tooltip}
+    >
+      {children}
+      <span className="sr-only">{label}</span>
+    </button>
+  )
+}
 
 const NOTIFICATION_SOUND_OPTIONS: { label: string; value: NotificationSound }[] = [
   { label: '기본 차임', value: 'chime' },
@@ -7303,69 +7331,67 @@ function DocsPanel({
             <div className="sidebar-header-main">
               <span className="sidebar-title">{title}</span>
               <span className="header-actions explorer-actions">
-                <button className="tool-btn" title="새 사건 추가" onClick={onOpenWorkspace}>
+                <ExplorerToolButton label="새 사건 추가" tooltip="새 사건 추가" onClick={onOpenWorkspace}>
                   <IconWorkspace size={15} />
-                  <span className="sr-only">새 사건 추가</span>
-                </button>
-                <button
-                  className="tool-btn"
-                  title="상위 폴더로 이동"
+                </ExplorerToolButton>
+                <ExplorerToolButton
+                  label="상위 폴더로 이동"
+                  tooltip="상위 폴더로 이동"
                   disabled={!draftsFolder}
                   onClick={onGoParentFolder}
                 >
                   <IconParentFolder size={15} />
-                  <span className="sr-only">상위 폴더로 이동</span>
-                </button>
-                <button
-                  className="tool-btn"
-                  title="작성서류 폴더 변경"
+                </ExplorerToolButton>
+                <ExplorerToolButton
+                  label="작성서류 폴더 변경"
+                  tooltip="작성서류 폴더 변경"
                   disabled={!draftsFolder}
                   onClick={onPickDrafts}
                 >
                   <IconSaveAs size={15} />
-                  <span className="sr-only">작성서류 폴더 변경</span>
-                </button>
-                <button
-                  className="tool-btn"
-                  title="소송기록 폴더 변경"
+                </ExplorerToolButton>
+                <ExplorerToolButton
+                  label="소송기록 폴더 변경"
+                  tooltip="소송기록 폴더 변경"
                   disabled={!draftsFolder}
                   onClick={onPickRecords}
                 >
                   <IconViewer size={15} />
-                  <span className="sr-only">소송기록 폴더 변경</span>
-                </button>
-                <button className="tool-btn" title="새 파일" disabled={!draftsFolder} onClick={onNewFile}>
+                </ExplorerToolButton>
+                <ExplorerToolButton
+                  label="새 파일"
+                  tooltip="새 파일 만들기"
+                  disabled={!draftsFolder}
+                  onClick={onNewFile}
+                >
                   <IconNewFile size={15} />
-                  <span className="sr-only">새 파일</span>
-                </button>
-                <button
-                  className={`tool-btn ${fileFindOpen ? 'on' : ''}`}
-                  title="파일명 찾기"
+                </ExplorerToolButton>
+                <ExplorerToolButton
+                  label="파일명 찾기"
+                  tooltip="파일명 찾기"
+                  className={fileFindOpen ? 'on' : ''}
                   disabled={!draftsFolder}
                   onClick={() => setFileFindOpen((v) => !v)}
                 >
                   <IconSearch size={15} />
-                  <span className="sr-only">파일명 찾기</span>
-                </button>
-                <button
-                  className="tool-btn"
-                  title="새 폴더"
+                </ExplorerToolButton>
+                <ExplorerToolButton
+                  label="새 폴더"
+                  tooltip="새 폴더 만들기"
                   disabled={!draftsFolder}
                   onClick={onNewFolder}
                 >
                   <IconNewFolder size={15} />
-                  <span className="sr-only">새 폴더</span>
-                </button>
+                </ExplorerToolButton>
                 {onSync && (
-                  <button
-                    className="tool-btn"
-                    title="rclone 동기화 (로컬 ↔ 맥미니)"
+                  <ExplorerToolButton
+                    label="동기화"
+                    tooltip="rclone 동기화 (로컬 ↔ 맥미니)"
                     disabled={!draftsFolder}
                     onClick={onSync}
                   >
                     <IconSync size={15} />
-                    <span className="sr-only">동기화</span>
-                  </button>
+                  </ExplorerToolButton>
                 )}
               </span>
             </div>

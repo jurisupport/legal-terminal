@@ -40,12 +40,13 @@ curl -fsSL https://raw.githubusercontent.com/jurisupport/legal-terminal/main/ins
 
 ## 이번 업데이트
 
-최신 릴리스: [v0.1.125](https://github.com/jurisupport/legal-terminal/releases/tag/v0.1.125)
+최신 릴리스: [v0.1.126](https://github.com/jurisupport/legal-terminal/releases/tag/v0.1.126)
 
 - **원격 다운로드 진행률 개선**: 원격 파일 읽기와 다운로드 진행 상황에 바이트 단위 진행률을 표시합니다.
 - **다운로드 위치 기억**: 마지막으로 선택한 원격 다운로드 폴더를 다음 다운로드 기본 위치로 사용합니다.
 - **Agent Panel 프롬프트 복사**: 내가 보낸 프롬프트와 대기 중인 지시를 카드에서 바로 복사할 수 있습니다.
 - **Agent 대기 상태 안정화**: 사용자 응답 대기 중인 Agent가 대기 상태와 스피너를 유지합니다.
+- **탐색기 아이콘 설명**: 탐색기 상단 아이콘에 마우스를 올리거나 키보드 포커스를 두면 기능 설명을 표시합니다.
 
 ## 처음 쓰는 순서
 
