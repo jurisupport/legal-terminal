@@ -2034,6 +2034,25 @@ body {
   align-items: center;
   margin-bottom: 8px;
 }
+.download-progress-title {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+.download-progress-spinner {
+  width: 16px;
+  height: 16px;
+  flex: 0 0 16px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--accent);
+  font-size: 13px;
+  font-weight: 800;
+  line-height: 1;
+  animation: spin 0.8s linear infinite;
+}
 .download-progress-head strong,
 .download-progress-detail {
   min-width: 0;
@@ -2045,7 +2064,7 @@ body {
   font-size: 13px;
   color: var(--fg);
 }
-.download-progress-head span {
+.download-progress-percent {
   flex: 0 0 auto;
   color: var(--fg-muted);
   font-size: 12px;

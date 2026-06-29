@@ -244,6 +244,7 @@ export default function Terminal({
   onNewAgent,
   onNewTerminal,
   onRequestClose,
+  onRequestCloseCaseTab,
   onStatus,
   onBracketedPasteModeChange,
   todoContext,
@@ -264,6 +265,7 @@ export default function Terminal({
   onNewAgent?: () => void
   onNewTerminal?: () => void
   onRequestClose?: () => void
+  onRequestCloseCaseTab?: () => void
   onStatus?: (status: 'working' | 'done' | 'question') => void
   onBracketedPasteModeChange?: (enabled: boolean) => void
   todoContext?: TodoTerminalContext
@@ -284,6 +286,8 @@ export default function Terminal({
   onNewTermRef.current = onNewTerminal
   const onCloseRef = useRef(onRequestClose)
   onCloseRef.current = onRequestClose
+  const onCloseCaseTabRef = useRef(onRequestCloseCaseTab)
+  onCloseCaseTabRef.current = onRequestCloseCaseTab
   const onStatusRef = useRef(onStatus)
   onStatusRef.current = onStatus
   const onBracketedPasteModeChangeRef = useRef(onBracketedPasteModeChange)
@@ -569,6 +573,12 @@ export default function Terminal({
           // Ctrl/Cmd+W: 이 터미널 닫기 (작업 중이면 App에서 확인).
           e.stopPropagation()
           onCloseRef.current?.()
+          return false
+        }
+        if (k === 'w' && e.shiftKey && !e.altKey) {
+          // Ctrl/Cmd+Shift+W: 현재 사건탭 닫기.
+          e.stopPropagation()
+          onCloseCaseTabRef.current?.()
           return false
         }
         if (k === 'tab') {

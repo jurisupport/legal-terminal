@@ -1596,6 +1596,12 @@ interface AutoDownloadRecordsResult {
 
 const recordsAutoDownloadInFlight = new Map<string, Promise<AutoDownloadRecordsResult>>()
 
+interface AutoRecordDownloadFile {
+  source: string
+  destPath: string
+  label: string
+}
+
 function safeLocalPathSegment(value: string, fallback = 'download'): string {
   const cleaned = value
     .normalize('NFC')
@@ -1641,7 +1647,10 @@ async function writeRecordCopy(dest: string, data: Buffer): Promise<void> {
   await rename(tmp, dest)
 }
 
-async function autoDownloadRemoteRecords(sourceUri: string): Promise<AutoDownloadRecordsResult> {
+async function autoDownloadRemoteRecords(
+  sourceUri: string,
+  sender?: WebContents
+): Promise<AutoDownloadRecordsResult> {
   if (!isRemote(sourceUri)) {
     return { ok: false, error: '원격 소송기록 폴더만 자동 다운로드할 수 있습니다.' }
   }
@@ -1654,6 +1663,19 @@ async function autoDownloadRemoteRecords(sourceUri: string): Promise<AutoDownloa
   const task = (async (): Promise<AutoDownloadRecordsResult> => {
     await mkdir(destRoot, { recursive: true })
     const files = await rfsListPdfs(sourceUri)
+    const progressBase: DownloadProgressBase | undefined = sender
+      ? {
+          id: createDownloadId(),
+          source: sourceUri,
+          name: `${remoteBasename(sourceUri)} 소송기록`,
+          isDir: true
+        }
+      : undefined
+    const emitProgress = (update: DownloadProgressUpdate): void => {
+      if (!sender || !progressBase) return
+      sendDownloadProgress(sender, progressBase, update)
+    }
+    const pending: AutoRecordDownloadFile[] = []
     let downloaded = 0
     let skipped = 0
     let failed = 0
@@ -1663,13 +1685,83 @@ async function autoDownloadRemoteRecords(sourceUri: string): Promise<AutoDownloa
         skipped += 1
         continue
       }
+      pending.push({ source: file.path, destPath: dest, label: file.name })
+    }
+
+    if (pending.length === 0) {
+      return {
+        ok: true,
+        path: destRoot,
+        count: files.length,
+        downloaded,
+        skipped,
+        failed
+      }
+    }
+
+    emitProgress({
+      phase: 'preparing',
+      totalFiles: pending.length,
+      completedFiles: 0,
+      destPath: destRoot
+    })
+
+    let completedFiles = 0
+    for (const file of pending) {
+      emitProgress({
+        phase: 'downloading',
+        totalFiles: pending.length,
+        completedFiles,
+        currentFile: file.label,
+        destPath: destRoot
+      })
       try {
-        await writeRecordCopy(dest, await rfsReadBytes(file.path))
+        await writeRecordCopy(
+          file.destPath,
+          await rfsReadBytes(file.source, (progress) =>
+            emitProgress({
+              phase: 'downloading',
+              totalFiles: pending.length,
+              completedFiles,
+              currentFile: file.label,
+              destPath: destRoot,
+              totalBytes: progress.totalBytes,
+              downloadedBytes: progress.downloadedBytes
+            })
+          )
+        )
         downloaded += 1
       } catch {
         failed += 1
+      } finally {
+        completedFiles += 1
+        emitProgress({
+          phase: 'downloading',
+          totalFiles: pending.length,
+          completedFiles,
+          currentFile: file.label,
+          destPath: destRoot
+        })
       }
     }
+
+    if (failed > 0) {
+      emitProgress({
+        phase: 'error',
+        totalFiles: pending.length,
+        completedFiles,
+        destPath: destRoot,
+        error: `소송기록 PDF ${failed}개를 다운로드하지 못했습니다.`
+      })
+    } else {
+      emitProgress({
+        phase: 'done',
+        totalFiles: pending.length,
+        completedFiles,
+        destPath: destRoot
+      })
+    }
+
     return {
       ok: failed === 0 || downloaded > 0 || skipped > 0,
       path: destRoot,
@@ -2220,9 +2312,9 @@ ipcMain.handle('fs:download', async (event, source: string) => {
   }
 })
 
-ipcMain.handle('fs:autoDownloadRecords', async (_e, source: string) => {
+ipcMain.handle('fs:autoDownloadRecords', async (event, source: string) => {
   try {
-    return await autoDownloadRemoteRecords(source)
+    return await autoDownloadRemoteRecords(source, event.sender)
   } catch (e) {
     return { ok: false, error: String(e) }
   }

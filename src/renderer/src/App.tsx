@@ -1513,6 +1513,7 @@ export default function App(): JSX.Element {
   const [pendingCreate, setPendingCreate] = useState<PendingCreateRequest | null>(null)
   const closeActiveTermRef = useRef<() => void>(() => {})
   const closeActiveTabRef = useRef<() => void>(() => {})
+  const closeActiveCaseTabRef = useRef<() => void>(() => {})
 
   useEffect(() => {
     const applySettings = (s: AppSettings): void => {
@@ -2017,7 +2018,7 @@ export default function App(): JSX.Element {
     void window.lt.app.newWindow()
   }
 
-  // 단축키: Ctrl/Cmd+T 새 Agent / Ctrl/Cmd+Shift+T 새 터미널 / Ctrl/Cmd+W 탭 닫기 / Ctrl/Cmd+N 새 문서 / Ctrl/Cmd+Shift+N 새 사건
+  // 단축키: Ctrl/Cmd+T 새 Agent / Ctrl/Cmd+Shift+T 새 터미널 / Ctrl/Cmd+W 탭 닫기 / Ctrl/Cmd+Shift+W 사건탭 닫기 / Ctrl/Cmd+N 새 문서 / Ctrl/Cmd+Shift+N 새 사건
   useEffect(() => {
     const onKey = (e: KeyboardEvent): void => {
       const activeEl = document.activeElement as HTMLElement | null
@@ -2088,6 +2089,10 @@ export default function App(): JSX.Element {
         e.preventDefault()
         e.stopPropagation()
         setCaseTabsOpen((open) => !open)
+      } else if (isKey('w', 'KeyW') && e.shiftKey) {
+        e.preventDefault()
+        e.stopPropagation()
+        closeActiveCaseTabRef.current()
       } else if (isKey('w', 'KeyW') && !e.shiftKey) {
         e.preventDefault()
         e.stopPropagation()
@@ -4847,6 +4852,7 @@ export default function App(): JSX.Element {
   const totalCaseNoticeCount =
     totalCaseDocumentUpdateCount + totalCaseQuestionTaskCount + totalCaseDoneTaskCount
   const caseTabsShortcut = platform === 'darwin' ? '⌘0' : 'Ctrl+0'
+  const closeCaseTabShortcut = platform === 'darwin' ? '⌘⇧W' : 'Ctrl+Shift+W'
   const caseTabActivityTitle =
     totalCaseNoticeCount > 0
       ? `사건탭 · ${[
@@ -5057,6 +5063,10 @@ export default function App(): JSX.Element {
     setActiveWork({ left: '', right: '' })
     setFolderRecord(null)
     setPdfRecord(null)
+  }
+  closeActiveCaseTabRef.current = (): void => {
+    const tabId = activeCaseTabId || caseTabRows.find((row) => row.active)?.tab.id || caseTabs[0]?.id
+    if (tabId) closeCaseTab(tabId)
   }
 
   const cycleCaseTab = (dir: number): void => {
@@ -5951,6 +5961,7 @@ export default function App(): JSX.Element {
                 onAskSelection={(text) => askAboutTerminalSelection(t.id, text)}
                 onNewTerminal={() => addTermSame(termSide(t), t.id)}
                 onRequestClose={() => closeTermWithConfirm(t.id)}
+                onRequestCloseCaseTab={() => closeActiveCaseTabRef.current()}
                 onStatus={(s) => onTermStatus(t.id, s)}
                 onBracketedPasteModeChange={(enabled) => onTermBracketedPasteMode(t.id, enabled)}
                 onTodoChanged={() => setTodoNonce((n) => n + 1)}
@@ -6310,6 +6321,7 @@ export default function App(): JSX.Element {
                   onAskSelection={(text) => askAboutTerminalSelection(t.id, text)}
                   onNewTerminal={() => addTermSame(side, t.id)}
                   onRequestClose={() => closeTermWithConfirm(t.id)}
+                  onRequestCloseCaseTab={() => closeActiveCaseTabRef.current()}
                   onStatus={(s) => onTermStatus(t.id, s)}
                   onBracketedPasteModeChange={(enabled) => onTermBracketedPasteMode(t.id, enabled)}
                   onTodoChanged={() => setTodoNonce((n) => n + 1)}
@@ -6532,7 +6544,7 @@ export default function App(): JSX.Element {
                 <button
                   className="tab-context-menu-item"
                   role="menuitem"
-                  title="이 사건탭과 여기에 속한 문서/터미널 탭을 닫습니다"
+                  title={`이 사건탭과 여기에 속한 문서/터미널 탭을 닫습니다 (${closeCaseTabShortcut})`}
                   onClick={(e) => {
                     e.stopPropagation()
                     closeCaseTab(caseTabContextMenu.tabId)
@@ -6819,14 +6831,21 @@ function DownloadProgressToast({ progress }: { progress: FsDownloadProgress }): 
       : downloadedBytes > 0
         ? formatBytes(downloadedBytes)
         : ''
+  const currentFileFraction =
+    progress.phase === 'downloading' && total > 1 && totalBytes > 0 && downloadedBytes < totalBytes
+      ? downloadedBytes / totalBytes
+      : 0
   const percent =
-    totalBytes > 0
-      ? Math.round((downloadedBytes / totalBytes) * 100)
-      : total > 0
-        ? Math.round((completed / total) * 100)
-        : progress.phase === 'done'
-          ? 100
-          : 0
+    progress.phase === 'done'
+      ? 100
+      : total > 1
+        ? Math.round(((completed + currentFileFraction) / total) * 100)
+        : totalBytes > 0
+          ? Math.round((downloadedBytes / totalBytes) * 100)
+          : total > 0
+            ? Math.round((completed / total) * 100)
+            : 0
+  const active = progress.phase === 'preparing' || progress.phase === 'downloading'
   const title =
     progress.phase === 'preparing'
       ? `${progress.name} 목록 확인 중`
@@ -6851,8 +6870,15 @@ function DownloadProgressToast({ progress }: { progress: FsDownloadProgress }): 
   return (
     <div className={`download-progress ${progress.phase}`} role="status" aria-live="polite">
       <div className="download-progress-head">
-        <strong>{title}</strong>
-        <span>{percent}%</span>
+        <div className="download-progress-title">
+          {active && (
+            <span className="download-progress-spinner" aria-hidden="true">
+              @
+            </span>
+          )}
+          <strong>{title}</strong>
+        </div>
+        <span className="download-progress-percent">{percent}%</span>
       </div>
       <div
         className="download-progress-bar"
