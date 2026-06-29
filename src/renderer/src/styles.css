@@ -4655,6 +4655,9 @@ body {
 .agent-status.working {
   color: #d7ba7d;
 }
+.agent-status.waiting_user {
+  color: #d7ba7d;
+}
 .agent-status.esc-armed {
   color: #f0a0a0;
 }

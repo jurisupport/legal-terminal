@@ -440,6 +440,9 @@ const agentStatusLabels: Record<AgentPanelStatus, string> = {
   error: '오류'
 }
 
+const isActiveAgentStatus = (status: AgentPanelStatus): boolean =>
+  status === 'working' || status === 'waiting_permission' || status === 'waiting_user'
+
 function timelineStatusLabel(item: TimelineItem): string | undefined {
   if (item.kind === 'diff' && item.status === 'applied') return '적용됨'
   if (item.kind === 'diff' && item.status === 'reverted') return '되돌림'
@@ -2592,8 +2595,8 @@ export default function AgentPanel({
     () => hasPrompt && !sendBlockedReason,
     [hasPrompt, sendBlockedReason]
   )
-  const queuesNewInput =
-    status === 'working' || status === 'waiting_permission' || status === 'waiting_user'
+  const queuesNewInput = isActiveAgentStatus(status)
+  const showStatusSpinner = isActiveAgentStatus(status)
   const interruptible = queuesNewInput || authActive
   const stopButtonClassName = escInterruptArmed ? 'agent-stop-button armed' : 'agent-stop-button'
   const stopButtonTitle = escInterruptArmed
@@ -4007,10 +4010,14 @@ export default function AgentPanel({
             aria-label={statusAccessibleLabel}
             aria-live="polite"
           >
-            {status === 'working' ? (
+            {showStatusSpinner ? (
               <>
                 <span className="agent-status-spinner" aria-hidden="true" />
-                <span className="sr-only">{statusLabel}</span>
+                {status === 'working' ? (
+                  <span className="sr-only">{statusLabel}</span>
+                ) : (
+                  <span>{baseStatusLabel}</span>
+                )}
               </>
             ) : (
               <span>{baseStatusLabel}</span>

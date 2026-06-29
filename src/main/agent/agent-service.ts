@@ -35,6 +35,7 @@ import type {
   AgentSlashCommand,
   AgentSshConn,
   AgentSource,
+  AgentStatus,
   AgentRateLimitUsage,
   AgentTokenUsage,
   AgentWorktreeForkInput,
@@ -1022,6 +1023,17 @@ function emitProcessEvent(
   emit(session, { type: 'process:event', sessionId: session.id, processId, title, text, status })
 }
 
+function currentSessionStatus(session: AgentSession): AgentStatus {
+  if (session.pendingPermissions.size > 0) return 'waiting_permission'
+  if (session.pendingDialogs.size > 0) return 'waiting_user'
+  if (session.running && !session.running.signal.aborted) return 'working'
+  return 'idle'
+}
+
+function emitCurrentSessionStatus(session: AgentSession): void {
+  emit(session, { type: 'status', sessionId: session.id, status: currentSessionStatus(session) })
+}
+
 function emitInterrupted(session: AgentSession, message = '사용자가 Agent 작업을 중지했습니다.'): void {
   emit(session, { type: 'session:interrupted', sessionId: session.id, message })
 }
@@ -1674,8 +1686,8 @@ function handleSystemMessage(session: AgentSession, message: Record<string, unkn
   }
   if (subtype === 'status') {
     const status = message.status === 'requesting' || message.status === 'compacting' ? 'working' : 'idle'
-    if (status === 'idle' && session.pendingPermissions.size > 0) {
-      emit(session, { type: 'status', sessionId: session.id, status: 'waiting_permission' })
+    if (status === 'idle') {
+      emitCurrentSessionStatus(session)
       return
     }
     emit(session, { type: 'status', sessionId: session.id, status })
@@ -3190,6 +3202,7 @@ export function createAgentSession(opts: AgentCreateOptions, webContents: WebCon
     } else {
       refreshAgentAuthStatus(existing)
     }
+    emitCurrentSessionStatus(existing)
     emitUsageUpdate(existing)
     if (existing.provider === 'claude') prefetchClaudeSlashCommands(existing)
     return { ok: true }
