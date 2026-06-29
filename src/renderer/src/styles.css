@@ -4543,6 +4543,7 @@ body {
   border-radius: 4px;
   padding: 8px;
   font: var(--agent-font-size, 13px)/1.45 var(--font-sans);
+  overflow-wrap: anywhere;
   outline: none;
 }
 .agent-prompt textarea:disabled {

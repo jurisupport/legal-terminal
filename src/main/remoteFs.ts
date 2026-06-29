@@ -392,6 +392,11 @@ interface Entry {
   mtimeMs?: number
 }
 
+export interface RfsReadProgress {
+  totalBytes?: number
+  downloadedBytes: number
+}
+
 export interface RfsListOptions {
   refresh?: boolean
 }
@@ -628,7 +633,10 @@ function statIsDir(sftp: SFTPWrapper, path: string): Promise<boolean> {
   )
 }
 
-export async function rfsReadBytes(uri: string): Promise<Buffer> {
+export async function rfsReadBytes(
+  uri: string,
+  onProgress?: (progress: RfsReadProgress) => void
+): Promise<Buffer> {
   const { profileId, path } = parseRemote(uri)
   const sftp = await getSftp(profileId)
   let actualPath: string
@@ -644,27 +652,31 @@ export async function rfsReadBytes(uri: string): Promise<Buffer> {
   const cacheKey = remoteFileCacheKey(profileId, actualPath, remoteFileStatSignature(st))
   const cached = await readRemoteFileCache(REMOTE_FILE_CACHE_NAMESPACE, cacheKey)
   if (cached) return cached
+  const progress = (downloadedBytes: number): void =>
+    onProgress?.({ totalBytes: st.size, downloadedBytes })
+  progress(0)
   const remember = (data: Buffer): Buffer => {
     rememberRemoteFileCache(REMOTE_FILE_CACHE_NAMESPACE, cacheKey, data)
+    progress(data.byteLength)
     return data
   }
   if (isLikelyOneDrivePath(actualPath)) {
     const cloudPath = oneDriveCloudPath(actualPath)
     try {
-      return remember(await readBytesViaSsh(profileId, actualPath, SSH_QUICK_READ_TIMEOUT_MS))
+      return remember(await readBytesViaSsh(profileId, actualPath, SSH_QUICK_READ_TIMEOUT_MS, progress))
     } catch (sshErr) {
       if (cloudPath) {
         try {
           await materializeRemoteOneDriveFile(profileId, cloudPath, actualPath)
-          return remember(await readBytesViaSsh(profileId, actualPath, SSH_READ_TIMEOUT_MS))
+          return remember(await readBytesViaSsh(profileId, actualPath, SSH_READ_TIMEOUT_MS, progress))
         } catch (materializeErr) {
           try {
-            return remember(await readBytesViaRclone(profileId, cloudPath))
+            return remember(await readBytesViaRclone(profileId, cloudPath, progress))
           } catch (rcloneErr) {
             if (!isCloudTimeout(sshErr)) throw new Error(readFailureMessage(sshErr, rcloneErr))
             await hydrateRemoteFile(profileId, actualPath)
             try {
-              return remember(await readBytesViaSsh(profileId, actualPath))
+              return remember(await readBytesViaSsh(profileId, actualPath, SSH_READ_TIMEOUT_MS, progress))
             } catch (retryErr) {
               throw new Error(
                 [
@@ -679,12 +691,13 @@ export async function rfsReadBytes(uri: string): Promise<Buffer> {
       }
       if (!isCloudTimeout(sshErr)) throw sshErr
       await hydrateRemoteFile(profileId, actualPath)
-      return remember(await readBytesViaSsh(profileId, actualPath))
+      return remember(await readBytesViaSsh(profileId, actualPath, SSH_READ_TIMEOUT_MS, progress))
     }
   }
   try {
     return remember(await new Promise<Buffer>((resolve, reject) => {
       const chunks: Buffer[] = []
+      let downloadedBytes = 0
       const stream = sftp.createReadStream(actualPath)
       let settled = false
       let timer: ReturnType<typeof setTimeout> | undefined
@@ -701,7 +714,10 @@ export async function rfsReadBytes(uri: string): Promise<Buffer> {
       }
       arm()
       stream.on('data', (chunk: Buffer | string) => {
-        chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk))
+        const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
+        chunks.push(buf)
+        downloadedBytes += buf.byteLength
+        progress(downloadedBytes)
         arm()
       })
       stream.on('error', (err: unknown) => fail(err instanceof Error ? err : new Error(String(err))))
@@ -715,12 +731,12 @@ export async function rfsReadBytes(uri: string): Promise<Buffer> {
   } catch (e) {
     const sftpErr = e
     try {
-      return remember(await readBytesViaSsh(profileId, actualPath))
+      return remember(await readBytesViaSsh(profileId, actualPath, SSH_READ_TIMEOUT_MS, progress))
     } catch (sshErr) {
       if (isCloudTimeout(sshErr)) {
         await hydrateRemoteFile(profileId, actualPath)
         try {
-          return remember(await readBytesViaSsh(profileId, actualPath))
+          return remember(await readBytesViaSsh(profileId, actualPath, SSH_READ_TIMEOUT_MS, progress))
         } catch (retryErr) {
           throw new Error(cloudFileMessage(actualPath, sftpErr, retryErr))
         }
@@ -751,7 +767,8 @@ function cloudFileMessage(path: string, sftpErr: unknown, retryErr: unknown): st
 async function readBytesViaSsh(
   profileId: string,
   path: string,
-  timeoutMs = SSH_READ_TIMEOUT_MS
+  timeoutMs = SSH_READ_TIMEOUT_MS,
+  onBytes?: (downloadedBytes: number) => void
 ): Promise<Buffer> {
   const profile = await getProfile(profileId)
   const args = sshArgs(profile)
@@ -765,7 +782,12 @@ async function readBytesViaSsh(
       proc.kill()
       reject(new Error('Operation timed out'))
     }, timeoutMs)
-    proc.stdout.on('data', (chunk: Buffer) => chunks.push(chunk))
+    let downloadedBytes = 0
+    proc.stdout.on('data', (chunk: Buffer) => {
+      chunks.push(chunk)
+      downloadedBytes += chunk.byteLength
+      onBytes?.(downloadedBytes)
+    })
     proc.stderr.on('data', (chunk: Buffer) => errs.push(chunk))
     proc.on('error', (err) => {
       clearTimeout(timer)
@@ -783,7 +805,11 @@ async function readBytesViaSsh(
   })
 }
 
-async function readBytesViaRclone(profileId: string, cloudPath: string): Promise<Buffer> {
+async function readBytesViaRclone(
+  profileId: string,
+  cloudPath: string,
+  onBytes?: (downloadedBytes: number) => void
+): Promise<Buffer> {
   const profile = await getProfile(profileId)
   const script = `${remoteRcloneBootstrap()}\n"$rclone_bin" cat ${shq(cloudPath)} --retries=1 --low-level-retries=1`
 
@@ -795,7 +821,12 @@ async function readBytesViaRclone(profileId: string, cloudPath: string): Promise
       proc.kill()
       reject(new Error('rclone read timed out'))
     }, RCLONE_READ_TIMEOUT_MS)
-    proc.stdout.on('data', (chunk: Buffer) => chunks.push(chunk))
+    let downloadedBytes = 0
+    proc.stdout.on('data', (chunk: Buffer) => {
+      chunks.push(chunk)
+      downloadedBytes += chunk.byteLength
+      onBytes?.(downloadedBytes)
+    })
     proc.stderr.on('data', (chunk: Buffer) => errs.push(chunk))
     proc.on('error', (err) => {
       clearTimeout(timer)

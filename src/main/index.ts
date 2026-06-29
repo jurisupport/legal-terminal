@@ -41,7 +41,8 @@ import {
   rfsStat,
   rfsDelete,
   clearRemoteDirCache as clearRemoteFsDirCache,
-  disposeRemote
+  disposeRemote,
+  type RfsReadProgress
 } from './remoteFs'
 import type { SshProfile } from './settings'
 import {
@@ -77,6 +78,7 @@ const dockBounceByWindow = new Map<number, number>()
 const forceClosingWindowIds = new Set<number>()
 const GITHUB_PROJECT_URL = 'https://github.com/jurisupport/legal-terminal'
 const DEFAULT_WINDOW_TITLE = 'legal-terminal'
+let lastDownloadDir: string | undefined
 
 function getAppIconPath(): string | undefined {
   const iconPath = app.isPackaged
@@ -1563,6 +1565,24 @@ function remoteBasename(uri: string): string {
   return posix.basename(path) || 'download'
 }
 
+async function getDownloadDefaultDir(): Promise<string> {
+  const candidate = lastDownloadDir ?? (await getSettings()).lastDownloadDir
+  if (candidate) {
+    try {
+      const st = await stat(candidate)
+      if (st.isDirectory()) return candidate
+    } catch {
+      /* 설정에 남은 폴더가 사라졌으면 기본 다운로드 폴더로 되돌린다. */
+    }
+  }
+  return app.getPath('downloads')
+}
+
+function rememberDownloadDir(dir: string): void {
+  lastDownloadDir = dir
+  void setSettings({ lastDownloadDir: dir }).catch(() => {})
+}
+
 interface AutoDownloadRecordsResult {
   ok: boolean
   path?: string
@@ -1693,6 +1713,8 @@ interface DownloadProgressUpdate {
   phase: DownloadProgressPhase
   totalFiles?: number
   completedFiles?: number
+  totalBytes?: number
+  downloadedBytes?: number
   currentFile?: string
   destPath?: string
   error?: string
@@ -1714,6 +1736,55 @@ function sendDownloadProgress(
     completedFiles: 0,
     ...update
   })
+}
+
+async function readRemoteBytesWithProgress(sender: WebContents, filePath: string): Promise<Buffer> {
+  const base: DownloadProgressBase = {
+    id: createDownloadId(),
+    source: filePath,
+    name: remoteBasename(filePath),
+    isDir: false
+  }
+  let started = false
+  let sentBytes = 0
+  const onProgress = (progress: RfsReadProgress): void => {
+    started = true
+    sentBytes = Math.max(sentBytes, progress.downloadedBytes)
+    sendDownloadProgress(sender, base, {
+      phase: 'downloading',
+      totalFiles: 1,
+      completedFiles: 0,
+      currentFile: base.name,
+      totalBytes: progress.totalBytes,
+      downloadedBytes: sentBytes
+    })
+  }
+  try {
+    const buf = await rfsReadBytes(filePath, onProgress)
+    if (started) {
+      sendDownloadProgress(sender, base, {
+        phase: 'done',
+        totalFiles: 1,
+        completedFiles: 1,
+        currentFile: base.name,
+        totalBytes: buf.byteLength,
+        downloadedBytes: buf.byteLength
+      })
+    }
+    return buf
+  } catch (error) {
+    if (started) {
+      sendDownloadProgress(sender, base, {
+        phase: 'error',
+        error: String(error),
+        totalFiles: 1,
+        completedFiles: 0,
+        currentFile: base.name,
+        downloadedBytes: sentBytes
+      })
+    }
+    throw error
+  }
 }
 
 async function collectRemoteDownloadPlan(srcUri: string, destPath: string): Promise<RemoteDownloadPlan> {
@@ -1769,7 +1840,20 @@ async function downloadRemoteToLocalWithProgress(
       destPath
     })
     await mkdir(dirname(file.destPath), { recursive: true })
-    await writeFile(file.destPath, await rfsReadBytes(file.source))
+    await writeFile(
+      file.destPath,
+      await rfsReadBytes(file.source, (progress) =>
+        onProgress({
+          phase: 'downloading',
+          totalFiles,
+          completedFiles,
+          currentFile: file.label,
+          destPath,
+          totalBytes: progress.totalBytes,
+          downloadedBytes: progress.downloadedBytes
+        })
+      )
+    )
     completedFiles += 1
     onProgress({
       phase: 'downloading',
@@ -1915,9 +1999,11 @@ ipcMain.handle('fs:listPdfs', async (_e, dir: string) => {
 
 ipcMain.handle('fs:clipboardFiles', async () => readClipboardFilePaths())
 
-ipcMain.handle('fs:readBytes', async (_e, filePath: string) => {
+ipcMain.handle('fs:readBytes', async (event, filePath: string) => {
   try {
-    const buf = isRemote(filePath) ? await rfsReadBytes(filePath) : await readLocalBytes(filePath)
+    const buf = isRemote(filePath)
+      ? await readRemoteBytesWithProgress(event.sender, filePath)
+      : await readLocalBytes(filePath)
     // 렌더러로 ArrayBuffer 전달 (pdf.js 입력용)
     return buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength)
   } catch (e) {
@@ -1927,10 +2013,12 @@ ipcMain.handle('fs:readBytes', async (_e, filePath: string) => {
 })
 
 // HWP/HWPX 텍스트만 추출 — 이미지/표 등 서식은 무시하고 본문 텍스트만
-ipcMain.handle('fs:readHwpText', async (_e, filePath: string) => {
+ipcMain.handle('fs:readHwpText', async (event, filePath: string) => {
   const ext = extname(filePath).toLowerCase()
   try {
-    const buf = isRemote(filePath) ? await rfsReadBytes(filePath) : await readLocalBytes(filePath)
+    const buf = isRemote(filePath)
+      ? await readRemoteBytesWithProgress(event.sender, filePath)
+      : await readLocalBytes(filePath)
     return { ok: true, text: extractHwpText(buf, ext) }
   } catch (e) {
     return { ok: false, text: '', error: 'HWP/HWPX 파싱 실패: ' + String(e) }
@@ -1938,19 +2026,23 @@ ipcMain.handle('fs:readHwpText', async (_e, filePath: string) => {
 })
 
 // HWP/HWPX 본문과 표를 Markdown으로 추출
-ipcMain.handle('fs:readHwpMarkdown', async (_e, filePath: string) => {
+ipcMain.handle('fs:readHwpMarkdown', async (event, filePath: string) => {
   const ext = extname(filePath).toLowerCase()
   try {
-    const buf = isRemote(filePath) ? await rfsReadBytes(filePath) : await readLocalBytes(filePath)
+    const buf = isRemote(filePath)
+      ? await readRemoteBytesWithProgress(event.sender, filePath)
+      : await readLocalBytes(filePath)
     return { ok: true, markdown: extractHwpMarkdown(buf, ext) }
   } catch (e) {
     return { ok: false, markdown: '', error: 'HWP/HWPX Markdown 추출 실패: ' + String(e) }
   }
 })
 
-ipcMain.handle('fs:readDocxText', async (_e, filePath: string) => {
+ipcMain.handle('fs:readDocxText', async (event, filePath: string) => {
   try {
-    const buf = isRemote(filePath) ? await rfsReadBytes(filePath) : await readLocalBytes(filePath)
+    const buf = isRemote(filePath)
+      ? await readRemoteBytesWithProgress(event.sender, filePath)
+      : await readLocalBytes(filePath)
     return { ok: true, text: extractDocxText(buf) }
   } catch (e) {
     return { ok: false, text: '', error: 'DOCX 텍스트 추출 실패: ' + String(e) }
@@ -2070,14 +2162,17 @@ ipcMain.handle('fs:download', async (event, source: string) => {
     const st = await rfsStat(source)
     const name = remoteBasename(source)
     progressBase = { id: createDownloadId(), source, name, isDir: st.isDir }
+    const defaultDownloadDir = await getDownloadDefaultDir()
     if (st.isDir) {
       const r = await dialog.showOpenDialog(mainWindow, {
         title: '원격 폴더 다운로드 위치',
-        defaultPath: app.getPath('downloads'),
+        defaultPath: defaultDownloadDir,
         properties: ['openDirectory', 'createDirectory']
       })
       if (r.canceled || r.filePaths.length === 0) return { ok: true, canceled: true }
-      const path = join(r.filePaths[0], name)
+      const selectedDir = r.filePaths[0]
+      rememberDownloadDir(selectedDir)
+      const path = join(selectedDir, name)
       sendDownloadProgress(event.sender, progressBase, { phase: 'preparing', destPath: path })
       const count = await downloadRemoteToLocalWithProgress(source, path, (update) =>
         sendDownloadProgress(event.sender, progressBase as DownloadProgressBase, update)
@@ -2092,9 +2187,10 @@ ipcMain.handle('fs:download', async (event, source: string) => {
     }
     const r = await dialog.showSaveDialog(mainWindow, {
       title: '원격 파일 다운로드',
-      defaultPath: join(app.getPath('downloads'), name)
+      defaultPath: join(defaultDownloadDir, name)
     })
     if (r.canceled || !r.filePath) return { ok: true, canceled: true }
+    rememberDownloadDir(dirname(r.filePath))
     sendDownloadProgress(event.sender, progressBase, {
       phase: 'downloading',
       totalFiles: 1,
@@ -2236,12 +2332,12 @@ ipcMain.handle('fs:stat', async (_e, filePath: string) => {
   }
 })
 
-ipcMain.handle('fs:readText', async (_e, filePath: string) => {
+ipcMain.handle('fs:readText', async (event, filePath: string) => {
   const ext = extname(filePath).toLowerCase()
   if (isRemote(filePath)) {
     const st = await rfsStat(filePath)
     if (!TEXT_EXT.has(ext)) return { ext, kind: 'binary' as const, text: '', size: st.size, mtimeMs: st.mtimeMs }
-    const buf = await rfsReadBytes(filePath)
+    const buf = await readRemoteBytesWithProgress(event.sender, filePath)
     const decoded = decodeTextBuffer(buf, MAX_TEXT_BYTES)
     return {
       ext,

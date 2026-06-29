@@ -47,6 +47,8 @@ export interface FsDownloadProgress {
   phase: 'preparing' | 'downloading' | 'done' | 'error'
   totalFiles: number
   completedFiles: number
+  totalBytes?: number
+  downloadedBytes?: number
   currentFile?: string
   destPath?: string
   error?: string

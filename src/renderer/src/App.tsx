@@ -6765,10 +6765,40 @@ export default function App(): JSX.Element {
   )
 }
 
+function formatBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return '0 B'
+  const units = ['B', 'KB', 'MB', 'GB', 'TB']
+  let value = bytes
+  let unit = 0
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024
+    unit += 1
+  }
+  return `${value >= 10 || unit === 0 ? value.toFixed(0) : value.toFixed(1)} ${units[unit]}`
+}
+
 function DownloadProgressToast({ progress }: { progress: FsDownloadProgress }): JSX.Element {
   const total = Math.max(0, progress.totalFiles)
   const completed = total > 0 ? Math.min(progress.completedFiles, total) : progress.completedFiles
-  const percent = total > 0 ? Math.round((completed / total) * 100) : progress.phase === 'done' ? 100 : 0
+  const totalBytes = Math.max(0, progress.totalBytes ?? 0)
+  const downloadedBytes =
+    totalBytes > 0
+      ? Math.min(Math.max(0, progress.downloadedBytes ?? 0), totalBytes)
+      : Math.max(0, progress.downloadedBytes ?? 0)
+  const byteDetail =
+    totalBytes > 0
+      ? `${formatBytes(downloadedBytes)} / ${formatBytes(totalBytes)}`
+      : downloadedBytes > 0
+        ? formatBytes(downloadedBytes)
+        : ''
+  const percent =
+    totalBytes > 0
+      ? Math.round((downloadedBytes / totalBytes) * 100)
+      : total > 0
+        ? Math.round((completed / total) * 100)
+        : progress.phase === 'done'
+          ? 100
+          : 0
   const title =
     progress.phase === 'preparing'
       ? `${progress.name} 목록 확인 중`
@@ -6782,11 +6812,13 @@ function DownloadProgressToast({ progress }: { progress: FsDownloadProgress }): 
       ? '원격 폴더를 살펴보는 중입니다.'
       : progress.phase === 'error'
         ? progress.error || '알 수 없는 오류'
-        : total > 0
-          ? `파일 ${completed}/${total}개${progress.currentFile ? ` · ${progress.currentFile}` : ''}`
+        : byteDetail
+          ? `${byteDetail}${total > 1 ? ` · 파일 ${completed}/${total}개` : ''}${progress.currentFile ? ` · ${progress.currentFile}` : ''}`
+          : total > 0
+            ? `파일 ${completed}/${total}개${progress.currentFile ? ` · ${progress.currentFile}` : ''}`
           : progress.isDir
-            ? '빈 폴더 또는 파일 목록 생성 중'
-            : progress.currentFile || '파일을 내려받는 중입니다.'
+              ? '빈 폴더 또는 파일 목록 생성 중'
+              : progress.currentFile || '파일을 내려받는 중입니다.'
 
   return (
     <div className={`download-progress ${progress.phase}`} role="status" aria-live="polite">

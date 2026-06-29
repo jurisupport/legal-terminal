@@ -1,4 +1,4 @@
-import { parseMarkdown } from './markdownCompat'
+import { parseMarkdown } from './markdownCompat.ts'
 
 type ColWidth = { value: number; unit: '%' | 'cm' }
 type ColWidthSlot = ColWidth | null

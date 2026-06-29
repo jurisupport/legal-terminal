@@ -996,14 +996,62 @@ function mergePromptHistory(current: string[], entries: string[]): string[] {
   return merged.slice(-PROMPT_HISTORY_LIMIT)
 }
 
-function caretOnFirstLine(textarea: HTMLTextAreaElement): boolean {
-  if (textarea.selectionStart !== textarea.selectionEnd) return false
-  return !textarea.value.slice(0, textarea.selectionStart).includes('\n')
+function textareaLineHeight(textarea: HTMLTextAreaElement): number {
+  const style = window.getComputedStyle(textarea)
+  const lineHeight = Number.parseFloat(style.lineHeight)
+  if (Number.isFinite(lineHeight)) return lineHeight
+  const fontSize = Number.parseFloat(style.fontSize)
+  return Number.isFinite(fontSize) ? fontSize * 1.45 : 18
 }
 
-function caretOnLastLine(textarea: HTMLTextAreaElement): boolean {
+function textareaCaretTop(textarea: HTMLTextAreaElement, position: number): number {
+  if (textarea.clientWidth <= 0) return 0
+
+  const style = window.getComputedStyle(textarea)
+  const mirror = document.createElement('div')
+  const marker = document.createElement('span')
+  mirror.textContent = textarea.value.slice(0, position)
+  marker.textContent = '\u200b'
+  mirror.appendChild(marker)
+
+  const mirrorStyle = mirror.style
+  mirrorStyle.position = 'absolute'
+  mirrorStyle.visibility = 'hidden'
+  mirrorStyle.left = '-10000px'
+  mirrorStyle.top = '0'
+  mirrorStyle.width = `${textarea.clientWidth}px`
+  mirrorStyle.boxSizing = 'border-box'
+  mirrorStyle.whiteSpace = 'pre-wrap'
+  mirrorStyle.overflowWrap = 'anywhere'
+  mirrorStyle.font = style.font
+  mirrorStyle.lineHeight = style.lineHeight
+  mirrorStyle.letterSpacing = style.letterSpacing
+  mirrorStyle.textTransform = style.textTransform
+  mirrorStyle.textAlign = style.textAlign
+  mirrorStyle.textIndent = style.textIndent
+  mirrorStyle.padding = style.padding
+  mirrorStyle.border = '0'
+  mirrorStyle.setProperty('tab-size', style.getPropertyValue('tab-size'))
+
+  document.body.appendChild(mirror)
+  const top = marker.offsetTop
+  mirror.remove()
+  return top
+}
+
+function caretOnFirstVisualLine(textarea: HTMLTextAreaElement): boolean {
   if (textarea.selectionStart !== textarea.selectionEnd) return false
-  return !textarea.value.slice(textarea.selectionStart).includes('\n')
+  const lineHeight = textareaLineHeight(textarea)
+  return textareaCaretTop(textarea, textarea.selectionStart) <= textareaCaretTop(textarea, 0) + lineHeight / 2
+}
+
+function caretOnLastVisualLine(textarea: HTMLTextAreaElement): boolean {
+  if (textarea.selectionStart !== textarea.selectionEnd) return false
+  const lineHeight = textareaLineHeight(textarea)
+  return (
+    textareaCaretTop(textarea, textarea.selectionStart) >=
+    textareaCaretTop(textarea, textarea.value.length) - lineHeight / 2
+  )
 }
 
 function isEditableKeyboardTarget(target: EventTarget | null): boolean {
@@ -3133,6 +3181,15 @@ export default function AgentPanel({
     }
   }
 
+  const copyPrompt = async (text: string): Promise<void> => {
+    try {
+      await navigator.clipboard.writeText(text)
+      showTransientFeedback('프롬프트 복사됨')
+    } catch {
+      setError('프롬프트를 클립보드에 복사할 수 없습니다.')
+    }
+  }
+
   const copyAssistant = async (markdown: string, mode: AgentCopyMode): Promise<void> => {
     try {
       await copyAgentOutput(markdown, mode)
@@ -3523,11 +3580,26 @@ export default function AgentPanel({
           const showRevertDiff = item.kind === 'diff' && item.status === 'applied' && canRevertDiff(item.diff)
           const showOpenChangedFile =
             item.kind === 'diff' && !!onOpenFile && !!(item.diff?.filePath ?? item.filePath)
+          const promptCopyText =
+            (item.kind === 'user' || item.kind === 'queue') && item.text && item.text.trim().length > 0
+              ? item.text
+              : ''
           return (
             <section key={item.id} className={`agent-card ${item.kind} ${item.status ?? ''}`}>
               <div className="agent-card-head">
                 <span>{item.title}</span>
                 <span className="agent-card-head-right">
+                  {promptCopyText && (
+                    <span className="agent-copy-actions" aria-label="프롬프트 복사">
+                      <button
+                        type="button"
+                        title="프롬프트 복사"
+                        onClick={() => void copyPrompt(promptCopyText)}
+                      >
+                        복사
+                      </button>
+                    </span>
+                  )}
                   {item.kind === 'assistant' && item.text && (
                     <span className="agent-copy-actions" aria-label="출력 복사">
                       <button
@@ -3863,8 +3935,8 @@ export default function AgentPanel({
               const textarea = e.currentTarget
               const direction = e.key === 'ArrowUp' ? -1 : 1
               if (
-                (direction === -1 && caretOnFirstLine(textarea)) ||
-                (direction === 1 && promptHistoryIndexRef.current !== null && caretOnLastLine(textarea))
+                (direction === -1 && caretOnFirstVisualLine(textarea)) ||
+                (direction === 1 && promptHistoryIndexRef.current !== null && caretOnLastVisualLine(textarea))
               ) {
                 if (recallPromptHistory(direction)) e.preventDefault()
               }
