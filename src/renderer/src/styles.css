@@ -4355,6 +4355,11 @@ body {
   background: rgba(79, 107, 122, 0.22);
   font-size: var(--agent-small-font-size);
 }
+button.agent-attachment-chip {
+  font-family: inherit;
+  text-align: left;
+  cursor: pointer;
+}
 .agent-attachment-pending {
   flex: 1 1 160px;
   min-width: 0;

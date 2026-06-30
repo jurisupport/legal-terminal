@@ -30,12 +30,26 @@ const ALIGN_CENTER_CLOSE = '<!-- /lt-align -->'
 export const TEXT_SELECTION_OVERLAY_EVENT = 'lt:text-selection-overlay'
 export const MARKDOWN_CENTER_SELECTION_EVENT = 'lt:markdown-center-selection'
 
+export interface MarkdownSelectionRange {
+  startLine: number
+  startColumn: number
+  endLine: number
+  endColumn: number
+}
+
+export interface MarkdownRevealRequest {
+  nonce: number
+  range?: MarkdownSelectionRange
+  text?: string
+}
+
 export interface TextSelectionOverlayDetail {
   x: number
   y: number
   text: string
   markdown?: string
   editorDraftId?: string
+  range?: MarkdownSelectionRange
   count: number
 }
 
@@ -240,6 +254,17 @@ function restorePosition(state: EditorState, bookmark: PositionBookmark): number
   return Math.min(line.from + bookmark.column, line.to)
 }
 
+function selectionRange(state: EditorState, from: number, to: number): MarkdownSelectionRange {
+  const start = bookmarkPosition(state, from)
+  const end = bookmarkPosition(state, to)
+  return {
+    startLine: start.line,
+    startColumn: start.column,
+    endLine: end.line,
+    endColumn: end.column
+  }
+}
+
 function bookmarkSelection(state: EditorState): SelectionBookmark {
   return {
     mainIndex: state.selection.mainIndex,
@@ -283,6 +308,7 @@ function editorSelectionOverlay(view: EditorView, editorDraftId: string): TextSe
     text,
     markdown: text,
     editorDraftId,
+    range: selectionRange(view.state, from, to),
     count: Array.from(visibleText).length
   }
 }
@@ -304,6 +330,74 @@ function centerAlignSelectionInView(view: EditorView): void {
   view.dispatch({
     changes: { from, to, insert: centerAlignBlock(text) },
     selection: { anchor: from + ALIGN_CENTER_OPEN.length + 1 },
+    scrollIntoView: true
+  })
+  view.focus()
+}
+
+function findRevealTextRange(state: EditorState, text: string): { from: number; to: number } | null {
+  const target = text.trim()
+  if (!target) return null
+  const doc = state.doc.toString()
+  const exact = doc.indexOf(target)
+  if (exact >= 0) return { from: exact, to: exact + target.length }
+  const compactTarget = target.replace(/\s+/g, ' ')
+  if (!compactTarget) return null
+  const compactDoc = doc.replace(/\s+/g, ' ')
+  const compactIndex = compactDoc.indexOf(compactTarget)
+  if (compactIndex < 0) return null
+  let compactPos = 0
+  let from = -1
+  let to = -1
+  for (let i = 0; i < doc.length; i += 1) {
+    const char = doc[i]
+    const previous = doc[i - 1]
+    const contributesSpace = /\s/.test(char) && !/\s/.test(previous ?? '')
+    if (!/\s/.test(char) || contributesSpace) {
+      if (compactPos === compactIndex) from = i
+      if (compactPos === compactIndex + compactTarget.length - 1) {
+        to = i + 1
+        break
+      }
+      compactPos += 1
+    }
+  }
+  return from >= 0 && to >= from ? { from, to } : null
+}
+
+function revealMarkdownSelection(view: EditorView, request: MarkdownRevealRequest): void {
+  const state = view.state
+  let from: number | undefined
+  let to: number | undefined
+  if (request.range) {
+    from = restorePosition(state, {
+      line: request.range.startLine,
+      column: request.range.startColumn
+    })
+    to = restorePosition(state, {
+      line: request.range.endLine,
+      column: request.range.endColumn
+    })
+    if (request.text) {
+      const selected = state.sliceDoc(Math.min(from, to), Math.max(from, to)).trim()
+      if (selected !== request.text.trim()) {
+        const found = findRevealTextRange(state, request.text)
+        if (found) {
+          from = found.from
+          to = found.to
+        }
+      }
+    }
+  } else if (request.text) {
+    const found = findRevealTextRange(state, request.text)
+    if (found) {
+      from = found.from
+      to = found.to
+    }
+  }
+  if (from === undefined || to === undefined) return
+  view.dispatch({
+    selection: EditorSelection.range(from, to),
     scrollIntoView: true
   })
   view.focus()
@@ -367,6 +461,7 @@ export default function MarkdownEditor({
   scrollKey,
   initialScroll,
   onScrollPosition,
+  revealRequest,
   onDirty
 }: {
   title?: string
@@ -385,6 +480,7 @@ export default function MarkdownEditor({
   scrollKey?: string
   initialScroll?: DocumentScrollPosition
   onScrollPosition?: (position: DocumentScrollPosition) => void
+  revealRequest?: MarkdownRevealRequest
   // 실제 파일에 저장되지 않은 변경사항이 있으면 닫기 전 알린다
   onDirty?: (dirty: boolean) => void
 }): JSX.Element {
@@ -393,9 +489,12 @@ export default function MarkdownEditor({
   const scrollKeyRef = useRef(scrollKey)
   const initialScrollRef = useRef(initialScroll)
   const onScrollPositionRef = useRef(onScrollPosition)
+  const revealRequestRef = useRef(revealRequest)
+  const revealedRequestNonceRef = useRef<number | null>(null)
   scrollKeyRef.current = scrollKey
   initialScrollRef.current = initialScroll
   onScrollPositionRef.current = onScrollPosition
+  revealRequestRef.current = revealRequest
   const hostRef = useRef<HTMLDivElement>(null)
   const viewRef = useRef<EditorView | null>(null)
   const previewComp = useRef(new Compartment())
@@ -424,6 +523,12 @@ export default function MarkdownEditor({
       top: view.scrollDOM.scrollTop,
       left: view.scrollDOM.scrollLeft
     })
+  }
+  const applyRevealRequest = (request = revealRequestRef.current): void => {
+    const view = viewRef.current
+    if (!view || !request || revealedRequestNonceRef.current === request.nonce) return
+    revealedRequestNonceRef.current = request.nonce
+    window.requestAnimationFrame(() => revealMarkdownSelection(view, request))
   }
   const [preview, setPreview] = useState(!plainText)
   const [err, setErr] = useState('')
@@ -872,6 +977,12 @@ export default function MarkdownEditor({
   }, [title])
 
   useEffect(() => {
+    revealRequestRef.current = revealRequest
+    applyRevealRequest(revealRequest)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [revealRequest?.nonce])
+
+  useEffect(() => {
     const onCenterSelection = (event: Event): void => {
       const detail = (event as CustomEvent<{ draftId?: string }>).detail
       if (detail?.draftId !== draftId) return
@@ -995,6 +1106,7 @@ export default function MarkdownEditor({
             scroller.scrollLeft = left
           })
         }
+        applyRevealRequest()
         viewRef.current.focus()
       })
       .catch((e) => alive && setErr(String(e)))

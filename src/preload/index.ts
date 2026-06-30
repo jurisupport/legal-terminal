@@ -410,6 +410,20 @@ interface AgentAttachment {
   origin?: 'local' | 'remote'
   access?: 'workspace-path' | 'context-only'
   range?: { startLine?: number; endLine?: number; startPage?: number; endPage?: number }
+  source?: {
+    docId?: string
+    path?: string
+    title?: string
+    text?: string
+    range?: {
+      startLine?: number
+      startColumn?: number
+      endLine?: number
+      endColumn?: number
+      startPage?: number
+      endPage?: number
+    }
+  }
   text?: string
   content?: string
   contentTruncated?: boolean

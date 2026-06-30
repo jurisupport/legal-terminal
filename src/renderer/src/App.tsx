@@ -41,6 +41,8 @@ import MarkdownEditor, {
   TEXT_SELECTION_OVERLAY_EVENT,
   type MarkdownSaveHandler,
   type MarkdownDocumentPayload,
+  type MarkdownRevealRequest,
+  type MarkdownSelectionRange,
   type TextSelectionOverlayDetail
 } from './editor/MarkdownEditor'
 import { markdownToPlainText, writeMarkdownClipboard } from './markdownClipboard'
@@ -354,6 +356,8 @@ const isAgentTab = (tab?: TermTab): tab is TermTab & { kind: 'agent' } => tab?.k
 const isAgentProvider = (value: unknown): value is AgentProvider => value === 'claude' || value === 'codex'
 const resolveAgentProvider = (value: unknown, _ssh?: SshConn): AgentProvider =>
   isAgentProvider(value) ? value : DEFAULT_AGENT_PROVIDER
+const isClaudeAgentTab = (tab?: TermTab): tab is TermTab & { kind: 'agent' } =>
+  isAgentTab(tab) && resolveAgentProvider(tab.agentProvider, tab.ssh) === 'claude'
 const agentProviderLabel = (term: TermTab): string =>
   resolveAgentProvider(term.agentProvider, term.ssh) === 'codex' ? 'Codex Agent' : 'Claude Agent'
 const otherSide = (side: DockSide): DockSide => (side === 'left' ? 'right' : 'left')
@@ -394,20 +398,20 @@ const bumpFocusNonce = (current: Record<string, number>, id: string): Record<str
   [id]: (current[id] ?? 0) + 1
 })
 
-const resolveClaudeTargetTab = (
+const resolveClaudeAgentTargetTab = (
   tabs: TermTab[],
   activeTermId: string,
   activeWorkBySide: Record<DockSide, string>
-): TermTab | undefined => {
+): (TermTab & { kind: 'agent' }) | undefined => {
   const active = tabs.find((tab) => tab.id === activeTermId)
-  if (active) return active
+  if (isClaudeAgentTab(active)) return active
   for (const side of ['right', 'left'] as DockSide[]) {
     const parsed = parseWorkKey(activeWorkBySide[side] ?? '')
     if (parsed?.kind !== 'terminal') continue
     const visible = tabs.find((tab) => tab.id === parsed.id)
-    if (visible) return visible
+    if (isClaudeAgentTab(visible)) return visible
   }
-  return tabs[0]
+  return tabs.find(isClaudeAgentTab)
 }
 
 // 원격 파일 패널이 쓰는 ssh:// URI 빌더 (main의 remoteFs와 동일 스킴)
@@ -530,9 +534,17 @@ interface ClaudeDraftPromptOptions {
   sourceTitle?: string
   instruction?: string
 }
+interface ClaudeSelectionSource {
+  docId?: string
+  docPath?: string
+  docTitle?: string
+  text?: string
+  range?: MarkdownSelectionRange
+}
 interface ClaudeAskOptions extends ClaudeDraftPromptOptions {
   docPath?: string | null
   sourceLabel?: string
+  selectionSource?: ClaudeSelectionSource
 }
 
 type CaseWorkspaceTab = WorkspaceCaseTabPayload
@@ -1424,6 +1436,8 @@ export default function App(): JSX.Element {
   const [caseDocumentUpdates, setCaseDocumentUpdates] = useState<Record<string, CaseDocumentUpdates>>({})
   const docTabsRef = useRef<DocTab[]>(docTabs)
   const dirtyDocsRef = useRef<Set<string>>(dirtyDocs)
+  const [markdownRevealRequests, setMarkdownRevealRequests] = useState<Record<string, MarkdownRevealRequest>>({})
+  const markdownRevealSeqRef = useRef(0)
   const markdownSaveHandlersRef = useRef<Map<string, MarkdownSaveHandler>>(new Map())
   const requestWindowCloseRef = useRef<() => void>(() => {})
   const [closeWindowPrompt, setCloseWindowPrompt] = useState<CloseWindowPromptState | null>(null)
@@ -2210,7 +2224,7 @@ export default function App(): JSX.Element {
     name: string,
     side: DockSide = 'left',
     caseTabIdOverride?: string
-  ): void => {
+  ): string => {
     const caseTabIdValue = caseTabIdOverride ?? inferCaseTabIdForPath(path, caseTabs) ?? currentCaseTabIdForNewTab()
     const existing = docTabs.find((t) => t.path === path && caseIdForDoc(t) === caseTabIdValue)
     if (caseTabIdValue) {
@@ -2220,7 +2234,7 @@ export default function App(): JSX.Element {
     }
     if (existing) {
       activateDocTab(existing.id)
-      return
+      return existing.id
     }
     const kind = docKindForPath(path)
     const tab: DocTab = { id: `file-${++docSeq}`, title: name, kind, caseTabId: caseTabIdValue, path, side }
@@ -2231,6 +2245,52 @@ export default function App(): JSX.Element {
       activeDocId: tab.id,
       activeWork: { ...activeWork, [side]: docKey(tab.id) }
     })
+    return tab.id
+  }
+
+  const markdownRangeFromAttachmentSource = (
+    source: AgentAttachment['source'] | undefined
+  ): MarkdownSelectionRange | undefined => {
+    const range = source?.range
+    if (
+      typeof range?.startLine !== 'number' ||
+      typeof range.startColumn !== 'number' ||
+      typeof range.endLine !== 'number' ||
+      typeof range.endColumn !== 'number'
+    )
+      return undefined
+    return {
+      startLine: range.startLine,
+      startColumn: range.startColumn,
+      endLine: range.endLine,
+      endColumn: range.endColumn
+    }
+  }
+
+  const openAgentAttachmentSource = (attachment: AgentAttachment): void => {
+    const source = attachment.source
+    if (!source) return
+    const existing =
+      (source.docId ? docTabsRef.current.find((tab) => tab.id === source.docId) : undefined) ??
+      (source.path ? docTabsRef.current.find((tab) => tab.path === source.path) : undefined)
+    let docId: string | undefined
+    if (existing) {
+      activateDocTab(existing.id)
+      docId = existing.id
+    } else if (source.path) {
+      docId = openFile(source.path, source.title ?? fileNameFromPath(source.path), 'left')
+    }
+    if (!docId) return
+    const range = markdownRangeFromAttachmentSource(source)
+    if (!range && !source.text) return
+    setMarkdownRevealRequests((current) => ({
+      ...current,
+      [docId]: {
+        nonce: ++markdownRevealSeqRef.current,
+        range,
+        text: source.text
+      }
+    }))
   }
 
   // 이미지 뷰어: 같은 폴더의 정렬순 이전/다음 이미지로 현재 탭에서 이동
@@ -2539,7 +2599,8 @@ export default function App(): JSX.Element {
     suggested?: string,
     caseMeta?: CaseMeta,
     side: DockSide = 'right',
-    suggestedOptions?: FolderMatchSuggestion[]
+    suggestedOptions?: FolderMatchSuggestion[],
+    agentProviderOverride?: AgentProvider
   ): TermTab => {
     const source: CurrentCase = { drafts, records, name, meta: caseMeta }
     const caseTabIdValue = caseTabId(source)
@@ -2553,7 +2614,7 @@ export default function App(): JSX.Element {
       suggestedRecords: suggested,
       suggestedRecordOptions: suggestedOptions,
       autoClaude: kind === 'terminal',
-      agentProvider: kind === 'agent' ? resolveAgentProvider(agentDefaultProvider) : undefined,
+      agentProvider: kind === 'agent' ? resolveAgentProvider(agentProviderOverride ?? agentDefaultProvider) : undefined,
       createdAt: Date.now(),
       side,
       ...caseMeta
@@ -2573,8 +2634,10 @@ export default function App(): JSX.Element {
     suggested?: string,
     caseMeta?: CaseMeta,
     side: DockSide = 'right',
-    suggestedOptions?: FolderMatchSuggestion[]
-  ): TermTab => createLocalCaseTab('agent', drafts, name, records, suggested, caseMeta, side, suggestedOptions)
+    suggestedOptions?: FolderMatchSuggestion[],
+    agentProviderOverride?: AgentProvider
+  ): TermTab =>
+    createLocalCaseTab('agent', drafts, name, records, suggested, caseMeta, side, suggestedOptions, agentProviderOverride)
 
   const createCaseTerminal = (
     drafts: string,
@@ -2624,8 +2687,9 @@ export default function App(): JSX.Element {
     meta?: CaseMeta,
     records?: string,
     side: DockSide = 'right',
-    kind: 'agent' | 'terminal' = 'agent'
-  ): { id: string; title: string } => {
+    kind: 'agent' | 'terminal' = 'agent',
+    agentProviderOverride?: AgentProvider
+  ): TermTab => {
     const title = name || remotePath.replace(/\/+$/, '').split('/').pop() || profile.label
     const draftsUri = remoteUri(profile.id, remotePath)
     const ssh = sshConnFromProfile(profile)
@@ -2648,7 +2712,7 @@ export default function App(): JSX.Element {
       cwd: remotePath,
       recordsFolder: records,
       autoClaude: kind === 'terminal',
-      agentProvider: kind === 'agent' ? resolveAgentProvider(agentDefaultProvider, ssh) : undefined,
+      agentProvider: kind === 'agent' ? resolveAgentProvider(agentProviderOverride ?? agentDefaultProvider, ssh) : undefined,
       createdAt: Date.now(),
       ssh,
       sshLabel: profile.label,
@@ -2665,7 +2729,7 @@ export default function App(): JSX.Element {
     window.lt.case.addHistory({ drafts: draftsUri, records, name: title }).then(setRecent)
     // 소송기록이 정해졌으면 페어링 기억(다음에 자동 적용) — 로컬과 동일
     if (records) window.lt.case.setPairing(draftsUri, records)
-    return { id: tab.id, title }
+    return tab
   }
 
   const openRemoteCaseContext = (
@@ -3141,18 +3205,23 @@ export default function App(): JSX.Element {
     registerCaseTabFromTerm(tab)
   }
 
-  const addAgentSame = (preferredSide?: DockSide, sourceTermId = activeTerm): void => {
+  const addAgentSame = (
+    preferredSide?: DockSide,
+    sourceTermId = activeTerm,
+    options?: { provider?: AgentProvider }
+  ): TermTab | undefined => {
     const cur = termTabs.find((t) => t.id === sourceTermId)
     const side = preferredSide ?? termSide(cur)
+    const agentProviderOverride = options?.provider
     const ssh = cur?.ssh ?? currentCase?.ssh
     const cwd = cur?.cwd ?? (ssh ? currentCase?.remotePath : currentCase?.drafts)
     if (!cwd) {
       void (async () => {
         const picked = await window.lt.dialog.openCase()
         if (!picked) return
-        createCase(picked.path, picked.name, undefined, undefined, undefined, side)
+        createCase(picked.path, picked.name, undefined, undefined, undefined, side, undefined, agentProviderOverride)
       })()
-      return
+      return undefined
     }
     const title = cur?.title ?? currentCase?.name ?? cwd.split(/[\\/]/).pop() ?? '세션'
     const tab: TermTab = {
@@ -3163,7 +3232,7 @@ export default function App(): JSX.Element {
       cwd,
       recordsFolder: cur?.recordsFolder ?? currentCase?.records,
       autoClaude: false,
-      agentProvider: resolveAgentProvider(cur?.agentProvider ?? agentDefaultProvider, ssh),
+      agentProvider: resolveAgentProvider(agentProviderOverride ?? cur?.agentProvider ?? agentDefaultProvider, ssh),
       createdAt: Date.now(),
       jsId: cur?.jsId ?? currentCase?.meta?.jsId,
       court: cur?.court ?? currentCase?.meta?.court,
@@ -3176,10 +3245,14 @@ export default function App(): JSX.Element {
       side
     }
     setTermTabs((tabs) => [...tabs, tab])
-    moveAgentDraft(isAgentTab(cur) ? cur.id : undefined, tab.id)
+    const shouldMoveDraft =
+      isAgentTab(cur) &&
+      (!agentProviderOverride || resolveAgentProvider(cur.agentProvider, cur.ssh) === agentProviderOverride)
+    moveAgentDraft(shouldMoveDraft ? cur.id : undefined, tab.id)
     setActiveTerm(tab.id)
     setWorkActive(side, termKeyOf(tab.id))
     registerCaseTabFromTerm(tab)
+    return tab
   }
 
   const changeAgentProvider = (termId: string, provider: AgentProvider): void => {
@@ -3991,7 +4064,7 @@ export default function App(): JSX.Element {
 
   const selectionAttachmentForAgent = (
     text: string,
-    opts: { docPath?: string; docName?: string; sourceLabel?: string },
+    opts: { docPath?: string; docName?: string; sourceLabel?: string; selectionSource?: ClaudeSelectionSource },
     term: TermTab
   ): AgentAttachment => {
     const trimmed = text.trim()
@@ -4010,6 +4083,15 @@ export default function App(): JSX.Element {
       kind: 'selection',
       label: selectionAttachmentLabel(sourceLabel),
       path: readablePath,
+      source: opts.selectionSource
+        ? {
+            docId: opts.selectionSource.docId,
+            path: opts.selectionSource.docPath,
+            title: opts.selectionSource.docTitle ?? sourceLabel,
+            text: opts.selectionSource.text ?? trimmed,
+            range: opts.selectionSource.range
+          }
+        : undefined,
       text: body
     }
   }
@@ -4725,17 +4807,94 @@ export default function App(): JSX.Element {
     window.lt.pty.write(termId, text)
   }
 
-  // Claude 질문 전송: Agent 탭이면 SDK로, 터미널이면 paste로, 문서 전용 창이면 메인 창으로 전달.
-  const activeTermRef = useRef(activeTerm)
-  activeTermRef.current = activeTerm
-  const sendClaude = (payload: string, opts?: { displayText?: string }): void => {
-    const tab = resolveClaudeTargetTab(visibleTermTabs, activeTerm, activeWork)
-    if (tab && isAgentTab(tab)) {
-      void window.lt.agent.send(tab.id, { text: payload, displayText: opts?.displayText })
+  type SendClaudeOptions = { displayText?: string; contextPath?: string; pasteOnly?: boolean }
+
+  const focusTermTabForPrompt = (tab: TermTab): void => {
+    setActiveTerm(tab.id)
+    setWorkActive(termSide(tab), termKeyOf(tab.id))
+    setTermFocusNonce((current) => bumpFocusNonce(current, tab.id))
+  }
+
+  const pasteDraftToAgent = (tab: TermTab & { kind: 'agent' }, payload: string): void => {
+    setAgentDrafts((current) => {
+      const draft = current[tab.id]
+      const input = draft?.input
+        ? `${draft.input}${/\s$/.test(draft.input) ? '' : '\n'}${payload}`
+        : payload
+      return {
+        ...current,
+        [tab.id]: {
+          input,
+          attachments: draft?.attachments ?? []
+        }
+      }
+    })
+    focusTermTabForPrompt(tab)
+  }
+
+  const sendToClaudeAgent = (
+    tab: TermTab & { kind: 'agent' },
+    payload: string,
+    opts?: SendClaudeOptions
+  ): void => {
+    focusTermTabForPrompt(tab)
+    void window.lt.agent.send(tab.id, { text: payload, displayText: opts?.displayText })
+  }
+
+  const createClaudeAgentForPrompt = (contextPath?: string): (TermTab & { kind: 'agent' }) | undefined => {
+    const cur = termTabs.find((t) => t.id === activeTerm)
+    const side = termSide(cur)
+    const hasCaseContext = !!cur || !!currentCase
+    if (!hasCaseContext && contextPath) {
+      const dir = dirnameForClaudeContext(contextPath)
+      const remote = dir ? parseRemoteUri(dir) : null
+      if (remote) {
+        const profile = sshProfiles.find((p) => p.id === remote.profileId)
+        if (profile) {
+          const tab = createRemoteCase(
+            profile,
+            remote.path,
+            pathLeaf(remote.path) ?? '세션',
+            undefined,
+            undefined,
+            side,
+            'agent',
+            'claude'
+          )
+          return isClaudeAgentTab(tab) ? tab : undefined
+        }
+      } else if (dir) {
+        const tab = createCase(
+          dir,
+          pathLeaf(dir) ?? '세션',
+          undefined,
+          undefined,
+          undefined,
+          side,
+          undefined,
+          'claude'
+        )
+        return isClaudeAgentTab(tab) ? tab : undefined
+      }
+    }
+    const tab = addAgentSame(side, activeTerm, { provider: 'claude' })
+    return isClaudeAgentTab(tab) ? tab : undefined
+  }
+
+  // Claude 질문 전송: Claude Agent 탭을 우선 사용하고, 없으면 새 Claude Agent 탭에 초안으로 붙인다.
+  const sendClaude = (payload: string, opts?: SendClaudeOptions): void => {
+    if (docOnly) {
+      void window.lt.claude.ask(payload)
       return
     }
-    if (tab) pasteToTerm(tab.id, payload)
-    else window.lt.claude.ask(payload)
+    const tab = resolveClaudeAgentTargetTab(visibleTermTabs, activeTerm, activeWork)
+    if (tab) {
+      if (opts?.pasteOnly) pasteDraftToAgent(tab, payload)
+      else sendToClaudeAgent(tab, payload, opts)
+      return
+    }
+    const created = createClaudeAgentForPrompt(opts?.contextPath)
+    if (created) pasteDraftToAgent(created, payload)
   }
 
   const buildFreshFilePrompt = async (
@@ -4828,16 +4987,12 @@ export default function App(): JSX.Element {
       '원문은 화면 표시에서 숨겼습니다.'
     ].join('\n')
   // 메인 창: 다른 창에서 온 Claude 질문을 활성 Claude surface에 주입.
+  const sendClaudeRef = useRef(sendClaude)
+  sendClaudeRef.current = sendClaude
   useEffect(
     () =>
       window.lt.claude.onIncoming((payload) => {
-        const tab = resolveClaudeTargetTab(
-          termTabsRef.current,
-          activeTermRef.current,
-          activeWorkRef.current
-        )
-        if (tab && isAgentTab(tab)) void window.lt.agent.send(tab.id, { text: payload })
-        else if (tab) pasteToTerm(tab.id, payload)
+        sendClaudeRef.current(payload)
       }),
     []
   )
@@ -4878,14 +5033,29 @@ export default function App(): JSX.Element {
       const sourceLabel = opts?.sourceLabel ?? docName
       const ref = sourceLabel ? `「${sourceLabel}」${docPath ? `(${docPath})` : ''}` : ''
       const t = text.trim()
-      if (t && activeTermTab && isAgentTab(activeTermTab)) {
-        const attachment = selectionAttachmentForAgent(t, { docPath, docName, sourceLabel }, activeTermTab)
+      const promptTarget =
+        resolveClaudeAgentTargetTab(visibleTermTabs, activeTerm, activeWork) ?? activeTermTab ?? sessionCaseSource
+      const selectionSource =
+        t && opts?.selectionSource
+          ? {
+              ...opts.selectionSource,
+              docPath: opts.selectionSource.docPath ?? docPath,
+              docTitle: opts.selectionSource.docTitle ?? sourceLabel,
+              text: opts.selectionSource.text ?? t
+            }
+          : undefined
+      if (t && isClaudeAgentTab(activeTermTab)) {
+        const attachment = selectionAttachmentForAgent(
+          t,
+          { docPath, docName, sourceLabel, selectionSource },
+          activeTermTab
+        )
         queueAgentAttachment(activeTermTab, attachment, agentSelectionInputText(attachment))
         return
       }
       const filePrompt =
         docPath && docName
-          ? await buildFreshFilePrompt(docPath, docName, activeTermTab, {
+          ? await buildFreshFilePrompt(docPath, docName, promptTarget, {
               sourcePath: opts?.sourcePath,
               sourceTitle: opts?.sourceTitle
             })
@@ -4913,7 +5083,7 @@ export default function App(): JSX.Element {
       } else if (docName) {
         payload = filePrompt ? `${filePrompt}${opts?.instruction ? '' : '위 파일에 대해 '}` : `${ref} 파일에 대해 `
       } else return
-      sendClaude(payload, { displayText })
+      sendClaude(payload, { displayText, contextPath: docPath, pasteOnly: true })
     })()
   }
 
@@ -5817,6 +5987,7 @@ export default function App(): JSX.Element {
           scrollKey={docScrollKey(tab)}
           initialScroll={scrollPositionForDoc(tab)}
           onScrollPosition={(position) => updateDocScrollPosition(tab.id, position)}
+          revealRequest={markdownRevealRequests[tab.id]}
           onAsk={(draftPath, meta) => {
             if (draftPath) {
               setTreeRefresh((current) => current + 1)
@@ -6114,6 +6285,7 @@ export default function App(): JSX.Element {
                 onOpenTerminal={() => addTermSame(termSide(t), t.id, { reuseAgentTab: true })}
                 onOpenDiff={(request) => openAgentDiff(request, caseIdForTerm(t))}
                 onOpenFile={(path, title) => openFile(path, title ?? fileNameFromPath(path), 'left', t.caseTabId)}
+                onOpenAttachmentSource={openAgentAttachmentSource}
               />
             ) : (
               <Terminal
@@ -6472,6 +6644,7 @@ export default function App(): JSX.Element {
                   onOpenTerminal={() => addTermSame(side, t.id, { reuseAgentTab: true })}
                   onOpenDiff={(request) => openAgentDiff(request, caseIdForTerm(t))}
                   onOpenFile={(path, title) => openFile(path, title ?? fileNameFromPath(path), 'left', t.caseTabId)}
+                  onOpenAttachmentSource={openAgentAttachmentSource}
                 />
               ) : (
                 <Terminal
@@ -7089,8 +7262,28 @@ const centerMarkdownSelection = (draftId?: string): void => {
   window.dispatchEvent(new CustomEvent(MARKDOWN_CENTER_SELECTION_EVENT, { detail: { draftId } }))
 }
 
-const askOptionsForSelectionElement = (element: Element | null): ClaudeAskOptions | undefined =>
-  element?.closest('.agent-panel') ? { docPath: null, sourceLabel: 'Agent 패널' } : undefined
+const selectionSourceForElement = (
+  element: Element | null,
+  text: string,
+  detail?: TextSelectionOverlayDetail | null
+): ClaudeSelectionSource | undefined => {
+  const docId =
+    closestHTMLElement(element as HTMLElement | null, '[data-doc-id]')?.dataset.docId ??
+    detail?.editorDraftId
+  const range = detail?.range
+  if (!docId && !range) return undefined
+  return { docId, text, range }
+}
+
+const askOptionsForSelectionElement = (
+  element: Element | null,
+  selectionSource?: ClaudeSelectionSource
+): ClaudeAskOptions | undefined =>
+  element?.closest('.agent-panel')
+    ? { docPath: null, sourceLabel: 'Agent 패널' }
+    : selectionSource
+      ? { selectionSource }
+      : undefined
 
 type SelectionAskHandler = (text: string, opts?: ClaudeAskOptions) => void
 type SelectionActionBox = TextSelectionOverlayDetail & { askOpts?: ClaudeAskOptions }
@@ -7125,6 +7318,7 @@ function SelectionMenu({ onAsk }: { onAsk: SelectionAskHandler }): JSX.Element |
       const markdown = isEditorContext && editorDetail?.markdown?.trim() ? editorDetail.markdown : undefined
       const text = (markdown ?? sel?.toString() ?? '').trim()
       if (!text || !canShowSelectionActions(el)) return // 선택 없으면 기본 메뉴
+      const selectionSource = selectionSourceForElement(el, text, markdown ? editorDetail : null)
       e.preventDefault()
       setMenu({
         x: e.clientX,
@@ -7133,7 +7327,7 @@ function SelectionMenu({ onAsk }: { onAsk: SelectionAskHandler }): JSX.Element |
         queryText: markdown ? markdownToPlainText(markdown) || text : text,
         markdown,
         editorDraftId: editorDetail?.editorDraftId,
-        askOpts: askOptionsForSelectionElement(el)
+        askOpts: askOptionsForSelectionElement(el, selectionSource)
       })
     }
     const onEditorSelection = (event: Event): void => {
@@ -7241,7 +7435,10 @@ function SelectionAsk({ onAsk }: { onAsk: SelectionAskHandler }): JSX.Element | 
         y: rect.top - 6,
         text,
         count: Array.from(visibleText).length,
-        askOpts: askOptionsForSelectionElement(el)
+        askOpts: askOptionsForSelectionElement(
+          el,
+          selectionSourceForElement(el, visibleText)
+        )
       })
     }
 
@@ -7259,7 +7456,13 @@ function SelectionAsk({ onAsk }: { onAsk: SelectionAskHandler }): JSX.Element | 
         setBox(null)
         return
       }
-      setBox(detail)
+      const activeEditor = document.activeElement instanceof Element ? document.activeElement.closest('.cm-editor') : null
+      const docElement = activeEditor?.closest('[data-doc-id]') ?? null
+      const selectionSource = selectionSourceForElement(docElement, detail.text, detail)
+      setBox({
+        ...detail,
+        askOpts: askOptionsForSelectionElement(docElement, selectionSource)
+      })
     }
     const onPointerDown = (event: PointerEvent): void => {
       if (!event.isPrimary || event.button !== 0) return

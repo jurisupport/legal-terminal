@@ -87,6 +87,7 @@ interface AgentPanelProps {
   onOpenTerminal?: () => void
   onOpenDiff?: (request: AgentDiffOpenRequest) => void
   onOpenFile?: (path: string, title?: string) => void
+  onOpenAttachmentSource?: (attachment: AgentAttachment) => void
 }
 
 export interface AgentAttachmentRequest {
@@ -725,6 +726,38 @@ const attachmentOrigin = (value: unknown): AgentAttachment['origin'] | undefined
 const attachmentAccess = (value: unknown): AgentAttachment['access'] | undefined =>
   value === 'workspace-path' || value === 'context-only' ? value : undefined
 
+function attachmentSource(value: unknown): AgentAttachment['source'] | undefined {
+  const source = asRecord(value)
+  if (!source) return undefined
+  const range = asRecord(source.range)
+  const normalizedRange = range
+    ? {
+        startLine: numberValue(range.startLine),
+        startColumn: numberValue(range.startColumn),
+        endLine: numberValue(range.endLine),
+        endColumn: numberValue(range.endColumn),
+        startPage: numberValue(range.startPage),
+        endPage: numberValue(range.endPage)
+      }
+    : undefined
+  const normalized = {
+    docId: stringValue(source.docId),
+    path: stringValue(source.path),
+    title: stringValue(source.title),
+    text: stringValue(source.text),
+    range: normalizedRange
+  }
+  if (
+    !normalized.docId &&
+    !normalized.path &&
+    !normalized.title &&
+    !normalized.text &&
+    !Object.values(normalizedRange ?? {}).some((item) => item !== undefined)
+  )
+    return undefined
+  return normalized
+}
+
 function fileNameFromPath(path: string): string {
   const clean = path.replace(/[\\/]+$/, '')
   return clean.split(/[\\/]/).filter(Boolean).pop() || clean
@@ -1066,12 +1099,22 @@ function attachmentTitle(attachment: AgentAttachment): string {
       : attachment.access === 'workspace-path'
         ? '작업공간 경로로 전달됨'
         : undefined
+  const source = attachment.source
+    ? [
+        attachment.source.title ? `원문: ${attachment.source.title}` : undefined,
+        attachment.source.path ? `원문 경로: ${attachment.source.path}` : undefined
+      ].filter(Boolean).join('\n')
+    : undefined
   const detail = attachment.text
     ? attachment.text.length > 500
       ? `${attachment.text.slice(0, 500)}...`
       : attachment.text
     : undefined
-  return [attachment.path, access, detail].filter(Boolean).join('\n\n') || attachment.label
+  return [attachment.path, source, access, detail].filter(Boolean).join('\n\n') || attachment.label
+}
+
+function canOpenAttachmentSource(attachment: AgentAttachment): boolean {
+  return !!attachment.source && (!!attachment.source.docId || !!attachment.source.path)
 }
 
 function normalizeAgentAttachments(value: unknown): AgentAttachment[] {
@@ -1088,6 +1131,7 @@ function normalizeAgentAttachments(value: unknown): AgentAttachment[] {
           kind !== 'terminal-snippet')
       )
         return []
+      const range = asRecord(attachment.range)
       return [
         {
           kind,
@@ -1095,6 +1139,15 @@ function normalizeAgentAttachments(value: unknown): AgentAttachment[] {
           path: stringValue(attachment.path),
           origin: attachmentOrigin(attachment.origin),
           access: attachmentAccess(attachment.access),
+          range: range
+            ? {
+                startLine: numberValue(range.startLine),
+                endLine: numberValue(range.endLine),
+                startPage: numberValue(range.startPage),
+                endPage: numberValue(range.endPage)
+              }
+            : undefined,
+          source: attachmentSource(attachment.source),
           text: stringValue(attachment.text),
           content: stringValue(attachment.content),
           contentTruncated: attachment.contentTruncated === true
@@ -2077,7 +2130,8 @@ export default function AgentPanel({
   onWorktreeFork,
   onOpenTerminal,
   onOpenDiff,
-  onOpenFile
+  onOpenFile,
+  onOpenAttachmentSource
 }: AgentPanelProps): JSX.Element {
   const usesClaudeRemoteAuth = Boolean(ssh) && provider === 'claude'
   const usesAgentAuth = usesClaudeRemoteAuth || provider === 'codex'
@@ -3670,18 +3724,35 @@ export default function AgentPanel({
               {item.inputPreview && <pre className="agent-card-input">{item.inputPreview}</pre>}
               {item.attachments && item.attachments.length > 0 && (
                 <div className="agent-attachments sent" aria-label="전송된 첨부">
-                  {item.attachments.map((attachment, index) => (
-                    <span
-                      key={`${attachment.path ?? attachment.label}-${index}`}
-                      className="agent-attachment-chip"
-                      title={attachmentTitle(attachment)}
-                    >
-                      <span className="agent-attachment-kind">{attachmentKindLabel(attachment.kind)}</span>
-                      <span className="agent-attachment-label">
-                        {attachment.label}
+                  {item.attachments.map((attachment, index) => {
+                    const content = (
+                      <>
+                        <span className="agent-attachment-kind">{attachmentKindLabel(attachment.kind)}</span>
+                        <span className="agent-attachment-label">
+                          {attachment.label}
+                        </span>
+                      </>
+                    )
+                    return canOpenAttachmentSource(attachment) ? (
+                      <button
+                        key={`${attachment.path ?? attachment.label}-${index}`}
+                        type="button"
+                        className="agent-attachment-chip"
+                        title={`${attachmentTitle(attachment)}\n\n클릭하면 원문 위치로 이동합니다`}
+                        onClick={() => onOpenAttachmentSource?.(attachment)}
+                      >
+                        {content}
+                      </button>
+                    ) : (
+                      <span
+                        key={`${attachment.path ?? attachment.label}-${index}`}
+                        className="agent-attachment-chip"
+                        title={attachmentTitle(attachment)}
+                      >
+                        {content}
                       </span>
-                    </span>
-                  ))}
+                    )
+                  })}
                 </div>
               )}
               {item.kind === 'auth' && item.urls && item.urls.length > 0 && (
@@ -3930,8 +4001,18 @@ export default function AgentPanel({
                 <button
                   type="button"
                   className="agent-attachment-chip insertable"
-                  title={`${attachmentTitle(attachment)}\n\n클릭하면 프롬프트에 넣습니다`}
-                  onClick={() => insertAttachmentReference(attachment)}
+                  title={`${attachmentTitle(attachment)}\n\n${
+                    canOpenAttachmentSource(attachment)
+                      ? '클릭하면 원문 위치로 이동합니다'
+                      : '클릭하면 프롬프트에 넣습니다'
+                  }`}
+                  onClick={() => {
+                    if (canOpenAttachmentSource(attachment)) {
+                      onOpenAttachmentSource?.(attachment)
+                      return
+                    }
+                    insertAttachmentReference(attachment)
+                  }}
                 >
                   <span className="agent-attachment-kind">{attachmentKindLabel(attachment.kind)}</span>
                   <span className="agent-attachment-label">{attachment.label}</span>

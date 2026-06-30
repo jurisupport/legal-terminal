@@ -40,12 +40,12 @@ curl -fsSL https://raw.githubusercontent.com/jurisupport/legal-terminal/main/ins
 
 ## 이번 업데이트
 
-최신 릴리스: [v0.1.128](https://github.com/jurisupport/legal-terminal/releases/tag/v0.1.128)
+최신 릴리스: [v0.1.129](https://github.com/jurisupport/legal-terminal/releases/tag/v0.1.129)
 
-- **Agent 한도 표시 보강**: Claude 5시간/7일 한도를 함께 표시하고 갱신 시점을 날짜와 시간으로 보여줍니다.
-- **긴 대화 usage 갱신**: 컨텍스트가 일정량 늘어날 때 `/usage`를 보강 조회해 한도 표시가 늦게 갱신되는 문제를 줄였습니다.
-- **터미널 상태 감지 안정화**: Claude 입력 프롬프트가 실제로 돌아온 뒤에만 완료로 판단해 긴 출력 중 조기 완료 알림을 줄였습니다.
-- **사건탭 알림 정리**: 현재 보고 있는 작업공간의 완료/문서 변경 알림은 배지와 토스트에서 제외해 중복 알림을 줄였습니다.
+- **선택 본문 출처 복귀**: 문서에서 `Claude에 묻기`로 보낸 선택 첨부를 누르면 원문 문서의 해당 위치로 돌아갑니다.
+- **Markdown 선택 위치 보존**: 선택 당시의 줄·열 범위와 원문 텍스트를 함께 저장해 문서가 조금 바뀌어도 가능한 원래 부분을 다시 찾습니다.
+- **Agent 첨부 칩 개선**: 전송 전 첨부와 전송 후 대화에 남은 첨부 칩 모두 원문 이동 동작을 지원합니다.
+- **출처 메타데이터 보존**: Agent 첨부 타입과 preload/main 브리지에 원문 위치 정보를 안전하게 보존합니다.
 
 ## 처음 쓰는 순서
 
