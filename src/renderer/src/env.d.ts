@@ -150,6 +150,8 @@ export interface WorkspaceCaseTabPayload {
   name: string
   drafts: string
   records?: string
+  suggestedRecords?: string
+  suggestedRecordOptions?: FolderMatchSuggestion[]
   meta?: {
     jsId?: string
     court?: string

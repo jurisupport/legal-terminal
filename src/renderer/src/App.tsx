@@ -514,6 +514,8 @@ interface CaseMeta {
 interface CurrentCase {
   drafts: string
   records?: string
+  suggestedRecords?: string
+  suggestedRecordOptions?: FolderMatchSuggestion[]
   name: string
   meta?: CaseMeta
   ssh?: SshConn
@@ -1107,6 +1109,18 @@ const sanitizeCurrentCase = (value: unknown): CurrentCase | null => {
   return {
     drafts: c.drafts,
     records: typeof c.records === 'string' ? c.records : undefined,
+    suggestedRecords: typeof c.suggestedRecords === 'string' ? c.suggestedRecords : undefined,
+    suggestedRecordOptions: Array.isArray(c.suggestedRecordOptions)
+      ? c.suggestedRecordOptions.filter(
+          (item): item is FolderMatchSuggestion =>
+            !!item &&
+            typeof item === 'object' &&
+            typeof (item as FolderMatchSuggestion).path === 'string' &&
+            typeof (item as FolderMatchSuggestion).name === 'string' &&
+            typeof (item as FolderMatchSuggestion).reason === 'string' &&
+            typeof (item as FolderMatchSuggestion).score === 'number'
+        )
+      : undefined,
     name: c.name,
     meta: c.meta,
     ssh: c.ssh,
@@ -1172,6 +1186,8 @@ const caseTabFromCurrentCase = (
   name: source.name,
   drafts: source.drafts,
   records: source.records,
+  suggestedRecords: source.suggestedRecords,
+  suggestedRecordOptions: source.suggestedRecordOptions,
   meta: source.meta,
   ssh: source.ssh,
   sshLabel: source.sshLabel,
@@ -1184,6 +1200,8 @@ const caseTabFromCurrentCase = (
 const currentCaseFromCaseTab = (tab: CaseWorkspaceTab): CurrentCase => ({
   drafts: tab.drafts,
   records: tab.records,
+  suggestedRecords: tab.suggestedRecords,
+  suggestedRecordOptions: tab.suggestedRecordOptions,
   name: tab.name,
   meta: tab.meta,
   ssh: tab.ssh,
@@ -1202,6 +1220,8 @@ const upsertCaseTab = (
         ...existing,
         ...incoming,
         records: incoming.records ?? existing.records,
+        suggestedRecords: incoming.records ? undefined : incoming.suggestedRecords,
+        suggestedRecordOptions: incoming.records ? undefined : incoming.suggestedRecordOptions,
         meta: incoming.meta ?? existing.meta,
         ssh: incoming.ssh ?? existing.ssh,
         sshLabel: incoming.sshLabel ?? existing.sshLabel,
@@ -2236,6 +2256,8 @@ export default function App(): JSX.Element {
     return {
       drafts,
       records: t.recordsFolder,
+      suggestedRecords: t.suggestedRecords,
+      suggestedRecordOptions: t.suggestedRecordOptions,
       name: t.title,
       meta: {
         jsId: t.jsId,
@@ -2299,6 +2321,27 @@ export default function App(): JSX.Element {
           : tab
       )
     )
+  }
+
+  const openCaseContext = (source: CurrentCase, activeTermId?: string): CaseWorkspaceTab => {
+    const tab = registerCaseTab(source, activeTermId)
+    setCurrentCase(source)
+    if (activeTermId) {
+      setActiveTerm(activeTermId)
+    } else {
+      setActiveTerm((id) => {
+        const current = termTabsRef.current.find((term) => term.id === id)
+        return current && caseIdForTerm(current) === tab.id ? id : ''
+      })
+    }
+    const sessionSource = currentCaseSessionSource(source, sshProfiles)
+    preloadPastSessions(sessionSource?.cwd, sessionSource)
+    void window.lt.case.addHistory({
+      drafts: source.drafts,
+      records: source.records,
+      name: source.name
+    }).then(setRecent)
+    return tab
   }
 
   // 다른 창에서 찢겨/이동돼 온 탭 수신 → 문서 또는 터미널 열기.
@@ -2466,9 +2509,18 @@ export default function App(): JSX.Element {
     records: string | undefined,
     name: string,
     caseMeta?: CaseMeta,
-    activeTermId?: string
+    activeTermId?: string,
+    suggested?: string,
+    suggestedOptions?: FolderMatchSuggestion[]
   ): void => {
-    const source = { drafts, records, name, meta: caseMeta }
+    const source = {
+      drafts,
+      records,
+      suggestedRecords: records ? undefined : suggested,
+      suggestedRecordOptions: records ? undefined : suggestedOptions,
+      name,
+      meta: caseMeta
+    }
     setCurrentCase(source)
     registerCaseTab(source, activeTermId)
     window.lt.case.addHistory({ drafts, records, name }).then(setRecent)
@@ -2505,7 +2557,7 @@ export default function App(): JSX.Element {
     setTermTabs((t) => [...t, tab])
     setActiveTerm(tab.id)
     setWorkActive(side, termKeyOf(tab.id))
-    rememberLocalCase(drafts, records, name, caseMeta, tab.id)
+    rememberLocalCase(drafts, records, name, caseMeta, tab.id, suggested, suggestedOptions)
     preloadPastSessions(tab.cwd, tab)
     return tab
   }
@@ -2541,7 +2593,12 @@ export default function App(): JSX.Element {
     if (!picked) return
     // 이전에 페어링한 소송기록 폴더가 있으면 '추천'만 (자동 적용하지 않고 물어봄)
     const paired = await window.lt.case.getPairing(picked.path)
-    createCase(picked.path, picked.name, undefined, paired ?? undefined, undefined, side)
+    openCaseContext({
+      drafts: picked.path,
+      name: picked.name,
+      suggestedRecords: paired ?? undefined
+    })
+    setMode('explorer')
   }
 
   const addTerm = async (side: DockSide = 'right'): Promise<void> => {
@@ -2607,6 +2664,33 @@ export default function App(): JSX.Element {
     return { id: tab.id, title }
   }
 
+  const openRemoteCaseContext = (
+    profile: SshProfile,
+    remotePath: string,
+    name?: string,
+    meta?: CaseMeta,
+    records?: string,
+    suggestions?: FolderMatchSuggestion[]
+  ): { id: string; title: string } => {
+    const title = name || remotePath.replace(/\/+$/, '').split('/').pop() || profile.label
+    const draftsUri = remoteUri(profile.id, remotePath)
+    const source: CurrentCase = {
+      drafts: draftsUri,
+      records,
+      suggestedRecords: records ? undefined : suggestions?.[0]?.path,
+      suggestedRecordOptions: records ? undefined : suggestions,
+      name: title,
+      meta,
+      ssh: sshConnFromProfile(profile),
+      sshLabel: profile.label,
+      profileId: profile.id,
+      remotePath
+    }
+    const tab = openCaseContext(source)
+    if (records) window.lt.case.setPairing(draftsUri, records)
+    return { id: tab.id, title }
+  }
+
   const attachRemoteRecords = (
     tabId: string,
     profile: SshProfile,
@@ -2617,30 +2701,45 @@ export default function App(): JSX.Element {
     caseId?: string
   ): void => {
     if (!records && !suggestions?.length) return
+    const suggestedRecords = records ? undefined : suggestions?.[0]?.path
+    const suggestedRecordOptions = records ? undefined : suggestions
     setTermTabs((tabs) =>
       tabs.map((t) =>
         t.id === tabId
           ? {
               ...t,
               recordsFolder: records,
-              suggestedRecords: records ? undefined : suggestions?.[0]?.path,
-              suggestedRecordOptions: records ? undefined : suggestions
+              suggestedRecords,
+              suggestedRecordOptions
             }
           : t
       )
     )
     setCurrentCase((c) =>
-      c?.profileId === profile.id && c.remotePath === remotePath && records ? { ...c, records } : c
+      c?.profileId === profile.id && c.remotePath === remotePath
+        ? {
+            ...c,
+            records: records ?? c.records,
+            suggestedRecords,
+            suggestedRecordOptions
+          }
+        : c
     )
-    if (!records) return
     const drafts = remoteUri(profile.id, remotePath)
     setCaseTabs((tabs) =>
       tabs.map((tab) =>
-        tab.profileId === profile.id && tab.remotePath === remotePath
-          ? { ...tab, records, updatedAt: Date.now() }
+        tab.id === tabId || (tab.profileId === profile.id && tab.remotePath === remotePath)
+          ? {
+              ...tab,
+              records: records ?? tab.records,
+              suggestedRecords,
+              suggestedRecordOptions,
+              updatedAt: Date.now()
+            }
           : tab
       )
     )
+    if (!records) return
     window.lt.case.setPairing(drafts, records)
     if (caseId) window.lt.case.setJsPairing(remoteJsPairingKey(profile.id, caseId), drafts, records)
     window.lt.case.addHistory({ drafts, records, name: title }).then(setRecent)
@@ -2851,7 +2950,8 @@ export default function App(): JSX.Element {
   }): Promise<void> => {
     const remote = parseRemoteUri(entry.drafts)
     if (!remote) {
-      createCase(entry.drafts, entry.name, entry.records)
+      openCaseContext({ drafts: entry.drafts, records: entry.records, name: entry.name })
+      setMode('explorer')
       return
     }
     const s = await window.lt.settings.get()
@@ -2862,7 +2962,8 @@ export default function App(): JSX.Element {
       window.alert('이 최근 사건에 연결된 SSH 프로필을 찾을 수 없습니다. 설정에서 SSH 프로필을 확인하세요.')
       return
     }
-    createRemoteCase(profile, remote.path, entry.name, undefined, entry.records)
+    openRemoteCaseContext(profile, remote.path, entry.name, undefined, entry.records)
+    setMode('explorer')
   }
 
   // 과거 claude 세션 이어서 열기 (claude --resume). 지정한 cwd/사건 컨텍스트에서.
@@ -3231,13 +3332,20 @@ export default function App(): JSX.Element {
   // 추천 소송기록 폴더 적용 ('열기' 클릭 시)
   const applySuggested = (path?: string): void => {
     const cur = termTabs.find((t) => t.id === activeTerm)
-    if (!cur) return
-    if (!cur.suggestedRecords && !path) return
-    const rec = path ?? cur.suggestedRecords
+    const rec = path ?? cur?.suggestedRecords ?? currentCase?.suggestedRecords
     if (!rec) return
+    const source = cur ? currentCaseFromTerm(cur) : currentCase
+    if (!source) return
+    const nextSource: CurrentCase = {
+      ...source,
+      records: rec,
+      suggestedRecords: undefined,
+      suggestedRecordOptions: undefined
+    }
+    const targetCaseTabId = cur ? caseIdForTerm(cur) : caseTabId(source)
     setTermTabs((tabs) =>
       tabs.map((t) =>
-        t.id === activeTerm
+        caseIdForTerm(t) === targetCaseTabId
           ? {
               ...t,
               recordsFolder: rec,
@@ -3247,11 +3355,11 @@ export default function App(): JSX.Element {
           : t
       )
     )
-    setCurrentCase((c) => (c ? { ...c, records: rec } : c))
-    registerCaseTabFromTerm({ ...cur, recordsFolder: rec })
-    const drafts = historyDraftsForTerm(cur)
+    setCurrentCase(nextSource)
+    setCaseTabs((tabs) => upsertCaseTab(tabs, { ...caseTabFromCurrentCase(nextSource, cur?.id), id: targetCaseTabId }))
+    const drafts = cur ? historyDraftsForTerm(cur) : nextSource.drafts
     window.lt.case.setPairing(drafts, rec)
-    window.lt.case.addHistory({ drafts, records: rec, name: cur.title }).then(setRecent)
+    window.lt.case.addHistory({ drafts, records: rec, name: nextSource.name }).then(setRecent)
   }
 
   const removeTermTab = (id: string): void => {
@@ -3691,8 +3799,8 @@ export default function App(): JSX.Element {
       ? remoteUri(activeTermTab.profileId, activeTermTab.cwd)
       : (activeTermTab?.cwd ?? currentCase?.drafts)
   const activeRecordsFolder = activeTermTab?.recordsFolder ?? currentCase?.records
-  const activeSuggestedRecords = activeTermTab?.suggestedRecords
-  const activeSuggestedRecordOptions = activeTermTab?.suggestedRecordOptions
+  const activeSuggestedRecords = activeTermTab?.suggestedRecords ?? currentCase?.suggestedRecords
+  const activeSuggestedRecordOptions = activeTermTab?.suggestedRecordOptions ?? currentCase?.suggestedRecordOptions
   const sameCaseFolder = (left?: string, right?: string): boolean => {
     if (!left || !right) return false
     const clean = (value: string): string => value.replace(/[\\/]+$/, '')
@@ -3712,64 +3820,17 @@ export default function App(): JSX.Element {
       const resolved: { records?: string; suggestions?: FolderMatchSuggestion[] } = keepRecords
         ? { records: keepRecords }
         : await resolveRemoteRecords(profile, remote.path).catch(() => ({}))
-      const tab: TermTab = {
-        id: newId(),
-        title,
-        kind: 'agent',
-        cwd: remote.path,
-        recordsFolder: resolved.records,
-        suggestedRecords: resolved.records ? undefined : resolved.suggestions?.[0]?.path,
-        suggestedRecordOptions: resolved.records ? undefined : resolved.suggestions,
-        autoClaude: false,
-        agentProvider: resolveAgentProvider(agentDefaultProvider, sshConnFromProfile(profile)),
-        createdAt: Date.now(),
-        ssh: sshConnFromProfile(profile),
-        sshLabel: profile.label,
-        profileId: profile.id,
-        side: 'right'
-      }
-      const source = currentCaseFromTerm(tab)
-      const nextTab = { ...tab, caseTabId: caseTabId(source) }
-      setTermTabs((tabs) => [...tabs, nextTab])
-      setActiveTerm(nextTab.id)
-      setCurrentCase(source)
-      setWorkActive('right', termKeyOf(nextTab.id))
-      registerCaseTab(source, nextTab.id)
-      preloadPastSessions(nextTab.cwd, nextTab)
-      void window.lt.case.addHistory({
-        drafts: source.drafts,
-        records: source.records,
-        name: source.name
-      }).then(setRecent)
+      openRemoteCaseContext(profile, remote.path, title, undefined, resolved.records, resolved.suggestions)
       return
     }
 
     const paired = keepRecords ? undefined : await window.lt.case.getPairing(folderPath).catch(() => undefined)
-    const tab: TermTab = {
-      id: newId(),
-      title,
-      kind: 'agent',
-      cwd: folderPath,
-      recordsFolder: keepRecords,
+    openCaseContext({
+      drafts: folderPath,
+      records: keepRecords,
       suggestedRecords: keepRecords ? undefined : paired,
-      autoClaude: false,
-      agentProvider: resolveAgentProvider(agentDefaultProvider),
-      createdAt: Date.now(),
-      side: 'right'
-    }
-    const source = currentCaseFromTerm(tab)
-    const nextTab = { ...tab, caseTabId: caseTabId(source) }
-    setTermTabs((tabs) => [...tabs, nextTab])
-    setActiveTerm(nextTab.id)
-    setCurrentCase(source)
-    setWorkActive('right', termKeyOf(nextTab.id))
-    registerCaseTab(source, nextTab.id)
-    preloadPastSessions(nextTab.cwd, nextTab)
-    void window.lt.case.addHistory({
-      drafts: source.drafts,
-      records: source.records,
-      name: source.name
-    }).then(setRecent)
+      name: title
+    })
   }
 
   const goParentDraftsFolder = (): void => {
@@ -4923,7 +4984,7 @@ export default function App(): JSX.Element {
               ? `완료 ${doneTaskCount}개`
             : tabCount
               ? `${tabCount}개 탭`
-              : '탭 닫힘'
+              : '작업 탭 없음'
     }
   })
   const totalCaseDoneTaskCount = caseTabRows.reduce((sum, row) => sum + row.doneTaskCount, 0)
@@ -5421,7 +5482,7 @@ export default function App(): JSX.Element {
   const matchCaseFolder = async (root: string, c: JsCase): Promise<string | undefined> =>
     (await matchCaseFolders(root, c))[0]?.path
 
-  // 좌클릭: 사건 작업환경 열기 (폴더 매칭 → 없으면 직접 지정 → 터미널/뷰어 연결)
+  // 좌클릭: 사건 작업환경 열기 (폴더 매칭 → 없으면 직접 지정 → 사건 컨텍스트 연결)
   const openCaseWorkspace = async (c: JsCase, detailLoaded = false): Promise<OpenedCase | null> => {
     if (!detailLoaded) c = await loadCaseDetail(c)
     const saved = c.id ? await window.lt.case.getJsPairing(c.id) : undefined
@@ -5469,8 +5530,14 @@ export default function App(): JSX.Element {
       partyNames: partyNames || undefined,
       memo: c.memo?.trim() || undefined
     }
-    const openedCase: CurrentCase = { drafts, records, name, meta }
-    setCurrentCase(openedCase)
+    const openedCase: CurrentCase = {
+      drafts,
+      records,
+      suggestedRecords: suggested,
+      suggestedRecordOptions: recordSuggestions.length ? recordSuggestions : undefined,
+      name,
+      meta
+    }
     const existing = termTabs.find((t) => t.cwd === drafts || (t.jsId && t.jsId === c.id))
     let term: TermTab | undefined
     let termId: string | undefined
@@ -5478,7 +5545,7 @@ export default function App(): JSX.Element {
       term = existing
       termId = existing.id
       activateTermTab(existing.id)
-      registerCaseTab(openedCase, existing.id)
+      openCaseContext(openedCase, existing.id)
       setTermTabs((tabs) =>
         tabs.map((t) =>
           t.id === existing.id
@@ -5494,8 +5561,7 @@ export default function App(): JSX.Element {
         )
       )
     } else {
-      term = createCase(drafts, name, records, suggested, meta, 'right', recordSuggestions)
-      termId = term.id
+      openCaseContext(openedCase)
     }
     setMode('explorer')
     return { ...openedCase, term, termId }
@@ -5550,7 +5616,7 @@ export default function App(): JSX.Element {
     const savedRemote = saved?.drafts ? parseRemoteUri(saved.drafts) : null
     const savedRecords = saved?.records
     if (savedRemote?.profileId === profile.id) {
-      const opened = createRemoteCase(profile, savedRemote.path, name, meta, savedRecords)
+      const opened = openRemoteCaseContext(profile, savedRemote.path, name, meta, savedRecords)
       if (!savedRecords) resolveRemoteRecordsLater(opened.id, profile, savedRemote.path, opened.title, c)
       setMode('explorer')
       return
@@ -5562,9 +5628,9 @@ export default function App(): JSX.Element {
     }
     if (matchedUri) {
       const remotePath = remotePlain(matchedUri, profile.id)
-      const opened = createRemoteCase(profile, remotePath, name, meta)
+      const opened = openRemoteCaseContext(profile, remotePath, name, meta)
       if (c.id) window.lt.case.setJsPairing(remoteJsPairingKey(profile.id, c.id), matchedUri)
-      // 소송기록 매칭은 터미널을 먼저 띄운 뒤 붙인다. SFTP/키 문제로 터미널 생성이 막히면 안 된다.
+      // 소송기록 매칭은 사건 컨텍스트를 먼저 띄운 뒤 비동기로 붙인다.
       resolveRemoteRecordsLater(opened.id, profile, remotePath, opened.title, c)
       setMode('explorer')
     } else {
@@ -6735,7 +6801,7 @@ export default function App(): JSX.Element {
           onPick={async (remotePath) => {
             const prof = remotePick
             setRemotePick(null)
-            const opened = createRemoteCase(prof, remotePath)
+            const opened = openRemoteCaseContext(prof, remotePath)
             resolveRemoteRecordsLater(opened.id, prof, remotePath, opened.title)
           }}
         />
@@ -6777,7 +6843,7 @@ export default function App(): JSX.Element {
           onPick={async (remotePath) => {
             const { profile, name, meta, caseData } = remoteCasePick
             setRemoteCasePick(null)
-            const opened = createRemoteCase(profile, remotePath, name, meta)
+            const opened = openRemoteCaseContext(profile, remotePath, name, meta)
             if (caseData.id) {
               window.lt.case.setJsPairing(
                 remoteJsPairingKey(profile.id, caseData.id),
