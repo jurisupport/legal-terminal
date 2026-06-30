@@ -93,6 +93,7 @@ interface AgentSession {
   slashCommands?: AgentSlashCommand[]
   claudeUsageProbeRunning?: boolean
   claudeUsageProbeLastAt?: number
+  claudeUsageSummaryLastContextTokens?: number
   viewers: Map<number, WebContents>
   pendingPermissions: Map<string, PendingPermission>
   pendingDialogs: Map<string, PendingDialog>
@@ -136,6 +137,7 @@ const USER_DIALOG_TIMEOUT_MS = 30 * 60_000
 const MCP_STATUS_TIMEOUT_MS = 20_000
 const GIT_WORKTREE_TIMEOUT_MS = 60_000
 const CLAUDE_USAGE_PROBE_COOLDOWN_MS = 60_000
+const CLAUDE_USAGE_SUMMARY_CONTEXT_TOKEN_INTERVAL = 20_000
 const MIN_TEXT_OVERLAP = 4
 const sshBin =
   process.platform === 'win32'
@@ -1114,6 +1116,30 @@ function emitUsageUpdate(session: AgentSession): void {
   })
 }
 
+export function shouldRefreshClaudeUsageSummaryForRateLimit(
+  provider: AgentProvider,
+  rateLimit: Pick<AgentRateLimitUsage, 'rateLimitType' | 'remainingPercent'>,
+  knownRateLimitTypes: Iterable<string | undefined>
+): boolean {
+  if (provider !== 'claude' || rateLimit.rateLimitType === 'overage') return false
+  if (rateLimit.remainingPercent === undefined) return true
+  return !Array.from(knownRateLimitTypes).includes('five_hour')
+}
+
+export function shouldRefreshClaudeUsageSummaryForContextUsage(
+  provider: AgentProvider,
+  context: Pick<AgentContextUsage, 'totalTokens'> | undefined,
+  lastContextTokens: number | undefined,
+  intervalTokens = CLAUDE_USAGE_SUMMARY_CONTEXT_TOKEN_INTERVAL
+): boolean {
+  if (provider !== 'claude' || !context || intervalTokens <= 0) return false
+  const totalTokens = context.totalTokens
+  if (!Number.isFinite(totalTokens) || totalTokens < intervalTokens) return false
+  if (lastContextTokens === undefined) return true
+  if (totalTokens < lastContextTokens) return false
+  return totalTokens - lastContextTokens >= intervalTokens
+}
+
 function usageTokensFromRecord(value: unknown): Omit<AgentTokenUsage, 'turns' | 'updatedAt'> | undefined {
   const usage = asRecord(value)
   if (!usage) return undefined
@@ -1194,6 +1220,19 @@ function rememberContextUsage(session: AgentSession, value: unknown): void {
   const context = normalizeContextUsage(value)
   if (!context) return
   session.contextUsage = context
+  if (context.totalTokens < (session.claudeUsageSummaryLastContextTokens ?? 0)) {
+    session.claudeUsageSummaryLastContextTokens = context.totalTokens
+  }
+  if (
+    shouldRefreshClaudeUsageSummaryForContextUsage(
+      session.provider,
+      context,
+      session.claudeUsageSummaryLastContextTokens
+    ) &&
+    refreshClaudeUsageSummary(session)
+  ) {
+    session.claudeUsageSummaryLastContextTokens = context.totalTokens
+  }
   emitUsageUpdate(session)
 }
 
@@ -1316,10 +1355,10 @@ function sdkTextContent(value: unknown): string | undefined {
   return undefined
 }
 
-function refreshClaudeUsageSummary(session: AgentSession): void {
-  if (session.provider !== 'claude' || session.claudeUsageProbeRunning) return
+function refreshClaudeUsageSummary(session: AgentSession): boolean {
+  if (session.provider !== 'claude' || session.claudeUsageProbeRunning) return false
   const now = Date.now()
-  if (session.claudeUsageProbeLastAt && now - session.claudeUsageProbeLastAt < CLAUDE_USAGE_PROBE_COOLDOWN_MS) return
+  if (session.claudeUsageProbeLastAt && now - session.claudeUsageProbeLastAt < CLAUDE_USAGE_PROBE_COOLDOWN_MS) return false
   session.claudeUsageProbeRunning = true
   session.claudeUsageProbeLastAt = now
 
@@ -1342,7 +1381,7 @@ function refreshClaudeUsageSummary(session: AgentSession): void {
           )
   } catch {
     session.claudeUsageProbeRunning = false
-    return
+    return false
   }
 
   let stdoutBuffer = ''
@@ -1371,6 +1410,7 @@ function refreshClaudeUsageSummary(session: AgentSession): void {
     if (stdoutBuffer.trim()) handleLine(stdoutBuffer)
     session.claudeUsageProbeRunning = false
   })
+  return true
 }
 
 function rememberRateLimitUsage(session: AgentSession, value: unknown): AgentRateLimitUsage | undefined {
@@ -1401,7 +1441,13 @@ function rememberRateLimitUsage(session: AgentSession, value: unknown): AgentRat
   }
 
   emitUsageUpdate(session)
-  if (session.provider === 'claude' && rateLimit.remainingPercent === undefined && rateLimit.rateLimitType !== 'overage') {
+  if (
+    shouldRefreshClaudeUsageSummaryForRateLimit(
+      session.provider,
+      rateLimit,
+      Array.from(session.rateLimitUsages?.values() ?? []).map((usage) => usage.rateLimitType)
+    )
+  ) {
     refreshClaudeUsageSummary(session)
   }
   return rateLimit

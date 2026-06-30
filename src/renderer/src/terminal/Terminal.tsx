@@ -8,6 +8,7 @@ import { LT_PATH, LT_PATHS, readLtPaths } from '../filetree/FileTree'
 import type { AgentProvider, SshConn, TodoTerminalContext } from '../env'
 import FindBar from '../search/FindBar'
 import { installTerminalPointerDragGuard } from '../dragGuard'
+import { CLAUDE_INPUT_PROMPT_RE, getClaudeIdleStatus, stripAnsi } from './statusTracker'
 
 // D2Coding(번들, 한글:영문=2:1 고정폭)을 우선 — 한글/영문 폭이 한 폰트로 통일되어 정렬이 맞는다.
 const DEFAULT_FONT = "'D2Coding', 'Cascadia Mono', Consolas, monospace"
@@ -17,7 +18,6 @@ const normalizeTerminalCopyText = (text: string): string => text.replace(/(^|[\r
 const WIN_IME_FIX_CLASS = 'lt-win-ime-fix'
 const WIN_IME_COMPOSING_CLASS = 'lt-ime-composing'
 const WIN_IME_FIXED_CLASS = 'lt-ime-fixed'
-const CLAUDE_INPUT_PROMPT_RE = /^\s*(?:[│┃]\s*)?[›>]\s/
 
 interface TerminalFindMatch {
   row: number
@@ -91,6 +91,11 @@ const cursorAnchor = (term: XTerm): ImeAnchor | null => {
     row,
     col: clamp(term.buffer.active.cursorX, 0, Math.max(0, term.cols - 1))
   }
+}
+
+const terminalCursorLineText = (term: XTerm): string => {
+  const buffer = term.buffer.active
+  return buffer.getLine(buffer.baseY + buffer.cursorY)?.translateToString(true) ?? ''
 }
 
 const findClaudeInputAnchor = (
@@ -651,31 +656,31 @@ export default function Terminal({
 
       // 진행중/완료 감지:
       // claude는 작업 중 "esc to interrupt" 스피너를 계속 그린다 → 그게 보이면 working.
-      // 원격 SSH에서는 화면 갱신이 뭉쳐 도착할 수 있으므로 충분히 조용해진 뒤에만 done으로 본다.
+      // 출력이 잠깐 조용해졌다는 이유만으로 완료 처리하지 않고, 커서 위치에 입력 프롬프트가 돌아와야 done으로 본다.
       let idleTimer: ReturnType<typeof setTimeout> | null = null
       let working = false
       let recent = '' // 최근 출력(ANSI 제거 전) — 질문/확인 프롬프트 감지용
-      let lastBusyAt = 0
+      let lastActivityAt = 0
       const idleMs = ssh ? 6000 : 2500
       const BUSY_RE = /to interrupt/i
-      // claude 권한/확인 프롬프트 패턴
-      const QUESTION_RE =
-        /(do you want to|would you like to|continue\?|❯\s*1\.|\b1\.\s*yes\b|\(y\/n\)|\by\/n\b)/i
-      const stripAnsi = (s: string): string => s.replace(/\[[0-9;?]*[a-zA-Z]/g, '')
       const scheduleIdle = (delay = idleMs): void => {
         if (idleTimer) clearTimeout(idleTimer)
         idleTimer = setTimeout(goIdle, delay)
       }
       const goIdle = (): void => {
         if (!working) return
-        const isQuestion = QUESTION_RE.test(stripAnsi(recent))
-        if (!isQuestion && Date.now() - lastBusyAt < idleMs) {
-          scheduleIdle(idleMs - (Date.now() - lastBusyAt))
+        const idleStatus = getClaudeIdleStatus(recent, terminalCursorLineText(term))
+        if (idleStatus !== 'question' && Date.now() - lastActivityAt < idleMs) {
+          scheduleIdle(idleMs - (Date.now() - lastActivityAt))
+          return
+        }
+        if (idleStatus === 'working') {
+          scheduleIdle(idleMs)
           return
         }
         working = false
         windowsImeCorrection.setClaudeWorking(false)
-        onStatusRef.current?.(isQuestion ? 'question' : 'done')
+        onStatusRef.current?.(idleStatus)
       }
       const offData = window.lt.pty.onData((p) => {
         if (p.id !== id) return
@@ -691,9 +696,9 @@ export default function Terminal({
           onStatusRef.current?.('working')
         }
         if (busy || working) {
-          if (busy) lastBusyAt = Date.now()
+          lastActivityAt = Date.now()
           recent = (recent + p.data).slice(-4000)
-          scheduleIdle(QUESTION_RE.test(stripAnsi(recent)) ? 500 : idleMs)
+          scheduleIdle(getClaudeIdleStatus(recent, terminalCursorLineText(term)) === 'question' ? 500 : idleMs)
         }
       })
       const offExit = window.lt.pty.onExit((p) => {
@@ -782,7 +787,7 @@ export default function Terminal({
       })
       // Claude의 BEL은 완료뿐 아니라 권한/확인 프롬프트에서도 울릴 수 있으므로 즉시 완료로 보지 않는다.
       const onBellDisp = term.onBell(() => {
-        if (working) scheduleIdle(QUESTION_RE.test(stripAnsi(recent)) ? 500 : idleMs)
+        if (working) scheduleIdle(getClaudeIdleStatus(recent, terminalCursorLineText(term)) === 'question' ? 500 : idleMs)
       })
       const updateSelectionAction = (): void => {
         if (findOpenRef.current || !term.hasSelection()) {

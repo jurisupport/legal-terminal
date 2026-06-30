@@ -1759,12 +1759,14 @@ export default function App(): JSX.Element {
     closestHTMLElement(element, '[data-doc-id]')?.dataset.docId
   const activateDocTab = (id: string): void => {
     const tab = docTabs.find((t) => t.id === id)
+    const caseTabIdValue = tab?.caseTabId ?? activeCaseTabId
     if (tab?.caseTabId) setActiveCaseTabId(tab.caseTabId)
+    clearCaseDocumentUpdates(caseTabIdValue)
     setActiveDoc(id)
     const side = docSide(tab)
     const key = docKey(id)
     setWorkActive(side, key)
-    updateCaseTabActivity(tab?.caseTabId ?? activeCaseTabId, {
+    updateCaseTabActivity(caseTabIdValue, {
       activeDocId: id,
       activeWork: { ...activeWork, [side]: key }
     })
@@ -1798,12 +1800,14 @@ export default function App(): JSX.Element {
   )
   const activateTermTab = (id: string): void => {
     const tab = termTabs.find((t) => t.id === id)
+    const caseTabIdValue = tab?.caseTabId ?? activeCaseTabId
     if (tab?.caseTabId) setActiveCaseTabId(tab.caseTabId)
+    clearCaseDocumentUpdates(caseTabIdValue)
     setActiveTerm(id)
     const side = termSide(tab)
     const key = termKeyOf(id)
     setWorkActive(side, key)
-    updateCaseTabActivity(tab?.caseTabId ?? activeCaseTabId, {
+    updateCaseTabActivity(caseTabIdValue, {
       activeTermId: id,
       activeWork: { ...activeWork, [side]: key }
     })
@@ -2187,7 +2191,7 @@ export default function App(): JSX.Element {
         let changed = false
         for (const path of paths) {
           const caseTabIdValue = explicitCaseTabId ?? inferCaseTabIdForPath(path, caseTabs)
-          if (!caseTabIdValue || !liveCaseTabIds.has(caseTabIdValue)) continue
+          if (!caseTabIdValue || !liveCaseTabIds.has(caseTabIdValue) || caseTabIdValue === activeCaseTabId) continue
           const current = next[caseTabIdValue]
           const pathSet = new Set(current?.paths ?? [])
           pathSet.add(path)
@@ -2199,7 +2203,7 @@ export default function App(): JSX.Element {
     }
     window.addEventListener(REMOTE_FILE_CHANGED_EVENT, onDocumentChanged)
     return () => window.removeEventListener(REMOTE_FILE_CHANGED_EVENT, onDocumentChanged)
-  }, [caseTabs])
+  }, [activeCaseTabId, caseTabs])
 
   const openFile = (
     path: string,
@@ -3438,6 +3442,17 @@ export default function App(): JSX.Element {
     })
   }
 
+  const activeWorkKeyForSide = (side: DockSide): WorkTabKey | '' =>
+    resolveActiveWorkKey(workKeysForSide(visibleDocTabs, visibleTermTabs, side), activeWork[side])
+
+  const isTermVisibleInCurrentWorkspace = (id: string): boolean => {
+    if (termOnly) return id === activeTerm
+    return (['left', 'right'] as DockSide[]).some((side) => {
+      const parsed = parseWorkKey(activeWorkKeyForSide(side))
+      return parsed?.kind === 'terminal' && parsed.id === id
+    })
+  }
+
   // 터미널 작업 상태(진행중/완료/질문대기). 완료는 사건탭 배지로, 질문은 토스트로 알린다.
   const onTermStatus = (id: string, status: TermRunStatus): void => {
     setTermStatus((m) => {
@@ -3454,6 +3469,16 @@ export default function App(): JSX.Element {
       })
       dismissToastForTerm(id)
     } else {
+      if (isTermVisibleInCurrentWorkspace(id)) {
+        setTermAttention((s) => {
+          if (!s.has(id)) return s
+          const n = new Set(s)
+          n.delete(id)
+          return n
+        })
+        dismissToastForTerm(id)
+        return
+      }
       playNotificationSound(notificationSound, notificationVolume)
       window.lt.app.requestAttention(status)
       setTermAttention((s) => new Set(s).add(id))
@@ -4946,24 +4971,21 @@ export default function App(): JSX.Element {
     termTabs.filter((term) => caseIdForTerm(term) === tab.id)
   const docsForCaseTab = (tab: CaseWorkspaceTab): DocTab[] =>
     docTabs.filter((doc) => !isSharedDocTab(doc) && caseIdForDoc(doc) === tab.id)
-  const totalCaseDocumentUpdateCount = caseTabs.reduce(
-    (sum, tab) => sum + (caseDocumentUpdates[tab.id]?.paths.length ?? 0),
-    0
-  )
   const caseTabRows = caseTabs.map((tab) => {
     const terms = termsForCaseTab(tab)
     const docs = docsForCaseTab(tab)
     const documentUpdates = caseDocumentUpdates[tab.id]
-    const documentUpdateCount = documentUpdates?.paths.length ?? 0
-    const working = terms.some((term) => termStatus.get(term.id) === 'working')
-    const questionTaskCount = terms.filter((term) => termStatus.get(term.id) === 'question').length
-    const doneTaskCount = terms.filter(
-      (term) => termAttention.has(term.id) && termStatus.get(term.id) === 'done'
-    ).length
     const active =
       tab.id === activeCaseTabId ||
       terms.some((term) => term.id === activeTerm) ||
       docs.some((doc) => doc.id === activeDoc)
+    const noticeTerms = active
+      ? []
+      : terms.filter((term) => termAttention.has(term.id) && !isTermVisibleInCurrentWorkspace(term.id))
+    const documentUpdateCount = active ? 0 : (documentUpdates?.paths.length ?? 0)
+    const working = terms.some((term) => termStatus.get(term.id) === 'working')
+    const questionTaskCount = noticeTerms.filter((term) => termStatus.get(term.id) === 'question').length
+    const doneTaskCount = noticeTerms.filter((term) => termStatus.get(term.id) === 'done').length
     const tabCount = terms.length + docs.length
     return {
       tab,
@@ -4985,8 +5007,9 @@ export default function App(): JSX.Element {
             : tabCount
               ? `${tabCount}개 탭`
               : '작업 탭 없음'
-    }
+      }
   })
+  const totalCaseDocumentUpdateCount = caseTabRows.reduce((sum, row) => sum + row.documentUpdateCount, 0)
   const totalCaseDoneTaskCount = caseTabRows.reduce((sum, row) => sum + row.doneTaskCount, 0)
   const totalCaseQuestionTaskCount = caseTabRows.reduce((sum, row) => sum + row.questionTaskCount, 0)
   const totalCaseNoticeCount =
@@ -6202,9 +6225,7 @@ export default function App(): JSX.Element {
           .join('\n')
       }))
     ]
-    const activeKey = workTabs.some((t) => t.id === activeWork[side])
-      ? activeWork[side]
-      : (workTabs[0]?.id ?? '')
+    const activeKey = activeWorkKeyForSide(side)
     const activeParsed = parseWorkKey(activeKey)
     const activeDocForPane =
       activeParsed?.kind === 'doc' ? docs.find((t) => t.id === activeParsed.id) : undefined

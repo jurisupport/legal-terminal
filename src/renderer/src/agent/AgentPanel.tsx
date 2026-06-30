@@ -17,6 +17,12 @@ import * as pdfjs from 'pdfjs-dist'
 import type { PDFDocumentProxy } from 'pdfjs-dist'
 import PdfJsWorker from 'pdfjs-dist/build/pdf.worker.min.mjs?worker&inline'
 import { LT_PATH, LT_PATHS, readLtPaths } from '../filetree/FileTree'
+import {
+  percentText,
+  rateLimitLabel,
+  showRateLimitInBar,
+  type AgentRateLimitUsageView
+} from './rateLimitDisplay'
 import type {
   AgentAttachment,
   AgentEvent,
@@ -198,16 +204,6 @@ interface AgentContextUsageView {
   remainingTokens: number
   percentage: number
   model?: string
-  updatedAt: number
-}
-
-interface AgentRateLimitUsageView {
-  status?: 'allowed' | 'allowed_warning' | 'rejected'
-  rateLimitType?: string
-  utilization?: number
-  remainingPercent?: number
-  resetsAt?: number
-  isUsingOverage?: boolean
   updatedAt: number
 }
 
@@ -594,11 +590,6 @@ const costFormatter = new Intl.NumberFormat('en-US', {
   maximumFractionDigits: 4
 })
 
-const resetTimeFormatter = new Intl.DateTimeFormat('ko-KR', {
-  hour: '2-digit',
-  minute: '2-digit'
-})
-
 function emptyAgentUsageView(): AgentUsageView {
   return {
     tokens: {
@@ -621,49 +612,6 @@ function tokenCount(value: number | undefined): string {
 
 function exactTokenCount(value: number | undefined): string {
   return value === undefined || !Number.isFinite(value) ? '-' : exactNumberFormatter.format(Math.max(0, Math.round(value)))
-}
-
-function percentText(value: number | undefined): string {
-  if (value === undefined || !Number.isFinite(value)) return '-'
-  return `${Math.round(Math.max(0, Math.min(100, value)))}%`
-}
-
-function rateLimitTypeLabel(value: string | undefined): string {
-  if (value === 'five_hour') return '5시간 한도'
-  if (value === 'seven_day') return '7일 한도'
-  if (value === 'seven_day_opus') return '7일 Opus'
-  if (value === 'seven_day_sonnet') return '7일 Sonnet'
-  if (value === 'overage') return '초과 사용'
-  return '한도'
-}
-
-function rateLimitLabel(value: AgentRateLimitUsageView): string {
-  const reset = resetTimeText(value.resetsAt)
-  const remaining =
-    value.remainingPercent === undefined ? rateLimitStatusText(value) : `잔여 ${percentText(value.remainingPercent)}`
-  return `${rateLimitTypeLabel(value.rateLimitType)} ${remaining}${reset ? ` · ${reset}` : ''}`
-}
-
-function rateLimitStatusText(value: AgentRateLimitUsageView): string {
-  if (value.rateLimitType === 'overage') {
-    if (value.isUsingOverage) return '사용 중'
-    if (value.status === 'rejected') return '불가'
-    if (value.status === 'allowed_warning') return '주의'
-    if (value.status === 'allowed') return '가능'
-  }
-  if (value.status === 'rejected') return '소진'
-  if (value.status === 'allowed_warning') return '주의'
-  return '잔여율 미제공'
-}
-
-function showRateLimitInBar(value: AgentRateLimitUsageView): boolean {
-  if (value.rateLimitType !== 'overage') return true
-  return value.isUsingOverage === true || value.status === 'rejected' || value.status === 'allowed_warning'
-}
-
-function resetTimeText(value: number | undefined): string | undefined {
-  if (value === undefined || !Number.isFinite(value)) return undefined
-  return resetTimeFormatter.format(new Date(value))
 }
 
 function cacheTokenTotal(tokens: AgentTokenUsageView): number {
