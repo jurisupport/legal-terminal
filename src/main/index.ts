@@ -287,8 +287,7 @@ function createWindow(setMain = true, opts?: { docOnly?: boolean; termOnly?: boo
     const closeCaseTab =
       input.type === 'keyDown' &&
       (process.platform === 'darwin' ? input.meta && !input.control : input.control) &&
-      !input.alt &&
-      input.shift &&
+      (process.platform === 'darwin' ? !input.alt && input.shift : input.shift || input.alt) &&
       isW
     if (!closeTab && !closeCaseTab) return
     event.preventDefault()

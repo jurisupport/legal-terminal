@@ -575,8 +575,8 @@ export default function Terminal({
           onCloseRef.current?.()
           return false
         }
-        if (k === 'w' && e.shiftKey && !e.altKey) {
-          // Ctrl/Cmd+Shift+W: 현재 사건탭 닫기.
+        if (k === 'w' && (e.shiftKey || (!isMac && e.altKey))) {
+          // Ctrl/Cmd+Shift+W 또는 Windows Ctrl+Alt+W: 현재 사건탭 닫기.
           e.stopPropagation()
           onCloseCaseTabRef.current?.()
           return false

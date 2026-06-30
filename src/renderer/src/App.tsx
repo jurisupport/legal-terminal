@@ -2019,7 +2019,7 @@ export default function App(): JSX.Element {
     void window.lt.app.newWindow()
   }
 
-  // 단축키: Ctrl/Cmd+T 새 Agent / Ctrl/Cmd+Shift+T 새 터미널 / Ctrl/Cmd+W 탭 닫기 / Ctrl/Cmd+Shift+W 사건탭 닫기 / Ctrl/Cmd+N 새 문서 / Ctrl/Cmd+Shift+N 새 사건
+  // 단축키: Ctrl/Cmd+T 새 Agent / Ctrl/Cmd+Shift+T 새 터미널 / Ctrl/Cmd+W 탭 닫기 / Ctrl/Cmd+Shift+W 사건탭 닫기(Windows: Ctrl+Alt+W도 지원) / Ctrl/Cmd+N 새 문서 / Ctrl/Cmd+Shift+N 새 사건
   useEffect(() => {
     const onKey = (e: KeyboardEvent): void => {
       const activeEl = document.activeElement as HTMLElement | null
@@ -2046,10 +2046,18 @@ export default function App(): JSX.Element {
       const termSideForShortcut =
         workSideForShortcut ?? termSide(termTabs.find((t) => t.id === sourceTermId))
       const primary = platform === 'darwin' ? e.metaKey && !e.ctrlKey : e.ctrlKey
+      const closeCaseTabShortcut =
+        primary && isKey('w', 'KeyW') && (e.shiftKey || (platform !== 'darwin' && e.altKey))
       const pageCycleShortcut = (k === 'pageup' || k === 'pagedown') && !e.altKey && (primary || e.ctrlKey)
       const macCtrlTab = platform === 'darwin' && e.ctrlKey && !e.metaKey && k === 'tab'
       const macCtrlTInWorkArea =
         platform === 'darwin' && !!(termId || workSideForShortcut) && e.ctrlKey && !e.metaKey && isT
+      if (closeCaseTabShortcut) {
+        e.preventDefault()
+        e.stopPropagation()
+        closeActiveCaseTabRef.current()
+        return
+      }
       if (primary && !e.altKey && !e.shiftKey && isKey('s', 'KeyS')) {
         const handler = markdownSaveHandlersRef.current.get(activeDoc)
         if (!handler) return
@@ -2090,10 +2098,6 @@ export default function App(): JSX.Element {
         e.preventDefault()
         e.stopPropagation()
         setCaseTabsOpen((open) => !open)
-      } else if (isKey('w', 'KeyW') && e.shiftKey) {
-        e.preventDefault()
-        e.stopPropagation()
-        closeActiveCaseTabRef.current()
       } else if (isKey('w', 'KeyW') && !e.shiftKey) {
         e.preventDefault()
         e.stopPropagation()
@@ -4853,7 +4857,7 @@ export default function App(): JSX.Element {
   const totalCaseNoticeCount =
     totalCaseDocumentUpdateCount + totalCaseQuestionTaskCount + totalCaseDoneTaskCount
   const caseTabsShortcut = platform === 'darwin' ? '⌘0' : 'Ctrl+0'
-  const closeCaseTabShortcut = platform === 'darwin' ? '⌘⇧W' : 'Ctrl+Shift+W'
+  const closeCaseTabShortcut = platform === 'darwin' ? '⌘⇧W' : 'Ctrl+Shift+W / Ctrl+Alt+W'
   const caseTabActivityTitle =
     totalCaseNoticeCount > 0
       ? `사건탭 · ${[
