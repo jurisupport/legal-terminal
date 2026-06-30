@@ -1,10 +1,12 @@
 # legal-terminal
 
-> 대한민국 송무 변호사를 위한 AI 통합 작업환경.
+> **변호사를 위한 IDE.** 개발자에게 VS Code가 있다면, 송무 변호사에겐 legal-terminal이 있습니다.
+> 여기서 IDE 는 *Integrated **Drafting** Environment* — **통합 서면작성 환경**입니다.
 > 사건 폴더, 전자소송기록, 준비서면, Claude Code, JuriSupport 사건 관리를 한 화면에서 다룹니다.
 >
 > 쥬리서포트 주식회사 ([jurisupport.com](https://jurisupport.com))
 
+![IDE](https://img.shields.io/badge/IDE-Integrated_Drafting_Environment-7c3aed)
 ![License](https://img.shields.io/badge/License-MIT-blue.svg)
 ![Platform](https://img.shields.io/badge/Platform-macOS%20%7C%20Windows-lightgrey)
 ![Locale](https://img.shields.io/badge/Locale-ko--KR-red)
@@ -12,7 +14,7 @@
 
 ![legal-terminal demo](screenshots/demo.gif)
 
-legal-terminal은 따로 떠 있던 `claude` 터미널, 문서 에디터, 전자소송기록 뷰어, 사건·기일 대시보드를 하나로 묶습니다. 기존 `jurisupport-plugins`의 `songmu-legal` 플러그인, korean-law MCP, 판례·법령·사건기록 검색 도구, PII 보호 훅도 그대로 사용할 수 있습니다.
+legal-terminal은 따로 떠 있던 `claude` 터미널, 문서 에디터, 전자소송기록 뷰어, 사건·기일 대시보드를 하나로 묶습니다. 개발자가 IDE 안에서 코드·터미널·디버거를 오가듯, 변호사는 legal-terminal 안에서 **기록을 옆에 띄워 두고 그대로 준비서면을 씁니다.** 기존 `jurisupport-plugins`의 `songmu-legal` 플러그인, korean-law MCP, 판례·법령·사건기록 검색 도구, PII 보호 훅도 그대로 사용할 수 있습니다.
 
 ## 빠른 설치
 
