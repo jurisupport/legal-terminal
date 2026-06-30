@@ -81,6 +81,15 @@ import type {
 type Mode = 'explorer' | 'cases' | 'viewer' | 'todos'
 type DockSide = 'left' | 'right'
 type RecentCase = { drafts: string; records?: string; name: string; ts: number }
+type SyncMode = 'full' | 'folders' | 'file'
+interface SyncModalInit {
+  profile: SshProfile
+  macFolder: string
+  folderLabel?: string
+  directions?: 'both' | 'pull-only'
+  initialMode?: SyncMode
+  lockMode?: boolean
+}
 
 function isComposingInputKeyEvent(event: ReactKeyboardEvent<HTMLInputElement>): boolean {
   return event.nativeEvent.isComposing || event.key === 'Process' || event.keyCode === 229
@@ -1473,12 +1482,7 @@ export default function App(): JSX.Element {
     termId?: string
     source?: CurrentCase
   } | null>(null)
-  const [syncInit, setSyncInit] = useState<{
-    profile: SshProfile
-    macFolder: string
-    folderLabel?: string
-    directions?: 'both' | 'pull-only'
-  } | null>(null)
+  const [syncInit, setSyncInit] = useState<SyncModalInit | null>(null)
   const [workspacePick, setWorkspacePick] = useState<{
     loading: boolean
     entries: WorkspaceEntry[]
@@ -2708,6 +2712,35 @@ export default function App(): JSX.Element {
     return root ? root.replace(/\/+$/, '') + '/' + name : ''
   }
 
+  const relativePathForSync = (rootPath: string, filePath: string): string | undefined => {
+    const rootNorm = rootPath.replace(/\\/g, '/').replace(/\/+$/, '')
+    const fileNorm = filePath.replace(/\\/g, '/')
+    if (!rootNorm) return undefined
+    if (fileNorm === rootNorm) return ''
+    return fileNorm.startsWith(rootNorm + '/') ? fileNorm.slice(rootNorm.length + 1) : undefined
+  }
+
+  const joinSyncPath = (basePath: string, relativePath: string): string => {
+    const base = basePath.replace(/\/+$/, '')
+    const rel = relativePath.replace(/\\/g, '/').replace(/^\/+/, '')
+    if (!base) return rel
+    if (!rel) return base
+    if (base === '/') return `/${rel}`
+    return `${base}/${rel}`
+  }
+
+  const localMirrorFilePathForSync = (
+    localFilePath: string,
+    localFolderPath: string,
+    profile: SshProfile,
+    root?: string
+  ): string => {
+    const mirrorFolder = localMirrorPathForSync(localFolderPath, profile, root)
+    if (!mirrorFolder) return ''
+    const relativePath = relativePathForSync(localFolderPath, localFilePath) ?? fileNameFromPath(localFilePath)
+    return joinSyncPath(mirrorFolder, relativePath)
+  }
+
   // rclone 동기화 모달 열기 — 맥의 작성서류 폴더(원격 경로)를 추정해 프리필.
   // (클라우드 경유 모델: 맥에서 rclone 실행 → 맥 폴더 ↔ OneDrive 클라우드)
   const openSync = (): void => {
@@ -2729,6 +2762,47 @@ export default function App(): JSX.Element {
         macFolder: localMirrorPathForSync(localPath, profile, profile.draftsRoot)
       })
     }
+  }
+
+  const openFileSync = (path: string, name: string): void => {
+    if (sshProfiles.length === 0) {
+      window.alert('먼저 설정에서 SSH 접속 프로필을 추가하세요.')
+      return
+    }
+
+    const remote = parseRemoteUri(path)
+    let profile: SshProfile
+    let macFilePath = ''
+    if (remote) {
+      profile = syncProfileForRemote(remote.profileId)
+      macFilePath = remote.path
+    } else {
+      profile = sshProfiles[0]
+      const localRoot =
+        activeDraftsFolder && !isRemotePath(activeDraftsFolder)
+          ? activeDraftsFolder
+          : parentLocalPath(path)
+      if (localRoot) {
+        macFilePath = localMirrorFilePathForSync(path, localRoot, profile, profile.draftsRoot)
+      }
+    }
+
+    if (!macFilePath) {
+      window.alert('이 파일의 동기화 대상 경로를 계산하지 못했습니다.')
+      return
+    }
+    if (!looksLikeOneDrivePath(macFilePath)) {
+      window.alert('OneDrive 경로에 있는 파일만 rclone으로 동기화할 수 있습니다.')
+      return
+    }
+
+    setSyncInit({
+      profile,
+      macFolder: macFilePath,
+      folderLabel: name || '파일',
+      initialMode: 'file',
+      lockMode: true
+    })
   }
 
   // 소송기록 폴더는 기록뷰어에서 클라우드 → 맥/로컬 최신화만 제공한다.
@@ -5758,6 +5832,7 @@ export default function App(): JSX.Element {
       onDelete={deleteEntry}
       onPasteTo={pasteFilesTo}
       onDownload={downloadEntry}
+      onSyncFile={sshProfiles.length > 0 ? openFileSync : undefined}
       onOpenWorkspaceFromFolder={openFolderInNewWorkspace}
       onGoParentFolder={goParentDraftsFolder}
       onPickDrafts={pickDrafts}
@@ -6720,7 +6795,10 @@ export default function App(): JSX.Element {
         <SyncModal
           profiles={sshProfiles}
           init={syncInit}
-          onClose={() => setSyncInit(null)}
+          onClose={() => {
+            setSyncInit(null)
+            setTreeRefresh((n) => n + 1)
+          }}
         />
       )}
 
@@ -7221,6 +7299,7 @@ function DocsPanel({
   onDelete,
   onPasteTo,
   onDownload,
+  onSyncFile,
   onOpenWorkspaceFromFolder,
   onGoParentFolder,
   onPickDrafts,
@@ -7263,6 +7342,7 @@ function DocsPanel({
   onDelete: (path: string, name: string, isDir: boolean) => void | Promise<void>
   onPasteTo: (dir: string) => void
   onDownload: (path: string, name: string, isDir: boolean) => void
+  onSyncFile?: (path: string, name: string) => void
   onOpenWorkspaceFromFolder: (path: string, name: string) => void
   onGoParentFolder: () => void
   onPickDrafts: () => void
@@ -7492,6 +7572,7 @@ function DocsPanel({
               onDelete={onDelete}
               onPasteTo={onPasteTo}
               onDownload={onDownload}
+              onSyncFile={onSyncFile}
               onOpenWorkspaceFromFolder={onOpenWorkspaceFromFolder}
               pendingCreate={pendingCreate}
               sortMode={sortMode}
@@ -10764,7 +10845,9 @@ function RemoteFolderPicker({
             profile,
             macFolder: syncOpen.macFolder,
             folderLabel: syncOpen.folderLabel,
-            directions: 'pull-only'
+            directions: 'pull-only',
+            initialMode: 'folders',
+            lockMode: true
           }}
           onClose={closeSync}
         />
@@ -10781,19 +10864,14 @@ function SyncModal({
   onClose
 }: {
   profiles: SshProfile[]
-  init: {
-    profile: SshProfile
-    macFolder: string
-    folderLabel?: string
-    directions?: 'both' | 'pull-only'
-  }
+  init: SyncModalInit
   onClose: () => void
 }): JSX.Element {
   const [profileId, setProfileId] = useState(init.profile.id)
   const [macFolder, setMacFolder] = useState(init.macFolder)
   const [remoteName, setRemoteName] = useState('') // 예: "onedrive:"
   const [cloudPath, setCloudPath] = useState(cloudPathFromOneDrivePath(init.macFolder))
-  const [syncMode, setSyncMode] = useState<'full' | 'folders'>('full')
+  const [syncMode, setSyncMode] = useState<SyncMode>(init.initialMode ?? 'full')
   const [info, setInfo] = useState<{ installed: boolean; remotes: string[]; error?: string } | null>(
     null
   )
@@ -10804,6 +10882,7 @@ function SyncModal({
   const running = runningDirection !== null
   const folderLabel = init.folderLabel ?? '사건폴더'
   const pullOnly = init.directions === 'pull-only'
+  const modeLocked = !!init.lockMode
   const runningLabel =
     runningDirection === 'pull' ? '내리기' : runningDirection === 'push' ? '올리기' : ''
 
@@ -10828,11 +10907,17 @@ function SyncModal({
 
   const normalizedCloudPath = cloudPath.trim().replace(/^\/+/, '').normalize('NFC')
   const dest = remoteName ? remoteName + normalizedCloudPath : ''
-  const canRun = Boolean(!running && info?.installed && macFolder.trim() && remoteName)
+  const canRun = Boolean(
+    !running &&
+      info?.installed &&
+      macFolder.trim() &&
+      remoteName &&
+      (syncMode !== 'file' || normalizedCloudPath)
+  )
   const run = (direction: 'pull' | 'push'): void => {
     if (!canRun) return
     const label = direction === 'pull' ? '내리기' : '올리기'
-    const modeLabel = syncMode === 'folders' ? '폴더명만' : '전체'
+    const modeLabel = syncMode === 'folders' ? '폴더명만' : syncMode === 'file' ? '파일 1개' : '전체'
     setRunningDirection(direction)
     setLog((l) => [...l, `${label} 시작 (${modeLabel}): ${dest}`])
     window.lt.sync
@@ -10906,20 +10991,28 @@ function SyncModal({
               </select>
             </label>
             <label className="sync-field">
-              맥 {folderLabel}
+              맥 {syncMode === 'file' ? '파일' : folderLabel}
               <input
                 className="setting-input"
                 value={macFolder}
-                placeholder="/Users/me/Library/CloudStorage/OneDrive/진행중사건/사건폴더"
+                placeholder={
+                  syncMode === 'file'
+                    ? '/Users/me/Library/CloudStorage/OneDrive/진행중사건/사건폴더/서면.pdf'
+                    : '/Users/me/Library/CloudStorage/OneDrive/진행중사건/사건폴더'
+                }
                 onChange={(e) => setMacFolder(e.target.value)}
               />
             </label>
             <label className="sync-field">
-              클라우드 경로 (리모트 내부)
+              클라우드 {syncMode === 'file' ? '파일 ' : ''}경로 (리모트 내부)
               <input
                 className="setting-input"
                 value={cloudPath}
-                placeholder="진행중사건/사건폴더 (비우면 OneDrive 루트)"
+                placeholder={
+                  syncMode === 'file'
+                    ? '진행중사건/사건폴더/서면.pdf'
+                    : '진행중사건/사건폴더 (비우면 OneDrive 루트)'
+                }
                 onChange={(e) => setCloudPath(e.target.value)}
               />
             </label>
@@ -10929,7 +11022,7 @@ function SyncModal({
                 <button
                   type="button"
                   className={`sync-mode-btn ${syncMode === 'full' ? 'active' : ''}`}
-                  disabled={running}
+                  disabled={running || modeLocked}
                   onClick={() => setSyncMode('full')}
                 >
                   전체
@@ -10937,16 +11030,29 @@ function SyncModal({
                 <button
                   type="button"
                   className={`sync-mode-btn ${syncMode === 'folders' ? 'active' : ''}`}
-                  disabled={running}
+                  disabled={running || modeLocked}
                   onClick={() => setSyncMode('folders')}
                 >
                   폴더명만
                 </button>
+                {syncMode === 'file' && (
+                  <button
+                    type="button"
+                    className="sync-mode-btn active"
+                    disabled
+                  >
+                    파일 1개
+                  </button>
+                )}
               </div>
             </div>
             <p className="muted small">
               대상: <code>{dest || '(리모트:경로 미정)'}</code> ·{' '}
-              {syncMode === 'folders' ? (
+              {syncMode === 'file' ? (
+                <>
+                  copyto --update(선택 파일 1개, <b>삭제 전파 안 함</b>)
+                </>
+              ) : syncMode === 'folders' ? (
                 <>
                   파일 복사 없이 폴더 구조만 생성(<b>삭제 전파 안 함</b>)
                 </>

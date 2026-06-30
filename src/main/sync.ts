@@ -76,7 +76,7 @@ export function remoteRcloneInfo(
 export interface RemoteSyncOpts {
   profile: SshProfile
   direction: 'pull' | 'push' // pull: 클라우드→맥, push: 맥→클라우드
-  mode?: 'full' | 'folders' // folders: 파일은 건드리지 않고 폴더 구조만 생성
+  mode?: 'full' | 'folders' | 'file' // folders: 폴더 구조만 생성, file: 단일 파일만 복사
   macFolder: string // 맥의 사건 폴더 (예: /Users/me/OneDrive/진행중사건/강상우)
   dest: string // rclone 클라우드 대상 (예: onedrive:진행중사건/강상우)
 }
@@ -95,7 +95,7 @@ export function runRemoteSync(
   const src = opts.direction === 'pull' ? cloudArg : macArg
   const dst = opts.direction === 'pull' ? macArg : cloudArg
   const checkSource =
-    opts.direction === 'pull'
+    opts.direction === 'pull' && mode !== 'file'
       ? [
           'if ! "$rclone_bin" lsf ' + cloudArg + ' --max-depth 1 >/dev/null 2>&1; then',
           `  echo "클라우드 경로를 찾을 수 없습니다: ${cloudDest}" >&2`,
@@ -136,6 +136,28 @@ export function runRemoteSync(
           '  echo "폴더 생성: $rel"',
           'done < "$tmp"'
         ].join('\n')
+      : mode === 'file'
+        ? [
+            remoteRcloneBootstrap(),
+            `src=${src}`,
+            `dst=${dst}`,
+            'remote_parent() {',
+            '  case "$1" in',
+            '    *:*) prefix="${1%%:*}:"; rest="${1#*:}" ;;',
+            '    *) dirname "$1"; return ;;',
+            '  esac',
+            '  case "$rest" in',
+            '    */*) printf "%s%s\\n" "$prefix" "${rest%/*}" ;;',
+            '    *) printf "%s\\n" "$prefix" ;;',
+            '  esac',
+            '}',
+            opts.direction === 'pull' ? 'mkdir -p "$(dirname "$dst")" || exit 1' : '',
+            opts.direction === 'push' ? 'dst_dir=$(remote_parent "$dst"); "$rclone_bin" mkdir "$dst_dir" || exit 1' : '',
+            'echo "파일 1개를 동기화하는 중..."',
+            '"$rclone_bin" copyto "$src" "$dst" --update --retries=1 --low-level-retries=1 -v --stats-one-line --stats=1s'
+          ]
+            .filter(Boolean)
+            .join('\n')
       : `${remoteRcloneBootstrap()}\n${checkSource}\n` +
         `"$rclone_bin" copy ${src} ${dst} --update --create-empty-src-dirs --transfers=4 --checkers=8 ` +
         `--retries=1 --low-level-retries=1 -v --stats-one-line --stats=1s`
@@ -145,7 +167,7 @@ export function runRemoteSync(
     if (!wc.isDestroyed()) wc.send('sync:progress', line)
   }
   send(
-    `$ (맥미니에서) rclone ${mode === 'folders' ? '폴더명만 ' : ''}${
+    `$ (맥미니에서) rclone ${mode === 'folders' ? '폴더명만 ' : mode === 'file' ? '파일 1개 ' : ''}${
       opts.direction === 'pull' ? '내리기 ⬇' : '올리기 ⬆'
     }`
   )

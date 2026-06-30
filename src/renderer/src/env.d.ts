@@ -728,7 +728,7 @@ export interface LtApi {
     run: (opts: {
       profile: SshProfile
       direction: 'pull' | 'push'
-      mode?: 'full' | 'folders'
+      mode?: 'full' | 'folders' | 'file'
       macFolder: string
       dest: string
     }) => Promise<{ ok: boolean; code: number | null; error?: string }>

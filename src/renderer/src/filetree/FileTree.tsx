@@ -156,6 +156,7 @@ export default function FileTree({
   onDelete,
   onPasteTo,
   onDownload,
+  onSyncFile,
   onOpenWorkspaceFromFolder,
   pendingCreate = null,
   sortMode = 'name-asc',
@@ -173,6 +174,7 @@ export default function FileTree({
   onDelete?: (path: string, name: string, isDir: boolean) => void | Promise<void>
   onPasteTo?: (dir: string) => void
   onDownload?: (path: string, name: string, isDir: boolean) => void
+  onSyncFile?: (path: string, name: string) => void
   onOpenWorkspaceFromFolder?: (path: string, name: string) => void
   pendingCreate?: PendingCreateRequest | null
   sortMode?: SortMode
@@ -756,6 +758,18 @@ export default function FileTree({
               }}
             >
               다운로드
+            </li>
+          )}
+          {singleMenuEntry && !singleMenuEntry.isDir && onSyncFile && (
+            <li
+              className="ctx-item"
+              onClick={() => {
+                const { path, name } = singleMenuEntry
+                setMenu(null)
+                onSyncFile(path, name)
+              }}
+            >
+              이 파일만 동기화
             </li>
           )}
           {singleMenuEntry?.isDir && onOpenWorkspaceFromFolder && (
