@@ -3907,6 +3907,11 @@ body {
 .agent-md-wrap.streaming .agent-md-body > :last-child {
   animation: agent-answer-line-in 180ms ease-out;
 }
+.agent-md-wrap.streaming,
+.agent-md-wrap.streaming .agent-code-block,
+.agent-md-wrap.streaming pre {
+  overflow-anchor: none;
+}
 .agent-md-body {
   min-width: 0;
   max-width: none;

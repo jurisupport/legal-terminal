@@ -2166,6 +2166,8 @@ export default function AgentPanel({
   const createdRef = useRef(false)
   const scrollRef = useRef<HTMLDivElement>(null)
   const shouldFollowTimelineRef = useRef(true)
+  const timelineUserScrollRef = useRef(false)
+  const timelineUserScrollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const slashMenuRef = useRef<HTMLDivElement>(null)
   const modeMenuRef = useRef<HTMLDivElement>(null)
@@ -2346,10 +2348,20 @@ export default function AgentPanel({
     window.requestAnimationFrame(scroll)
   }, [])
 
+  const markTimelineUserScroll = useCallback((): void => {
+    timelineUserScrollRef.current = true
+    if (timelineUserScrollTimerRef.current) clearTimeout(timelineUserScrollTimerRef.current)
+    timelineUserScrollTimerRef.current = setTimeout(() => {
+      timelineUserScrollRef.current = false
+      timelineUserScrollTimerRef.current = null
+    }, 180)
+  }, [])
+
   const updateTimelineFollowState = useCallback((): void => {
     const timeline = scrollRef.current
     if (!timeline) return
     const atBottom = isTimelineNearBottom(timeline)
+    if (!timelineUserScrollRef.current && shouldFollowTimelineRef.current && !atBottom) return
     shouldFollowTimelineRef.current = atBottom
     if (atBottom) setShowNewOutputNotice(false)
   }, [])
@@ -2538,6 +2550,7 @@ export default function AgentPanel({
   useEffect(
     () => () => {
       if (copyFeedbackTimerRef.current) clearTimeout(copyFeedbackTimerRef.current)
+      if (timelineUserScrollTimerRef.current) clearTimeout(timelineUserScrollTimerRef.current)
     },
     []
   )
@@ -3453,7 +3466,16 @@ export default function AgentPanel({
       </header>
 
       <div className="agent-timeline-wrap">
-        <div className="agent-timeline" ref={scrollRef} onScroll={updateTimelineFollowState} onCopy={copySelection}>
+        <div
+          className="agent-timeline"
+          ref={scrollRef}
+          onScroll={updateTimelineFollowState}
+          onWheel={markTimelineUserScroll}
+          onPointerDown={markTimelineUserScroll}
+          onTouchMove={markTimelineUserScroll}
+          onKeyDown={markTimelineUserScroll}
+          onCopy={copySelection}
+        >
           {items.length === 0 && <div className="agent-empty">{agentLabel} Agent</div>}
           {items.map((item) => {
             if (item.kind === 'process') {

@@ -1,5 +1,4 @@
-import { Client, type SFTPWrapper, utils } from 'ssh2'
-import { spawn } from 'child_process'
+import { Client, type ClientChannel, type SFTPWrapper, utils } from 'ssh2'
 import { createHash } from 'crypto'
 import { readFile } from 'fs/promises'
 import { existsSync } from 'fs'
@@ -42,10 +41,13 @@ const pool = new Map<string, Promise<{ client: Client; sftp: SFTPWrapper }>>()
 
 const winAgent = '\\\\.\\pipe\\openssh-ssh-agent'
 const DEFAULT_KEYS = ['id_ed25519', 'id_ecdsa', 'id_rsa']
-const sshBin = process.platform === 'win32' ? 'ssh.exe' : 'ssh'
 const SSH_READ_TIMEOUT_MS = 120_000
 const SSH_QUICK_READ_TIMEOUT_MS = 8_000
-const RCLONE_READ_TIMEOUT_MS = 5 * 60_000
+const RCLONE_PROCESS_TIMEOUT = '60s'
+const RCLONE_PROCESS_TIMEOUT_MS = 60_000
+const RCLONE_IO_TIMEOUT = '30s'
+const RCLONE_CONNECT_TIMEOUT = '10s'
+const RCLONE_READ_TIMEOUT_MS = RCLONE_PROCESS_TIMEOUT_MS + 15_000
 const RCLONE_LIST_TIMEOUT_MS = 15_000
 const RCLONE_LIST_MERGE_TIMEOUT_MS = 2_500
 const REMOTE_CLOUD_HYDRATE_TIMEOUT_MS = 10 * 60_000
@@ -55,9 +57,36 @@ const REMOTE_DIR_CACHE_TTL_MS = 10 * 60_000
 const REMOTE_DIR_CACHE_MAX = 500
 const REMOTE_DIR_DISK_CACHE_NAMESPACE = 'remote-fs'
 const REMOTE_FILE_CACHE_NAMESPACE = 'remote-file'
+const REMOTE_PREFETCH_CONCURRENCY = 4
+const REMOTE_PREFETCH_COOLDOWN_MS = 10 * 60_000
+const REMOTE_RCLONE_LIST_BACKOFF_MS = 30_000
 const remotePrefetching = new Set<string>()
 const remotePrefetchedAt = new Map<string, number>()
+const remotePrefetchQueue: RemotePrefetchJob[] = []
+const remoteOneDriveListInflight = new Map<string, Promise<Entry[]>>()
+const remoteOneDriveListBackoffUntil = new Map<string, number>()
 const remoteLocalMutatedAt = new Map<string, number>()
+let remotePrefetchActive = 0
+
+interface RemoteExecResult {
+  stdout: Buffer
+  stderr: Buffer
+  code: number | null
+  signal?: string
+}
+
+interface RemoteExecOptions {
+  timeoutMs: number
+  timeoutMessage: string
+  onStdout?: (chunk: Buffer) => void
+}
+
+interface RemotePrefetchJob {
+  key: string
+  profileId: string
+  cloudPath: string
+  targetPath: string
+}
 
 function shq(s: string): string {
   return `'${s.replace(/'/g, "'\\''")}'`
@@ -114,7 +143,46 @@ function remoteRcloneBootstrap(): string {
     'if [ -z "$rclone_bin" ]; then',
     '  echo "rclone not found on remote Mac" >&2',
     '  exit 127',
-    'fi'
+    'fi',
+    'lt_timeout_bin=$(command -v timeout 2>/dev/null || command -v gtimeout 2>/dev/null || true)',
+    'lt_rclone_pid=',
+    'lt_rclone_watchdog=',
+    'lt_rclone_cleanup() {',
+    '  if [ -n "${lt_rclone_watchdog:-}" ]; then',
+    '    kill "$lt_rclone_watchdog" >/dev/null 2>&1 || true',
+    '    wait "$lt_rclone_watchdog" >/dev/null 2>&1 || true',
+    '    lt_rclone_watchdog=',
+    '  fi',
+    '  if [ -n "${lt_rclone_pid:-}" ] && kill -0 "$lt_rclone_pid" >/dev/null 2>&1; then',
+    '    if command -v pgrep >/dev/null 2>&1; then',
+    '      for lt_child in $(pgrep -P "$lt_rclone_pid" 2>/dev/null); do kill "$lt_child" >/dev/null 2>&1 || true; done',
+    '    fi',
+    '    kill "$lt_rclone_pid" >/dev/null 2>&1 || true',
+    '    sleep 1',
+    '    if command -v pgrep >/dev/null 2>&1; then',
+    '      for lt_child in $(pgrep -P "$lt_rclone_pid" 2>/dev/null); do kill -9 "$lt_child" >/dev/null 2>&1 || true; done',
+    '    fi',
+    '    kill -9 "$lt_rclone_pid" >/dev/null 2>&1 || true',
+    '    wait "$lt_rclone_pid" >/dev/null 2>&1 || true',
+    '  fi',
+    '  lt_rclone_pid=',
+    '}',
+    'trap lt_rclone_cleanup HUP INT TERM EXIT',
+    'lt_rclone() {',
+    '  lt_rclone_cleanup',
+    '  if [ -n "$lt_timeout_bin" ]; then',
+    `    "$lt_timeout_bin" -k 5s ${RCLONE_PROCESS_TIMEOUT} "$rclone_bin" "$@" --timeout ${RCLONE_IO_TIMEOUT} --contimeout ${RCLONE_CONNECT_TIMEOUT} &`,
+    '  else',
+    `    "$rclone_bin" "$@" --timeout ${RCLONE_IO_TIMEOUT} --contimeout ${RCLONE_CONNECT_TIMEOUT} &`,
+    '  fi',
+    '  lt_rclone_pid=$!',
+    `  ( sleep ${Math.ceil(RCLONE_PROCESS_TIMEOUT_MS / 1000)}; kill "$lt_rclone_pid" >/dev/null 2>&1 || true; sleep 2; kill -9 "$lt_rclone_pid" >/dev/null 2>&1 || true ) &`,
+    '  lt_rclone_watchdog=$!',
+    '  wait "$lt_rclone_pid"',
+    '  lt_rclone_status=$?',
+    '  lt_rclone_cleanup',
+    '  return "$lt_rclone_status"',
+    '}'
   ].join('\n')
 }
 
@@ -126,6 +194,15 @@ function remoteMaterializeTmpPath(profileId: string, cloudPath: string): string 
     .slice(0, 24)
   const base = posix.basename(rel) || 'file'
   return posix.join(REMOTE_MATERIALIZE_TMP_ROOT, profileId, `${hash}-${base}`)
+}
+
+function remoteExitError(result: RemoteExecResult, fallback: string): Error {
+  const msg = result.stderr.toString('utf8').trim()
+  const status =
+    result.signal && result.code !== 0
+      ? `원격 명령 종료 코드 ${result.code ?? 'unknown'} (${result.signal})`
+      : `원격 명령 종료 코드 ${result.code ?? 'unknown'}`
+  return new Error(msg || fallback || status)
 }
 
 function noteRemoteLocalMutation(path: string): void {
@@ -145,88 +222,76 @@ async function listRemoteOneDriveEntries(
   localDir: string,
   timeoutMs = RCLONE_LIST_TIMEOUT_MS
 ): Promise<Entry[]> {
-  const profile = await getProfile(profileId)
+  const backoffKey = `${profileId}\0${cloudPath}\0${localDir}`
+  const backoffUntil = remoteOneDriveListBackoffUntil.get(backoffKey) ?? 0
+  if (Date.now() < backoffUntil) throw new Error('rclone list backed off after recent failure')
+
+  const listKey = `${backoffKey}\0${timeoutMs}`
+  const existing = remoteOneDriveListInflight.get(listKey)
+  if (existing) return await existing
+
   const script = [
     remoteRcloneBootstrap(),
     `cloud=${shq(cloudPath)}`,
-    '"$rclone_bin" lsf "$cloud" --max-depth 1 --format p --retries=1 --low-level-retries=1'
+    'lt_rclone lsf "$cloud" --max-depth 1 --format p --retries=1 --low-level-retries=1'
   ].join('\n')
 
-  return await new Promise<Entry[]>((resolve, reject) => {
-    const chunks: Buffer[] = []
-    const errs: Buffer[] = []
-    const proc = spawn(sshBin, [...sshArgs(profile), script], { windowsHide: true })
-    const timer = setTimeout(() => {
-      proc.kill()
-      reject(new Error('rclone list timed out'))
-    }, timeoutMs)
-    proc.stdout.on('data', (chunk: Buffer) => chunks.push(chunk))
-    proc.stderr.on('data', (chunk: Buffer) => errs.push(chunk))
-    proc.on('error', (err) => {
-      clearTimeout(timer)
-      reject(new Error(`rclone list 실행 실패: ${err.message}`))
+  const request = (async (): Promise<Entry[]> => {
+    const result = await execRemoteCommand(profileId, script, {
+      timeoutMs,
+      timeoutMessage: 'rclone list timed out'
     })
-    proc.on('close', (code) => {
-      clearTimeout(timer)
-      if (code !== 0) {
-        reject(new Error(Buffer.concat(errs).toString('utf8').trim() || `rclone 종료 코드 ${code}`))
-        return
-      }
-      const entries = Buffer.concat(chunks)
-        .toString('utf8')
-        .split(/\r?\n/)
-        .flatMap((raw): Entry[] => {
-          if (!raw) return []
-          const isDir = raw.endsWith('/')
-          const rel = raw.replace(/\/+$/, '')
-          const name = posix.basename(rel)
-          if (!name || name.startsWith('.')) return []
-          return [
-            {
-              name,
-              path: makeRemote(profileId, posix.join(localDir, rel)),
-              isDir
-            }
-          ]
-        })
-      resolve(entries)
-    })
-  })
+    if (result.code !== 0) throw remoteExitError(result, `rclone 종료 코드 ${result.code}`)
+    return result.stdout
+      .toString('utf8')
+      .split(/\r?\n/)
+      .flatMap((raw): Entry[] => {
+        if (!raw) return []
+        const isDir = raw.endsWith('/')
+        const rel = raw.replace(/\/+$/, '')
+        const name = posix.basename(rel)
+        if (!name || name.startsWith('.')) return []
+        return [
+          {
+            name,
+            path: makeRemote(profileId, posix.join(localDir, rel)),
+            isDir
+          }
+        ]
+      })
+  })()
+  remoteOneDriveListInflight.set(listKey, request)
+  try {
+    const entries = await request
+    remoteOneDriveListBackoffUntil.delete(backoffKey)
+    return entries
+  } catch (e) {
+    remoteOneDriveListBackoffUntil.set(backoffKey, Date.now() + REMOTE_RCLONE_LIST_BACKOFF_MS)
+    throw e
+  } finally {
+    if (remoteOneDriveListInflight.get(listKey) === request) remoteOneDriveListInflight.delete(listKey)
+  }
 }
 
 async function deleteRemoteOneDrivePath(profileId: string, cloudPath: string): Promise<void> {
-  const profile = await getProfile(profileId)
   const script = [
     remoteRcloneBootstrap(),
     `cloud=${shq(cloudPath)}`,
     [
-      '"$rclone_bin" deletefile "$cloud" --retries=1 --low-level-retries=1 && exit 0',
+      'lt_rclone deletefile "$cloud" --retries=1 --low-level-retries=1 && exit 0',
       'file_status=$?',
-      '"$rclone_bin" purge "$cloud" --retries=1 --low-level-retries=1 && exit 0',
+      'lt_rclone purge "$cloud" --retries=1 --low-level-retries=1 && exit 0',
       'purge_status=$?',
       'echo "rclone deletefile failed: $file_status; purge failed: $purge_status" >&2',
       'exit "$purge_status"'
     ].join('\n')
   ].join('\n')
 
-  await new Promise<void>((resolve, reject) => {
-    const errs: Buffer[] = []
-    const proc = spawn(sshBin, [...sshArgs(profile), script], { windowsHide: true })
-    const timer = setTimeout(() => {
-      proc.kill()
-      reject(new Error('rclone delete timed out'))
-    }, RCLONE_READ_TIMEOUT_MS)
-    proc.stderr.on('data', (chunk: Buffer) => errs.push(chunk))
-    proc.on('error', (err) => {
-      clearTimeout(timer)
-      reject(new Error(`rclone delete 실행 실패: ${err.message}`))
-    })
-    proc.on('close', (code) => {
-      clearTimeout(timer)
-      if (code === 0) resolve()
-      else reject(new Error(Buffer.concat(errs).toString('utf8').trim() || `rclone 종료 코드 ${code}`))
-    })
+  const result = await execRemoteCommand(profileId, script, {
+    timeoutMs: RCLONE_READ_TIMEOUT_MS * 2,
+    timeoutMessage: 'rclone delete timed out'
   })
+  if (result.code !== 0) throw remoteExitError(result, `rclone 종료 코드 ${result.code}`)
 }
 
 async function listRemoteOneDrivePdfs(
@@ -235,43 +300,24 @@ async function listRemoteOneDrivePdfs(
   localRoot: string,
   timeoutMs = RCLONE_LIST_TIMEOUT_MS
 ): Promise<{ name: string; path: string }[]> {
-  const profile = await getProfile(profileId)
   const script = [
     remoteRcloneBootstrap(),
     `cloud=${shq(cloudPath)}`,
-    '"$rclone_bin" lsf "$cloud" --recursive --files-only --format p --retries=1 --low-level-retries=1'
+    'lt_rclone lsf "$cloud" --recursive --files-only --format p --retries=1 --low-level-retries=1'
   ].join('\n')
 
-  return await new Promise<{ name: string; path: string }[]>((resolve, reject) => {
-    const chunks: Buffer[] = []
-    const errs: Buffer[] = []
-    const proc = spawn(sshBin, [...sshArgs(profile), script], { windowsHide: true })
-    const timer = setTimeout(() => {
-      proc.kill()
-      reject(new Error('rclone pdf list timed out'))
-    }, timeoutMs)
-    proc.stdout.on('data', (chunk: Buffer) => chunks.push(chunk))
-    proc.stderr.on('data', (chunk: Buffer) => errs.push(chunk))
-    proc.on('error', (err) => {
-      clearTimeout(timer)
-      reject(new Error(`rclone pdf list 실행 실패: ${err.message}`))
-    })
-    proc.on('close', (code) => {
-      clearTimeout(timer)
-      if (code !== 0) {
-        reject(new Error(Buffer.concat(errs).toString('utf8').trim() || `rclone 종료 코드 ${code}`))
-        return
-      }
-      const entries = Buffer.concat(chunks)
-        .toString('utf8')
-        .split(/\r?\n/)
-        .flatMap((rel): { name: string; path: string }[] => {
-          if (!rel || !rel.toLowerCase().endsWith('.pdf')) return []
-          return [{ name: posix.basename(rel), path: makeRemote(profileId, posix.join(localRoot, rel)) }]
-        })
-      resolve(entries)
-    })
+  const result = await execRemoteCommand(profileId, script, {
+    timeoutMs,
+    timeoutMessage: 'rclone pdf list timed out'
   })
+  if (result.code !== 0) throw remoteExitError(result, `rclone 종료 코드 ${result.code}`)
+  return result.stdout
+    .toString('utf8')
+    .split(/\r?\n/)
+    .flatMap((rel): { name: string; path: string }[] => {
+      if (!rel || !rel.toLowerCase().endsWith('.pdf')) return []
+      return [{ name: posix.basename(rel), path: makeRemote(profileId, posix.join(localRoot, rel)) }]
+    })
 }
 
 async function getProfile(profileId: string): Promise<SshProfile> {
@@ -352,10 +398,14 @@ function connect(profileId: string): Promise<{ client: Client; sftp: SFTPWrapper
 }
 
 async function getSftp(profileId: string): Promise<SFTPWrapper> {
+  return (await getConnection(profileId)).sftp
+}
+
+async function getConnection(profileId: string): Promise<{ client: Client; sftp: SFTPWrapper }> {
   const existing = pool.get(profileId)
   if (existing) {
     try {
-      return (await existing).sftp
+      return await existing
     } catch {
       pool.delete(profileId) // 이전 연결 실패 → 새로 시도
     }
@@ -363,11 +413,94 @@ async function getSftp(profileId: string): Promise<SFTPWrapper> {
   const fresh = connect(profileId)
   pool.set(profileId, fresh)
   try {
-    return (await fresh).sftp
+    return await fresh
   } catch (e) {
     pool.delete(profileId)
     throw e
   }
+}
+
+async function execRemoteCommand(
+  profileId: string,
+  command: string,
+  opts: RemoteExecOptions
+): Promise<RemoteExecResult> {
+  const { client } = await getConnection(profileId)
+  return await new Promise<RemoteExecResult>((resolve, reject) => {
+    const stdout: Buffer[] = []
+    const stderr: Buffer[] = []
+    let settled = false
+    let stream: ClientChannel | undefined
+    let timer: ReturnType<typeof setTimeout> | undefined
+    let killTimer: ReturnType<typeof setTimeout> | undefined
+    let timeoutError: Error | undefined
+
+    const finish = (err?: Error, result?: RemoteExecResult): void => {
+      if (settled) return
+      settled = true
+      if (timer) clearTimeout(timer)
+      if (killTimer) clearTimeout(killTimer)
+      if (err) reject(err)
+      else resolve(result ?? { stdout: Buffer.concat(stdout), stderr: Buffer.concat(stderr), code: 0 })
+    }
+    const terminate = (): void => {
+      timeoutError = new Error(opts.timeoutMessage)
+      if (!stream) {
+        finish(timeoutError)
+        return
+      }
+      try {
+        stream.signal('TERM')
+      } catch {
+        /* best effort */
+      }
+      killTimer = setTimeout(() => {
+        try {
+          stream?.signal('KILL')
+        } catch {
+          /* best effort */
+        }
+        try {
+          stream?.close()
+        } catch {
+          /* best effort */
+        }
+        finish(timeoutError)
+      }, 2_000)
+    }
+    timer = setTimeout(terminate, opts.timeoutMs)
+
+    client.exec(command, (err, channel) => {
+      if (err) {
+        finish(err)
+        return
+      }
+      stream = channel
+      channel.on('data', (chunk: Buffer | string) => {
+        const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
+        stdout.push(buf)
+        opts.onStdout?.(buf)
+      })
+      channel.stderr.on('data', (chunk: Buffer | string) => {
+        stderr.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk))
+      })
+      channel.on('error', (streamErr: unknown) => {
+        finish(streamErr instanceof Error ? streamErr : new Error(String(streamErr)))
+      })
+      channel.on('close', (code: number | null, signal?: string) => {
+        if (timeoutError) {
+          finish(timeoutError)
+          return
+        }
+        finish(undefined, {
+          stdout: Buffer.concat(stdout),
+          stderr: Buffer.concat(stderr),
+          code,
+          signal
+        })
+      })
+    })
+  })
 }
 
 export function disposeRemote(profileId?: string): void {
@@ -770,39 +903,17 @@ async function readBytesViaSsh(
   timeoutMs = SSH_READ_TIMEOUT_MS,
   onBytes?: (downloadedBytes: number) => void
 ): Promise<Buffer> {
-  const profile = await getProfile(profileId)
-  const args = sshArgs(profile)
-  args.push(`cat -- ${shq(path)}`)
-
-  return await new Promise<Buffer>((resolve, reject) => {
-    const chunks: Buffer[] = []
-    const errs: Buffer[] = []
-    const proc = spawn(sshBin, args, { windowsHide: true })
-    const timer = setTimeout(() => {
-      proc.kill()
-      reject(new Error('Operation timed out'))
-    }, timeoutMs)
-    let downloadedBytes = 0
-    proc.stdout.on('data', (chunk: Buffer) => {
-      chunks.push(chunk)
+  let downloadedBytes = 0
+  const result = await execRemoteCommand(profileId, `cat -- ${shq(path)}`, {
+    timeoutMs,
+    timeoutMessage: 'Operation timed out',
+    onStdout: (chunk) => {
       downloadedBytes += chunk.byteLength
       onBytes?.(downloadedBytes)
-    })
-    proc.stderr.on('data', (chunk: Buffer) => errs.push(chunk))
-    proc.on('error', (err) => {
-      clearTimeout(timer)
-      reject(new Error(`SSH fallback 실행 실패: ${err.message}`))
-    })
-    proc.on('close', (code) => {
-      clearTimeout(timer)
-      if (code === 0) {
-        resolve(Buffer.concat(chunks))
-        return
-      }
-      const fallbackErr = Buffer.concat(errs).toString('utf8').trim()
-      reject(new Error(fallbackErr || `ssh 종료 코드 ${code}`))
-    })
+    }
   })
+  if (result.code === 0) return result.stdout
+  throw remoteExitError(result, `ssh 종료 코드 ${result.code}`)
 }
 
 async function readBytesViaRclone(
@@ -810,38 +921,18 @@ async function readBytesViaRclone(
   cloudPath: string,
   onBytes?: (downloadedBytes: number) => void
 ): Promise<Buffer> {
-  const profile = await getProfile(profileId)
-  const script = `${remoteRcloneBootstrap()}\n"$rclone_bin" cat ${shq(cloudPath)} --retries=1 --low-level-retries=1`
-
-  return await new Promise<Buffer>((resolve, reject) => {
-    const chunks: Buffer[] = []
-    const errs: Buffer[] = []
-    const proc = spawn(sshBin, [...sshArgs(profile), script], { windowsHide: true })
-    const timer = setTimeout(() => {
-      proc.kill()
-      reject(new Error('rclone read timed out'))
-    }, RCLONE_READ_TIMEOUT_MS)
-    let downloadedBytes = 0
-    proc.stdout.on('data', (chunk: Buffer) => {
-      chunks.push(chunk)
+  const script = `${remoteRcloneBootstrap()}\nlt_rclone cat ${shq(cloudPath)} --retries=1 --low-level-retries=1`
+  let downloadedBytes = 0
+  const result = await execRemoteCommand(profileId, script, {
+    timeoutMs: RCLONE_READ_TIMEOUT_MS,
+    timeoutMessage: 'rclone read timed out',
+    onStdout: (chunk) => {
       downloadedBytes += chunk.byteLength
       onBytes?.(downloadedBytes)
-    })
-    proc.stderr.on('data', (chunk: Buffer) => errs.push(chunk))
-    proc.on('error', (err) => {
-      clearTimeout(timer)
-      reject(new Error(`rclone 실행 실패: ${err.message}`))
-    })
-    proc.on('close', (code) => {
-      clearTimeout(timer)
-      if (code === 0) {
-        resolve(Buffer.concat(chunks))
-        return
-      }
-      const msg = Buffer.concat(errs).toString('utf8').trim()
-      reject(new Error(msg || `rclone 종료 코드 ${code}`))
-    })
+    }
   })
+  if (result.code === 0) return result.stdout
+  throw remoteExitError(result, `rclone 종료 코드 ${result.code}`)
 }
 
 async function materializeRemoteOneDriveFile(
@@ -849,13 +940,14 @@ async function materializeRemoteOneDriveFile(
   cloudPath: string,
   targetPath: string
 ): Promise<void> {
-  const profile = await getProfile(profileId)
   const tmpPath = `${remoteMaterializeTmpPath(profileId, cloudPath)}.part.$$`
   const script = [
     remoteRcloneBootstrap(),
     `cloud=${shq(cloudPath)}`,
     `target=${shq(targetPath)}`,
     `tmp=${shq(tmpPath)}`,
+    'cleanup_tmp() { rm -f "$tmp"; }',
+    'trap "lt_rclone_cleanup; cleanup_tmp" HUP INT TERM EXIT',
     'target_state=$(ls -lO "$target" 2>/dev/null || true)',
     'if [ -n "$target_state" ] && ! printf "%s\\n" "$target_state" | grep -q "dataless"; then exit 0; fi',
     'mkdir -p "$(dirname "$target")"',
@@ -863,119 +955,81 @@ async function materializeRemoteOneDriveFile(
     'gid=$(stat -f "%g" "$target" 2>/dev/null || stat -f "%g" "$(dirname "$target")" 2>/dev/null || true)',
     'mkdir -p "$(dirname "$tmp")"',
     'rm -f "$tmp"',
-    '"$rclone_bin" copyto "$cloud" "$tmp" --ignore-times --retries=1 --low-level-retries=1',
+    'lt_rclone copyto "$cloud" "$tmp" --ignore-times --retries=1 --low-level-retries=1',
     'chmod "$mode" "$tmp" >/dev/null 2>&1 || true',
     'if [ -n "$gid" ]; then chgrp "$gid" "$tmp" >/dev/null 2>&1 || true; fi',
     'target_state=$(ls -lO "$target" 2>/dev/null || true)',
     'if [ -n "$target_state" ] && ! printf "%s\\n" "$target_state" | grep -q "dataless"; then rm -f "$tmp"; exit 0; fi',
-    'mv -f "$tmp" "$target"'
+    'mv -f "$tmp" "$target"',
+    'mv_status=$?',
+    'if [ "$mv_status" -eq 0 ]; then trap - HUP INT TERM EXIT; fi',
+    'exit "$mv_status"'
   ].join('\n')
 
-  await new Promise<void>((resolve, reject) => {
-    const errs: Buffer[] = []
-    const proc = spawn(sshBin, [...sshArgs(profile), script], { windowsHide: true })
-    const timer = setTimeout(() => {
-      proc.kill()
-      reject(new Error('rclone materialize timed out'))
-    }, RCLONE_READ_TIMEOUT_MS)
-    proc.stderr.on('data', (chunk: Buffer) => errs.push(chunk))
-    proc.on('error', (err) => {
-      clearTimeout(timer)
-      reject(new Error(`rclone materialize 실행 실패: ${err.message}`))
-    })
-    proc.on('close', (code) => {
-      clearTimeout(timer)
-      if (code === 0) resolve()
-      else reject(new Error(Buffer.concat(errs).toString('utf8').trim() || `rclone 종료 코드 ${code}`))
-    })
+  const result = await execRemoteCommand(profileId, script, {
+    timeoutMs: RCLONE_READ_TIMEOUT_MS,
+    timeoutMessage: 'rclone materialize timed out'
   })
+  if (result.code !== 0) throw remoteExitError(result, `rclone 종료 코드 ${result.code}`)
 }
 
 function prefetchRemoteOneDriveFiles(profileId: string, uris: string[]): void {
   const now = Date.now()
-  const pairs = uris
+  const jobs = uris
     .map((uri) => {
       const { path } = parseRemote(uri)
       const cloudPath = oneDriveCloudPath(path)
       if (!cloudPath) return null
       const key = `${profileId}\0${cloudPath}`
       const doneAt = remotePrefetchedAt.get(key) ?? 0
-      if (remotePrefetching.has(key) || now - doneAt < 10 * 60_000) return null
-      return { key, cloudPath, targetPath: path }
+      if (remotePrefetching.has(key) || now - doneAt < REMOTE_PREFETCH_COOLDOWN_MS) return null
+      return { key, profileId, cloudPath, targetPath: path }
     })
-    .filter((p): p is { key: string; cloudPath: string; targetPath: string } => !!p)
-  if (pairs.length === 0) return
+    .filter((p): p is RemotePrefetchJob => !!p)
+  if (jobs.length === 0) return
 
-  for (const p of pairs) remotePrefetching.add(p.key)
-  void (async () => {
-    const profile = await getProfile(profileId)
-    const lines = pairs
-      .map((p) => `${Buffer.from(p.cloudPath).toString('base64')}\t${Buffer.from(p.targetPath).toString('base64')}`)
-      .join('\n')
-    const tmpRoot = posix.join(REMOTE_MATERIALIZE_TMP_ROOT, profileId)
-    const script = [
-      remoteRcloneBootstrap(),
-      `tmp_root=${shq(tmpRoot)}`,
-      'while IFS="$(printf \'\\t\')" read -r cloud64 target64; do',
-      '  [ -z "$cloud64" ] && continue',
-      '  cloud=$(printf "%s" "$cloud64" | base64 --decode)',
-      '  target=$(printf "%s" "$target64" | base64 --decode)',
-      '  target_state=$(ls -lO "$target" 2>/dev/null || true)',
-      '  if [ -n "$target_state" ] && ! printf "%s\\n" "$target_state" | grep -q "dataless"; then continue; fi',
-      '  mkdir -p "$(dirname "$target")"',
-      '  mode=$(stat -f "%Lp" "$target" 2>/dev/null || echo 600)',
-      '  gid=$(stat -f "%g" "$target" 2>/dev/null || stat -f "%g" "$(dirname "$target")" 2>/dev/null || true)',
-      '  mkdir -p "$tmp_root"',
-      '  name=$(basename "$target")',
-      '  tmp="$tmp_root/$name.part.$$"',
-      '  rm -f "$tmp"',
-      '  if "$rclone_bin" copyto "$cloud" "$tmp" --ignore-times --retries=1 --low-level-retries=1; then',
-      '    chmod "$mode" "$tmp" >/dev/null 2>&1 || true',
-      '    if [ -n "$gid" ]; then chgrp "$gid" "$tmp" >/dev/null 2>&1 || true; fi',
-      '    target_state=$(ls -lO "$target" 2>/dev/null || true)',
-      '    if [ -z "$target_state" ] || printf "%s\\n" "$target_state" | grep -q "dataless"; then',
-      '      mv -f "$tmp" "$target"',
-      '    else',
-      '      rm -f "$tmp"',
-      '    fi',
-      '  else',
-      '    rm -f "$tmp"',
-      '  fi',
-      `done <<'LT_PREFETCH_FILES'\n${lines}\nLT_PREFETCH_FILES`
-    ].join('\n')
-    await new Promise<void>((resolve) => {
-      const proc = spawn(sshBin, [...sshArgs(profile), script], { windowsHide: true })
-      proc.on('error', () => resolve())
-      proc.on('close', () => resolve())
-    })
-    const finishedAt = Date.now()
-    for (const p of pairs) {
-      remotePrefetching.delete(p.key)
-      remotePrefetchedAt.set(p.key, finishedAt)
-    }
-  })().catch(() => {
-    for (const p of pairs) remotePrefetching.delete(p.key)
-  })
+  for (const job of jobs) {
+    remotePrefetching.add(job.key)
+    remotePrefetchQueue.push(job)
+  }
+  drainRemotePrefetchQueue()
 }
-function sshArgs(profile: SshProfile): string[] {
-  const args: string[] = []
-  if (profile.port) args.push('-p', String(profile.port))
-  if (profile.identityFile) args.push('-i', profile.identityFile)
-  args.push('-o', 'BatchMode=yes')
-  args.push('-o', 'ConnectTimeout=20')
-  args.push('-o', 'ServerAliveInterval=30')
-  args.push('-o', 'StrictHostKeyChecking=accept-new')
-  args.push(`${profile.user}@${profile.host}`)
-  return args
+
+function drainRemotePrefetchQueue(): void {
+  while (remotePrefetchActive < REMOTE_PREFETCH_CONCURRENCY && remotePrefetchQueue.length > 0) {
+    const job = remotePrefetchQueue.shift()
+    if (!job) return
+    remotePrefetchActive += 1
+    void runRemotePrefetchJob(job).finally(() => {
+      remotePrefetchActive -= 1
+      drainRemotePrefetchQueue()
+    })
+  }
+}
+
+async function runRemotePrefetchJob(job: RemotePrefetchJob): Promise<void> {
+  try {
+    await materializeRemoteOneDriveFile(job.profileId, job.cloudPath, job.targetPath)
+  } catch {
+    /* Background prefetch is opportunistic; foreground open still reports errors. */
+  } finally {
+    remotePrefetching.delete(job.key)
+    remotePrefetchedAt.set(job.key, Date.now())
+  }
 }
 
 async function hydrateRemoteFile(profileId: string, path: string): Promise<void> {
-  const profile = await getProfile(profileId)
   const script = `
 p=${shq(path)}
 err="/tmp/legal-terminal-download-$$.err"
-cleanup() { rm -f "$err"; }
-trap cleanup EXIT
+cleanup() {
+  if [ -n "\${dlpid:-}" ] && kill -0 "$dlpid" >/dev/null 2>&1; then
+    kill "$dlpid" >/dev/null 2>&1 || true
+    wait "$dlpid" >/dev/null 2>&1 || true
+  fi
+  rm -f "$err"
+}
+trap cleanup HUP INT TERM EXIT
 
 try_read() {
   rm -f "$err"
@@ -1044,24 +1098,11 @@ if [ -x "$onedrive" ]; then "$onedrive" /getpin "$p" >&2 || true; fi
 ls -lO@ "$p" >&2 2>/dev/null || true
 exit 1
 `.trim()
-  await new Promise<void>((resolve, reject) => {
-    const errs: Buffer[] = []
-    const proc = spawn(sshBin, [...sshArgs(profile), script], { windowsHide: true })
-    const timer = setTimeout(() => {
-      proc.kill()
-      reject(new Error('원격 OneDrive 다운로드 대기 시간이 초과되었습니다.'))
-    }, REMOTE_CLOUD_HYDRATE_TIMEOUT_MS)
-    proc.stderr.on('data', (chunk: Buffer) => errs.push(chunk))
-    proc.on('error', (err) => {
-      clearTimeout(timer)
-      reject(err)
-    })
-    proc.on('close', (code) => {
-      clearTimeout(timer)
-      if (code === 0) resolve()
-      else reject(new Error(Buffer.concat(errs).toString('utf8').trim() || `ssh 종료 코드 ${code}`))
-    })
+  const result = await execRemoteCommand(profileId, script, {
+    timeoutMs: REMOTE_CLOUD_HYDRATE_TIMEOUT_MS,
+    timeoutMessage: '원격 OneDrive 다운로드 대기 시간이 초과되었습니다.'
   })
+  if (result.code !== 0) throw remoteExitError(result, `ssh 종료 코드 ${result.code}`)
 }
 
 export async function rfsWriteText(uri: string, content: string): Promise<void> {
