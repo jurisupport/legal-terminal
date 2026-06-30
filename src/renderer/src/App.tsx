@@ -1592,6 +1592,7 @@ export default function App(): JSX.Element {
   }, [])
 
   useEffect(() => window.lt.app.onCloseActiveTab(() => closeActiveTabRef.current()), [])
+  useEffect(() => window.lt.app.onCloseActiveCaseTab(() => closeActiveCaseTabRef.current()), [])
   useEffect(() => window.lt.app.onCloseWindowRequest(() => requestWindowCloseRef.current()), [])
   useEffect(() => {
     if (!caseTabsOpen) return

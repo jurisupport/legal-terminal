@@ -275,6 +275,7 @@ function createWindow(setMain = true, opts?: { docOnly?: boolean; termOnly?: boo
 
   win.webContents.on('before-input-event', (event, input) => {
     const key = input.key.toLowerCase()
+    const isW = key === 'w' || input.code === 'KeyW'
     const closeTab =
       input.type === 'keyDown' &&
       process.platform === 'darwin' &&
@@ -282,10 +283,16 @@ function createWindow(setMain = true, opts?: { docOnly?: boolean; termOnly?: boo
       !input.control &&
       !input.alt &&
       !input.shift &&
-      key === 'w'
-    if (!closeTab) return
+      isW
+    const closeCaseTab =
+      input.type === 'keyDown' &&
+      (process.platform === 'darwin' ? input.meta && !input.control : input.control) &&
+      !input.alt &&
+      input.shift &&
+      isW
+    if (!closeTab && !closeCaseTab) return
     event.preventDefault()
-    win.webContents.send('app:closeActiveTab')
+    win.webContents.send(closeCaseTab ? 'app:closeActiveCaseTab' : 'app:closeActiveTab')
   })
 
   let revealed = false

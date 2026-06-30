@@ -580,6 +580,7 @@ export interface LtApi {
     setWindowTitle: (title: string) => Promise<void>
     requestAttention: (reason?: 'done' | 'question') => void
     onCloseActiveTab: (cb: () => void) => () => void
+    onCloseActiveCaseTab: (cb: () => void) => () => void
     onCloseWindowRequest: (cb: () => void) => () => void
   }
   dialog: {

@@ -526,6 +526,11 @@ const api = {
       ipcRenderer.on('app:closeActiveTab', listener)
       return () => ipcRenderer.removeListener('app:closeActiveTab', listener)
     },
+    onCloseActiveCaseTab: (cb: () => void): (() => void) => {
+      const listener = (): void => cb()
+      ipcRenderer.on('app:closeActiveCaseTab', listener)
+      return () => ipcRenderer.removeListener('app:closeActiveCaseTab', listener)
+    },
     onCloseWindowRequest: (cb: () => void): (() => void) => {
       const listener = (): void => cb()
       ipcRenderer.on('app:closeWindowRequested', listener)
