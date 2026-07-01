@@ -7,6 +7,7 @@ import {
   type KeyboardEvent
 } from 'react'
 import type { JsHearing } from '../env'
+import { isCommittedEnter, isImeComposing } from '../ime'
 
 type SpeakerRole = 'court' | 'plaintiff' | 'defendant' | 'preparation' | 'other'
 type SaveStatus = 'idle' | 'saving' | 'saved' | 'error'
@@ -800,7 +801,7 @@ export default function HearingRecordPanel({
   }
 
   const handleDraftKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>): void => {
-    if (event.nativeEvent.isComposing || event.key === 'Process') return
+    if (isImeComposing(event)) return
     const currentDraft = event.currentTarget.value
     const shortcut = /^[1-9]$/.test(event.key) ? event.key : ''
     if ((event.ctrlKey || event.metaKey) && shortcut) {
@@ -1087,7 +1088,10 @@ export default function HearingRecordPanel({
               value={requestDraft}
               onChange={(event) => setRequestDraft(event.target.value)}
               onKeyDown={(event) => {
-                if (event.key === 'Enter') addRequest(requestDraft)
+                if (isCommittedEnter(event)) {
+                  event.preventDefault()
+                  addRequest(requestDraft)
+                }
               }}
               placeholder="요청사항 입력"
             />
@@ -1236,7 +1240,7 @@ export default function HearingRecordPanel({
               value={speakerLabelDraft}
               onChange={(event) => setSpeakerLabelDraft(event.target.value)}
               onKeyDown={(event) => {
-                if (event.key === 'Enter') {
+                if (isCommittedEnter(event)) {
                   event.preventDefault()
                   addCustomSpeaker()
                 }

@@ -42,12 +42,11 @@ curl -fsSL https://raw.githubusercontent.com/jurisupport/legal-terminal/main/ins
 
 ## 이번 업데이트
 
-최신 릴리스: [v0.1.129](https://github.com/jurisupport/legal-terminal/releases/tag/v0.1.129)
+최신 릴리스: [v0.1.130](https://github.com/jurisupport/legal-terminal/releases/tag/v0.1.130)
 
-- **선택 본문 출처 복귀**: 문서에서 `Claude에 묻기`로 보낸 선택 첨부를 누르면 원문 문서의 해당 위치로 돌아갑니다.
-- **Markdown 선택 위치 보존**: 선택 당시의 줄·열 범위와 원문 텍스트를 함께 저장해 문서가 조금 바뀌어도 가능한 원래 부분을 다시 찾습니다.
-- **Agent 첨부 칩 개선**: 전송 전 첨부와 전송 후 대화에 남은 첨부 칩 모두 원문 이동 동작을 지원합니다.
-- **출처 메타데이터 보존**: Agent 첨부 타입과 preload/main 브리지에 원문 위치 정보를 안전하게 보존합니다.
+- **기일기록 한글 입력 안정화**: 대화자명에 `홍길동`처럼 한글 이름을 입력하고 Enter로 추가할 때 마지막 글자가 별도 대화자로 중복 추가되던 문제를 고쳤습니다.
+- **IME Enter 처리 통일**: 기일기록의 대화자·요청사항 입력에서 한글 조합 중 Enter는 제출로 처리하지 않습니다.
+- **회귀 검증 추가**: IME 조합 Enter와 일반 Enter를 구분하는 검증 스크립트를 추가했습니다.
 
 ## 처음 쓰는 순서
 
