@@ -813,12 +813,18 @@ const api = {
       ipcRenderer.invoke('sync:remoteInfo', profile),
     run: (opts: {
       profile: SshProfile
-      direction: 'pull' | 'push'
+      direction: 'pull' | 'push' | 'bi'
       mode?: 'full' | 'folders' | 'file'
       macFolder: string
       dest: string
-    }): Promise<{ ok: boolean; code: number | null; error?: string }> =>
-      ipcRenderer.invoke('sync:run', opts),
+      dryRun?: boolean
+      resync?: boolean
+    }): Promise<{
+      ok: boolean
+      code: number | null
+      error?: string
+      changes?: { path: string; action: string }[]
+    }> => ipcRenderer.invoke('sync:run', opts),
     cancel: (): void => ipcRenderer.send('sync:cancel'),
     onProgress: (cb: (line: string) => void): (() => void) => {
       const listener = (_e: unknown, line: string): void => cb(line)

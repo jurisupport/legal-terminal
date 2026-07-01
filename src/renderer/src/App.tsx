@@ -84,6 +84,7 @@ type Mode = 'explorer' | 'cases' | 'viewer' | 'todos'
 type DockSide = 'left' | 'right'
 type RecentCase = { drafts: string; records?: string; name: string; ts: number }
 type SyncMode = 'full' | 'folders' | 'file'
+type SyncDirection = 'pull' | 'push' | 'bi'
 interface SyncModalInit {
   profile: SshProfile
   macFolder: string
@@ -9902,6 +9903,27 @@ function SettingsView(): JSX.Element {
 
       <section className="setting-row">
         <div className="setting-label">
+          OneDrive 자동 올리기{' '}
+          <span className="muted small">
+            — 원격 OneDrive 경로에 파일을 저장하면 그 파일을 rclone으로 바로 클라우드에 올림
+          </span>
+        </div>
+        <div className="setting-value">
+          <label className="setting-checkbox">
+            <input
+              type="checkbox"
+              checked={s.syncAutoPushOnSave === true}
+              onChange={(e) => {
+                void savePatch({ syncAutoPushOnSave: e.currentTarget.checked })
+              }}
+            />
+            <span>저장 후 자동 올리기 (맥미니에 rclone 필요)</span>
+          </label>
+        </div>
+      </section>
+
+      <section className="setting-row">
+        <div className="setting-label">
           PDF 기본 배율 <span className="muted small">— 전자소송기록을 열 때 적용</span>
         </div>
         <div className="setting-value">
@@ -11198,12 +11220,20 @@ function SyncModal({
   const [macFolder, setMacFolder] = useState(init.macFolder)
   const [remoteName, setRemoteName] = useState('') // 예: "onedrive:"
   const [cloudPath, setCloudPath] = useState(cloudPathFromOneDrivePath(init.macFolder))
+  // 사용자가 클라우드 경로를 직접 고치기 전까지는 맥 경로에서 자동 유도한다
+  const [cloudPathEdited, setCloudPathEdited] = useState(false)
   const [syncMode, setSyncMode] = useState<SyncMode>(init.initialMode ?? 'full')
   const [info, setInfo] = useState<{ installed: boolean; remotes: string[]; error?: string } | null>(
     null
   )
   const [log, setLog] = useState<string[]>([])
-  const [runningDirection, setRunningDirection] = useState<'pull' | 'push' | null>(null)
+  const [runningDirection, setRunningDirection] = useState<SyncDirection | null>(null)
+  const [previewing, setPreviewing] = useState(false)
+  const [preview, setPreview] = useState<{
+    direction: 'pull' | 'push'
+    items: { path: string; action: string }[]
+  } | null>(null)
+  const [needResync, setNeedResync] = useState(false)
   const logRef = useRef<HTMLPreElement>(null)
   const profile = profiles.find((p) => p.id === profileId) ?? init.profile
   const running = runningDirection !== null
@@ -11211,7 +11241,13 @@ function SyncModal({
   const pullOnly = init.directions === 'pull-only'
   const modeLocked = !!init.lockMode
   const runningLabel =
-    runningDirection === 'pull' ? '내리기' : runningDirection === 'push' ? '올리기' : ''
+    runningDirection === 'pull'
+      ? '내리기'
+      : runningDirection === 'push'
+        ? '올리기'
+        : runningDirection === 'bi'
+          ? '양방향 동기화'
+          : ''
 
   // 진행 로그 구독
   useEffect(() => window.lt.sync.onProgress((line) => setLog((l) => [...l, line])), [])
@@ -11241,16 +11277,50 @@ function SyncModal({
       remoteName &&
       (syncMode !== 'file' || normalizedCloudPath)
   )
-  const run = (direction: 'pull' | 'push'): void => {
+  const directionLabel = (direction: SyncDirection): string =>
+    direction === 'pull' ? '내리기' : direction === 'push' ? '올리기' : '양방향 동기화'
+  const run = (direction: SyncDirection, extra?: { resync?: boolean; confirmed?: boolean }): void => {
     if (!canRun) return
-    const label = direction === 'pull' ? '내리기' : '올리기'
+    const label = directionLabel(direction)
     const modeLabel = syncMode === 'folders' ? '폴더명만' : syncMode === 'file' ? '파일 1개' : '전체'
+    setPreview(null)
+    setNeedResync(false)
     setRunningDirection(direction)
+    // 전체/파일 복사는 dry-run으로 변경 목록을 먼저 보여주고 확인 후 실행한다.
+    // 폴더명만 모드는 파일을 건드리지 않고, 양방향은 bisync 자체 안전장치(충돌 보존)에 맡긴다.
+    if (direction !== 'bi' && syncMode !== 'folders' && !extra?.confirmed) {
+      setPreviewing(true)
+      setLog((l) => [...l, `${label} 미리보기 (${modeLabel}): ${dest}`])
+      window.lt.sync
+        .run({ profile, direction, mode: syncMode, macFolder, dest, dryRun: true })
+        .then((r) => {
+          if (!r.ok) {
+            if (r.error) setLog((l) => [...l, '오류: ' + r.error])
+            return
+          }
+          const items = r.changes ?? []
+          if (items.length === 0) {
+            setLog((l) => [...l, '이미 최신 상태입니다. 복사할 파일이 없습니다.'])
+            return
+          }
+          setPreview({ direction, items })
+        })
+        .catch((e) => setLog((l) => [...l, '오류: ' + String(e)]))
+        .finally(() => {
+          setPreviewing(false)
+          setRunningDirection(null)
+        })
+      return
+    }
     setLog((l) => [...l, `${label} 시작 (${modeLabel}): ${dest}`])
     window.lt.sync
-      .run({ profile, direction, mode: syncMode, macFolder, dest })
+      .run({ profile, direction, mode: syncMode, macFolder, dest, resync: extra?.resync })
       .then((r) => {
-        if (!r.ok && r.error) setLog((l) => [...l, '오류: ' + r.error])
+        if (!r.ok && r.error) {
+          setLog((l) => [...l, '오류: ' + r.error])
+          // bisync 최초 실행은 기준 상태(--resync)가 없어 실패한다 → 안내 후 원클릭 재실행
+          if (direction === 'bi' && /resync/i.test(r.error)) setNeedResync(true)
+        }
       })
       .catch((e) => setLog((l) => [...l, '오류: ' + String(e)]))
       .finally(() => setRunningDirection(null))
@@ -11327,11 +11397,16 @@ function SyncModal({
                     ? '/Users/me/Library/CloudStorage/OneDrive/진행중사건/사건폴더/서면.pdf'
                     : '/Users/me/Library/CloudStorage/OneDrive/진행중사건/사건폴더'
                 }
-                onChange={(e) => setMacFolder(e.target.value)}
+                onChange={(e) => {
+                  setMacFolder(e.target.value)
+                  setPreview(null)
+                  if (!cloudPathEdited) setCloudPath(cloudPathFromOneDrivePath(e.target.value))
+                }}
               />
             </label>
             <label className="sync-field">
-              클라우드 {syncMode === 'file' ? '파일 ' : ''}경로 (리모트 내부)
+              클라우드 {syncMode === 'file' ? '파일 ' : ''}경로 (리모트 내부
+              {cloudPathEdited ? '' : ' · 맥 경로에서 자동 계산'})
               <input
                 className="setting-input"
                 value={cloudPath}
@@ -11340,7 +11415,13 @@ function SyncModal({
                     ? '진행중사건/사건폴더/서면.pdf'
                     : '진행중사건/사건폴더 (비우면 OneDrive 루트)'
                 }
-                onChange={(e) => setCloudPath(e.target.value)}
+                onChange={(e) => {
+                  setCloudPath(e.target.value)
+                  setPreview(null)
+                  // 직접 수정하면 자동 계산 중지. 전부 지우면(=OneDrive 루트) 이후 맥 경로
+                  // 변경 시 자동 계산이 다시 켜진다.
+                  setCloudPathEdited(e.target.value.trim() !== '')
+                }}
               />
             </label>
             <div className="sync-field">
@@ -11350,7 +11431,10 @@ function SyncModal({
                   type="button"
                   className={`sync-mode-btn ${syncMode === 'full' ? 'active' : ''}`}
                   disabled={running || modeLocked}
-                  onClick={() => setSyncMode('full')}
+                  onClick={() => {
+                    setSyncMode('full')
+                    setPreview(null)
+                  }}
                 >
                   전체
                 </button>
@@ -11358,7 +11442,10 @@ function SyncModal({
                   type="button"
                   className={`sync-mode-btn ${syncMode === 'folders' ? 'active' : ''}`}
                   disabled={running || modeLocked}
-                  onClick={() => setSyncMode('folders')}
+                  onClick={() => {
+                    setSyncMode('folders')
+                    setPreview(null)
+                  }}
                 >
                   폴더명만
                 </button>
@@ -11385,20 +11472,89 @@ function SyncModal({
                 </>
               ) : (
                 <>
-                  copy --update(빈 폴더 포함, <b>삭제 전파 안 함</b>)
+                  양방향: bisync(<b>삭제 전파 포함</b>, 충돌 시 최신 파일 우선·진 쪽은 .conflict로
+                  보존) / 올리기·내리기: copy --update(<b>삭제 전파 안 함</b>, 실행 전 미리보기)
                 </>
               )}
             </p>
             <div className="sync-buttons">
+              {!pullOnly && syncMode === 'full' && (
+                <button className="empty-action" disabled={!canRun} onClick={() => run('bi')}>
+                  {runningDirection === 'bi'
+                    ? '양방향 동기화 진행 중...'
+                    : '⇅ 양방향 동기화 (권장)'}
+                </button>
+              )}
               {!pullOnly && (
                 <button className="empty-action" disabled={!canRun} onClick={() => run('push')}>
-                  {runningDirection === 'push' ? '올리기 진행 중...' : '⬆ 올리기 (맥 → 클라우드)'}
+                  {runningDirection === 'push'
+                    ? previewing
+                      ? '올리기 미리보기 중...'
+                      : '올리기 진행 중...'
+                    : '⬆ 올리기 (맥 → 클라우드)'}
                 </button>
               )}
               <button className="empty-action" disabled={!canRun} onClick={() => run('pull')}>
-                {runningDirection === 'pull' ? '내리기 진행 중...' : '⬇ 내리기 (클라우드 → 맥)'}
+                {runningDirection === 'pull'
+                  ? previewing
+                    ? '내리기 미리보기 중...'
+                    : '내리기 진행 중...'
+                  : '⬇ 내리기 (클라우드 → 맥)'}
               </button>
             </div>
+            {needResync && !running && (
+              <div className="sync-status" role="status">
+                <div className="sync-status-main">
+                  <div>
+                    <b>양방향 동기화 첫 실행</b>
+                    <span>
+                      이 폴더 쌍은 기준 상태가 아직 없습니다. 최초 1회 --resync로 양쪽 파일을
+                      합쳐(같은 파일은 맥 쪽 우선) 기준을 만든 뒤부터 삭제·변경이 양방향으로
+                      전파됩니다.
+                    </span>
+                  </div>
+                </div>
+                <button
+                  className="empty-action"
+                  disabled={!canRun}
+                  onClick={() => run('bi', { resync: true, confirmed: true })}
+                >
+                  기준 상태 만들고 동기화
+                </button>
+              </div>
+            )}
+            {preview && !running && (
+              <div className="sync-preview" role="status">
+                <div className="sync-status-main">
+                  <div>
+                    <b>
+                      {directionLabel(preview.direction)} 미리보기 — {preview.items.length}개
+                      {preview.items.length >= 500 ? ' 이상' : ''} 변경 예정
+                    </b>
+                    <span>아래 목록을 확인한 뒤 진행하세요. 진행 전에는 아무것도 복사되지 않았습니다.</span>
+                  </div>
+                </div>
+                <pre className="sync-log sync-preview-list">
+                  {preview.items
+                    .slice(0, 200)
+                    .map((c) => `${c.action === 'copy' ? '복사' : c.action} · ${c.path}`)
+                    .join('\n')}
+                  {preview.items.length > 200 ? `\n... 외 ${preview.items.length - 200}개` : ''}
+                </pre>
+                <div className="sync-buttons">
+                  <button
+                    className="empty-action"
+                    disabled={!canRun}
+                    onClick={() => run(preview.direction, { confirmed: true })}
+                  >
+                    {directionLabel(preview.direction)} 진행
+                  </button>
+                  <button className="header-btn" onClick={() => setPreview(null)}>
+                    취소
+                  </button>
+                </div>
+              </div>
+            )}
             {running && (
               <div className="sync-status" role="status" aria-live="polite">
                 <div className="sync-status-main">

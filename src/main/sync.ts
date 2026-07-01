@@ -75,25 +75,42 @@ export function remoteRcloneInfo(
 
 export interface RemoteSyncOpts {
   profile: SshProfile
-  direction: 'pull' | 'push' // pull: 클라우드→맥, push: 맥→클라우드
+  direction: 'pull' | 'push' | 'bi' // pull: 클라우드→맥, push: 맥→클라우드, bi: 양방향(bisync)
   mode?: 'full' | 'folders' | 'file' // folders: 폴더 구조만 생성, file: 단일 파일만 복사
   macFolder: string // 맥의 사건 폴더 (예: /Users/me/OneDrive/진행중사건/강상우)
   dest: string // rclone 클라우드 대상 (예: onedrive:진행중사건/강상우)
+  dryRun?: boolean // 실제 복사 없이 변경될 파일 목록만 수집
+  resync?: boolean // bisync 최초 실행 — 양쪽을 합쳐 기준 상태(listing)를 만든다
 }
+
+export interface RemoteSyncChange {
+  path: string
+  action: string // rclone dry-run 동작명 (copy, delete, ...)
+}
+
+// rclone 공통 플래그 — 재시도는 rclone 기본값(3/10) 수준으로 유지해 OneDrive API 순단을 흡수
+const RCLONE_COMMON_FLAGS =
+  '--transfers=4 --checkers=8 --retries=3 --low-level-retries=10 -v --stats-one-line --stats=1s'
+
+// dry-run 출력에서 변경 예정 파일을 추출. 시간 갱신(update modification time)류는 제외.
+const DRY_RUN_LINE = /NOTICE:\s+(.+?):\s+Skipped\s+(copy|update(?!\s+modification)|delete|remove directory|make directory)/
+const DRY_RUN_MAX_CHANGES = 500
 
 let active: ReturnType<typeof spawn> | null = null
 
-// 맥에서 rclone 동기화 실행 (삭제 전파 안 함). 진행 로그를 'sync:progress'로 스트리밍.
+// 맥에서 rclone 동기화 실행. 진행 로그를 'sync:progress'로 스트리밍.
+// pull/push는 copy --update(삭제 전파 안 함), bi는 bisync(삭제 전파 포함, 충돌 보존).
 export function runRemoteSync(
   opts: RemoteSyncOpts,
   wc: WebContents
-): Promise<{ ok: boolean; code: number | null; error?: string }> {
+): Promise<{ ok: boolean; code: number | null; error?: string; changes?: RemoteSyncChange[] }> {
   const mode = opts.mode ?? 'full'
   const cloudDest = opts.dest.normalize('NFC')
   const cloudArg = shq(cloudDest)
-  const macArg = shellPathArg(opts.macFolder)
+  const macArg = shellPathArg(opts.macFolder.normalize('NFC'))
   const src = opts.direction === 'pull' ? cloudArg : macArg
   const dst = opts.direction === 'pull' ? macArg : cloudArg
+  const dryRunFlag = opts.dryRun ? ' --dry-run' : ''
   const checkSource =
     opts.direction === 'pull' && mode !== 'file'
       ? [
@@ -107,7 +124,19 @@ export function runRemoteSync(
   const ensureFolderDestination =
     opts.direction === 'pull' ? 'mkdir -p "$dst" || exit 1' : '"$rclone_bin" mkdir "$dst" || exit 1'
   const rcloneCmd =
-    mode === 'folders'
+    opts.direction === 'bi'
+      ? [
+          remoteRcloneBootstrap(),
+          `mac=${macArg}`,
+          `cloud=${cloudArg}`,
+          'mkdir -p "$mac" || exit 1',
+          '"$rclone_bin" mkdir "$cloud" || exit 1',
+          // bisync: 양방향 전파(삭제 포함), 충돌 시 최신 파일 승리 + 진 쪽은 .conflict로 보존.
+          // --resilient/--recover: 중단된 이전 실행에서 자동 복구. 최초 1회는 --resync 필요.
+          `"$rclone_bin" bisync "$mac" "$cloud" --create-empty-src-dirs --conflict-resolve newer ` +
+            `--resilient --recover ${RCLONE_COMMON_FLAGS}${opts.resync ? ' --resync' : ''}${dryRunFlag}`
+        ].join('\n')
+      : mode === 'folders'
       ? [
           remoteRcloneBootstrap(),
           checkSource,
@@ -151,16 +180,17 @@ export function runRemoteSync(
             '    *) printf "%s\\n" "$prefix" ;;',
             '  esac',
             '}',
-            opts.direction === 'pull' ? 'mkdir -p "$(dirname "$dst")" || exit 1' : '',
-            opts.direction === 'push' ? 'dst_dir=$(remote_parent "$dst"); "$rclone_bin" mkdir "$dst_dir" || exit 1' : '',
+            opts.direction === 'pull' && !opts.dryRun ? 'mkdir -p "$(dirname "$dst")" || exit 1' : '',
+            opts.direction === 'push' && !opts.dryRun
+              ? 'dst_dir=$(remote_parent "$dst"); "$rclone_bin" mkdir "$dst_dir" || exit 1'
+              : '',
             'echo "파일 1개를 동기화하는 중..."',
-            '"$rclone_bin" copyto "$src" "$dst" --update --retries=1 --low-level-retries=1 -v --stats-one-line --stats=1s'
+            `"$rclone_bin" copyto "$src" "$dst" --update ${RCLONE_COMMON_FLAGS}${dryRunFlag}`
           ]
             .filter(Boolean)
             .join('\n')
       : `${remoteRcloneBootstrap()}\n${checkSource}\n` +
-        `"$rclone_bin" copy ${src} ${dst} --update --create-empty-src-dirs --transfers=4 --checkers=8 ` +
-        `--retries=1 --low-level-retries=1 -v --stats-one-line --stats=1s`
+        `"$rclone_bin" copy ${src} ${dst} --update --create-empty-src-dirs ${RCLONE_COMMON_FLAGS}${dryRunFlag}`
   const args = [...sshBaseArgs(opts.profile), rcloneCmd]
 
   const send = (line: string): void => {
@@ -168,11 +198,15 @@ export function runRemoteSync(
   }
   send(
     `$ (맥미니에서) rclone ${mode === 'folders' ? '폴더명만 ' : mode === 'file' ? '파일 1개 ' : ''}${
-      opts.direction === 'pull' ? '내리기 ⬇' : '올리기 ⬆'
-    }`
+      opts.direction === 'pull' ? '내리기 ⬇' : opts.direction === 'push' ? '올리기 ⬆' : '양방향 ⇅'
+    }${opts.resync ? ' (기준 상태 생성)' : ''}${opts.dryRun ? ' (미리보기)' : ''}`
   )
-  send(`  ${opts.direction === 'pull' ? cloudDest : opts.macFolder}`)
-  send(`  → ${opts.direction === 'pull' ? opts.macFolder : cloudDest}`)
+  if (opts.direction === 'bi') {
+    send(`  ${opts.macFolder} ⇄ ${cloudDest}`)
+  } else {
+    send(`  ${opts.direction === 'pull' ? cloudDest : opts.macFolder}`)
+    send(`  → ${opts.direction === 'pull' ? opts.macFolder : cloudDest}`)
+  }
 
   return new Promise((resolve) => {
     let proc: ReturnType<typeof spawn>
@@ -184,10 +218,21 @@ export function runRemoteSync(
     }
     active = proc
     let tail = ''
+    const changes: RemoteSyncChange[] = []
+    let pending = ''
     const onData = (buf: Buffer): void => {
       const text = buf.toString()
       tail = (tail + text).slice(-2000)
       for (const line of text.split(/\r?\n/)) if (line.trim()) send(line)
+      if (!opts.dryRun) return
+      // 스트림 청크 경계에서 줄이 잘리지 않도록 버퍼링 후 완성된 줄만 파싱
+      pending += text
+      const lines = pending.split(/\r?\n/)
+      pending = lines.pop() ?? ''
+      for (const line of lines) {
+        const m = DRY_RUN_LINE.exec(line)
+        if (m && changes.length < DRY_RUN_MAX_CHANGES) changes.push({ path: m[1], action: m[2] })
+      }
     }
     proc.stdout?.on('data', onData)
     proc.stderr?.on('data', onData)
@@ -197,8 +242,13 @@ export function runRemoteSync(
     })
     proc.on('close', (code) => {
       active = null
-      send(code === 0 ? '✓ 완료' : `✗ 종료 코드 ${code}`)
-      resolve({ ok: code === 0, code, error: code === 0 ? undefined : tail })
+      send(code === 0 ? (opts.dryRun ? '✓ 미리보기 완료' : '✓ 완료') : `✗ 종료 코드 ${code}`)
+      resolve({
+        ok: code === 0,
+        code,
+        error: code === 0 ? undefined : tail,
+        changes: opts.dryRun ? changes : undefined
+      })
     })
   })
 }

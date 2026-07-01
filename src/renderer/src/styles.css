@@ -6066,6 +6066,23 @@ button.agent-attachment-chip {
   color: var(--fg-muted);
   font-size: 11px;
 }
+.sync-preview {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 0 0 10px;
+  padding: 9px 10px;
+  border: 1px solid rgba(14, 99, 156, 0.75);
+  border-radius: 6px;
+  background: rgba(14, 99, 156, 0.13);
+}
+.sync-preview .sync-buttons {
+  margin: 0;
+}
+.sync-preview-list {
+  height: auto;
+  max-height: 160px;
+}
 .sync-spinner {
   width: 15px;
   height: 15px;

@@ -1018,6 +1018,50 @@ async function runRemotePrefetchJob(job: RemotePrefetchJob): Promise<void> {
   }
 }
 
+// ── 저장 시 자동 올리기 ──
+// 원격 OneDrive 경로에 파일을 저장하면 잠시 뒤 그 파일만 rclone copyto로 클라우드에 올린다.
+// macOS OneDrive 클라이언트의 업로드 시점에 기대지 않고 전파를 확정한다.
+// 실패는 조용히 넘긴다(수동 동기화·OneDrive 클라이언트가 보완).
+const AUTO_PUSH_DEBOUNCE_MS = 5_000
+const autoPushTimers = new Map<string, ReturnType<typeof setTimeout>>()
+
+function scheduleRemoteAutoPush(profileId: string, path: string): void {
+  const cloudPath = oneDriveCloudPath(path)
+  if (!cloudPath) return
+  const key = `${profileId}\0${path}`
+  const prev = autoPushTimers.get(key)
+  if (prev) clearTimeout(prev)
+  autoPushTimers.set(
+    key,
+    setTimeout(() => {
+      autoPushTimers.delete(key)
+      void runRemoteAutoPush(profileId, path, cloudPath)
+    }, AUTO_PUSH_DEBOUNCE_MS)
+  )
+}
+
+async function runRemoteAutoPush(
+  profileId: string,
+  path: string,
+  cloudPath: string
+): Promise<void> {
+  try {
+    if ((await getSettings()).syncAutoPushOnSave !== true) return
+    const script =
+      `${remoteRcloneBootstrap()}\n` +
+      `lt_rclone copyto ${shq(path)} ${shq(cloudPath)} --update --retries=3 --low-level-retries=10`
+    const result = await execRemoteCommand(profileId, script, {
+      timeoutMs: RCLONE_READ_TIMEOUT_MS,
+      timeoutMessage: 'rclone 자동 올리기 대기 시간 초과'
+    })
+    if (result.code !== 0) {
+      console.warn('[remoteFs] 자동 올리기 실패:', path, result.stderr.toString('utf8').slice(-500))
+    }
+  } catch (e) {
+    console.warn('[remoteFs] 자동 올리기 실패:', path, e)
+  }
+}
+
 async function hydrateRemoteFile(profileId: string, path: string): Promise<void> {
   const script = `
 p=${shq(path)}
@@ -1122,6 +1166,7 @@ export async function rfsWriteText(uri: string, content: string): Promise<void> 
     )
   }
   noteRemoteLocalMutation(posix.dirname(path))
+  scheduleRemoteAutoPush(profileId, path)
 }
 
 // 바이너리 업로드: destDirUri 하위에 name으로 저장 → 저장된 URI 반환
@@ -1147,6 +1192,7 @@ export async function rfsWriteBytes(
     )
   }
   noteRemoteLocalMutation(path)
+  scheduleRemoteAutoPush(profileId, full)
   return makeRemote(profileId, full)
 }
 
@@ -1213,6 +1259,7 @@ export async function rfsCreateFile(
     )
   }
   noteRemoteLocalMutation(path)
+  scheduleRemoteAutoPush(profileId, full)
   return makeRemote(profileId, full)
 }
 

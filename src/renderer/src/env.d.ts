@@ -326,6 +326,7 @@ export interface AppSettings {
   remotePickerSortMode?: string
   remoteDirectoryCache?: boolean
   remoteFileCache?: boolean
+  syncAutoPushOnSave?: boolean
   sshProfiles?: SshProfile[]
 }
 
@@ -744,11 +745,18 @@ export interface LtApi {
     ) => Promise<{ installed: boolean; remotes: string[]; error?: string }>
     run: (opts: {
       profile: SshProfile
-      direction: 'pull' | 'push'
+      direction: 'pull' | 'push' | 'bi'
       mode?: 'full' | 'folders' | 'file'
       macFolder: string
       dest: string
-    }) => Promise<{ ok: boolean; code: number | null; error?: string }>
+      dryRun?: boolean
+      resync?: boolean
+    }) => Promise<{
+      ok: boolean
+      code: number | null
+      error?: string
+      changes?: { path: string; action: string }[]
+    }>
     cancel: () => void
     onProgress: (cb: (line: string) => void) => () => void
   }
