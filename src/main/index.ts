@@ -2320,7 +2320,7 @@ ipcMain.handle('fs:download', async (event, source: string) => {
 
 ipcMain.handle('fs:autoDownloadRecords', async (event, source: string) => {
   try {
-    return await autoDownloadRemoteRecords(source, event.sender)
+    return await autoDownloadRemoteRecords(source)
   } catch (e) {
     return { ok: false, error: String(e) }
   }
