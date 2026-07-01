@@ -212,6 +212,7 @@ interface WorkspaceSnapshot {
   activeCaseTabId?: string
   activeWork?: { left?: string; right?: string }
   currentCase?: unknown
+  pdfStatus?: Record<string, unknown>
   crop?: { on: boolean; ratio: number }
 }
 

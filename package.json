@@ -21,6 +21,7 @@
     "verify:terminal-status": "node --experimental-strip-types --no-warnings scripts/verify-terminal-status.mjs",
     "verify:hearing-ime": "node --experimental-strip-types --no-warnings scripts/verify-hearing-ime.mjs",
     "verify:md-compat": "node --experimental-strip-types --no-warnings scripts/verify-md-compat.mjs",
+    "verify:record-outline": "node --experimental-strip-types --no-warnings scripts/verify-record-outline.mjs",
     "verify:pdf-layout": "node scripts/verify-pdf-layout.mjs",
     "verify:hwp-text": "node --experimental-strip-types --no-warnings scripts/verify-hwp-text.mjs",
     "verify:node-pty": "node scripts/verify-node-pty-binary.cjs",

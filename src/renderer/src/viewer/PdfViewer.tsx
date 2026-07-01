@@ -11,6 +11,7 @@ export interface PdfViewStatus {
   pages: number
   zoomPct: number
   zoomMode: PdfZoomMode
+  rotation: number
   cropOn: boolean
   cropRatio: number
 }
@@ -136,10 +137,11 @@ export default function PdfViewer({
       pages: numPages,
       zoomPct: effPct,
       zoomMode: mode,
+      rotation,
       cropOn,
       cropRatio
     })
-  }, [cropOn, cropRatio, effPct, mode, numPages, onStatus, page, path])
+  }, [cropOn, cropRatio, effPct, mode, numPages, onStatus, page, path, rotation])
 
   // 마지막/첫 페이지 경계에서 다음/이전 문서로 이동. 버튼 클릭 후에도 키보드가 먹도록 뷰어에 포커스 복원.
   // 로딩 중(numPages=0)엔 무시 — 새 문서가 뜨기 전 입력이 다음다음 문서로 건너뛰는 것 방지.
@@ -200,11 +202,15 @@ export default function PdfViewer({
       initialStatusRef.current?.path === path && Number.isFinite(initialStatusRef.current.page)
         ? Math.max(1, Math.floor(initialStatusRef.current.page))
         : 1
+    const initialRotation =
+      initialStatusRef.current?.path === path && Number.isFinite(initialStatusRef.current.rotation)
+        ? ((Math.floor(initialStatusRef.current.rotation / 90) * 90) % 360 + 360) % 360
+        : 0
     setErr('')
     setLoading(true)
     setNumPages(0)
     setPage(initialPage)
-    setRotation(0)
+    setRotation(initialRotation)
     setPasswordPrompt(null)
     setPasswordValue('')
     setPasswordBusy(false)

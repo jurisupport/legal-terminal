@@ -678,8 +678,29 @@ const samePdfStatus = (a: PdfViewStatus | undefined, b: PdfViewStatus): boolean 
   a.pages === b.pages &&
   a.zoomPct === b.zoomPct &&
   a.zoomMode === b.zoomMode &&
+  a.rotation === b.rotation &&
   a.cropOn === b.cropOn &&
   a.cropRatio === b.cropRatio
+
+const pdfStatusKey = (path?: string): string => path ?? ''
+
+const sanitizePdfStatus = (value: unknown): PdfViewStatus | null => {
+  if (!value || typeof value !== 'object') return null
+  const raw = value as Partial<PdfViewStatus>
+  if (typeof raw.path !== 'string' || !raw.path) return null
+  const page = Number.isFinite(raw.page) ? Math.max(1, Math.floor(raw.page as number)) : 1
+  const pages = Number.isFinite(raw.pages) ? Math.max(0, Math.floor(raw.pages as number)) : 0
+  const zoomPct = Number.isFinite(raw.zoomPct) ? Math.max(10, Math.round(raw.zoomPct as number)) : 100
+  const zoomMode =
+    raw.zoomMode === 'fit_width' || raw.zoomMode === 'fit_page' || raw.zoomMode === 'custom'
+      ? raw.zoomMode
+      : 'fit_page'
+  const rotation = Number.isFinite(raw.rotation)
+    ? ((Math.floor((raw.rotation as number) / 90) * 90) % 360 + 360) % 360
+    : 0
+  const cropRatio = Number.isFinite(raw.cropRatio) ? Math.max(0, Math.min(0.5, raw.cropRatio as number)) : 0.05
+  return { path: raw.path, page, pages, zoomPct, zoomMode, rotation, cropOn: !!raw.cropOn, cropRatio }
+}
 
 const sameDocScrollPosition = (a: DocScrollPosition | undefined, b: DocScrollPosition): boolean =>
   !!a && a.key === b.key && a.top === b.top && a.left === b.left
@@ -754,6 +775,7 @@ const describeDocStatus = (
       `${pdfStatus.page}/${pages}쪽`,
       `${pdfStatus.zoomPct}%`,
       pdfZoomLabel(pdfStatus.zoomMode),
+      pdfStatus.rotation ? `${pdfStatus.rotation}°` : undefined,
       pdfStatus.cropOn && `여백 ${Math.round(pdfStatus.cropRatio * 100)}%`
     ])
   }
@@ -3436,6 +3458,7 @@ export default function App(): JSX.Element {
     setCaseTabs((tabs) => upsertCaseTab(tabs, { ...caseTabFromCurrentCase(nextSource, cur?.id), id: targetCaseTabId }))
     const drafts = cur ? historyDraftsForTerm(cur) : nextSource.drafts
     window.lt.case.setPairing(drafts, rec)
+    saveJsPairing(nextSource, drafts, rec)
     window.lt.case.addHistory({ drafts, records: rec, name: nextSource.name }).then(setRecent)
   }
 
@@ -4170,6 +4193,7 @@ export default function App(): JSX.Element {
       activeCaseTabId,
       activeWork,
       currentCase,
+      pdfStatus,
       crop: { on: cropOn, ratio: cropRatio }
     }
   }
@@ -4276,6 +4300,17 @@ export default function App(): JSX.Element {
       }
       nextDocs.push(nextTab)
       docIdMap.set(saved.id, nextTab.id)
+    }
+    if (snapshot.pdfStatus && typeof snapshot.pdfStatus === 'object') {
+      setPdfStatus((current) => {
+        const restored: Record<string, PdfViewStatus> = {}
+        for (const rawStatus of Object.values(snapshot.pdfStatus as Record<string, unknown>)) {
+          const status = sanitizePdfStatus(rawStatus)
+          if (!status) continue
+          restored[pdfStatusKey(status.path)] = status
+        }
+        return { ...current, ...restored }
+      })
     }
 
     const nextActiveCaseTabId =
@@ -5432,8 +5467,9 @@ export default function App(): JSX.Element {
     if (nextRow) openCaseTab(nextRow.tab)
   }
 
-  const updatePdfStatus = (tabId: string, status: PdfViewStatus): void => {
-    setPdfStatus((s) => (samePdfStatus(s[tabId], status) ? s : { ...s, [tabId]: status }))
+  const updatePdfStatus = (status: PdfViewStatus): void => {
+    const key = pdfStatusKey(status.path)
+    setPdfStatus((s) => (samePdfStatus(s[key], status) ? s : { ...s, [key]: status }))
   }
   const updateDocScrollPosition = (tabId: string, position: DocScrollPosition): void => {
     setDocScrollPositions((s) => (sameDocScrollPosition(s[tabId], position) ? s : { ...s, [tabId]: position }))
@@ -5443,10 +5479,11 @@ export default function App(): JSX.Element {
     const position = docScrollPositions[tab.id]
     return position?.key === key ? position : undefined
   }
-  const activePdfStatus =
-    activeDocTab?.kind === 'pdf' && pdfStatus[activeDocTab.id]?.path === activeDocTab.path
-      ? pdfStatus[activeDocTab.id]
-      : undefined
+  const pdfStatusForTab = (tab: DocTab): PdfViewStatus | undefined => {
+    const status = pdfStatus[pdfStatusKey(tab.path)] ?? pdfStatus[tab.id]
+    return status?.path === tab.path ? status : undefined
+  }
+  const activePdfStatus = activeDocTab?.kind === 'pdf' ? pdfStatusForTab(activeDocTab) : undefined
   const activeTermRunStatus = activeTerm ? termStatus.get(activeTerm) : undefined
   const selectionStatus = selectionCharCount > 0 ? `선택 ${formatCharCount(selectionCharCount)}자` : undefined
   const statusInfo =
@@ -6028,8 +6065,8 @@ export default function App(): JSX.Element {
               )
             }
             onAskDoc={() => askClaude('')}
-            initialStatus={pdfStatus[tab.id]?.path === tab.path ? pdfStatus[tab.id] : undefined}
-            onStatus={(status) => updatePdfStatus(tab.id, status)}
+            initialStatus={pdfStatusForTab(tab)}
+            onStatus={updatePdfStatus}
           />
         ) : (
           <PdfViewer
@@ -6042,8 +6079,8 @@ export default function App(): JSX.Element {
             onCropOn={setCropOn}
             onCropRatio={setCropRatio}
             onAskDoc={() => askClaude('')}
-            initialStatus={pdfStatus[tab.id]?.path === tab.path ? pdfStatus[tab.id] : undefined}
-            onStatus={(status) => updatePdfStatus(tab.id, status)}
+            initialStatus={pdfStatusForTab(tab)}
+            onStatus={updatePdfStatus}
           />
         ))}
       {tab?.kind === 'diff' && <DiffPreview diff={agentDiffs[tab.diffId ?? '']?.diff} alwaysExpanded />}

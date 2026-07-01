@@ -30,7 +30,8 @@ export interface ParsedRecord {
 const DATE_RE = /\d{4}\.\d{2}\.\d{2}/
 const DATE_LENIENT = /(\d{4})\.\s*(\d{1,2})\.\s*(\d{1,2})/ // 2024.03.01 / 2024. 3. 1
 const CASE_RE = /\d{4}[가-힣]{1,5}\d{1,6}/ // 2025느합1050, 2024가단5369527
-const EVID_RE = /(?:^|[\s_\-–—(（])([갑을])\s*제?\s*(\d+(?:-\d+)?)\s*호?증?(?=$|[\s_\-–—()（）.])/
+const EVID_RE =
+  /(?:^|[\s_\-–—(（])([갑을])[\s_()（）]*제?[\s_()（）]*(\d+)(?:(?:\s*[-–—]\s*|의\s*)(\d+))?\s*호?증?(?:의\s*(\d+))?(?=$|[\s_\-–—()（）.]|의)/
 const RECORD_SEQUENCE_RE = /^\s*(\d{1,6})\s*$/
 const FALLBACK_SORT_KEY_OFFSET = 1_000_000_000
 const FALLBACK_SORT_KEY_BUCKET = 1_000_000
@@ -145,6 +146,8 @@ function evidenceName(title: string, prefix: string): string | undefined {
       const name = m2[1].replace(/\s*\([^)]*\)\s*$/, '').trim()
       if (name.length >= 2 && !name.endsWith(')')) return name
     }
+    const stripped = stripEvidencePrefix(b, type, num)
+    if (stripped && stripped.length >= 2) return stripped
   }
   const fallback = new RegExp(`${type}\\s*제?\\s*${num}\\s*호?증?\\s*[_\\s\\-–—]+(.+)`)
   const fm = title.match(fallback)
@@ -162,6 +165,22 @@ function evidenceName(title: string, prefix: string): string | undefined {
     if (second.length >= 2 && !/[갑을]/.test(second)) return second
   }
   return undefined
+}
+
+function formatEvidencePrefix(side: string, mainNum: string, subNum?: string): string {
+  return `${side}${mainNum}${subNum ? '-' + subNum : ''}`
+}
+
+function stripEvidencePrefix(text: string, side: string, num: string): string | undefined {
+  const [main, sub] = num.split('-')
+  const subPattern = sub
+    ? `(?:(?:\\s*[-–—_]\\s*|\\s*의\\s*)${sub}|\\s*호?증?\\s*의\\s*${sub})?`
+    : ''
+  const re = new RegExp(
+    `^\\s*${side}[\\s_()（）]*제?[\\s_()（）]*${main}${subPattern}\\s*호?증?[\\s_()（）\\-–—]+`
+  )
+  const name = text.replace(re, '').replace(/\s*\([^)]*\)\s*$/, '').trim()
+  return name !== text.trim() ? name : undefined
 }
 
 function classify(title: string): OutlineItem {
@@ -188,11 +207,11 @@ function classify(title: string): OutlineItem {
   if (isEvidence) {
     category = 'evidence'
     if (em) {
-      evidencePrefix = `${em[1]}${em[2]}`
+      evidencePrefix = formatEvidencePrefix(em[1], em[2], em[3] ?? em[4])
       const major = em[1] === '갑' ? 0 : 1
-      const n = parseInt(em[2], 10) || 0
+      const n = parseInt(evidencePrefix.slice(1), 10) || 0
       sortKey = major * 100000 + n * 100
-      const sub = em[2].includes('-') ? parseInt(em[2].split('-')[1], 10) || 0 : 0
+      const sub = evidencePrefix.includes('-') ? parseInt(evidencePrefix.split('-')[1], 10) || 0 : 0
       sortKey += sub
     }
     const name = em ? evidenceName(title, evidencePrefix as string) : undefined
