@@ -1,4 +1,5 @@
 import {
+  Fragment,
   useCallback,
   useEffect,
   useMemo,
@@ -8709,12 +8710,24 @@ function SessionList({
     query
   ])
 
+  // 날짜 그룹(오늘/어제/…) + 그룹 안에서는 시각만 — 훑어보기 좋게
+  const startOfDay = (d: Date): number =>
+    new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime()
+  const dayLabel = (ms: number): string => {
+    const diffDays = Math.floor((startOfDay(new Date()) - startOfDay(new Date(ms))) / 86400000)
+    if (diffDays <= 0) return '오늘'
+    if (diffDays === 1) return '어제'
+    if (diffDays < 7) return '지난 7일'
+    if (diffDays < 30) return '지난 30일'
+    return '이전'
+  }
   const fmt = (ms: number): string => {
     const d = new Date(ms)
-    return `${d.getMonth() + 1}/${d.getDate()} ${String(d.getHours()).padStart(2, '0')}:${String(
-      d.getMinutes()
-    ).padStart(2, '0')}`
+    const time = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
+    const diffDays = Math.floor((startOfDay(new Date()) - startOfDay(d)) / 86400000)
+    return diffDays <= 1 ? time : `${d.getMonth() + 1}/${d.getDate()} ${time}`
   }
+  const filterFolder = pathLeaf(filterCwd)
 
   return (
     <div
@@ -8754,7 +8767,9 @@ function SessionList({
           >
             <span className="sl-name">{s.title}</span>
             <span className="sl-sub">
-              {[s.client && `의뢰인 ${s.client}`, s.court].filter(Boolean).join(' · ') || s.cwd}
+              {[s.sessionTitle, s.client && `의뢰인 ${s.client}`, s.court]
+                .filter(Boolean)
+                .join(' · ') || s.cwd}
             </span>
           </li>
         ))}
@@ -8766,21 +8781,31 @@ function SessionList({
           <li className="muted pad small">과거 세션이 없습니다.</li>
         )}
         {filterCwd &&
-          past?.map((p) => (
-            <li
-              key={p.sessionId}
-              className="sl-row past"
-              onClick={() => onResume(p.sessionId, filterCwd, p.title, filterSource)}
-              title={`${p.sessionId}\n${p.cwd ?? filterCwd}\nclaude --resume 로 이어서 열기`}
-            >
-              <span className="sl-name">↻ {p.title || '(제목 없음)'}</span>
-              <span className="sl-sub">
-                {[p.transcriptTitle && p.transcriptTitle !== p.title ? p.transcriptTitle : undefined, p.folderName, fmt(p.mtime)]
-                  .filter(Boolean)
-                  .join(' · ')}
-              </span>
-            </li>
-          ))}
+          past?.map((p, i) => {
+            const group = dayLabel(p.mtime)
+            const prevGroup = i > 0 ? dayLabel(past[i - 1].mtime) : undefined
+            // 대화 내용 제목을 앞세우고, 사건/폴더 맥락은 보조 줄로
+            const name = p.transcriptTitle || p.title || '(제목 없음)'
+            const caseLabel =
+              [p.caseNumber, p.caseName].filter(Boolean).join(' ') ||
+              (p.folderName !== filterFolder ? p.folderName : undefined)
+            return (
+              <Fragment key={p.sessionId}>
+                {group !== prevGroup && <li className="sl-daysep">{group}</li>}
+                <li
+                  className="sl-row past"
+                  onClick={() => onResume(p.sessionId, filterCwd, p.title, filterSource)}
+                  title={`${p.sessionId}\n${p.cwd ?? filterCwd}\nclaude --resume 로 이어서 열기`}
+                >
+                  <span className="sl-name">{name}</span>
+                  <span className="sl-sub">
+                    <span className="sl-time">{fmt(p.mtime)}</span>
+                    {caseLabel && filter === 'all' ? ` · ${caseLabel}` : ''}
+                  </span>
+                </li>
+              </Fragment>
+            )
+          })}
       </ul>
     </div>
   )

@@ -1,7 +1,7 @@
 import { app } from 'electron'
 import { homedir } from 'os'
 import { dirname, join } from 'path'
-import { mkdir, open, readFile, readdir, realpath, stat, writeFile } from 'fs/promises'
+import { mkdir, open, readFile, readdir, realpath, rename, stat, writeFile } from 'fs/promises'
 import { execFile } from 'child_process'
 import type { SshProfile } from './settings'
 
@@ -36,6 +36,13 @@ export interface SessionListEntry {
   indexed?: boolean
 }
 
+interface ParsedHead {
+  cwd?: string
+  aiTitle?: string
+  fallbackTitle?: string
+  title?: string
+}
+
 export interface SessionSearchContext {
   query?: string
   displayTitle?: string
@@ -54,6 +61,8 @@ export interface SessionMetaInput extends SessionSearchContext {
   cwd: string
   title?: string
   transcriptTitle?: string
+  // 앱이 대화 맥락으로 직접 생성한 세션 제목 (transcript ai-title이 없는 SDK 세션용)
+  generatedTitle?: string
   mtime?: number
   ssh?: SshConn
 }
@@ -182,16 +191,32 @@ function isSessionMeta(value: unknown): value is SessionMeta {
   )
 }
 
-async function readSessionIndex(): Promise<SessionMeta[]> {
+function parseSessionIndex(text: string): SessionMeta[] | null {
   try {
-    const raw = await readFile(sessionIndexPath(), 'utf8')
-    const parsed = JSON.parse(raw) as SessionIndex
+    const parsed = JSON.parse(text) as SessionIndex
     return Array.isArray(parsed.entries) ? parsed.entries.filter(isSessionMeta) : []
-  } catch (e) {
-    const code = (e as NodeJS.ErrnoException).code
-    if (code === 'ENOENT') return []
+  } catch {
+    return null
+  }
+}
+
+async function readSessionIndex(): Promise<SessionMeta[]> {
+  let raw: string
+  try {
+    raw = await readFile(sessionIndexPath(), 'utf8')
+  } catch {
     return []
   }
+  const direct = parseSessionIndex(raw)
+  if (direct) return direct
+  // 구버전의 비원자 쓰기가 겹치면 유효한 JSON 뒤에 이전 내용 조각이 남는다.
+  // 최상위 닫는 중괄호(pretty-print 기준 "\n}")까지만 잘라 복구를 시도한다.
+  const end = raw.indexOf('\n}')
+  if (end > 0) {
+    const salvaged = parseSessionIndex(raw.slice(0, end + 2))
+    if (salvaged) return salvaged
+  }
+  return []
 }
 
 async function writeSessionIndex(entries: SessionMeta[]): Promise<void> {
@@ -200,11 +225,15 @@ async function writeSessionIndex(entries: SessionMeta[]): Promise<void> {
   const sorted = [...entries]
     .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
     .slice(0, MAX_SESSION_INDEX_ENTRIES)
+  // temp+rename 원자 쓰기 — 앱 인스턴스 두 개(설치본+dev)가 동시에 쓰면
+  // 파일이 부분 덮어쓰기로 깨져 인덱스 전체가 유실되는 것을 막는다.
+  const tmp = `${file}.${process.pid}.tmp`
   await writeFile(
-    file,
+    tmp,
     JSON.stringify({ version: SESSION_INDEX_VERSION, entries: sorted }, null, 2),
     'utf8'
   )
+  await rename(tmp, file)
 }
 
 function buildSessionMeta(input: SessionMetaInput): SessionMeta {
@@ -220,6 +249,7 @@ function buildSessionMeta(input: SessionMetaInput): SessionMeta {
       input.sessionId,
       input.title,
       input.transcriptTitle,
+      input.generatedTitle,
       input.displayTitle,
       input.caseNumber,
       input.caseName,
@@ -249,6 +279,7 @@ export async function rememberSessionMeta(input: SessionMetaInput): Promise<{ ok
           displayTitle: input.displayTitle || previous.displayTitle,
           title: input.title || previous.title,
           transcriptTitle: input.transcriptTitle || previous.transcriptTitle,
+          generatedTitle: input.generatedTitle || previous.generatedTitle,
           mtime: input.mtime ?? previous.mtime,
           folderName: input.folderName || previous.folderName,
           ssh: input.ssh || previous.ssh
@@ -288,12 +319,14 @@ function matchIndexedSession(
 }
 
 function decorateSession(
-  session: { sessionId: string; title?: string; mtime: number; cwd?: string },
+  session: { sessionId: string; title?: string; aiTitle?: string; mtime: number; cwd?: string },
   meta?: SessionMeta,
   context?: SessionSearchContext
 ): SessionListEntry {
   const displayTitle = meta?.displayTitle || context?.displayTitle
-  const transcriptTitle = session.title || meta?.transcriptTitle || meta?.title
+  // 세션 고유 제목: AI 생성 제목(transcript ai-title → 앱 생성) 우선, 첫 사용자 메시지는 최후 수단
+  const transcriptTitle =
+    session.aiTitle || meta?.generatedTitle || session.title || meta?.transcriptTitle || meta?.title
   const title = displayTitle || meta?.title || transcriptTitle
   return {
     sessionId: session.sessionId,
@@ -568,10 +601,54 @@ export async function readSessionTranscript(
   }
 }
 
-function parseHead(content: string): { cwd?: string; title?: string } {
+const TITLE_MAX_CHARS = 48
+
+function truncateTitle(text: string): string {
+  const oneLine = text.replace(/\s+/g, ' ').trim()
+  if (oneLine.length <= TITLE_MAX_CHARS) return oneLine
+  return `${oneLine.slice(0, TITLE_MAX_CHARS)}…`
+}
+
+// 첫 사용자 메시지에서 제목 후보 추출. 내부 태그·명령 래퍼·fork 프리앰블은
+// 건너뛰거나(undefined) 정리해서, "<local-command-caveat>…" 같은 원문이 제목이 되지 않게 한다.
+function userTitleCandidate(raw: string): string | undefined {
+  let text = raw
+  // 슬래시 명령 세션: 명령 이름을 그대로 제목으로
+  const command = /<command-name>\s*([^<\n]+?)\s*<\/command-name>/.exec(text)
+  if (command) {
+    const args = /<command-args>\s*([^<\n]*?)\s*<\/command-args>/.exec(text)?.[1]
+    return truncateTitle([command[1], args].filter(Boolean).join(' '))
+  }
+  // 로컬 명령 출력·caveat 안내는 대화 내용이 아니므로 다음 사용자 메시지를 기다린다
+  if (/<local-command-caveat>|<local-command-stdout>|<command-message>/.test(text)) return undefined
+  // fork/전환으로 주입된 transcript 프리앰블도 실제 지시가 아니다
+  if (/원본 대화 transcript입니다|진행하던 대화 transcript입니다/.test(text)) return undefined
+  text = text
+    .replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, ' ')
+    .replace(/<ide_selection>[\s\S]*?<\/ide_selection>/g, ' ')
+    .replace(/<\/?[a-z][a-z0-9_-]*>/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+  if (!text) return undefined
+  return truncateTitle(text)
+}
+
+function transcriptEntryUserText(d: Record<string, unknown>): string | undefined {
+  const m = d.message as { content?: unknown } | undefined
+  const c = m?.content
+  if (typeof c === 'string') return c
+  if (Array.isArray(c))
+    return c
+      .filter((x) => x && typeof x === 'object' && (x as { type?: string }).type === 'text')
+      .map((x) => (x as { text?: string }).text ?? '')
+      .join(' ')
+  return undefined
+}
+
+function parseHead(content: string): ParsedHead {
   let cwd: string | undefined
   let aiTitle: string | undefined
-  let firstUser: string | undefined
+  let fallbackTitle: string | undefined
   for (const line of content.split('\n')) {
     if (!line.trim() || !line.includes('{')) continue
     let d: Record<string, unknown>
@@ -582,19 +659,12 @@ function parseHead(content: string): { cwd?: string; title?: string } {
     }
     if (!cwd && typeof d.cwd === 'string') cwd = d.cwd
     if (d.type === 'ai-title' && typeof d.aiTitle === 'string') aiTitle = d.aiTitle
-    if (!firstUser && d.type === 'user') {
-      const m = d.message as { content?: unknown } | undefined
-      const c = m?.content
-      if (typeof c === 'string') firstUser = c
-      else if (Array.isArray(c))
-        firstUser = c
-          .filter((x) => x && typeof x === 'object' && (x as { type?: string }).type === 'text')
-          .map((x) => (x as { text?: string }).text ?? '')
-          .join(' ')
+    if (!fallbackTitle && d.type === 'user' && d.isMeta !== true) {
+      const text = transcriptEntryUserText(d)
+      if (text) fallbackTitle = userTitleCandidate(text)
     }
   }
-  const title = aiTitle || (firstUser ? firstUser.trim().slice(0, 40) : undefined)
-  return { cwd, title }
+  return { cwd, aiTitle, fallbackTitle, title: aiTitle || fallbackTitle }
 }
 
 // 주어진 cwd의 모든 과거 claude 세션 목록 (최신순). 제목·시각 포함.
@@ -625,7 +695,7 @@ export async function listSessions(
       if (p.cwd && pathMatchesAny(p.cwd, cwdAliases)) {
         push(
           decorateSession(
-            { sessionId: t.sessionId, title: p.title, mtime: t.mtime, cwd: p.cwd },
+            { sessionId: t.sessionId, title: p.fallbackTitle, aiTitle: p.aiTitle, mtime: t.mtime, cwd: p.cwd },
             indexedByKey.get(t.sessionId),
             context
           )
@@ -639,7 +709,7 @@ export async function listSessions(
         decorateSession(
           {
             sessionId: meta.sessionId,
-            title: meta.transcriptTitle || meta.title,
+            title: meta.generatedTitle || meta.transcriptTitle || meta.title,
             mtime: meta.mtime ?? Date.parse(meta.updatedAt),
             cwd: meta.cwd
           },
@@ -663,7 +733,7 @@ export async function listSessions(
     if (p.cwd && pathMatchesAny(p.cwd, cwdAliases)) {
       push(
         decorateSession(
-          { sessionId: t.sessionId, title: p.title, mtime: t.mtime, cwd: p.cwd },
+          { sessionId: t.sessionId, title: p.fallbackTitle, aiTitle: p.aiTitle, mtime: t.mtime, cwd: p.cwd },
           indexedByKey.get(t.sessionId),
           context
         )
@@ -677,7 +747,7 @@ export async function listSessions(
       decorateSession(
         {
           sessionId: meta.sessionId,
-          title: meta.transcriptTitle || meta.title,
+          title: meta.generatedTitle || meta.transcriptTitle || meta.title,
           mtime: meta.mtime ?? Date.parse(meta.updatedAt),
           cwd: meta.cwd
         },
@@ -691,6 +761,18 @@ export async function listSessions(
 
 // 주어진 cwd의 claude 세션 제목. since가 주어지면 그 시각 이후 갱신된 transcript만 본다
 // (터미널을 연 뒤 시작된 세션 = 현재 세션. 과거 세션 제목이 잡히는 것을 방지).
+// ai-title 없는 SDK 세션은 앱이 생성해 인덱스에 저장한 제목으로 보완한다.
+async function resolveSessionTitle(
+  sessionId: string,
+  parsed: ParsedHead,
+  ssh?: SshConn
+): Promise<string | undefined> {
+  if (parsed.aiTitle) return parsed.aiTitle
+  const indexed = await readSessionIndex()
+  const meta = indexed.find((m) => m.sessionId === sessionId && sameSource(m, ssh))
+  return meta?.generatedTitle || parsed.fallbackTitle || meta?.transcriptTitle
+}
+
 export async function currentSession(
   cwd: string,
   since = 0,
@@ -703,7 +785,7 @@ export async function currentSession(
       if (since && t.mtime < since) continue
       const p = parseHead(t.head)
       if (p.cwd && pathMatchesAny(p.cwd, cwdAliases)) {
-        return { sessionId: t.sessionId, title: p.title }
+        return { sessionId: t.sessionId, title: await resolveSessionTitle(t.sessionId, p, ssh) }
       }
     }
     return null
@@ -719,7 +801,7 @@ export async function currentSession(
     }
     const p = parseHead(head)
     if (p.cwd && pathMatchesAny(p.cwd, cwdAliases)) {
-      return { sessionId: t.sessionId, title: p.title }
+      return { sessionId: t.sessionId, title: await resolveSessionTitle(t.sessionId, p) }
     }
   }
   return null

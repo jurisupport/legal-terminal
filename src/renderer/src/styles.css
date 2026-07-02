@@ -2442,6 +2442,35 @@ body {
 .sl-row.past .sl-name {
   color: #b9c2cc;
 }
+.sl-row.past {
+  position: relative;
+}
+.sl-row.past::after {
+  content: '↻ 이어서 열기';
+  position: absolute;
+  right: 8px;
+  top: 50%;
+  transform: translateY(-50%);
+  font-size: 10px;
+  color: var(--accent);
+  background: var(--bg-alt);
+  padding: 1px 5px;
+  border-radius: 3px;
+  border: 1px solid var(--border);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.1s;
+}
+.sl-row.past:hover::after {
+  opacity: 1;
+}
+.sl-daysep {
+  list-style: none;
+  font-size: 10px;
+  color: var(--fg-muted);
+  padding: 8px 9px 2px;
+  letter-spacing: 0.05em;
+}
 .sl-row:hover {
   background: rgba(255, 255, 255, 0.06);
 }

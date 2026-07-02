@@ -3,7 +3,9 @@ import { randomUUID } from 'crypto'
 import { execFile, spawn, type ChildProcessWithoutNullStreams } from 'child_process'
 import { existsSync } from 'fs'
 import { mkdir } from 'fs/promises'
+import { tmpdir } from 'os'
 import { basename, dirname, join, relative } from 'path'
+import { rememberSessionMeta } from '../sessions'
 import {
   query,
   type McpServerStatus,
@@ -120,6 +122,12 @@ interface AgentSession {
   contextUsage?: AgentContextUsage
   rateLimitUsage?: AgentRateLimitUsage
   rateLimitUsages?: Map<string, AgentRateLimitUsage>
+  turnCount?: number
+  firstUserText?: string
+  lastUserText?: string
+  titleGenRunning?: boolean
+  titleGeneratedAtTurn?: number
+  generatedTitle?: string
 }
 
 const sessions = new Map<string, AgentSession>()
@@ -1834,6 +1842,10 @@ function handleResultMessage(session: AgentSession, message: Record<string, unkn
     sessionId: session.id,
     status: isError ? 'error' : 'done'
   })
+  if (!isError) {
+    session.turnCount = (session.turnCount ?? 0) + 1
+    maybeGenerateSessionTitle(session)
+  }
   if (isError) {
     emit(session, {
       type: 'error',
@@ -1841,6 +1853,109 @@ function handleResultMessage(session: AgentSession, message: Record<string, unkn
       message: `Claude 종료 상태: ${subtype ?? 'unknown'}`,
       recoverable: true
     })
+  }
+}
+
+// SDK 세션은 CLI(TUI)와 달리 transcript에 ai-title을 남기지 않는다.
+// 첫 턴이 끝나면 대화 맥락(요청+답변)으로 제목을 생성해 세션 인덱스에 저장하고,
+// 대화가 쌓인 뒤(6턴) 한 번 더 다듬는다. 실패해도 기존 제목 폴백으로 동작한다.
+const TITLE_REFRESH_TURN = 6
+const TITLE_GEN_MODEL = 'claude-haiku-4-5-20251001'
+const TITLE_GEN_TIMEOUT_MS = 45_000
+
+function clipForTitlePrompt(text: string | undefined, max: number): string {
+  const clean = (text ?? '').replace(/\s+/g, ' ').trim()
+  return clean.length > max ? `${clean.slice(0, max)}…` : clean
+}
+
+function sanitizeGeneratedTitle(raw: string | undefined): string | undefined {
+  if (!raw) return undefined
+  const line = raw
+    .split('\n')
+    .map((l) => l.trim())
+    .find((l) => l.length > 0)
+  if (!line) return undefined
+  const title = line
+    .replace(/^제목\s*[:：]\s*/, '')
+    .replace(/^["'“”`*#\s]+|["'“”`*.\s]+$/g, '')
+    .trim()
+  if (!title || title.length > 60) return undefined
+  return title.length > 40 ? `${title.slice(0, 40)}…` : title
+}
+
+function maybeGenerateSessionTitle(session: AgentSession): void {
+  if (session.provider !== 'claude' || session.source !== 'local') return
+  if (session.titleGenRunning || !session.firstUserText) return
+  const turns = session.turnCount ?? 0
+  const due =
+    session.titleGeneratedAtTurn === undefined
+      ? turns >= 1
+      : session.titleGeneratedAtTurn < TITLE_REFRESH_TURN && turns >= TITLE_REFRESH_TURN
+  if (!due) return
+  session.titleGenRunning = true
+  void generateSessionTitle(session)
+    .catch(() => {
+      /* 제목 생성은 부가 기능 — 실패 시 첫 메시지 기반 폴백 제목이 유지된다. */
+    })
+    .finally(() => {
+      session.titleGenRunning = false
+    })
+}
+
+async function generateSessionTitle(session: AgentSession): Promise<void> {
+  const assistantText =
+    session.assistantText.get(session.turnAssistantMessageId ?? '') ??
+    session.assistantText.get(session.activeAssistantMessageId ?? '')
+  const parts = [
+    '아래 대화에 붙일 간결한 한국어 제목을 지어줘.',
+    '- 8~20자, 명사형으로 끝맺기 (예: "대여금 준비서면 쟁점 정리", "임차권등기 신청서 초안 작성")',
+    '- 대화의 핵심 목적·대상 문서·쟁점이 드러나게. 인사말이나 도구 이름은 제외.',
+    '- 출력은 제목 한 줄만. 따옴표·마침표 없이.',
+    '',
+    `[작업 폴더] ${basename(session.cwd)}`,
+    session.title ? `[탭 이름] ${clipForTitlePrompt(session.title, 80)}` : '',
+    '',
+    `[첫 요청] ${clipForTitlePrompt(session.firstUserText, 600)}`,
+    session.lastUserText && session.lastUserText !== session.firstUserText
+      ? `[최근 요청] ${clipForTitlePrompt(session.lastUserText, 400)}`
+      : '',
+    assistantText ? `[답변 발췌] ${clipForTitlePrompt(assistantText, 1200)}` : ''
+  ].filter(Boolean)
+
+  const abortController = new AbortController()
+  const timer = setTimeout(() => abortController.abort(), TITLE_GEN_TIMEOUT_MS)
+  try {
+    // cwd를 임시 폴더로 두어 제목 생성용 transcript가 사건 폴더 세션 목록에 섞이지 않게 한다.
+    const response = query({
+      prompt: parts.join('\n'),
+      options: {
+        abortController,
+        cwd: tmpdir(),
+        model: TITLE_GEN_MODEL,
+        maxTurns: 1,
+        tools: [],
+        allowedTools: [],
+        pathToClaudeCodeExecutable: packagedClaudeAgentSdkExecutable(),
+        env: cleanEnv()
+      }
+    })
+    let title: string | undefined
+    for await (const sdkMessage of response) {
+      const message = asRecord(sdkMessage)
+      if (message?.type === 'result') title = sanitizeGeneratedTitle(stringValue(message.result))
+    }
+    if (!title) return
+    session.generatedTitle = title
+    session.titleGeneratedAtTurn = session.turnCount ?? 1
+    if (session.resumeSessionId) {
+      await rememberSessionMeta({
+        sessionId: session.resumeSessionId,
+        cwd: session.cwd,
+        generatedTitle: title
+      })
+    }
+  } finally {
+    clearTimeout(timer)
   }
 }
 
@@ -3777,11 +3892,14 @@ function startAgentTurn(session: AgentSession, input: AgentSendInput): void {
   session.running = abortController
   session.turnAssistantMessageId = assistantMessageId
   session.activeAssistantMessageId = assistantMessageId
+  const userDisplayText = agentInputDisplayText(input)
+  if (!session.firstUserText) session.firstUserText = userDisplayText
+  session.lastUserText = userDisplayText
   emit(session, {
     type: 'message:user',
     sessionId,
     messageId,
-    text: agentInputDisplayText(input),
+    text: userDisplayText,
     attachments: displayAgentAttachments(input.attachments)
   })
   emit(session, { type: 'status', sessionId, status: 'working' })
