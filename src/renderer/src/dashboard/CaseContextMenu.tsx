@@ -25,6 +25,7 @@ export default function CaseContextMenu({
   onBrief,
   onHearingRecord,
   onCreateTodo,
+  onActivity,
   onDetail
 }: {
   menu: CaseContextMenuState
@@ -37,6 +38,7 @@ export default function CaseContextMenu({
   onBrief: (c: JsCase) => void
   onHearingRecord?: (c: JsCase) => void
   onCreateTodo?: (c: JsCase, hearing?: JsHearing) => void | Promise<void>
+  onActivity?: (c: JsCase) => void
   onDetail?: (c: JsCase) => void
 }): JSX.Element {
   const c = menu.c
@@ -56,6 +58,7 @@ export default function CaseContextMenu({
     ...(onPickRecords ? ([['📚 소송기록 폴더 지정', () => onPickRecords(c)]] as MenuItem[]) : []),
     ['—', null],
     ...(c.id ? ([['🌐 JuriSupport에서 보기', () => openExt(caseWebUrl(c.id))]] as MenuItem[]) : []),
+    ...(onActivity ? ([['🕘 작업 이력', () => onActivity(c)]] as MenuItem[]) : []),
     ...(onDetail ? ([['ℹ 상세 보기', () => onDetail(c)]] as MenuItem[]) : []),
     ['—', null],
     ['📋 사건번호 복사', () => copy(c.caseNumber ?? '')],

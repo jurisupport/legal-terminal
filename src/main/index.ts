@@ -47,11 +47,15 @@ import {
 import type { SshProfile } from './settings'
 import {
   currentSession,
+  listFolderActivity,
   listSessions,
+  listSessionsByCase,
+  listWorkLog,
   readSessionTranscript,
   rememberSessionMeta,
   type SessionSearchContext
 } from './sessions'
+import type { CaseActivityQuery } from './caseActivityData'
 import { extractHwpMarkdown, extractHwpText } from './hwpText'
 import { createHwpxFromMarkdown } from './hwpxExport'
 import {
@@ -668,6 +672,12 @@ ipcMain.handle('sessions:transcript', (_e, p: { sessionId: string; ssh?: SshProf
 ipcMain.handle('sessions:remember', (_e, p: Parameters<typeof rememberSessionMeta>[0]) =>
   rememberSessionMeta(p)
 )
+// 사건 대시보드: 세션 인덱스를 사건별로 그룹핑한 최근 작업 이력
+ipcMain.handle('sessions:byCase', (_e, q: CaseActivityQuery) => listSessionsByCase(q))
+// 날짜별 작업일지: 최근 세션 전체 목록
+ipcMain.handle('sessions:workLog', (_e, p: { days?: number } | undefined) => listWorkLog(p?.days))
+// 사건 미연결 폴더 작업 그룹
+ipcMain.handle('sessions:byFolder', (_e, q: CaseActivityQuery) => listFolderActivity(q))
 
 // ── 작업환경 저장/복원 IPC ──
 ipcMain.handle('workspace:save', (_e, snapshot: WorkspaceSnapshot) =>

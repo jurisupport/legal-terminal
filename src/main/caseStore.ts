@@ -61,6 +61,11 @@ export async function getJsPairing(
 ): Promise<{ drafts: string; records?: string } | undefined> {
   return (await readStore()).jsPairings[id]
 }
+export async function allJsPairings(): Promise<
+  Record<string, { drafts: string; records?: string }>
+> {
+  return (await readStore()).jsPairings
+}
 export async function setJsPairing(
   id: string,
   p: { drafts: string; records?: string }

@@ -1503,11 +1503,119 @@ body {
 .dash-btn:hover {
   background: var(--bg-activity);
 }
+.dash-btn.on {
+  background: var(--bg-activity);
+  border-color: var(--accent);
+}
+/* 날짜별 작업일지 */
+.worklog {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 4px 16px 24px;
+  font-size: 12px;
+}
+.wl-more {
+  display: block;
+  margin: 14px auto 4px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 5px 16px;
+  color: var(--fg-muted);
+  font-size: 12px;
+  cursor: pointer;
+}
+.wl-more:hover {
+  background: var(--bg-activity);
+  color: var(--fg);
+}
+.wl-day {
+  margin: 14px 0 6px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--fg-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.wl-row {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 5px 8px;
+  border-radius: 6px;
+}
+.wl-row.clickable {
+  cursor: pointer;
+}
+.wl-row.clickable:hover {
+  background: var(--bg-activity);
+}
+.wl-time {
+  flex: none;
+  width: 38px;
+  color: var(--fg-muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+.wl-main {
+  flex: 1;
+  min-width: 0;
+}
+.wl-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+.wl-case {
+  flex: none;
+  max-width: 40%;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: #8fc2f0;
+  background: rgba(70, 130, 200, 0.14);
+  padding: 0 6px;
+  border-radius: 4px;
+}
+.wl-title {
+  flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--fg);
+}
+.wl-summary {
+  margin-top: 2px;
+  color: #a9c7a3;
+  overflow-wrap: anywhere;
+}
+.wl-inst {
+  margin-top: 2px;
+  color: var(--fg-muted);
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+}
+.wl-count {
+  color: var(--fg-muted);
+  opacity: 0.75;
+  white-space: nowrap;
+}
 .dash-err {
   color: #e8a0a0;
 }
-.dash-list {
+/* 스크롤은 dash-scroll(사건+폴더 섹션 전체)에서 담당 */
+.dash-scroll {
+  flex: 1;
+  min-height: 0;
   overflow-y: auto;
+}
+.dash-list {
   padding: 10px;
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
@@ -1606,6 +1714,152 @@ body {
   background: rgba(211, 182, 122, 0.16);
   padding: 0 6px;
   border-radius: 4px;
+}
+/* 사건 카드: 최근 에이전트 작업 */
+.case-activity {
+  margin-top: 7px;
+  font-size: 12px;
+  color: var(--fg-muted);
+}
+.ca-line {
+  margin: 2px 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: #a9c7a3;
+}
+.ca-line.clickable {
+  cursor: pointer;
+}
+.ca-line.clickable:hover {
+  color: var(--fg);
+}
+/* 사건 미연결 폴더 작업 섹션 */
+.dash-folders {
+  margin-top: 18px;
+}
+.df-head {
+  padding: 0 16px 6px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--fg-muted);
+}
+.df-sub {
+  font-weight: 400;
+  font-size: 11px;
+  opacity: 0.7;
+  margin-left: 4px;
+}
+.folder-card .case-no {
+  color: var(--fg);
+}
+.ca-time {
+  font-weight: 600;
+  background: rgba(140, 190, 130, 0.14);
+  padding: 0 6px;
+  border-radius: 4px;
+}
+.ca-summary {
+  margin-top: 3px;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+  color: #c7ccd0;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+.ca-more {
+  margin-top: 4px;
+  background: none;
+  border: none;
+  padding: 0;
+  color: var(--fg-muted);
+  font-size: 11px;
+  cursor: pointer;
+}
+.ca-more:hover {
+  color: var(--fg);
+}
+/* 사건 카드: 작업 이력 타임라인(펼침) */
+.case-timeline {
+  margin-top: 9px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+  cursor: default;
+  font-size: 12px;
+}
+.cat-row {
+  margin: 3px 0;
+}
+.cat-head {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  width: 100%;
+  background: none;
+  border: none;
+  padding: 2px 0;
+  color: var(--fg);
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+.cat-head:hover .cat-title {
+  color: var(--link);
+}
+.cat-title {
+  flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.cat-time {
+  flex: none;
+  color: var(--fg-muted);
+  font-size: 11px;
+}
+.cat-ssh {
+  flex: none;
+  font-size: 10px;
+  color: #8fc2f0;
+  background: rgba(70, 130, 200, 0.18);
+  padding: 0 5px;
+  border-radius: 4px;
+}
+.cat-summary {
+  margin: 1px 0 3px;
+  color: var(--fg-muted);
+  overflow-wrap: anywhere;
+}
+.cat-body {
+  margin: 4px 0 6px;
+  padding-left: 10px;
+  border-left: 2px solid var(--border);
+}
+.cat-inst {
+  margin: 4px 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: #c7ccd0;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 4;
+  overflow: hidden;
+}
+.cat-resume {
+  margin-top: 4px;
+  background: rgba(140, 190, 130, 0.12);
+  border: 1px solid rgba(140, 190, 130, 0.35);
+  border-radius: 5px;
+  padding: 2px 10px;
+  color: #a9c7a3;
+  font-size: 11px;
+  cursor: pointer;
+}
+.cat-resume:hover {
+  background: rgba(140, 190, 130, 0.22);
 }
 .dash-token {
   max-width: 460px;

@@ -290,8 +290,65 @@ interface SessionRememberInput extends SessionSearchContext {
   cwd: string
   title?: string
   transcriptTitle?: string
+  workSummary?: string
+  workSummaryAt?: number
+  workSummaryAtTurn?: number
   mtime?: number
   ssh?: SshConn
+}
+
+interface CaseActivityQuery {
+  cases: { id: string; caseNumber?: string | null; caseName?: string | null }[]
+  limitPerCase?: number
+}
+
+interface CaseSessionSummary {
+  sessionId: string
+  title?: string
+  mtime: number
+  cwd?: string
+  profileId?: string
+  sshLabel?: string
+  workSummary?: string
+  workSummaryAt?: number
+}
+
+interface CaseActivity {
+  sessions: CaseSessionSummary[]
+  lastActivity: number
+  total: number
+}
+
+interface WorkLogItem {
+  sessionId: string
+  cwd?: string
+  profileId?: string
+  sshLabel?: string
+  caseNumber?: string
+  caseName?: string
+  folderName?: string
+  title?: string
+  workSummary?: string
+  count: number
+  firstText?: string
+  lastTs: number
+}
+
+interface WorkLogDay {
+  date: string
+  epoch: number
+  items: WorkLogItem[]
+}
+
+interface FolderActivity {
+  key: string
+  folderName: string
+  cwd: string
+  profileId?: string
+  sshLabel?: string
+  sessions: CaseSessionSummary[]
+  lastActivity: number
+  total: number
 }
 
 interface SessionTranscriptMessage {
@@ -848,7 +905,13 @@ const api = {
     transcript: (sessionId: string, ssh?: SshConn): Promise<SessionTranscript | null> =>
       ipcRenderer.invoke('sessions:transcript', { sessionId, ssh }),
     remember: (input: SessionRememberInput): Promise<{ ok: boolean; error?: string }> =>
-      ipcRenderer.invoke('sessions:remember', input)
+      ipcRenderer.invoke('sessions:remember', input),
+    byCase: (q: CaseActivityQuery): Promise<Record<string, CaseActivity>> =>
+      ipcRenderer.invoke('sessions:byCase', q),
+    workLog: (days?: number): Promise<WorkLogDay[]> =>
+      ipcRenderer.invoke('sessions:workLog', { days }),
+    byFolder: (q: CaseActivityQuery): Promise<FolderActivity[]> =>
+      ipcRenderer.invoke('sessions:byFolder', q)
   },
   agent: {
     create: (opts: AgentCreateOptions): Promise<AgentCommandResult> =>

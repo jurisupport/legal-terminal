@@ -4,6 +4,26 @@ import { dirname, join } from 'path'
 import { mkdir, open, readFile, readdir, realpath, rename, stat, writeFile } from 'fs/promises'
 import { execFile } from 'child_process'
 import type { SshProfile } from './settings'
+import {
+  buildCaseActivity,
+  buildFolderActivity,
+  comparablePath,
+  pathLeaf,
+  searchNorm,
+  type CaseActivity,
+  type CaseActivityQuery,
+  type FolderActivity
+} from './caseActivityData'
+import {
+  daysFromTranscriptContent,
+  mergeWorkLog,
+  type DayActivity,
+  type SessionDayScan,
+  type WorkLogDay,
+  type WorkLogScanSource
+} from './workLogData'
+import { allJsPairings } from './caseStore'
+import { getSettings } from './settings'
 
 // claude Code 세션 transcript: ~/.claude/projects/<인코딩폴더>/<sessionId>.jsonl
 // 폴더 인코딩이 비영숫자→'-'(한글 충돌)이라, 폴더명 계산 대신 transcript 내부 cwd로 매칭한다.
@@ -63,6 +83,10 @@ export interface SessionMetaInput extends SessionSearchContext {
   transcriptTitle?: string
   // 앱이 대화 맥락으로 직접 생성한 세션 제목 (transcript ai-title이 없는 SDK 세션용)
   generatedTitle?: string
+  // 앱이 자동 생성한 "한 일/다음 할 일" 요약 — 사건 대시보드 표시용
+  workSummary?: string
+  workSummaryAt?: number
+  workSummaryAtTurn?: number
   mtime?: number
   ssh?: SshConn
 }
@@ -116,18 +140,6 @@ function sourceKey(ssh?: SshConn): string {
   return ssh ? remoteSourceKey(ssh) : 'local'
 }
 
-function pathLeaf(path?: string): string | undefined {
-  if (!path) return undefined
-  const clean = path.replace(/[\\/]+$/, '')
-  return clean.split(/[\\/]/).filter(Boolean).pop() || clean
-}
-
-function comparablePath(path?: string): string {
-  if (!path) return ''
-  const clean = path.trim().replace(/[\\/]+$/, '') || '/'
-  return clean.normalize('NFKC')
-}
-
 function pathMatchesAny(candidate: string | undefined, aliases: Set<string>): boolean {
   const comparable = comparablePath(candidate)
   return !!comparable && aliases.has(comparable)
@@ -141,13 +153,6 @@ async function localCwdAliases(cwd: string): Promise<Set<string>> {
     /* The original cwd is still useful if the folder is unavailable. */
   }
   return aliases
-}
-
-function searchNorm(value?: string): string {
-  return (value ?? '')
-    .normalize('NFKC')
-    .toLowerCase()
-    .replace(/\s+/g, '')
 }
 
 function searchText(parts: (string | number | undefined)[]): string {
@@ -280,6 +285,9 @@ export async function rememberSessionMeta(input: SessionMetaInput): Promise<{ ok
           title: input.title || previous.title,
           transcriptTitle: input.transcriptTitle || previous.transcriptTitle,
           generatedTitle: input.generatedTitle || previous.generatedTitle,
+          workSummary: input.workSummary || previous.workSummary,
+          workSummaryAt: input.workSummaryAt ?? previous.workSummaryAt,
+          workSummaryAtTurn: input.workSummaryAtTurn ?? previous.workSummaryAtTurn,
           mtime: input.mtime ?? previous.mtime,
           folderName: input.folderName || previous.folderName,
           ssh: input.ssh || previous.ssh
@@ -757,6 +765,214 @@ export async function listSessions(
     )
   }
   return out.sort((a, b) => b.mtime - a.mtime)
+}
+
+// 사건 대시보드용: 세션 인덱스를 사건별로 그룹핑해 최근 작업을 돌려준다.
+// transcript 스캔 없이 인덱스 1회 + pairing 1회 읽기라 저렴하다.
+export async function listSessionsByCase(q: CaseActivityQuery): Promise<Record<string, CaseActivity>> {
+  if (!q?.cases?.length) return {}
+  const [entries, pairings] = await Promise.all([readSessionIndex(), allJsPairings()])
+  return buildCaseActivity(entries, pairings, q)
+}
+
+// 사건 대시보드: 어떤 사건에도 안 붙은 세션을 폴더별로 묶어 돌려준다.
+export async function listFolderActivity(q: CaseActivityQuery): Promise<FolderActivity[]> {
+  const [entries, pairings] = await Promise.all([readSessionIndex(), allJsPairings()])
+  return buildFolderActivity(entries, pairings, q ?? { cases: [] })
+}
+
+// ── 날짜별 작업일지: 트랜스크립트 타임스탬프를 스캔해 세션을 날짜별로 쪼갠다 ──
+// 세션 인덱스(마지막 활동 시각)만으로는 여러 날에 걸친 작업이 마지막 날에만 보이고,
+// 인덱스가 유실돼도 트랜스크립트는 남아 있으므로 파일을 직접 스캔한다.
+
+const WORK_LOG_SCAN_VERSION = 2 // 지시 정리 규칙이 바뀌면 올린다 (캐시 전체 재스캔)
+const REMOTE_WORK_LOG_TTL_MS = 10 * 60_000
+const REMOTE_WORK_LOG_TIMEOUT_MS = 25_000
+
+interface WorkLogScanCacheEntry {
+  mtime: number
+  cwd?: string
+  days: DayActivity[]
+}
+
+function workLogCachePath(): string {
+  return join(app.getPath('userData'), 'worklog-scan.json')
+}
+
+async function readWorkLogScanCache(): Promise<Record<string, WorkLogScanCacheEntry>> {
+  try {
+    const parsed = JSON.parse(await readFile(workLogCachePath(), 'utf8')) as {
+      version?: number
+      local?: Record<string, WorkLogScanCacheEntry>
+    }
+    return parsed.version === WORK_LOG_SCAN_VERSION && parsed.local ? parsed.local : {}
+  } catch {
+    return {}
+  }
+}
+
+async function writeWorkLogScanCache(local: Record<string, WorkLogScanCacheEntry>): Promise<void> {
+  try {
+    const file = workLogCachePath()
+    const tmp = `${file}.${process.pid}.tmp`
+    await writeFile(tmp, JSON.stringify({ version: WORK_LOG_SCAN_VERSION, local }), 'utf8')
+    await rename(tmp, file)
+  } catch {
+    /* 캐시 저장 실패는 다음 스캔이 조금 느려질 뿐이다. */
+  }
+}
+
+// 로컬 트랜스크립트 스캔 — 파일 mtime이 안 바뀐 세션은 캐시를 재사용한다.
+async function scanLocalWorkLog(days: number): Promise<SessionDayScan[]> {
+  const cutoff = Date.now() - days * 86_400_000
+  const [refs, cache] = await Promise.all([listTranscripts(), readWorkLogScanCache()])
+  const nextCache: Record<string, WorkLogScanCacheEntry> = {}
+  const out: SessionDayScan[] = []
+  let changed = false
+  for (const ref of refs) {
+    if (ref.mtime < cutoff) continue
+    const cached = cache[ref.sessionId]
+    if (cached && cached.mtime === ref.mtime) {
+      nextCache[ref.sessionId] = cached
+      out.push({ sessionId: ref.sessionId, cwd: cached.cwd, days: cached.days })
+      continue
+    }
+    try {
+      const read = await readTail(ref.file)
+      const scan = daysFromTranscriptContent(read.content)
+      const entry: WorkLogScanCacheEntry = { mtime: ref.mtime, cwd: scan.cwd, days: scan.days }
+      nextCache[ref.sessionId] = entry
+      changed = true
+      if (scan.days.length) out.push({ sessionId: ref.sessionId, cwd: scan.cwd, days: scan.days })
+    } catch {
+      /* 깨진 파일은 건너뛴다 */
+    }
+  }
+  if (changed || Object.keys(cache).length !== Object.keys(nextCache).length) {
+    await writeWorkLogScanCache(nextCache)
+  }
+  return out
+}
+
+// 원격 트랜스크립트 스캔 — 파일을 내려받지 않고 원격에서 python3로 집계해 JSON만 받는다.
+const remoteWorkLogCache = new Map<string, { fetchedAt: number; sessions: SessionDayScan[] }>()
+
+function remoteWorkLogScript(days: number): string {
+  const windowDays = Math.max(1, Math.min(365, Math.floor(days)))
+  return `
+command -v python3 >/dev/null 2>&1 || exit 0
+python3 - <<'PY'
+import json, os, glob, re, datetime
+ROOT = os.path.expanduser('~/.claude/projects')
+CUTOFF = datetime.datetime.now().timestamp() - ${windowDays} * 86400
+NOISE = {'/usage','/context','/cost','/compact','/clear','/exit','/login','/logout','/model','/status','/help','/doctor','/resume'}
+def clean(t):
+    t = (t or '').strip()
+    if not t: return None
+    if t.lower() in NOISE: return None
+    m = re.search(r'<command-name>\\s*([^<\\n]+?)\\s*</command-name>', t)
+    if m:
+        if m.group(1).strip().lower() in NOISE: return None
+        a = re.search(r'<command-args>\\s*([^<\\n]*?)\\s*</command-args>', t)
+        arg = a.group(1).strip() if a else ''
+        return (m.group(1) + (' ' + arg if arg else '')).strip()
+    if re.search(r'<local-command-caveat>|<local-command-stdout>|<command-message>', t): return None
+    if t.startswith('[Request interrupted'): return None
+    if 'transcript입니다' in t: return None
+    t = re.sub(r'<system-reminder>[\\s\\S]*?</system-reminder>', ' ', t)
+    t = re.sub(r'<ide_selection>[\\s\\S]*?</ide_selection>', ' ', t)
+    t = re.sub(r'</?[A-Za-z][A-Za-z0-9_-]*>', ' ', t)
+    t = re.sub(r'\\s+', ' ', t).strip()
+    return t or None
+def text_of(msg):
+    c = (msg or {}).get('content')
+    if isinstance(c, str): return c
+    if isinstance(c, list):
+        return ' '.join(x.get('text', '') for x in c if isinstance(x, dict) and x.get('type') == 'text')
+    return None
+out = []
+for f in glob.glob(ROOT + '/*/*.jsonl'):
+    try:
+        if os.path.getmtime(f) < CUTOFF: continue
+        sid = os.path.basename(f)[:-6]
+        cwd = None
+        days = {}
+        with open(f, encoding='utf-8', errors='ignore') as fh:
+            for line in fh:
+                if '"type":"user"' not in line and (cwd or '"cwd"' not in line): continue
+                try: d = json.loads(line)
+                except Exception: continue
+                if cwd is None and isinstance(d.get('cwd'), str): cwd = d['cwd']
+                if d.get('type') != 'user' or d.get('isMeta') is True or d.get('isSidechain') is True: continue
+                ts = d.get('timestamp')
+                if not isinstance(ts, str): continue
+                try: dt = datetime.datetime.fromisoformat(ts.replace('Z', '+00:00')).astimezone()
+                except Exception: continue
+                t = clean(text_of(d.get('message')))
+                if not t: continue
+                key = dt.strftime('%Y-%m-%d')
+                ms = int(dt.timestamp() * 1000)
+                e = days.get(key)
+                if e:
+                    e['count'] += 1
+                    e['lastTs'] = max(e['lastTs'], ms)
+                else:
+                    days[key] = {'date': key, 'count': 1, 'firstText': t[:200], 'lastTs': ms}
+        if days:
+            out.append({'sessionId': sid, 'cwd': cwd, 'days': sorted(days.values(), key=lambda x: x['date'])})
+    except Exception:
+        pass
+print(json.dumps(out, ensure_ascii=False))
+PY
+`.trim()
+}
+
+async function scanRemoteWorkLog(ssh: SshConn, days: number): Promise<SessionDayScan[]> {
+  const key = remoteSourceKey(ssh)
+  const cached = remoteWorkLogCache.get(key)
+  if (cached && Date.now() - cached.fetchedAt < REMOTE_WORK_LOG_TTL_MS) return cached.sessions
+  const sessions = await new Promise<SessionDayScan[]>((resolve) => {
+    execFile(
+      sshBin,
+      [...sshBaseArgs(ssh), remoteWorkLogScript(days)],
+      { timeout: REMOTE_WORK_LOG_TIMEOUT_MS, windowsHide: true, maxBuffer: 64 * 1024 * 1024 },
+      (err, stdout) => {
+        if (err) {
+          resolve([])
+          return
+        }
+        try {
+          const parsed = JSON.parse(stdout.trim() || '[]') as SessionDayScan[]
+          resolve(Array.isArray(parsed) ? parsed : [])
+        } catch {
+          resolve([])
+        }
+      }
+    )
+  })
+  if (sessions.length) remoteWorkLogCache.set(key, { fetchedAt: Date.now(), sessions })
+  return sessions
+}
+
+// 날짜별 작업일지: 로컬+원격 트랜스크립트 스캔을 합치고, 스캔이 닿지 못한 세션은 인덱스로 폴백.
+export async function listWorkLog(days = 30): Promise<WorkLogDay[]> {
+  const [entries, settings, local] = await Promise.all([
+    readSessionIndex(),
+    getSettings().catch(() => ({}) as { sshProfiles?: SshProfile[] }),
+    scanLocalWorkLog(days)
+  ])
+  const scans: WorkLogScanSource[] = [{ sourceKey: 'local', sessions: local }]
+  const profiles = settings.sshProfiles ?? []
+  const remotes = await Promise.all(
+    profiles.map(async (p) => ({
+      sourceKey: remoteSourceKey(p),
+      profileId: p.id,
+      sshLabel: p.label,
+      sessions: await scanRemoteWorkLog(p, days).catch(() => [])
+    }))
+  )
+  scans.push(...remotes.filter((r) => r.sessions.length))
+  return mergeWorkLog(scans, entries, Date.now(), days)
 }
 
 // 주어진 cwd의 claude 세션 제목. since가 주어지면 그 시각 이후 갱신된 transcript만 본다

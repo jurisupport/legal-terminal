@@ -128,6 +128,9 @@ interface AgentSession {
   titleGenRunning?: boolean
   titleGeneratedAtTurn?: number
   generatedTitle?: string
+  workSummaryRunning?: boolean
+  workSummaryAtTurn?: number
+  workSummaryTimer?: NodeJS.Timeout
 }
 
 const sessions = new Map<string, AgentSession>()
@@ -1845,6 +1848,7 @@ function handleResultMessage(session: AgentSession, message: Record<string, unkn
   if (!isError) {
     session.turnCount = (session.turnCount ?? 0) + 1
     maybeGenerateSessionTitle(session)
+    scheduleWorkSummary(session)
   }
   if (isError) {
     emit(session, {
@@ -1954,6 +1958,104 @@ async function generateSessionTitle(session: AgentSession): Promise<void> {
         generatedTitle: title
       })
     }
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+// 사건 대시보드용 "한 일/다음" 요약. 제목 생성과 같은 인프라를 쓰되,
+// 연속 지시 중에는 디바운스로 미루고 사용자가 손을 뗀 뒤 1회만 생성한다.
+// 탭이 닫힐 때는 타이머를 기다리지 않고 즉시 플러시한다.
+const WORK_SUMMARY_DEBOUNCE_MS = 90_000
+
+function sanitizeWorkSummary(raw: string | undefined): string | undefined {
+  if (!raw) return undefined
+  const lines = raw
+    .split('\n')
+    .map((l) => l.trim())
+    .filter(Boolean)
+  if (!lines.length || lines.length > 2 || !/^한 일\s*[:：]/.test(lines[0])) return undefined
+  const text = lines.join(' · ')
+  return text.length > 150 ? undefined : text
+}
+
+function scheduleWorkSummary(session: AgentSession): void {
+  if (session.provider !== 'claude' || session.source !== 'local') return
+  if (!session.firstUserText) return
+  if (session.workSummaryTimer) clearTimeout(session.workSummaryTimer)
+  session.workSummaryTimer = setTimeout(() => {
+    session.workSummaryTimer = undefined
+    flushWorkSummary(session)
+  }, WORK_SUMMARY_DEBOUNCE_MS)
+}
+
+function flushWorkSummary(session: AgentSession): void {
+  if (session.provider !== 'claude' || session.source !== 'local') return
+  const turns = session.turnCount ?? 0
+  if (turns < 1 || !session.firstUserText || !session.resumeSessionId) return
+  if (session.workSummaryRunning || session.workSummaryAtTurn === turns) return
+  session.workSummaryRunning = true
+  void generateWorkSummary(session, turns)
+    .catch(() => {
+      /* 요약은 부가 기능 — 실패해도 세션 제목만으로 대시보드가 동작한다. */
+    })
+    .finally(() => {
+      session.workSummaryRunning = false
+    })
+}
+
+async function generateWorkSummary(session: AgentSession, turns: number): Promise<void> {
+  const assistantText =
+    session.assistantText.get(session.turnAssistantMessageId ?? '') ??
+    session.assistantText.get(session.activeAssistantMessageId ?? '')
+  const parts = [
+    '아래 법률사무 에이전트 대화의 진행 상황을 요약해줘.',
+    '- 정확히 두 줄로만 출력:',
+    '한 일: <이번 세션에서 완료한 작업, 30자 내>',
+    '다음: <남은 일이나 다음 단계, 없으면 "없음", 30자 내>',
+    '- 명사형으로 간결하게. 따옴표·머리기호 없이.',
+    '',
+    `[작업 폴더] ${basename(session.cwd)}`,
+    session.title ? `[탭 이름] ${clipForTitlePrompt(session.title, 80)}` : '',
+    '',
+    `[첫 요청] ${clipForTitlePrompt(session.firstUserText, 600)}`,
+    session.lastUserText && session.lastUserText !== session.firstUserText
+      ? `[최근 요청] ${clipForTitlePrompt(session.lastUserText, 400)}`
+      : '',
+    assistantText ? `[답변 발췌] ${clipForTitlePrompt(assistantText, 1200)}` : ''
+  ].filter(Boolean)
+
+  const abortController = new AbortController()
+  const timer = setTimeout(() => abortController.abort(), TITLE_GEN_TIMEOUT_MS)
+  try {
+    // 제목 생성과 동일: cwd를 임시 폴더로 두어 요약용 transcript가 사건 세션 목록에 섞이지 않게 한다.
+    const response = query({
+      prompt: parts.join('\n'),
+      options: {
+        abortController,
+        cwd: tmpdir(),
+        model: TITLE_GEN_MODEL,
+        maxTurns: 1,
+        tools: [],
+        allowedTools: [],
+        pathToClaudeCodeExecutable: packagedClaudeAgentSdkExecutable(),
+        env: cleanEnv()
+      }
+    })
+    let summary: string | undefined
+    for await (const sdkMessage of response) {
+      const message = asRecord(sdkMessage)
+      if (message?.type === 'result') summary = sanitizeWorkSummary(stringValue(message.result))
+    }
+    if (!summary || !session.resumeSessionId) return
+    session.workSummaryAtTurn = turns
+    await rememberSessionMeta({
+      sessionId: session.resumeSessionId,
+      cwd: session.cwd,
+      workSummary: summary,
+      workSummaryAt: Date.now(),
+      workSummaryAtTurn: turns
+    })
   } finally {
     clearTimeout(timer)
   }
@@ -4235,6 +4337,12 @@ export function closeAgentSession(sessionId: string, webContents?: WebContents):
     session.viewers.delete(webContents.id)
     if (session.viewers.size > 0) return { ok: true }
   }
+  // 탭을 닫으면 디바운스를 기다리지 않고 "한 일/다음" 요약을 즉시 남긴다 (best effort).
+  if (session.workSummaryTimer) {
+    clearTimeout(session.workSummaryTimer)
+    session.workSummaryTimer = undefined
+  }
+  flushWorkSummary(session)
   session.running?.abort()
   session.remoteProcess?.kill()
   session.remoteProcess = undefined

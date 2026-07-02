@@ -288,8 +288,65 @@ export interface SessionRememberInput extends SessionSearchContext {
   cwd: string
   title?: string
   transcriptTitle?: string
+  workSummary?: string
+  workSummaryAt?: number
+  workSummaryAtTurn?: number
   mtime?: number
   ssh?: SshConn
+}
+
+export interface CaseActivityQuery {
+  cases: { id: string; caseNumber?: string | null; caseName?: string | null }[]
+  limitPerCase?: number
+}
+
+export interface CaseSessionSummary {
+  sessionId: string
+  title?: string
+  mtime: number
+  cwd?: string
+  profileId?: string
+  sshLabel?: string
+  workSummary?: string
+  workSummaryAt?: number
+}
+
+export interface CaseActivity {
+  sessions: CaseSessionSummary[]
+  lastActivity: number
+  total: number
+}
+
+export interface WorkLogItem {
+  sessionId: string
+  cwd?: string
+  profileId?: string
+  sshLabel?: string
+  caseNumber?: string
+  caseName?: string
+  folderName?: string
+  title?: string
+  workSummary?: string
+  count: number // 그날 사용자 지시 수 (인덱스 폴백 행은 0)
+  firstText?: string // 그날 첫 지시
+  lastTs: number
+}
+
+export interface WorkLogDay {
+  date: string
+  epoch: number
+  items: WorkLogItem[]
+}
+
+export interface FolderActivity {
+  key: string
+  folderName: string
+  cwd: string
+  profileId?: string
+  sshLabel?: string
+  sessions: CaseSessionSummary[]
+  lastActivity: number
+  total: number
 }
 
 export interface SessionTranscriptMessage {
@@ -773,6 +830,9 @@ export interface LtApi {
     ) => Promise<SessionListEntry[]>
     transcript: (sessionId: string, ssh?: SshConn) => Promise<SessionTranscript | null>
     remember: (input: SessionRememberInput) => Promise<{ ok: boolean; error?: string }>
+    byCase: (q: CaseActivityQuery) => Promise<Record<string, CaseActivity>>
+    workLog: (days?: number) => Promise<WorkLogDay[]>
+    byFolder: (q: CaseActivityQuery) => Promise<FolderActivity[]>
   }
   agent: {
     create: (opts: AgentCreateOptions) => Promise<AgentCommandResult>

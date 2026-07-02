@@ -63,6 +63,7 @@ import type {
   AppSettings,
   AgentAttachment,
   AgentProvider,
+  CaseSessionSummary,
   JsCase,
   JsHearing,
   TodoTerminalContext,
@@ -3066,10 +3067,14 @@ export default function App(): JSX.Element {
     cwd: string,
     title?: string,
     source?: TermTab,
-    side: DockSide = termSide(source)
+    side: DockSide = termSide(source),
+    fallbackCase?: OpenedCase // 대시보드에서 방금 연 사건 — currentCase state가 아직 갱신 전일 수 있다
   ): void => {
-    const base =
-      currentCase && (currentCase.drafts === cwd || currentCase.remotePath === cwd)
+    const matchesCwd = (c?: CurrentCase | null): boolean =>
+      !!c && (c.drafts === cwd || c.remotePath === cwd)
+    const base = matchesCwd(fallbackCase)
+      ? fallbackCase
+      : matchesCwd(currentCase)
         ? currentCase
         : undefined
     const meta = base?.meta
@@ -5839,6 +5844,13 @@ export default function App(): JSX.Element {
     await pickRecords({ term: opened.term, termId: opened.termId, source: opened })
   }
 
+  // 대시보드 작업 이력에서 과거 세션 이어하기: 사건 작업환경을 연 뒤 그 세션을 복원한다.
+  const resumeCaseSession = async (c: JsCase, s: CaseSessionSummary): Promise<void> => {
+    const opened = await openCaseWorkspace(c)
+    if (!opened) return
+    openPastSession(s.sessionId, s.cwd ?? opened.drafts, s.title, opened.term, undefined, opened)
+  }
+
   const openHearingRecordForCase = async (c: JsCase): Promise<void> => {
     const detail = await loadCaseDetail(c)
     const opened = await openCaseWorkspace(detail, true)
@@ -6405,6 +6417,8 @@ export default function App(): JSX.Element {
             onPickRecords={pickRecordsForCase}
             onBrief={briefCaseToClaude}
             onHearingRecord={(c) => void openHearingRecordForCase(c)}
+            onResumeSession={(c, s) => void resumeCaseSession(c, s)}
+            onResumePath={(sessionId, cwd, title) => openPastSession(sessionId, cwd, title)}
             onChanged={() => setJsNonce((n) => n + 1)}
           />
         </div>

@@ -10,6 +10,18 @@ export function fmtDate(iso?: string): string {
   return `${d.getMonth() + 1}/${d.getDate()}`
 }
 
+// 상대시각 라벨: 방금 / N분 전 / N시간 전 / N일 전 / M.D
+export function agoLabel(ms: number): string {
+  if (!ms) return ''
+  const diff = Date.now() - ms
+  if (diff < 60_000) return '방금'
+  if (diff < 3_600_000) return `${Math.floor(diff / 60_000)}분 전`
+  if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)}시간 전`
+  if (diff < 7 * 86_400_000) return `${Math.floor(diff / 86_400_000)}일 전`
+  const d = new Date(ms)
+  return `${d.getMonth() + 1}.${d.getDate()}`
+}
+
 export function nextHearing(c: JsCase): { when: string; note: string } | null {
   if (!c.hearings?.length) return null
   const now = Date.now()
