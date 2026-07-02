@@ -181,6 +181,66 @@ export function IconSaveAs({ size = 16 }: IconProps): JSX.Element {
   )
 }
 
+export function IconFork({ size = 16 }: IconProps): JSX.Element {
+  return (
+    <svg {...base(size)}>
+      <circle cx="7" cy="6" r="2.4" />
+      <circle cx="17" cy="6" r="2.4" />
+      <circle cx="12" cy="18" r="2.4" />
+      <path d="M7 8.4v1.6a3 3 0 0 0 3 3h4a3 3 0 0 0 3-3V8.4" />
+      <path d="M12 13v2.6" />
+    </svg>
+  )
+}
+
+export function IconWorktree({ size = 16 }: IconProps): JSX.Element {
+  return (
+    <svg {...base(size)}>
+      <path d="M3 7a2 2 0 0 1 2-2h3.5l2 2H19a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
+      <circle cx="9.5" cy="12" r="1.6" />
+      <circle cx="15.5" cy="16" r="1.6" />
+      <path d="M9.5 13.6c0 1.6 1.4 2.4 4.4 2.4" />
+    </svg>
+  )
+}
+
+export function IconTerminal({ size = 16 }: IconProps): JSX.Element {
+  return (
+    <svg {...base(size)}>
+      <rect x="3" y="4.5" width="18" height="15" rx="2" />
+      <path d="M7 9l3.5 3L7 15" />
+      <path d="M12.5 15.5H17" />
+    </svg>
+  )
+}
+
+export function IconSend({ size = 16 }: IconProps): JSX.Element {
+  return (
+    <svg {...base(size)}>
+      <path d="M4 11.5L20 4l-4.5 16-3.6-6.4L4 11.5z" />
+      <path d="M11.9 13.6L20 4" />
+    </svg>
+  )
+}
+
+export function IconStop({ size = 16 }: IconProps): JSX.Element {
+  return (
+    <svg {...base(size)}>
+      <rect x="6.5" y="6.5" width="11" height="11" rx="1.6" />
+    </svg>
+  )
+}
+
+export function IconMention({ size = 16 }: IconProps): JSX.Element {
+  return (
+    <svg {...base(size)}>
+      <circle cx="12" cy="12" r="3.4" />
+      <path d="M20.5 12a8.5 8.5 0 1 0-3.2 6.6" />
+      <path d="M15.4 8.6V13a2.4 2.4 0 0 0 4.8 0V12" />
+    </svg>
+  )
+}
+
 export function IconAlignCenter({ size = 16 }: IconProps): JSX.Element {
   return (
     <svg {...base(size)}>

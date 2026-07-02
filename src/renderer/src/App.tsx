@@ -14,7 +14,8 @@ import AgentPanel, {
   DiffPreview,
   type AgentAttachmentRequest,
   type AgentDraftState,
-  type AgentDiffOpenRequest
+  type AgentDiffOpenRequest,
+  type AgentProviderHandoff
 } from './agent/AgentPanel'
 import FileTree, { LT_PATH, sortEntries, type PendingCreateRequest, type SortMode } from './filetree/FileTree'
 import PdfViewer, { type PdfViewStatus } from './viewer/PdfViewer'
@@ -334,6 +335,7 @@ interface TermTab {
   createdAt?: number // 세션 시작 시각 — 이 이후의 transcript만 현재 세션으로 매칭
   resumeSessionId?: string // 과거 세션 이어서 열기
   forkFromSessionId?: string // 새 세션에 맥락만 주입할 원본 세션
+  handoffContext?: AgentProviderHandoff // 프로바이더 전환 시 이어받은 대화 맥락 — 첫 지시에 합쳐 전달
   ssh?: SshConn // 주어지면 원격(SSH) 사건 — cwd는 원격 경로, claude도 원격에서 실행
   sshLabel?: string // 접속 프로필 이름 (탭 툴팁/표시용)
   profileId?: string // 원격 파일 패널 라우팅용 (ssh://<profileId>/<경로>)
@@ -3278,11 +3280,33 @@ export default function App(): JSX.Element {
     return tab
   }
 
-  const changeAgentProvider = (termId: string, provider: AgentProvider): void => {
+  const changeAgentProvider = (
+    termId: string,
+    provider: AgentProvider,
+    handoff?: AgentProviderHandoff
+  ): void => {
     const current = termTabsRef.current.find((term) => term.id === termId)
     if (!current || !isAgentTab(current)) return
     const nextProvider = resolveAgentProvider(provider, current.ssh)
     if (current.agentProvider === nextProvider) return
+
+    // 대화가 이미 있는 탭이면 세션을 버리지 않고 같은 독의 새 탭에서 연다.
+    // 맥락은 패널 타임라인에서 추출한 transcript를 첫 지시에 합쳐 전달한다.
+    // (세션 파일을 읽지 않으므로 Claude↔Codex 양방향·원격에서도 즉시 동작)
+    if (handoff && handoff.count > 0) {
+      openForkedAgentTab(current, {
+        cwd: current.cwd,
+        title: `${current.title} · ${nextProvider === 'codex' ? 'Codex' : 'Claude'}`,
+        side: termSide(current),
+        ssh: current.ssh,
+        sshLabel: current.sshLabel,
+        profileId: current.profileId,
+        provider: nextProvider,
+        handoffContext: handoff
+      })
+      return
+    }
+
     void window.lt.agent.close(termId)
     setTermTabs((tabs) =>
       tabs.map((term) =>
@@ -3292,11 +3316,18 @@ export default function App(): JSX.Element {
               agentProvider: nextProvider,
               resumeSessionId: undefined,
               forkFromSessionId: undefined,
+              handoffContext: undefined,
               sessionTitle: undefined,
               createdAt: Date.now()
             }
           : term
       )
+    )
+  }
+
+  const consumeAgentHandoff = (termId: string): void => {
+    setTermTabs((tabs) =>
+      tabs.map((term) => (term.id === termId ? { ...term, handoffContext: undefined } : term))
     )
   }
 
@@ -3310,6 +3341,8 @@ export default function App(): JSX.Element {
       ssh?: SshConn
       sshLabel?: string
       profileId?: string
+      provider?: AgentProvider
+      handoffContext?: AgentProviderHandoff
     }
   ): void => {
     const tab: TermTab = {
@@ -3319,10 +3352,11 @@ export default function App(): JSX.Element {
       kind: 'agent',
       cwd: opts.cwd,
       autoClaude: false,
-      agentProvider: resolveAgentProvider(source.agentProvider, opts.ssh),
+      agentProvider: resolveAgentProvider(opts.provider ?? source.agentProvider, opts.ssh),
       createdAt: Date.now(),
       resumeSessionId: undefined,
       forkFromSessionId: opts.forkFromSessionId,
+      handoffContext: opts.handoffContext,
       sessionTitle: undefined,
       renamed: true,
       ssh: opts.ssh,
@@ -6304,6 +6338,7 @@ export default function App(): JSX.Element {
                 provider={resolveAgentProvider(t.agentProvider, t.ssh)}
                 resumeSessionId={t.resumeSessionId}
                 forkFromSessionId={t.forkFromSessionId}
+                initialHandoff={t.handoffContext}
                 ssh={t.ssh}
                 profileId={t.profileId}
                 caseTabId={t.caseTabId}
@@ -6318,7 +6353,8 @@ export default function App(): JSX.Element {
                 }
                 onStatus={(s) => onTermStatus(t.id, s)}
                 onFork={() => void forkAgentTab(t.id, termSide(t))}
-                onProviderChange={(provider) => changeAgentProvider(t.id, provider)}
+                onProviderChange={(provider, handoff) => changeAgentProvider(t.id, provider, handoff)}
+                onHandoffConsumed={() => consumeAgentHandoff(t.id)}
                 onWorktreeFork={() => void forkAgentWorktreeTab(t.id, termSide(t))}
                 onOpenTerminal={() => addTermSame(termSide(t), t.id, { reuseAgentTab: true })}
                 onOpenDiff={(request) => openAgentDiff(request, caseIdForTerm(t))}
@@ -6663,6 +6699,7 @@ export default function App(): JSX.Element {
                   provider={resolveAgentProvider(t.agentProvider, t.ssh)}
                   resumeSessionId={t.resumeSessionId}
                   forkFromSessionId={t.forkFromSessionId}
+                  initialHandoff={t.handoffContext}
                   ssh={t.ssh}
                   profileId={t.profileId}
                   caseTabId={t.caseTabId}
@@ -6677,7 +6714,8 @@ export default function App(): JSX.Element {
                   }
                   onStatus={(s) => onTermStatus(t.id, s)}
                   onFork={() => void forkAgentTab(t.id, side)}
-                  onProviderChange={(provider) => changeAgentProvider(t.id, provider)}
+                  onProviderChange={(provider, handoff) => changeAgentProvider(t.id, provider, handoff)}
+                  onHandoffConsumed={() => consumeAgentHandoff(t.id)}
                   onWorktreeFork={() => void forkAgentWorktreeTab(t.id, side)}
                   onOpenTerminal={() => addTermSame(side, t.id, { reuseAgentTab: true })}
                   onOpenDiff={(request) => openAgentDiff(request, caseIdForTerm(t))}

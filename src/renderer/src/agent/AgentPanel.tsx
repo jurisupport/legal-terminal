@@ -5,24 +5,57 @@ import {
   useMemo,
   useRef,
   useState,
-  Fragment,
   type CSSProperties,
   type ClipboardEvent,
-  type DragEvent,
-  type MouseEvent
+  type DragEvent
 } from 'react'
-import DOMPurify from 'dompurify'
-import { marked } from 'marked'
 import * as pdfjs from 'pdfjs-dist'
 import type { PDFDocumentProxy } from 'pdfjs-dist'
 import PdfJsWorker from 'pdfjs-dist/build/pdf.worker.min.mjs?worker&inline'
 import { LT_PATH, LT_PATHS, readLtPaths } from '../filetree/FileTree'
+import {
+  IconClaude,
+  IconFork,
+  IconMention,
+  IconSend,
+  IconStop,
+  IconTerminal,
+  IconWorktree
+} from '../icons/Icons'
 import {
   percentText,
   rateLimitLabel,
   showRateLimitInBar,
   type AgentRateLimitUsageView
 } from './rateLimitDisplay'
+import { asRecord, numberValue, recordArray, stringArray, stringValue } from './values'
+import {
+  appendDiffFallbackText,
+  diffFallbackText,
+  diffTitle,
+  diffViewFromParts,
+  diffViewFromRecord,
+  mergeDiffViews,
+  normalizeDiffEdits,
+  type DiffEdit,
+  type DiffView
+} from './diff'
+import { DiffPreview } from './DiffPreview'
+import { MarkdownMessage } from './MarkdownMessage'
+import { ToolRow, toolStepDisplay, type ProcessStep } from './ToolRow'
+import {
+  copyAgentOutput,
+  markdownPreviewText,
+  selectionIntersectsElement,
+  writeSelectionToClipboard,
+  type AgentCopyMode
+} from './markdown'
+import {
+  buildMentionIndex,
+  filterMentionEntries,
+  mentionTokenAt,
+  type MentionEntry
+} from './mention'
 import type {
   AgentAttachment,
   AgentEvent,
@@ -34,9 +67,11 @@ import type {
   SshConn
 } from '../env'
 
+export { DiffPreview } from './DiffPreview'
+export type { DiffView } from './diff'
+
 type AgentRunStatus = 'working' | 'done' | 'question'
 type AgentSendDelivery = 'normal' | 'queue' | 'steer'
-type AgentCopyMode = 'rich' | 'markdown' | 'text'
 type AgentAuthStatus = 'checking' | 'authenticated' | 'unauthenticated' | 'unavailable' | 'error'
 type AgentPanelStatus = 'idle' | 'working' | 'waiting_permission' | 'waiting_user' | 'done' | 'error'
 
@@ -50,8 +85,6 @@ const CONTEXT_ATTACHMENT_TEXT_LIMIT = 160_000
 const FOLDER_ATTACHMENT_ENTRY_LIMIT = 120
 const TIMELINE_BOTTOM_THRESHOLD = 36
 const TIMELINE_PREVIEW_LIMIT = 78
-const DIFF_FALLBACK_LINE_LIMIT = 10
-const DIFF_FALLBACK_TEXT_LIMIT = 6000
 const REMOTE_FILE_CHANGED_EVENT = 'lt:remote-file-changed'
 const ESC_INTERRUPT_ARM_MS = 2000
 
@@ -63,6 +96,12 @@ const clampAgentFontSize = (value: number | undefined): number => {
 const isTimelineNearBottom = (timeline: HTMLDivElement): boolean =>
   timeline.scrollHeight - timeline.scrollTop - timeline.clientHeight <= TIMELINE_BOTTOM_THRESHOLD
 
+// 프로바이더 전환 시 새 탭으로 넘길 대화 맥락 (패널 타임라인에서 직접 추출)
+export interface AgentProviderHandoff {
+  transcript: string
+  count: number
+}
+
 interface AgentPanelProps {
   id: string
   cwd: string
@@ -70,6 +109,7 @@ interface AgentPanelProps {
   provider: AgentProvider
   resumeSessionId?: string
   forkFromSessionId?: string
+  initialHandoff?: AgentProviderHandoff
   ssh?: SshConn
   profileId?: string
   caseTabId?: string
@@ -82,7 +122,8 @@ interface AgentPanelProps {
   onDraftChange?: (draft: AgentDraftState) => void
   onStatus?: (status: AgentRunStatus) => void
   onFork?: () => void
-  onProviderChange?: (provider: AgentProvider) => void
+  onProviderChange?: (provider: AgentProvider, handoff?: AgentProviderHandoff) => void
+  onHandoffConsumed?: () => void
   onWorktreeFork?: () => void
   onOpenTerminal?: () => void
   onOpenDiff?: (request: AgentDiffOpenRequest) => void
@@ -104,7 +145,18 @@ export interface AgentDraftState {
 
 interface TimelineItem {
   id: string
-  kind: 'user' | 'assistant' | 'tool' | 'permission' | 'diff' | 'error' | 'auth' | 'process' | 'queue' | 'dialog'
+  kind:
+    | 'user'
+    | 'assistant'
+    | 'tool'
+    | 'permission'
+    | 'diff'
+    | 'error'
+    | 'auth'
+    | 'process'
+    | 'queue'
+    | 'dialog'
+    | 'plan'
   title?: string
   text?: string
   diff?: DiffView
@@ -112,6 +164,8 @@ interface TimelineItem {
   status?: string
   filePath?: string
   requestId?: string
+  toolName?: string
+  planMarkdown?: string
   dialogId?: string
   questions?: AgentDialogQuestion[]
   answers?: Record<string, string>
@@ -136,49 +190,6 @@ interface AgentDialogQuestion {
   header?: string
   options: AgentDialogOption[]
   multiSelect?: boolean
-}
-
-interface ProcessStep {
-  id: string
-  title: string
-  text?: string
-  status?: string
-}
-
-interface DiffEdit {
-  oldString?: string
-  newString?: string
-}
-
-interface DiffPatchHunk {
-  oldStart: number
-  oldLines: number
-  newStart: number
-  newLines: number
-  lines: string[]
-}
-
-interface DiffRow {
-  kind: 'context' | 'change' | 'remove' | 'add'
-  beforeNo?: number
-  afterNo?: number
-  before?: string
-  after?: string
-}
-
-interface DiffHunkView {
-  label?: string
-  oldStart?: number
-  newStart?: number
-  rows: DiffRow[]
-}
-
-export interface DiffView {
-  filePath?: string
-  hunks: DiffHunkView[]
-  additions: number
-  deletions: number
-  revertEdits?: DiffEdit[]
 }
 
 export interface AgentDiffOpenRequest {
@@ -239,6 +250,25 @@ const agentProviderLabels: Record<AgentProvider, string> = {
   claude: 'Claude',
   codex: 'Codex'
 }
+
+const emptyStateSuggestions: { label: string; prompt: string }[] = [
+  {
+    label: '사건 폴더 요약',
+    prompt: '이 사건 폴더의 구조와 주요 문서를 훑어보고 사건 개요를 요약해줘.'
+  },
+  {
+    label: '쟁점 정리',
+    prompt: '기록을 검토해서 당사자별 주장과 다툼 있는 쟁점을 표로 정리해줘.'
+  },
+  {
+    label: '반박 논점',
+    prompt: '상대방의 최근 서면을 읽고 반박 가능한 논점과 뒷받침할 증거를 정리해줘.'
+  },
+  {
+    label: '다음 할 일',
+    prompt: '사건 진행 상황을 검토하고 다음 기일까지 준비할 일 목록을 만들어줘.'
+  }
+]
 
 const isAgentPermissionMode = (value: unknown): value is AgentPermissionMode =>
   typeof value === 'string' && modeLabels.some((option) => option.value === value)
@@ -440,6 +470,11 @@ const agentStatusLabels: Record<AgentPanelStatus, string> = {
 const isActiveAgentStatus = (status: AgentPanelStatus): boolean =>
   status === 'working' || status === 'waiting_permission' || status === 'waiting_user'
 
+function formatElapsedSeconds(seconds: number): string {
+  if (seconds < 60) return `${seconds}초`
+  return `${Math.floor(seconds / 60)}분 ${seconds % 60}초`
+}
+
 function timelineStatusLabel(item: TimelineItem): string | undefined {
   if (item.kind === 'diff' && item.status === 'applied') return '적용됨'
   if (item.kind === 'diff' && item.status === 'reverted') return '되돌림'
@@ -561,21 +596,6 @@ function mergeSlashCommands(appCommands: SlashCommand[], runtimeCommands: SlashC
   }
   return [...merged.values()]
 }
-
-const asRecord = (value: unknown): Record<string, unknown> | null =>
-  value && typeof value === 'object' ? (value as Record<string, unknown>) : null
-
-const stringValue = (value: unknown): string | undefined => (typeof value === 'string' ? value : undefined)
-const numberValue = (value: unknown): number | undefined =>
-  typeof value === 'number' && Number.isFinite(value) ? value : undefined
-
-const stringArray = (value: unknown): string[] =>
-  Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : []
-
-const recordArray = (value: unknown): Record<string, unknown>[] =>
-  Array.isArray(value)
-    ? value.filter((item): item is Record<string, unknown> => Boolean(asRecord(item)))
-    : []
 
 const compactNumberFormatter = new Intl.NumberFormat('ko-KR', {
   notation: 'compact',
@@ -1163,233 +1183,6 @@ const eventSessionId = (event: AgentEvent): string | undefined => {
   return stringValue(request?.sessionId)
 }
 
-const preview = (value: unknown, max = 260): string => {
-  const text = typeof value === 'string' ? value : JSON.stringify(value, null, 2)
-  if (!text) return ''
-  return text.length > max ? `${text.slice(0, max)}...` : text
-}
-
-const splitDiffText = (value: string | undefined): string[] => {
-  if (value === undefined) return []
-  return value.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n')
-}
-
-function diffLineStats(hunks: DiffHunkView[]): { additions: number; deletions: number } {
-  let additions = 0
-  let deletions = 0
-  for (const hunk of hunks) {
-    for (const row of hunk.rows) {
-      if (row.kind === 'add' || row.kind === 'change') additions += row.after === undefined ? 0 : 1
-      if (row.kind === 'remove' || row.kind === 'change') deletions += row.before === undefined ? 0 : 1
-    }
-  }
-  return { additions, deletions }
-}
-
-function visibleDiffFallbackText(text: string): { text: string; truncated: boolean } {
-  const normalized = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n')
-  const lines = normalized.split('\n')
-  const lineLimited =
-    lines.length > DIFF_FALLBACK_LINE_LIMIT
-      ? lines.slice(0, DIFF_FALLBACK_LINE_LIMIT).join('\n')
-      : normalized
-  const charLimited =
-    lineLimited.length > DIFF_FALLBACK_TEXT_LIMIT
-      ? lineLimited.slice(0, DIFF_FALLBACK_TEXT_LIMIT)
-      : lineLimited
-  const truncated = lineLimited.length !== normalized.length || charLimited.length !== lineLimited.length
-  return {
-    text: truncated ? `${charLimited.trimEnd()}\n...` : charLimited,
-    truncated
-  }
-}
-
-function normalizePatchHunks(value: unknown): DiffPatchHunk[] {
-  return recordArray(value)
-    .map((hunk) => {
-      const oldStart = numberValue(hunk.oldStart)
-      const oldLines = numberValue(hunk.oldLines)
-      const newStart = numberValue(hunk.newStart)
-      const newLines = numberValue(hunk.newLines)
-      const lines = stringArray(hunk.lines)
-      if (
-        oldStart === undefined ||
-        oldLines === undefined ||
-        newStart === undefined ||
-        newLines === undefined ||
-        lines.length === 0
-      ) {
-        return null
-      }
-      return { oldStart, oldLines, newStart, newLines, lines }
-    })
-    .filter((hunk): hunk is DiffPatchHunk => Boolean(hunk))
-}
-
-function normalizeDiffEdits(value: unknown): DiffEdit[] {
-  const edits: DiffEdit[] = []
-  for (const edit of recordArray(value)) {
-    const oldString = stringValue(edit.oldString)
-    const newString = stringValue(edit.newString)
-    if (oldString !== undefined || newString !== undefined) edits.push({ oldString, newString })
-  }
-  return edits
-}
-
-function rowsFromPatchHunk(hunk: DiffPatchHunk): DiffRow[] {
-  const rows: DiffRow[] = []
-  const removals: { lineNo: number; text: string }[] = []
-  let beforeNo = hunk.oldStart
-  let afterNo = hunk.newStart
-
-  const flushRemovals = (): void => {
-    while (removals.length > 0) {
-      const removed = removals.shift()!
-      rows.push({ kind: 'remove', beforeNo: removed.lineNo, before: removed.text })
-    }
-  }
-
-  for (const rawLine of hunk.lines) {
-    if (rawLine.startsWith('\\')) continue
-    const marker = rawLine[0]
-    const text = marker === '+' || marker === '-' || marker === ' ' ? rawLine.slice(1) : rawLine
-    if (marker === '-') {
-      removals.push({ lineNo: beforeNo, text })
-      beforeNo += 1
-      continue
-    }
-    if (marker === '+') {
-      const removed = removals.shift()
-      rows.push(
-        removed
-          ? { kind: 'change', beforeNo: removed.lineNo, afterNo, before: removed.text, after: text }
-          : { kind: 'add', afterNo, after: text }
-      )
-      afterNo += 1
-      continue
-    }
-    flushRemovals()
-    rows.push({ kind: 'context', beforeNo, afterNo, before: text, after: text })
-    beforeNo += 1
-    afterNo += 1
-  }
-
-  flushRemovals()
-  return rows
-}
-
-function rowsFromStrings(oldString: string | undefined, newString: string | undefined): DiffRow[] {
-  const beforeLines = splitDiffText(oldString)
-  const afterLines = splitDiffText(newString)
-  const max = Math.max(beforeLines.length, afterLines.length)
-  const rows: DiffRow[] = []
-  for (let index = 0; index < max; index += 1) {
-    const before = beforeLines[index]
-    const after = afterLines[index]
-    if (before === after) {
-      rows.push({ kind: 'context', beforeNo: index + 1, afterNo: index + 1, before, after })
-    } else if (before === undefined) {
-      rows.push({ kind: 'add', afterNo: index + 1, after })
-    } else if (after === undefined) {
-      rows.push({ kind: 'remove', beforeNo: index + 1, before })
-    } else {
-      rows.push({ kind: 'change', beforeNo: index + 1, afterNo: index + 1, before, after })
-    }
-  }
-  return rows
-}
-
-function diffViewFromParts(args: {
-  filePath?: string
-  structuredPatch?: unknown
-  oldString?: string
-  newString?: string
-  edits?: DiffEdit[]
-}): DiffView | undefined {
-  const reversibleEdits = (args.edits?.length ? args.edits : [{ oldString: args.oldString, newString: args.newString }])
-    .filter((edit) => edit.oldString !== undefined && edit.newString !== undefined && edit.newString.length > 0)
-  const patchHunks = normalizePatchHunks(args.structuredPatch)
-  if (patchHunks.length > 0) {
-    const hunks = patchHunks.map((hunk, index) => ({
-      label: `Hunk ${index + 1}`,
-      oldStart: hunk.oldStart,
-      newStart: hunk.newStart,
-      rows: rowsFromPatchHunk(hunk)
-    }))
-    const stats = diffLineStats(hunks)
-    return {
-      filePath: args.filePath,
-      hunks,
-      ...stats,
-      ...(reversibleEdits.length > 0 ? { revertEdits: reversibleEdits } : {})
-    }
-  }
-
-  const edits = args.edits?.length ? args.edits : [{ oldString: args.oldString, newString: args.newString }]
-  const hunks = edits
-    .map((edit, index) => ({
-      label: edits.length > 1 ? `Edit ${index + 1}` : undefined,
-      rows: rowsFromStrings(edit.oldString, edit.newString)
-    }))
-    .filter((hunk) => hunk.rows.length > 0)
-  if (hunks.length === 0) return undefined
-  const stats = diffLineStats(hunks)
-  return {
-    filePath: args.filePath,
-    hunks,
-    ...stats,
-    ...(reversibleEdits.length > 0 ? { revertEdits: reversibleEdits } : {})
-  }
-}
-
-function diffViewFromRecord(record: Record<string, unknown> | null): DiffView | undefined {
-  if (!record) return undefined
-  return diffViewFromParts({
-    filePath: stringValue(record.filePath),
-    structuredPatch: record.structuredPatch,
-    oldString: stringValue(record.oldString),
-    newString: stringValue(record.newString),
-    edits: normalizeDiffEdits(record.edits)
-  })
-}
-
-function diffTitle(prefix: string, filePath?: string): string {
-  return filePath ? `${prefix} · ${filePath.split(/[\\/]/).pop()}` : prefix
-}
-
-function diffFallbackText(oldString?: string, newString?: string): string | undefined {
-  const text = [
-    oldString !== undefined ? `- ${oldString}` : undefined,
-    newString !== undefined ? `+ ${newString}` : undefined
-  ]
-    .filter(Boolean)
-    .join('\n')
-  return text || undefined
-}
-
-function appendDiffFallbackText(current: string | undefined, next: string | undefined): string | undefined {
-  if (!next) return current
-  if (!current) return next
-  return `${current}\n\n${next}`
-}
-
-function mergeDiffViews(current: DiffView | undefined, next: DiffView | undefined, filePath?: string): DiffView | undefined {
-  if (!current) return next
-  if (!next) return current
-  const hunks = [...current.hunks, ...next.hunks].map((hunk, index, all) => ({
-    ...hunk,
-    label: all.length > 1 ? `Hunk ${index + 1}` : hunk.label
-  }))
-  const stats = diffLineStats(hunks)
-  const revertEdits = [...(next.revertEdits ?? []), ...(current.revertEdits ?? [])]
-  return {
-    filePath: filePath ?? next.filePath ?? current.filePath,
-    hunks,
-    ...stats,
-    ...(revertEdits.length > 0 ? { revertEdits } : {})
-  }
-}
-
 const upsertItem = (
   items: TimelineItem[],
   id: string,
@@ -1413,41 +1206,48 @@ function processGroupId(items: TimelineItem[]): string {
   return 'process-session'
 }
 
-function upsertProcessStep(items: TimelineItem[], step: ProcessStep): TimelineItem[] {
+type ProcessStepPatch = Partial<ProcessStep> & { id: string }
+
+function mergeProcessStep(existing: ProcessStep | undefined, patch: ProcessStepPatch): ProcessStep {
+  return {
+    id: patch.id,
+    title: patch.title ?? existing?.title ?? '작업',
+    text: patch.text ?? existing?.text,
+    status: patch.status ?? existing?.status,
+    toolName: patch.toolName ?? existing?.toolName,
+    input: patch.input ?? existing?.input,
+    output: patch.output ?? existing?.output,
+    elapsedMs: patch.elapsedMs ?? existing?.elapsedMs
+  }
+}
+
+function upsertProcessStep(items: TimelineItem[], patch: ProcessStepPatch): TimelineItem[] {
   const id = processGroupId(items)
-  const makeItem = (): TimelineItem => ({
-    id,
-    kind: 'process',
-    title: '작업 과정',
-    text: stepSummary(step),
-    status: step.status ?? 'running',
-    processSteps: [step]
-  })
+  const makeItem = (): TimelineItem => {
+    const step = mergeProcessStep(undefined, patch)
+    return {
+      id,
+      kind: 'process',
+      title: '작업 과정',
+      text: stepSummary(step),
+      status: step.status ?? 'running',
+      processSteps: [step]
+    }
+  }
   const updateItem = (item: TimelineItem): TimelineItem => {
     const steps = item.processSteps ?? []
-    const exists = steps.some((existing) => existing.id === step.id)
+    const exists = steps.some((existing) => existing.id === patch.id)
     const nextSteps = exists
-      ? steps.map((existing) =>
-          existing.id === step.id
-            ? {
-                ...existing,
-                ...step,
-                title:
-                  step.title === '도구' && existing.title.startsWith('도구 ·')
-                    ? existing.title
-                    : step.title
-              }
-            : existing
-        )
-      : [...steps, step]
-    const latest = nextSteps[nextSteps.length - 1] ?? step
+      ? steps.map((existing) => (existing.id === patch.id ? mergeProcessStep(existing, patch) : existing))
+      : [...steps, mergeProcessStep(undefined, patch)]
+    const latest = nextSteps[nextSteps.length - 1]
     const hasError = nextSteps.some((existing) => existing.status === 'error')
     const running = nextSteps.some((existing) => existing.status === 'running')
     return {
       ...item,
       title: '작업 과정',
-      text: stepSummary(latest),
-      status: hasError ? 'error' : running ? 'running' : latest.status ?? 'done',
+      text: latest ? stepSummary(latest) : item.text,
+      status: hasError ? 'error' : running ? 'running' : latest?.status ?? 'done',
       processSteps: nextSteps
     }
   }
@@ -1457,6 +1257,29 @@ function upsertProcessStep(items: TimelineItem[], step: ProcessStep): TimelineIt
   const insertAfter = [...items].map((item) => item.kind).lastIndexOf('user')
   if (insertAfter < 0) return [...items, makeItem()]
   return [...items.slice(0, insertAfter + 1), makeItem(), ...items.slice(insertAfter + 1)]
+}
+
+// 편집형 도구의 권한 요청에는 승인 전에 변경 내용을 미리 보여준다.
+const PERMISSION_EDIT_TOOLS = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit'])
+
+function permissionDiffFromRequest(
+  toolName: string | undefined,
+  input: Record<string, unknown> | null
+): DiffView | undefined {
+  if (!toolName || !input || !PERMISSION_EDIT_TOOLS.has(toolName)) return undefined
+  const filePath = stringValue(input.file_path) ?? stringValue(input.notebook_path)
+  const edits = normalizeDiffEdits(
+    recordArray(input.edits).map((edit) => ({
+      oldString: edit.old_string ?? edit.oldString,
+      newString: edit.new_string ?? edit.newString
+    }))
+  )
+  return diffViewFromParts({
+    filePath,
+    oldString: stringValue(input.old_string),
+    newString: stringValue(input.new_string) ?? (toolName === 'Write' ? stringValue(input.content) : undefined),
+    edits: edits.length > 0 ? edits : undefined
+  })
 }
 
 function reduceTimeline(items: TimelineItem[], event: AgentEvent, agentLabel: string): TimelineItem[] {
@@ -1560,10 +1383,12 @@ function reduceTimeline(items: TimelineItem[], event: AgentEvent, agentLabel: st
   }
   if (event.type === 'tool:start') {
     const id = stringValue(event.toolId) ?? `tool-${Date.now()}`
+    const name = stringValue(event.name) ?? 'tool'
     return upsertProcessStep(items, {
       id,
-      title: `도구 · ${stringValue(event.name) ?? 'tool'}`,
-      text: stringValue(event.inputPreview),
+      title: `도구 · ${name}`,
+      toolName: name,
+      input: stringValue(event.inputPreview),
       status: 'running'
     })
   }
@@ -1571,26 +1396,44 @@ function reduceTimeline(items: TimelineItem[], event: AgentEvent, agentLabel: st
     const id = stringValue(event.toolId) ?? `tool-${Date.now()}`
     return upsertProcessStep(items, {
       id,
-      title: '도구',
-      text: stringValue(event.outputPreview),
+      output: stringValue(event.outputPreview),
+      elapsedMs: numberValue(event.elapsedMs),
       status: event.isError ? 'error' : 'done'
     })
   }
   if (event.type === 'permission:request') {
     const request = asRecord(event.request)
     const requestId = stringValue(request?.requestId) ?? `permission-${Date.now()}`
+    const toolName = stringValue(request?.toolName)
+    const input = asRecord(request?.input)
+    const planMarkdown =
+      toolName === 'ExitPlanMode' || toolName === 'exit_plan_mode' ? stringValue(input?.plan) : undefined
     return [
       ...items,
       {
         id: requestId,
         kind: 'permission',
-        title: stringValue(request?.title) ?? stringValue(request?.toolName) ?? '권한 요청',
+        title: stringValue(request?.title) ?? toolName ?? '권한 요청',
         text: stringValue(request?.description) ?? stringValue(request?.decisionReason),
         requestId,
+        toolName,
         inputPreview: stringValue(request?.inputPreview),
+        diff: permissionDiffFromRequest(toolName, input),
+        planMarkdown,
         status: 'waiting'
       }
     ]
+  }
+  if (event.type === 'plan:proposed') {
+    const id = stringValue(event.planId) ?? `plan-${Date.now()}`
+    const markdown = stringValue(event.markdown) ?? ''
+    if (!markdown) return items
+    return upsertItem(
+      items,
+      id,
+      () => ({ id, kind: 'plan', title: '계획 제안', planMarkdown: markdown }),
+      (item) => ({ ...item, planMarkdown: markdown })
+    )
   }
   if (event.type === 'permission:resolved') {
     const requestId = stringValue(event.requestId)
@@ -1792,173 +1635,57 @@ function transcriptToTimeline(transcript: SessionTranscript, agentLabel: string)
   }))
 }
 
-function forkContextPrompt(transcript: SessionTranscript): string {
+function forkTranscriptBody(transcript: SessionTranscript): string {
   const body = transcript.messages
     .map((message) => `### ${message.role}\n${message.text}`)
     .join('\n\n')
-  const context =
-    body.length > CONTEXT_ATTACHMENT_TEXT_LIMIT
-      ? `[앞부분 일부 생략]\n${body.slice(-CONTEXT_ATTACHMENT_TEXT_LIMIT)}`
-      : body
+  return body.length > CONTEXT_ATTACHMENT_TEXT_LIMIT
+    ? `[앞부분 일부 생략]\n${body.slice(-CONTEXT_ATTACHMENT_TEXT_LIMIT)}`
+    : body
+}
+
+function forkContextPrompt(transcript: SessionTranscript): string {
   return [
     '다음은 새 독립 세션으로 fork한 원본 대화 transcript입니다.',
     '이 내용은 배경 맥락으로만 사용하고, 원본 세션에 이어붙이거나 원본 세션을 수정하지 마세요.',
     '아직 새 작업을 시작하지 말고 한 문장으로 맥락을 가져왔다는 사실만 확인하세요.',
     '',
-    context
+    forkTranscriptBody(transcript)
   ].join('\n')
 }
 
-export function DiffPreview({
-  diff,
-  fallbackText,
-  alwaysExpanded = false
-}: {
-  diff?: DiffView
-  fallbackText?: string
-  alwaysExpanded?: boolean
-}): JSX.Element | null {
-  const [expanded, setExpanded] = useState(false)
-  const isExpanded = alwaysExpanded || expanded
+// 프로바이더 전환용: 핸드셰이크 턴 없이 첫 지시에 합쳐 보내는 맥락 프리앰블.
+function handoffContextPreamble(transcriptBody: string): string {
+  return [
+    '다음은 사용자가 이 탭에서 다른 AI 어시스턴트와 진행하던 대화 transcript입니다.',
+    '사용자가 어시스턴트를 전환했으므로, 이 대화의 맥락(사실관계, 요청, 이미 오간 답변과 제안)을 이어받으세요.',
+    'transcript는 배경 맥락입니다. 다시 요약하거나 이어받았다고 따로 알릴 필요 없이, 마지막 흐름을 아는 상태에서 아래 사용자 지시를 바로 수행하세요.',
+    '',
+    transcriptBody,
+    '',
+    '---',
+    '',
+    '지금 처리할 사용자 지시:'
+  ].join('\n')
+}
 
-  if (!diff || diff.hunks.length === 0) {
-    if (!fallbackText) return null
-    const fallbackPreview = visibleDiffFallbackText(fallbackText)
-    const isLongFallback = fallbackPreview.truncated
-    const visibleText = isLongFallback && !isExpanded ? fallbackPreview.text : fallbackText
-
-    return (
-      <div className="agent-diff-fallback">
-        <pre className="agent-card-text">{visibleText}</pre>
-        {isLongFallback && !alwaysExpanded && (
-          <button
-            type="button"
-            className="agent-diff-toggle"
-            aria-expanded={isExpanded}
-            onClick={() => setExpanded((value) => !value)}
-          >
-            {isExpanded ? '접기' : '전체 펼쳐보기'}
-          </button>
-        )}
-      </div>
-    )
-  }
-
-  return (
-    <div className="agent-diff-view">
-      <div className="agent-diff-summary">
-        <span className="agent-diff-count add">+{diff.additions}</span>
-        <span className="agent-diff-count remove">-{diff.deletions}</span>
-        {!alwaysExpanded && (
-          <button
-            type="button"
-            className="agent-diff-toggle"
-            aria-expanded={isExpanded}
-            onClick={() => setExpanded((value) => !value)}
-          >
-            {isExpanded ? '접기' : '펼쳐보기'}
-          </button>
-        )}
-      </div>
-      {isExpanded && (
-        <>
-          <div className="agent-diff-labels" aria-hidden="true">
-            <span>변경 전</span>
-            <span>변경 후</span>
-          </div>
-          {diff.hunks.map((hunk, hunkIndex) => (
-            <div key={`${hunk.label ?? 'hunk'}-${hunkIndex}`} className="agent-diff-hunk">
-              {(hunk.label || diff.hunks.length > 1) && (
-                <div className="agent-diff-hunk-title">{hunk.label ?? `Hunk ${hunkIndex + 1}`}</div>
-              )}
-              <div className="agent-diff-grid">
-                {hunk.rows.map((row, rowIndex) => (
-                  <Fragment key={`${hunkIndex}-${rowIndex}`}>
-                    <div className={`agent-diff-line before ${row.kind}`}>
-                      <span className="agent-diff-line-no">{row.beforeNo ?? ''}</span>
-                      <span className="agent-diff-line-text">{row.before ?? ''}</span>
-                    </div>
-                    <div className={`agent-diff-line after ${row.kind}`}>
-                      <span className="agent-diff-line-no">{row.afterNo ?? ''}</span>
-                      <span className="agent-diff-line-text">{row.after ?? ''}</span>
-                    </div>
-                  </Fragment>
-                ))}
-              </div>
-            </div>
-          ))}
-        </>
-      )}
-    </div>
+// 타임라인의 사용자/어시스턴트 메시지를 프로바이더 전환용 transcript로 추출.
+// 세션 파일에 의존하지 않아 Claude↔Codex 양방향·원격에서도 즉시 동작한다.
+function providerHandoffFromTimeline(items: TimelineItem[]): AgentProviderHandoff | undefined {
+  const messages = items.filter(
+    (item) => (item.kind === 'user' || item.kind === 'assistant') && item.text && item.text.trim()
   )
+  if (messages.length === 0) return undefined
+  const body = messages
+    .map((item) => `### ${item.kind === 'user' ? 'user' : 'assistant'}\n${item.text}`)
+    .join('\n\n')
+  const transcript =
+    body.length > CONTEXT_ATTACHMENT_TEXT_LIMIT
+      ? `[앞부분 일부 생략]\n${body.slice(-CONTEXT_ATTACHMENT_TEXT_LIMIT)}`
+      : body
+  return { transcript, count: messages.length }
 }
 
-function renderMarkdown(text: string): string {
-  const html = marked.parse(text, { gfm: true, breaks: true }) as string
-  return DOMPurify.sanitize(html, {
-    USE_PROFILES: { html: true },
-    ADD_ATTR: ['target', 'rel']
-  })
-}
-
-function codeLanguageLabel(pre: HTMLPreElement): string | undefined {
-  const code = pre.querySelector('code')
-  const language = code?.className.match(/(?:^|\s)language-([^\s]+)/)?.[1]
-  return language ? language.replace(/^plaintext$/i, 'text') : undefined
-}
-
-function renderMarkdownForDisplay(text: string): string {
-  const host = document.createElement('div')
-  host.innerHTML = renderMarkdown(text)
-  const codeBlocks = Array.from(host.querySelectorAll('pre'))
-  codeBlocks.forEach((pre, index) => {
-    if (!(pre instanceof HTMLPreElement) || pre.closest('.agent-code-block')) return
-    const wrap = document.createElement('div')
-    wrap.className = 'agent-code-block'
-    wrap.dataset.codeBlockId = String(index)
-
-    const toolbar = document.createElement('div')
-    toolbar.className = 'agent-code-toolbar'
-    const language = codeLanguageLabel(pre)
-    if (language) {
-      const label = document.createElement('span')
-      label.className = 'agent-code-language'
-      label.textContent = language
-      toolbar.appendChild(label)
-    }
-
-    const button = document.createElement('button')
-    button.type = 'button'
-    button.className = 'agent-code-copy-btn'
-    button.title = '코드 복사'
-    button.setAttribute('aria-label', '코드 복사')
-    button.textContent = '복사'
-    toolbar.appendChild(button)
-
-    pre.replaceWith(wrap)
-    wrap.appendChild(toolbar)
-    wrap.appendChild(pre)
-  })
-  return host.innerHTML
-}
-
-function markdownToPlainText(markdown: string): string {
-  const host = document.createElement('div')
-  host.style.position = 'fixed'
-  host.style.left = '-10000px'
-  host.style.top = '0'
-  host.innerHTML = renderMarkdown(markdown)
-  document.body.appendChild(host)
-  const text = host.innerText.trim()
-  host.remove()
-  return text
-}
-
-function markdownPreviewText(markdown: string): string {
-  const host = document.createElement('div')
-  host.innerHTML = renderMarkdown(markdown)
-  return (host.textContent ?? '').trim()
-}
 
 function latestGeneratedPreview(items: TimelineItem[]): string {
   for (let index = items.length - 1; index >= 0; index -= 1) {
@@ -1972,141 +1699,6 @@ function latestGeneratedPreview(items: TimelineItem[]): string {
   return ''
 }
 
-function richClipboardHtml(markdown: string): string {
-  return `<meta charset="utf-8"><div>${renderMarkdown(markdown)}</div>`
-}
-
-function selectedHtml(selection: Selection): string {
-  const wrap = document.createElement('div')
-  for (let index = 0; index < selection.rangeCount; index += 1) {
-    wrap.appendChild(selection.getRangeAt(index).cloneContents())
-  }
-  return DOMPurify.sanitize(wrap.innerHTML, {
-    USE_PROFILES: { html: true },
-    ADD_ATTR: ['target', 'rel']
-  })
-}
-
-function selectionIntersectsElement(selection: Selection, element: HTMLElement): boolean {
-  for (let index = 0; index < selection.rangeCount; index += 1) {
-    const range = selection.getRangeAt(index)
-    if (range.collapsed) continue
-    const start =
-      range.startContainer instanceof Element ? range.startContainer : range.startContainer.parentElement
-    const end = range.endContainer instanceof Element ? range.endContainer : range.endContainer.parentElement
-    if ((start && element.contains(start)) || (end && element.contains(end))) return true
-    if (range.intersectsNode(element)) return true
-  }
-  return false
-}
-
-function writeSelectionToClipboard(clipboardData: DataTransfer, selection: Selection): boolean {
-  const text = selection.toString()
-  if (!text.trim()) return false
-  const html = selectedHtml(selection)
-  clipboardData.setData('text/plain', text)
-  if (html.trim()) clipboardData.setData('text/html', `<meta charset="utf-8">${html}`)
-  return true
-}
-
-async function writeRichClipboard(markdown: string): Promise<void> {
-  const html = richClipboardHtml(markdown)
-  const plain = markdownToPlainText(markdown)
-  if (navigator.clipboard?.write && 'ClipboardItem' in window) {
-    try {
-      const ClipboardItemCtor = window.ClipboardItem
-      await navigator.clipboard.write([
-        new ClipboardItemCtor({
-          'text/html': new Blob([html], { type: 'text/html' }),
-          'text/plain': new Blob([plain], { type: 'text/plain' })
-        })
-      ])
-      return
-    } catch {
-      /* fall back to selection-based rich copy */
-    }
-  }
-  const host = document.createElement('div')
-  host.contentEditable = 'true'
-  host.style.position = 'fixed'
-  host.style.left = '-10000px'
-  host.style.top = '0'
-  host.innerHTML = html
-  document.body.appendChild(host)
-  const selection = window.getSelection()
-  const range = document.createRange()
-  range.selectNodeContents(host)
-  selection?.removeAllRanges()
-  selection?.addRange(range)
-  const ok = document.execCommand('copy')
-  selection?.removeAllRanges()
-  host.remove()
-  if (!ok) await navigator.clipboard.writeText(plain)
-}
-
-async function copyAgentOutput(markdown: string, mode: AgentCopyMode): Promise<void> {
-  if (mode === 'rich') {
-    await writeRichClipboard(markdown)
-    return
-  }
-  await navigator.clipboard.writeText(mode === 'markdown' ? markdown : markdownToPlainText(markdown))
-}
-
-function MarkdownMessage({
-  text,
-  streaming,
-  onCopyCode
-}: {
-  text: string
-  streaming?: boolean
-  onCopyCode: (code: string) => Promise<boolean>
-}): JSX.Element {
-  const html = useMemo(() => renderMarkdownForDisplay(text), [text])
-
-  const copyCode = async (button: HTMLButtonElement): Promise<void> => {
-    const block = button.closest('.agent-code-block')
-    const code = block?.querySelector('pre code')?.textContent ?? block?.querySelector('pre')?.textContent
-    if (!code) return
-    const previous = button.textContent ?? '복사'
-    const copied = await onCopyCode(code)
-    if (!copied) return
-    button.textContent = '복사됨'
-    button.disabled = true
-    window.setTimeout(() => {
-      button.textContent = previous
-      button.disabled = false
-    }, 1200)
-  }
-
-  const onClick = (event: MouseEvent<HTMLDivElement>): void => {
-    const target = event.target instanceof Element ? event.target : null
-    const copyButton = target?.closest('button.agent-code-copy-btn')
-    if (copyButton instanceof HTMLButtonElement) {
-      event.preventDefault()
-      event.stopPropagation()
-      void copyCode(copyButton)
-      return
-    }
-    const link = target?.closest('a')
-    if (!(link instanceof HTMLAnchorElement)) return
-    const href = link.href
-    if (!href) return
-    event.preventDefault()
-    void window.lt.app.openExternal(href)
-  }
-
-  return (
-    <div className={`agent-md-wrap${streaming ? ' streaming' : ''}`}>
-      <div
-        className="md-body agent-md-body"
-        onClick={onClick}
-        dangerouslySetInnerHTML={{ __html: html }}
-      />
-      {streaming && <span className="agent-stream-caret" aria-hidden="true" />}
-    </div>
-  )
-}
-
 export default function AgentPanel({
   id,
   cwd,
@@ -2114,6 +1706,7 @@ export default function AgentPanel({
   provider,
   resumeSessionId,
   forkFromSessionId,
+  initialHandoff,
   ssh,
   profileId,
   caseTabId,
@@ -2127,6 +1720,7 @@ export default function AgentPanel({
   onStatus,
   onFork,
   onProviderChange,
+  onHandoffConsumed,
   onWorktreeFork,
   onOpenTerminal,
   onOpenDiff,
@@ -2164,6 +1758,13 @@ export default function AgentPanel({
   const [revertingDiffIds, setRevertingDiffIds] = useState<Set<string>>(new Set())
   const [usage, setUsage] = useState<AgentUsageView>(() => emptyAgentUsageView())
   const [escInterruptArmed, setEscInterruptArmed] = useState(false)
+  const [elapsedSeconds, setElapsedSeconds] = useState(0)
+  const [pendingHandoff, setPendingHandoff] = useState<{ preamble: string; count: number } | null>(null)
+  const [mentionState, setMentionState] = useState<{ query: string; start: number } | null>(null)
+  const [mentionIndex, setMentionIndex] = useState(0)
+  const [mentionEntries, setMentionEntries] = useState<MentionEntry[]>([])
+  const mentionIndexCacheRef = useRef<{ root: string; entries: MentionEntry[] } | null>(null)
+  const mentionMenuRef = useRef<HTMLDivElement>(null)
   const agentLabel = agentProviderLabels[provider]
   const createdRef = useRef(false)
   const scrollRef = useRef<HTMLDivElement>(null)
@@ -2180,6 +1781,7 @@ export default function AgentPanel({
   const promptHistoryRef = useRef<string[]>([])
   const promptHistoryIndexRef = useRef<number | null>(null)
   const promptHistoryDraftRef = useRef('')
+  const promptHistoryEditsRef = useRef<Map<number, string>>(new Map())
   const escInterruptArmedRef = useRef(false)
   const escInterruptTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const providerRef = useRef(provider)
@@ -2251,6 +1853,7 @@ export default function AgentPanel({
   const resetPromptHistoryCursor = useCallback((): void => {
     promptHistoryIndexRef.current = null
     promptHistoryDraftRef.current = ''
+    promptHistoryEditsRef.current.clear()
   }, [])
 
   useEffect(() => {
@@ -2284,15 +1887,21 @@ export default function AgentPanel({
 
       const currentIndex = promptHistoryIndexRef.current
       if (direction === 1 && currentIndex === null) return false
+      if (direction === -1 && currentIndex === 0) return true
+
+      // 탐색 중 수정한 내용은 세션 버퍼에 남겨 위/아래로 오가도 유지한다 (readline 방식)
+      const edits = promptHistoryEditsRef.current
+      if (currentIndex === null) {
+        promptHistoryDraftRef.current = input
+      } else if (input !== history[currentIndex]) {
+        edits.set(currentIndex, input)
+      } else {
+        edits.delete(currentIndex)
+      }
 
       let nextIndex: number | null
       if (direction === -1) {
-        if (currentIndex === null) {
-          promptHistoryDraftRef.current = input
-          nextIndex = history.length - 1
-        } else {
-          nextIndex = Math.max(0, currentIndex - 1)
-        }
+        nextIndex = currentIndex === null ? history.length - 1 : currentIndex - 1
       } else if (currentIndex !== null && currentIndex >= history.length - 1) {
         nextIndex = null
       } else {
@@ -2300,8 +1909,8 @@ export default function AgentPanel({
       }
 
       promptHistoryIndexRef.current = nextIndex
-      const nextInput = nextIndex === null ? promptHistoryDraftRef.current : history[nextIndex]
-      if (nextIndex === null) promptHistoryDraftRef.current = ''
+      const nextInput =
+        nextIndex === null ? promptHistoryDraftRef.current : (edits.get(nextIndex) ?? history[nextIndex])
       setInput(nextInput)
       focusPrompt(nextInput.length)
       return true
@@ -2472,6 +2081,15 @@ export default function AgentPanel({
       .catch((e) => setError(String(e instanceof Error ? e.message : e)))
   }, [cwd, forkFromSessionId, id, mode, provider, resumeSessionId, settingsLoaded, ssh, title])
 
+  // 프로바이더 전환으로 넘어온 대화 맥락을 보류해뒀다가 첫 지시에 합쳐 보낸다.
+  useEffect(() => {
+    if (!initialHandoff || initialHandoff.count === 0 || !initialHandoff.transcript.trim()) return
+    setPendingHandoff({
+      preamble: handoffContextPreamble(initialHandoff.transcript),
+      count: initialHandoff.count
+    })
+  }, [initialHandoff])
+
   useEffect(() => {
     if (provider !== 'claude') return
     if (!resumeSessionId) return
@@ -2611,8 +2229,42 @@ export default function AgentPanel({
     [hasPrompt, sendBlockedReason]
   )
   const queuesNewInput = isActiveAgentStatus(status)
-  const showStatusSpinner = isActiveAgentStatus(status)
   const interruptible = queuesNewInput || authActive
+
+  useEffect(() => {
+    if (!queuesNewInput) {
+      setElapsedSeconds(0)
+      return
+    }
+    const startedAt = Date.now()
+    setElapsedSeconds(0)
+    const timer = setInterval(
+      () => setElapsedSeconds(Math.floor((Date.now() - startedAt) / 1000)),
+      1000
+    )
+    return () => clearInterval(timer)
+  }, [queuesNewInput])
+
+  const runningToolLabel = useMemo(() => {
+    for (let index = items.length - 1; index >= 0; index -= 1) {
+      const item = items[index]
+      if (item.kind !== 'process') continue
+      const running = (item.processSteps ?? []).filter((step) => step.status === 'running')
+      const latest = running[running.length - 1]
+      if (!latest) continue
+      const display = toolStepDisplay(latest)
+      return display.arg ? `${display.name}(${display.arg})` : display.name
+    }
+    return undefined
+  }, [items])
+
+  const waitingPermission = useMemo(() => {
+    for (let index = items.length - 1; index >= 0; index -= 1) {
+      const item = items[index]
+      if (item.kind === 'permission' && item.status === 'waiting' && item.requestId) return item
+    }
+    return undefined
+  }, [items])
   const stopButtonClassName = escInterruptArmed ? 'agent-stop-button armed' : 'agent-stop-button'
   const stopButtonTitle = escInterruptArmed
     ? `Esc ${Math.round(ESC_INTERRUPT_ARM_MS / 1000)}초 안에 한 번 더 누르면 중지됩니다`
@@ -2687,6 +2339,64 @@ export default function AgentPanel({
     const active = slashMenuRef.current?.querySelector<HTMLElement>('[data-active="true"]')
     active?.scrollIntoView({ block: 'nearest', inline: 'nearest' })
   }, [showSlashMenu, slashIndex, slashMatches])
+
+  // @-멘션: 커서 앞 토큰이 있으면 작업공간 파일 인덱스에서 후보를 찾는다.
+  useEffect(() => {
+    if (!mentionState) {
+      setMentionEntries([])
+      return
+    }
+    let alive = true
+    const root = ssh && profileId ? remoteUri(profileId, cwd) : cwd
+    const applyEntries = (entries: MentionEntry[]): void => {
+      if (alive) setMentionEntries(filterMentionEntries(entries, mentionState.query))
+    }
+    const cached = mentionIndexCacheRef.current
+    if (cached && cached.root === root) {
+      applyEntries(cached.entries)
+      return () => {
+        alive = false
+      }
+    }
+    void buildMentionIndex(root)
+      .then((entries) => {
+        mentionIndexCacheRef.current = { root, entries }
+        applyEntries(entries)
+      })
+      .catch(() => {
+        if (alive) setMentionEntries([])
+      })
+    return () => {
+      alive = false
+    }
+  }, [cwd, mentionState, profileId, ssh])
+
+  useEffect(() => {
+    setMentionIndex(0)
+  }, [mentionState?.query, mentionState?.start])
+
+  // 전송·초기화 등으로 입력이 비면 멘션 메뉴도 닫는다.
+  useEffect(() => {
+    if (input === '') setMentionState(null)
+  }, [input])
+
+  const showMentionMenu = Boolean(mentionState) && mentionEntries.length > 0 && !authActive && !showSlashMenu
+
+  useLayoutEffect(() => {
+    if (!showMentionMenu) return
+    const active = mentionMenuRef.current?.querySelector<HTMLElement>('[data-active="true"]')
+    active?.scrollIntoView({ block: 'nearest', inline: 'nearest' })
+  }, [showMentionMenu, mentionIndex, mentionEntries])
+
+  const updateMentionFromTextarea = useCallback((textarea: HTMLTextAreaElement): void => {
+    const caret = textarea.selectionStart ?? textarea.value.length
+    const token = mentionTokenAt(textarea.value, caret)
+    setMentionState((current) => {
+      if (!token) return current === null ? current : null
+      if (current && current.query === token.query && current.start === token.start) return current
+      return token
+    })
+  }, [])
 
   const applySlashCommand = (command: SlashCommand): void => {
     resetPromptHistoryCursor()
@@ -2781,6 +2491,42 @@ export default function AgentPanel({
     },
     [attachmentForPath, attachmentPathForInputPath, authActive, focusPrompt, showTransientFeedback]
   )
+
+  const applyMentionEntry = useCallback(
+    (entry: MentionEntry): void => {
+      const state = mentionState
+      if (!state) return
+      setMentionState(null)
+      const insert = `@${entry.relPath} `
+      resetPromptHistoryCursor()
+      setInput((current) => {
+        const tokenEnd = Math.min(current.length, state.start + state.query.length + 1)
+        return `${current.slice(0, state.start)}${insert}${current.slice(tokenEnd)}`
+      })
+      focusPrompt(state.start + insert.length)
+      void attachmentForPath(entry.absPath)
+        .then((attachment) => {
+          setAttachments((current) => appendUniqueAttachments(current, [attachment]))
+        })
+        .catch((e) => setError(String(e instanceof Error ? e.message : e)))
+    },
+    [attachmentForPath, focusPrompt, mentionState, resetPromptHistoryCursor]
+  )
+
+  // 컴포저의 @ 버튼: 커서 위치에 '@'를 넣어 멘션 검색을 연다.
+  const insertMentionTrigger = useCallback((): void => {
+    const textarea = textareaRef.current
+    const caret = textarea?.selectionStart ?? input.length
+    const before = input.slice(0, caret)
+    const after = input.slice(caret)
+    const needsSpace = before.length > 0 && !/\s$/.test(before)
+    const insert = `${needsSpace ? ' ' : ''}@`
+    const nextCaret = caret + insert.length
+    resetPromptHistoryCursor()
+    setInput(`${before}${insert}${after}`)
+    setMentionState({ query: '', start: caret + (needsSpace ? 1 : 0) })
+    focusPrompt(nextCaret)
+  }, [focusPrompt, input, resetPromptHistoryCursor])
 
   useEffect(() => {
     const pending = attachmentRequests.filter(
@@ -2919,10 +2665,13 @@ export default function AgentPanel({
     if (rawText) rememberPrompts([rawText])
     setInput('')
     setAttachments([])
+    setMentionState(null)
     setError('')
     const nextDelivery = delivery ?? (queuesNewInput ? 'queue' : 'normal')
+    const handoff = pendingHandoff
     const result = await window.lt.agent.send(id, {
-      text,
+      text: handoff ? `${handoff.preamble}\n${text}` : text,
+      ...(handoff ? { displayText: text } : {}),
       attachments: sendAttachments,
       permissionMode: nextMode,
       delivery: nextDelivery
@@ -2930,6 +2679,11 @@ export default function AgentPanel({
     if (!result.ok) {
       setError(result.error ?? 'Agent 요청을 보낼 수 없습니다.')
       setStatus('error')
+      return
+    }
+    if (handoff) {
+      setPendingHandoff(null)
+      onHandoffConsumed?.()
     }
   }
 
@@ -3015,15 +2769,36 @@ export default function AgentPanel({
     [cwd, profileId, ssh]
   )
 
-  const resolvePermission = async (
-    requestId: string,
-    decision: 'allow' | 'reject',
-    remember = false
-  ): Promise<void> => {
-    setError('')
-    const result = await window.lt.agent.approve({ sessionId: id, requestId, decision, remember })
-    if (!result.ok) setError(result.error ?? '권한 응답을 보낼 수 없습니다.')
-  }
+  const resolvePermission = useCallback(
+    async (requestId: string, decision: 'allow' | 'reject', remember = false): Promise<void> => {
+      setError('')
+      const result = await window.lt.agent.approve({ sessionId: id, requestId, decision, remember })
+      if (!result.ok) setError(result.error ?? '권한 응답을 보낼 수 없습니다.')
+    },
+    [id]
+  )
+
+  // 권한 요청 대기 중 1/2/3 단축키: 입력 중이 아닐 때(또는 빈 프롬프트에서) 바로 응답한다.
+  useEffect(() => {
+    if (!visible || !waitingPermission?.requestId) return
+    const requestId = waitingPermission.requestId
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.key !== '1' && event.key !== '2' && event.key !== '3') return
+      if (event.defaultPrevented || event.isComposing || event.keyCode === 229 || event.repeat) return
+      if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return
+      const inPrompt = isAgentPromptKeyboardTarget(event.target)
+      if (isEditableKeyboardTarget(event.target)) {
+        if (!inPrompt) return
+        if ((textareaRef.current?.value ?? '').length > 0) return
+      }
+      event.preventDefault()
+      if (event.key === '1') void resolvePermission(requestId, 'allow')
+      else if (event.key === '2') void resolvePermission(requestId, 'allow', true)
+      else void resolvePermission(requestId, 'reject')
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [resolvePermission, visible, waitingPermission])
 
   const toggleDialogChoice = (dialogId: string, question: AgentDialogQuestion, label: string): void => {
     setDialogChoices((current) => {
@@ -3381,59 +3156,6 @@ export default function AgentPanel({
           </span>
         </div>
         <div className="agent-head-actions">
-          <select
-            className="agent-provider-select"
-            value={provider}
-            disabled={queuesNewInput || authActive}
-            title="이 탭에서 사용할 AI"
-            onChange={(e) => onProviderChange?.(e.currentTarget.value as AgentProvider)}
-          >
-            <option value="claude">Claude</option>
-            <option value="codex">Codex</option>
-          </select>
-          <div className="agent-mode-menu" ref={modeMenuRef}>
-            <button
-              type="button"
-              className={`agent-mode-trigger ${modeMenuOpen ? 'active' : ''}`}
-              title={currentMode.title}
-              aria-haspopup="menu"
-              aria-expanded={modeMenuOpen}
-              onClick={() => setModeMenuOpen((open) => !open)}
-            >
-              권한 · {currentMode.label}
-            </button>
-            {modeMenuOpen && (
-              <div className="agent-mode-popover" role="menu">
-                {modeLabels.map((option) => (
-                  <button
-                    key={option.value}
-                    type="button"
-                    className={mode === option.value ? 'active' : ''}
-                    title={option.title}
-                    role="menuitemradio"
-                    aria-checked={mode === option.value}
-                    onClick={() => {
-                      selectPermissionMode(option.value)
-                      setModeMenuOpen(false)
-                    }}
-                  >
-                    <span>{option.label}</span>
-                    <small>{option.title}</small>
-                  </button>
-                ))}
-              </div>
-            )}
-          </div>
-          {usesAgentAuth && (
-            <button
-              className="agent-auth-btn"
-              disabled={authButtonDisabled}
-              title={authButtonTitle}
-              onClick={() => void startAuthLogin()}
-            >
-              {authButtonLabel}
-            </button>
-          )}
           {onFork && (
             <button
               className="agent-icon-btn"
@@ -3441,7 +3163,7 @@ export default function AgentPanel({
               aria-label="Fork"
               onClick={onFork}
             >
-              F
+              <IconFork />
             </button>
           )}
           {onWorktreeFork && (
@@ -3456,12 +3178,17 @@ export default function AgentPanel({
               aria-label="Worktree Fork"
               onClick={onWorktreeFork}
             >
-              WT
+              <IconWorktree />
             </button>
           )}
           {onOpenTerminal && (
-            <button className="agent-icon-btn" title="터미널로 열기" onClick={onOpenTerminal}>
-              ›_
+            <button
+              className="agent-icon-btn"
+              title="터미널로 열기"
+              aria-label="터미널로 열기"
+              onClick={onOpenTerminal}
+            >
+              <IconTerminal />
             </button>
           )}
         </div>
@@ -3478,43 +3205,152 @@ export default function AgentPanel({
           onKeyDown={markTimelineUserScroll}
           onCopy={copySelection}
         >
-          {items.length === 0 && <div className="agent-empty">{agentLabel} Agent</div>}
+          {items.length === 0 && (
+            <div className="agent-empty">
+              <div className="agent-empty-icon" aria-hidden="true">
+                <IconClaude size={30} />
+              </div>
+              <div className="agent-empty-title">{agentLabel} Agent</div>
+              <div className="agent-empty-sub">
+                {pendingHandoff
+                  ? `이전 대화 ${pendingHandoff.count}개 메시지를 이어받았습니다. 하던 이야기를 그대로 이어서 지시하세요.`
+                  : '사건 폴더를 기반으로 검토·정리·초안 작업을 시킬 수 있습니다.'}
+              </div>
+              <div className="agent-empty-suggestions">
+                {emptyStateSuggestions.map((suggestion) => (
+                  <button
+                    key={suggestion.label}
+                    type="button"
+                    className="agent-empty-suggestion"
+                    title={suggestion.prompt}
+                    onClick={() => {
+                      resetPromptHistoryCursor()
+                      setInput(suggestion.prompt)
+                      focusPrompt(suggestion.prompt.length)
+                    }}
+                  >
+                    {suggestion.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
           {items.map((item) => {
             if (item.kind === 'process') {
-              const expanded = expandedProcessIds.has(item.id)
               const steps = item.processSteps ?? []
-              const liveStep = steps[steps.length - 1]
               return (
-                <section key={item.id} className={`agent-card process ${item.status ?? ''}`}>
-                  <button
-                    type="button"
-                    className="agent-process-row"
-                    aria-expanded={expanded}
-                    onClick={() => toggleProcess(item.id)}
-                  >
-                    <span className={`agent-process-chevron ${expanded ? 'expanded' : ''}`}>›</span>
-                    <span className="agent-process-title">{item.title ?? '작업 과정'}</span>
-                    <span className="agent-process-summary">{item.text ?? '진행 중'}</span>
-                    <span className="agent-process-count">{steps.length}</span>
-                  </button>
-                  {!expanded && liveStep && (
-                    <div className="agent-process-live" aria-hidden="true">
-                      <span key={`${liveStep.id}-${liveStep.status ?? ''}-${liveStep.text ?? liveStep.title}`}>
-                        {stepSummary(liveStep)}
-                      </span>
-                    </div>
+                <div key={item.id} className="agent-tools">
+                  {steps.map((step) => {
+                    const stepKey = `${item.id}:${step.id}`
+                    return (
+                      <ToolRow
+                        key={step.id}
+                        step={step}
+                        expanded={expandedProcessIds.has(stepKey)}
+                        onToggle={() => toggleProcess(stepKey)}
+                      />
+                    )
+                  })}
+                </div>
+              )
+            }
+            if (item.kind === 'plan') {
+              return (
+                <section key={item.id} className="agent-card plan">
+                  <div className="agent-card-head">
+                    <span>{item.title ?? '계획 제안'}</span>
+                  </div>
+                  {item.planMarkdown && (
+                    <MarkdownMessage text={item.planMarkdown} onCopyCode={copyCodeBlock} />
                   )}
-                  {expanded && (
-                    <div className="agent-process-details">
-                      {steps.map((step) => (
-                        <div key={step.id} className={`agent-process-step ${step.status ?? ''}`}>
-                          <div className="agent-process-step-head">
-                            <span>{step.title}</span>
-                            {step.status && <span>{step.status}</span>}
-                          </div>
-                          {step.text && <pre className="agent-process-step-text">{step.text}</pre>}
-                        </div>
-                      ))}
+                </section>
+              )
+            }
+            if (item.kind === 'user') {
+              const userCopyText = item.text && item.text.trim().length > 0 ? item.text : ''
+              return (
+                <section key={item.id} className="agent-msg user">
+                  <div className="agent-msg-bubble">
+                    <pre className="agent-card-text">{item.text}</pre>
+                    {item.attachments && item.attachments.length > 0 && (
+                      <div className="agent-attachments sent" aria-label="전송된 첨부">
+                        {item.attachments.map((attachment, index) => {
+                          const content = (
+                            <>
+                              <span className="agent-attachment-kind">
+                                {attachmentKindLabel(attachment.kind)}
+                              </span>
+                              <span className="agent-attachment-label">{attachment.label}</span>
+                            </>
+                          )
+                          return canOpenAttachmentSource(attachment) ? (
+                            <button
+                              key={`${attachment.path ?? attachment.label}-${index}`}
+                              type="button"
+                              className="agent-attachment-chip"
+                              title={`${attachmentTitle(attachment)}\n\n클릭하면 원문 위치로 이동합니다`}
+                              onClick={() => onOpenAttachmentSource?.(attachment)}
+                            >
+                              {content}
+                            </button>
+                          ) : (
+                            <span
+                              key={`${attachment.path ?? attachment.label}-${index}`}
+                              className="agent-attachment-chip"
+                              title={attachmentTitle(attachment)}
+                            >
+                              {content}
+                            </span>
+                          )
+                        })}
+                      </div>
+                    )}
+                  </div>
+                  <div className="agent-msg-tools" aria-label="메시지 작업">
+                    {userCopyText && (
+                      <button type="button" title="프롬프트 복사" onClick={() => void copyPrompt(userCopyText)}>
+                        복사
+                      </button>
+                    )}
+                  </div>
+                </section>
+              )
+            }
+            if (item.kind === 'assistant') {
+              const cancelled = item.status === 'cancelled' || item.status === 'canceled'
+              return (
+                <section key={item.id} className={`agent-msg assistant ${item.status ?? ''}`}>
+                  {item.text && (
+                    <MarkdownMessage
+                      text={item.text}
+                      streaming={item.status === 'streaming'}
+                      onCopyCode={copyCodeBlock}
+                    />
+                  )}
+                  {cancelled && <div className="agent-msg-cancelled">중지됨</div>}
+                  {item.text && item.status !== 'streaming' && (
+                    <div className="agent-msg-tools" aria-label="출력 복사">
+                      <button
+                        type="button"
+                        title="리치텍스트로 복사"
+                        onClick={() => void copyAssistant(item.text!, 'rich')}
+                      >
+                        복사
+                      </button>
+                      <button
+                        type="button"
+                        title="Markdown 원문으로 복사"
+                        onClick={() => void copyAssistant(item.text!, 'markdown')}
+                      >
+                        MD
+                      </button>
+                      <button
+                        type="button"
+                        title="일반 텍스트로 복사"
+                        onClick={() => void copyAssistant(item.text!, 'text')}
+                      >
+                        텍스트
+                      </button>
                     </div>
                   )}
                 </section>
@@ -3608,14 +3444,18 @@ export default function AgentPanel({
           const showOpenChangedFile =
             item.kind === 'diff' && !!onOpenFile && !!(item.diff?.filePath ?? item.filePath)
           const promptCopyText =
-            (item.kind === 'user' || item.kind === 'queue') && item.text && item.text.trim().length > 0
-              ? item.text
-              : ''
+            item.kind === 'queue' && item.text && item.text.trim().length > 0 ? item.text : ''
           return (
             <section key={item.id} className={`agent-card ${item.kind} ${item.status ?? ''}`}>
               <div className="agent-card-head">
                 <span>{item.title}</span>
                 <span className="agent-card-head-right">
+                  {item.kind === 'diff' && item.diff && (
+                    <span className="agent-diff-head-counts" aria-hidden="true">
+                      <span className="agent-diff-count add">+{item.diff.additions}</span>
+                      <span className="agent-diff-count remove">-{item.diff.deletions}</span>
+                    </span>
+                  )}
                   {promptCopyText && (
                     <span className="agent-copy-actions" aria-label="프롬프트 복사">
                       <button
@@ -3624,31 +3464,6 @@ export default function AgentPanel({
                         onClick={() => void copyPrompt(promptCopyText)}
                       >
                         복사
-                      </button>
-                    </span>
-                  )}
-                  {item.kind === 'assistant' && item.text && (
-                    <span className="agent-copy-actions" aria-label="출력 복사">
-                      <button
-                        type="button"
-                        title="리치텍스트로 복사"
-                        onClick={() => void copyAssistant(item.text!, 'rich')}
-                      >
-                        복사
-                      </button>
-                      <button
-                        type="button"
-                        title="Markdown 원문으로 복사"
-                        onClick={() => void copyAssistant(item.text!, 'markdown')}
-                      >
-                        MD
-                      </button>
-                      <button
-                        type="button"
-                        title="일반 텍스트로 복사"
-                        onClick={() => void copyAssistant(item.text!, 'text')}
-                      >
-                        텍스트
                       </button>
                     </span>
                   )}
@@ -3710,18 +3525,19 @@ export default function AgentPanel({
               {item.kind === 'diff' && !item.diff && item.text && (
                 <pre className="agent-card-text">{item.text}</pre>
               )}
-              {item.kind !== 'diff' &&
-                item.text &&
-                (item.kind === 'assistant' ? (
-                  <MarkdownMessage
-                    text={item.text}
-                    streaming={item.status === 'streaming'}
-                    onCopyCode={copyCodeBlock}
-                  />
-                ) : (
-                  <pre className="agent-card-text">{item.text}</pre>
-                ))}
-              {item.inputPreview && <pre className="agent-card-input">{item.inputPreview}</pre>}
+              {item.kind !== 'diff' && item.text && <pre className="agent-card-text">{item.text}</pre>}
+              {item.kind === 'permission' && item.planMarkdown && (
+                <MarkdownMessage text={item.planMarkdown} onCopyCode={copyCodeBlock} />
+              )}
+              {item.kind === 'permission' && !item.planMarkdown && item.diff && (
+                <DiffPreview
+                  diff={item.diff}
+                  alwaysExpanded={item.diff.additions + item.diff.deletions <= 40}
+                />
+              )}
+              {item.inputPreview && !(item.kind === 'permission' && (item.diff || item.planMarkdown)) && (
+                <pre className="agent-card-input">{item.inputPreview}</pre>
+              )}
               {item.attachments && item.attachments.length > 0 && (
                 <div className="agent-attachments sent" aria-label="전송된 첨부">
                   {item.attachments.map((attachment, index) => {
@@ -3774,12 +3590,31 @@ export default function AgentPanel({
                 </div>
               )}
               {item.kind === 'permission' && item.requestId && item.status !== 'resolved' && (
-                <div className="agent-card-actions">
-                  <button onClick={() => void resolvePermission(item.requestId!, 'allow')}>허용</button>
-                  <button onClick={() => void resolvePermission(item.requestId!, 'allow', true)}>
-                    항상 허용
+                <div className="agent-card-actions agent-permission-actions">
+                  <button
+                    disabled={item.status !== 'waiting'}
+                    onClick={() => void resolvePermission(item.requestId!, 'allow')}
+                  >
+                    허용 <kbd>1</kbd>
                   </button>
-                  <button onClick={() => void resolvePermission(item.requestId!, 'reject')}>거절</button>
+                  <button
+                    disabled={item.status !== 'waiting'}
+                    title={
+                      item.toolName
+                        ? `이 세션에서 ${item.toolName} 도구를 다시 묻지 않고 허용합니다`
+                        : '이 세션에서 같은 요청을 다시 묻지 않습니다'
+                    }
+                    onClick={() => void resolvePermission(item.requestId!, 'allow', true)}
+                  >
+                    {item.toolName ? `${item.toolName} 항상 허용` : '항상 허용'} <kbd>2</kbd>
+                  </button>
+                  <button
+                    disabled={item.status !== 'waiting'}
+                    className="danger"
+                    onClick={() => void resolvePermission(item.requestId!, 'reject')}
+                  >
+                    거절 <kbd>3</kbd>
+                  </button>
                 </div>
               )}
               {item.decision && <div className="agent-decision">{item.decision === 'allow' ? '허용됨' : '거절됨'}</div>}
@@ -3935,6 +3770,30 @@ export default function AgentPanel({
             })}
           </div>
         )}
+        {showMentionMenu && mentionState && (
+          <div ref={mentionMenuRef} className="agent-mention-menu" role="listbox" aria-label="파일 멘션">
+            <div className="agent-slash-heading">파일 첨부 · @{mentionState.query}</div>
+            {mentionEntries.map((entry, index) => (
+              <button
+                key={entry.absPath}
+                type="button"
+                className={`agent-mention-item ${index === mentionIndex ? 'active' : ''}`}
+                data-active={index === mentionIndex ? 'true' : undefined}
+                role="option"
+                aria-selected={index === mentionIndex}
+                title={entry.relPath}
+                onMouseDown={(e) => {
+                  e.preventDefault()
+                  applyMentionEntry(entry)
+                }}
+              >
+                <span className="agent-mention-kind">{entry.isDir ? '폴더' : '파일'}</span>
+                <span className="agent-mention-name">{entry.name}</span>
+                <span className="agent-mention-path">{entry.relPath}</span>
+              </button>
+            ))}
+          </div>
+        )}
         {authActive && (
           <div className="agent-auth-input">
             <input
@@ -3950,20 +3809,80 @@ export default function AgentPanel({
             <button onClick={() => void sendAuthInput()}>입력 전송</button>
           </div>
         )}
-        <textarea
+        {(queuesNewInput || authActive) && (
+          <div
+            className={`agent-status-line ${status}${escInterruptArmed ? ' esc-armed' : ''}`}
+            aria-live="polite"
+            aria-label={statusAccessibleLabel}
+          >
+            <span className="agent-status-spinner" aria-hidden="true" />
+            <span className="agent-status-text">
+              {authActive ? `${agentLabel} 로그인 진행 중` : baseStatusLabel}
+              {queuesNewInput && elapsedSeconds > 0 && ` · ${formatElapsedSeconds(elapsedSeconds)}`}
+            </span>
+            {!authActive && runningToolLabel && (
+              <span className="agent-status-tool" title={runningToolLabel}>
+                {runningToolLabel}
+              </span>
+            )}
+            {queuedCount > 0 && <span className="agent-status-queue">대기 {queuedCount}</span>}
+            <span className="agent-status-hint">
+              {escInterruptArmed ? 'Esc 한 번 더 누르면 중지' : 'Esc 두 번으로 중지'}
+            </span>
+          </div>
+        )}
+        {pendingHandoff && (
+          <div className="agent-handoff-notice" role="status">
+            <span>
+              이전 대화 {pendingHandoff.count}개 메시지를 이어받았습니다 — 첫 지시와 함께 전달됩니다
+            </span>
+            <button
+              type="button"
+              title="이어받은 맥락을 버리고 빈 세션으로 시작"
+              aria-label="이어받은 맥락 버리기"
+              onClick={() => {
+                setPendingHandoff(null)
+                onHandoffConsumed?.()
+              }}
+            >
+              ×
+            </button>
+          </div>
+        )}
+        <div className="agent-composer">
+          <textarea
           ref={textareaRef}
           value={input}
           disabled={authActive}
-          placeholder={authActive ? `${agentLabel} 로그인 진행 중` : `${agentLabel}에게 요청`}
+          placeholder={authActive ? `${agentLabel} 로그인 진행 중` : `${agentLabel}에게 요청 · @로 파일 첨부, /로 명령`}
           onChange={(e) => {
-            resetPromptHistoryCursor()
             setInput(e.target.value)
+            updateMentionFromTextarea(e.currentTarget)
           }}
+          onSelect={(e) => updateMentionFromTextarea(e.currentTarget)}
           onPaste={onAttachmentPaste}
           onKeyDown={(e) => {
             if (authActive) return
             if (e.nativeEvent.isComposing) return
-            if (showSlashMenu && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
+            const noModifiers = !e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey
+            if (showMentionMenu && noModifiers && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
+              e.preventDefault()
+              const direction = e.key === 'ArrowDown' ? 1 : -1
+              setMentionIndex((current) => (current + direction + mentionEntries.length) % mentionEntries.length)
+              return
+            }
+            if (showMentionMenu && (e.key === 'Tab' || e.key === 'Enter')) {
+              e.preventDefault()
+              const entry = mentionEntries[mentionIndex]
+              if (entry) applyMentionEntry(entry)
+              return
+            }
+            if (showMentionMenu && e.key === 'Escape') {
+              e.preventDefault()
+              setMentionState(null)
+              return
+            }
+            if (showSlashMenu && noModifiers && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
               e.preventDefault()
               const direction = e.key === 'ArrowDown' ? 1 : -1
               setSlashIndex((current) => (current + direction + slashMatches.length) % slashMatches.length)
@@ -3975,7 +3894,7 @@ export default function AgentPanel({
               if (command) applySlashCommand(command)
               return
             }
-            if ((e.key === 'ArrowUp' || e.key === 'ArrowDown') && !e.altKey && !e.ctrlKey && !e.metaKey) {
+            if ((e.key === 'ArrowUp' || e.key === 'ArrowDown') && noModifiers) {
               const textarea = e.currentTarget
               const direction = e.key === 'ArrowUp' ? -1 : 1
               if (
@@ -4030,6 +3949,139 @@ export default function AgentPanel({
             ))}
           </div>
         )}
+        <div className="agent-composer-bar">
+          <div className="agent-composer-left">
+            <button
+              type="button"
+              className="agent-icon-btn agent-mention-btn"
+              title="@로 파일·폴더 첨부"
+              aria-label="파일 멘션"
+              disabled={authActive}
+              onClick={insertMentionTrigger}
+            >
+              <IconMention size={14} />
+            </button>
+            <div className="agent-mode-menu" ref={modeMenuRef}>
+              <button
+                type="button"
+                className={`agent-mode-trigger ${modeMenuOpen ? 'active' : ''}`}
+                title={currentMode.title}
+                aria-haspopup="menu"
+                aria-expanded={modeMenuOpen}
+                onClick={() => setModeMenuOpen((open) => !open)}
+              >
+                {currentMode.label}
+                <span className="agent-mode-caret" aria-hidden="true">
+                  ▾
+                </span>
+              </button>
+              {modeMenuOpen && (
+                <div className="agent-mode-popover" role="menu">
+                  {modeLabels.map((option) => (
+                    <button
+                      key={option.value}
+                      type="button"
+                      className={mode === option.value ? 'active' : ''}
+                      title={option.title}
+                      role="menuitemradio"
+                      aria-checked={mode === option.value}
+                      onClick={() => {
+                        selectPermissionMode(option.value)
+                        setModeMenuOpen(false)
+                      }}
+                    >
+                      <span>{option.label}</span>
+                      <small>{option.title}</small>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+            <select
+              className="agent-provider-select"
+              value={provider}
+              disabled={queuesNewInput || authActive}
+              title="이 탭에서 사용할 AI"
+              onChange={(e) =>
+                onProviderChange?.(
+                  e.currentTarget.value as AgentProvider,
+                  providerHandoffFromTimeline(items)
+                )
+              }
+            >
+              <option value="claude">Claude</option>
+              <option value="codex">Codex</option>
+            </select>
+            {provider === 'codex' && (
+              <button
+                type="button"
+                className="agent-auth-btn"
+                title="Codex 모델 선택"
+                onClick={() => void openModelPicker()}
+              >
+                모델
+              </button>
+            )}
+            {usesAgentAuth && (
+              <button
+                className="agent-auth-btn"
+                disabled={authButtonDisabled}
+                title={authButtonTitle}
+                onClick={() => void startAuthLogin()}
+              >
+                {authButtonLabel}
+              </button>
+            )}
+          </div>
+          <div className="agent-composer-right">
+            {queuesNewInput ? (
+              <>
+                <button
+                  disabled={!canSubmit}
+                  title="작업을 멈추지 않고 즉시 방향을 바꿉니다"
+                  onClick={() => void send('steer')}
+                >
+                  바로 지시
+                </button>
+                <button
+                  className="agent-send-btn"
+                  disabled={!canSubmit}
+                  title="Enter로도 대기열에 넣습니다"
+                  onClick={() => void send('queue')}
+                >
+                  대기열 <IconSend size={13} />
+                </button>
+                <button
+                  className={stopButtonClassName}
+                  title={stopButtonTitle}
+                  aria-label="작업 중지"
+                  onClick={() => void interrupt()}
+                >
+                  <IconStop size={13} /> 중지
+                </button>
+              </>
+            ) : authActive ? (
+              <button
+                className={stopButtonClassName}
+                title={stopButtonTitle}
+                aria-label="로그인 중지"
+                onClick={() => void interrupt()}
+              >
+                <IconStop size={13} /> 중지
+              </button>
+            ) : (
+              <button
+                className="agent-send-btn"
+                disabled={!canSubmit}
+                title="전송 (Enter)"
+                onClick={() => void send()}
+              >
+                전송 <IconSend size={13} />
+              </button>
+            )}
+          </div>
+        </div>
+        </div>
         <div
           className={`agent-usage-bar ${rateLimitState}`}
           title={usageTitle(usage, provider)}
@@ -4045,65 +4097,10 @@ export default function AgentPanel({
           <span>출력 {tokenCount(usage.tokens.outputTokens)}</span>
           {cacheTokens > 0 && <span>캐시 {tokenCount(cacheTokens)}</span>}
           <span>{contextLabel}</span>
-          {limitLabels.length > 0 ? (
-            limitLabels.map((label) => <span key={label}>{label}</span>)
-          ) : (
-            <span>한도 대기</span>
-          )}
+          {limitLabels.length > 0 &&
+            limitLabels.map((label) => <span key={label}>{label}</span>)}
           {provider === 'codex' && usage.tokens.totalCostUsd !== undefined && (
             <span>{costFormatter.format(usage.tokens.totalCostUsd)}</span>
-          )}
-        </div>
-        <div className="agent-prompt-actions">
-          <span
-            className={`agent-status ${status}${escInterruptArmed ? ' esc-armed' : ''}`}
-            title={statusAccessibleLabel}
-            aria-label={statusAccessibleLabel}
-            aria-live="polite"
-          >
-            {showStatusSpinner ? (
-              <>
-                <span className="agent-status-spinner" aria-hidden="true" />
-                {status === 'working' ? (
-                  <span className="sr-only">{statusLabel}</span>
-                ) : (
-                  <span>{baseStatusLabel}</span>
-                )}
-              </>
-            ) : (
-              <span>{baseStatusLabel}</span>
-            )}
-            {escInterruptArmed && (
-              <span className="agent-status-esc-arm" aria-hidden="true">
-                Esc 한 번 더 누르면 중지
-              </span>
-            )}
-            {queuedCount > 0 && <span className="agent-status-queue">대기 {queuedCount}</span>}
-          </span>
-          {queuesNewInput ? (
-            <div className="agent-working-actions">
-              <button
-                disabled={!canSubmit}
-                title="Enter로도 대기열에 넣습니다"
-                onClick={() => void send('queue')}
-              >
-                대기열에 넣기
-              </button>
-              <button disabled={!canSubmit} onClick={() => void send('steer')}>
-                바로 지시하기
-              </button>
-              <button className={stopButtonClassName} title={stopButtonTitle} onClick={() => void interrupt()}>
-                중지
-              </button>
-            </div>
-          ) : authActive ? (
-            <button className={stopButtonClassName} title={stopButtonTitle} onClick={() => void interrupt()}>
-              중지
-            </button>
-          ) : (
-            <button disabled={!canSubmit} onClick={() => void send()}>
-              전송
-            </button>
           )}
         </div>
       </footer>
