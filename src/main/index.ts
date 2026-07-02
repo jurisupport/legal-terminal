@@ -1,4 +1,4 @@
-import { app, BrowserWindow, shell, ipcMain, dialog, screen, Menu, clipboard, type WebContents } from 'electron'
+import { app, BrowserWindow, shell, ipcMain, dialog, screen, Menu, clipboard, Notification, type WebContents } from 'electron'
 import { spawn } from 'child_process'
 import { createHash } from 'crypto'
 import { request } from 'https'
@@ -79,6 +79,8 @@ import { disposeAgentSessions, registerAgentIpc } from './agent/agent-service'
 let mainWindow: BrowserWindow | null = null
 let updateCheckStarted = false
 const dockBounceByWindow = new Map<number, number>()
+// 터미널/에이전트별 OS 네이티브 알림 — 같은 터미널의 새 알림이 이전 것을 대체한다
+const nativeNotifications = new Map<string, Notification>()
 const forceClosingWindowIds = new Set<number>()
 const GITHUB_PROJECT_URL = 'https://github.com/jurisupport/legal-terminal'
 const DEFAULT_WINDOW_TITLE = 'legal-terminal'
@@ -379,6 +381,64 @@ ipcMain.handle('window:forceClose', (e) => {
 ipcMain.on('app:requestAttention', (e, payload?: { reason?: 'done' | 'question' }) => {
   const win = BrowserWindow.fromWebContents(e.sender)
   if (win) requestWindowAttention(win, payload?.reason)
+})
+
+const nativeNotifyKey = (winId: number, termId: string): string => `${winId}:${termId}`
+
+const dismissNativeNotification = (winId: number, termId: string): void => {
+  const key = nativeNotifyKey(winId, termId)
+  nativeNotifications.get(key)?.close()
+  nativeNotifications.delete(key)
+}
+
+// OS 네이티브 알림(알림 센터). silent:false로 두어 소리·표시 여부를 OS(집중 모드 포함)가 결정한다.
+ipcMain.on(
+  'app:notify',
+  (e, payload: { termId: string; title: string; body: string; urgency: 'done' | 'question' }) => {
+    if (!Notification.isSupported()) return
+    const win = BrowserWindow.fromWebContents(e.sender)
+    if (!win || win.isDestroyed()) return
+    const winId = win.id
+    dismissNativeNotification(winId, payload.termId)
+    const notification = new Notification({
+      title: payload.title,
+      body: payload.body,
+      silent: false,
+      urgency: payload.urgency === 'question' ? 'critical' : 'normal'
+    })
+    notification.on('click', () => {
+      nativeNotifications.delete(nativeNotifyKey(winId, payload.termId))
+      if (win.isDestroyed()) return
+      if (win.isMinimized()) win.restore()
+      win.show()
+      win.focus()
+      win.webContents.send('app:notifyActivate', payload.termId)
+    })
+    notification.on('close', () => nativeNotifications.delete(nativeNotifyKey(winId, payload.termId)))
+    nativeNotifications.set(nativeNotifyKey(winId, payload.termId), notification)
+    notification.show()
+  }
+)
+
+ipcMain.on('app:dismissNotify', (e, payload: { termId: string }) => {
+  const win = BrowserWindow.fromWebContents(e.sender)
+  if (win) dismissNativeNotification(win.id, payload.termId)
+})
+
+// 독 배지 숫자(미확인 완료/질문 개수). 창별 개수를 합산한다. macOS·Linux에서만 동작.
+const badgeCountByWindow = new Map<number, number>()
+ipcMain.on('app:setBadgeCount', (e, count: number) => {
+  if (process.platform === 'win32') return
+  const win = BrowserWindow.fromWebContents(e.sender)
+  if (!win || win.isDestroyed()) return
+  badgeCountByWindow.set(win.id, Number.isFinite(count) && count > 0 ? Math.floor(count) : 0)
+  for (const id of badgeCountByWindow.keys()) {
+    const target = BrowserWindow.fromId(id)
+    if (!target || target.isDestroyed()) badgeCountByWindow.delete(id)
+  }
+  let total = 0
+  for (const value of badgeCountByWindow.values()) total += value
+  app.setBadgeCount(total)
 })
 
 ipcMain.handle('app:setWindowTitle', (e, title: string) => {
@@ -2492,6 +2552,8 @@ app.on('before-quit', () => {
 })
 
 app.whenReady().then(() => {
+  // Windows 토스트 알림에는 AppUserModelID가 필요하다 (electron-builder appId와 일치).
+  if (process.platform === 'win32') app.setAppUserModelId('kr.lawpid.legalterminal')
   applyDockIcon()
   // 기본 메뉴 제거 — 기본 메뉴가 Ctrl+W를 '창 닫기'에 바인딩해 터미널 Ctrl+W가 창을 닫는 문제 방지.
   // (메뉴바는 autoHideMenuBar로 이미 숨겨져 있어 UX 변화 없음. Ctrl+W는 렌더러에서 탭 닫기로 처리.)

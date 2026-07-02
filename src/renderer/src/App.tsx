@@ -1524,6 +1524,7 @@ export default function App(): JSX.Element {
   const [notificationSound, setNotificationSound] =
     useState<NotificationSound>(DEFAULT_NOTIFICATION_SOUND)
   const [notificationVolume, setNotificationVolume] = useState(DEFAULT_NOTIFICATION_VOLUME)
+  const [notifyDone, setNotifyDone] = useState(true)
   // SSH 접속 프로필 + 접속 선택/원격 폴더 선택 모달 상태
   const [sshProfiles, setSshProfiles] = useState<SshProfile[]>([])
   const [connMenu, setConnMenu] = useState(false)
@@ -1590,6 +1591,7 @@ export default function App(): JSX.Element {
       setAgentDefaultProvider(resolveAgentProvider(s.agentDefaultProvider))
       setNotificationSound(resolveNotificationSound(s.notificationSound))
       setNotificationVolume(clampNotificationVolume(s.notificationVolume))
+      setNotifyDone(s.notifyDone !== false)
     }
     window.lt?.app
       .info()
@@ -3577,6 +3579,8 @@ export default function App(): JSX.Element {
       n.delete(id)
       return n
     })
+    dismissToastForTerm(id)
+    window.lt.app.dismissNotify(id)
   }
 
   const activeWorkKeyForSide = (side: DockSide): WorkTabKey | '' =>
@@ -3590,14 +3594,16 @@ export default function App(): JSX.Element {
     })
   }
 
-  // 터미널 작업 상태(진행중/완료/질문대기). 완료는 사건탭 배지로, 질문은 토스트로 알린다.
+  // 터미널 작업 상태(진행중/완료/질문대기).
+  // 컨벤션: 보고 있는 작업(탭 표시 + 창 포커스)은 조용히 넘어가고, 그 외에는 알린다.
+  // 창 포커스 중 → 앱 내 알림음 + 토스트. 비포커스 → OS 네이티브 알림(소리·집중 모드는 OS가 결정) + 독 주목.
   const onTermStatus = (id: string, status: TermRunStatus): void => {
     setTermStatus((m) => {
       const n = new Map(m)
       n.set(id, status)
       return n
     })
-    if (status === 'working') {
+    const clearNotices = (): void => {
       setTermAttention((s) => {
         if (!s.has(id)) return s
         const n = new Set(s)
@@ -3605,38 +3611,51 @@ export default function App(): JSX.Element {
         return n
       })
       dismissToastForTerm(id)
-    } else {
-      if (isTermVisibleInCurrentWorkspace(id)) {
-        setTermAttention((s) => {
-          if (!s.has(id)) return s
-          const n = new Set(s)
-          n.delete(id)
-          return n
-        })
-        dismissToastForTerm(id)
-        return
-      }
-      playNotificationSound(notificationSound, notificationVolume)
-      window.lt.app.requestAttention(status)
-      setTermAttention((s) => new Set(s).add(id))
-      if (status === 'question') pushToast(id, status)
-      else dismissToastForTerm(id)
+      window.lt.app.dismissNotify(id)
     }
+    if (status === 'working') {
+      clearNotices()
+      return
+    }
+    if (isTermVisibleInCurrentWorkspace(id) && document.hasFocus()) {
+      clearNotices()
+      return
+    }
+    setTermAttention((s) => new Set(s).add(id))
+    if (status === 'done' && !notifyDone) {
+      dismissToastForTerm(id)
+      return
+    }
+    pushToast(id, status)
+    if (document.hasFocus()) {
+      playNotificationSound(notificationSound, notificationVolume)
+      return
+    }
+    window.lt.app.requestAttention(status)
+    const term = termTabs.find((t) => t.id === id)
+    window.lt.app.notify({
+      termId: id,
+      title: term?.title ?? '세션',
+      body: status === 'question' ? '확인/입력을 기다립니다' : '작업이 완료되었습니다',
+      urgency: status
+    })
   }
   const onTermBracketedPasteMode = (id: string, enabled: boolean): void => {
     setTermBracketedPasteMode((m) => (m[id] === enabled ? m : { ...m, [id]: enabled }))
   }
 
-  // 질문/확인 대기 팝업(토스트)
+  // 질문/완료 팝업(토스트). 질문 대기는 사용자 행동이 필요하므로 처리할 때까지 유지, 완료만 자동 소멸.
   const toastSeq = useRef(0)
-  const pushToast = (termId: string, status: 'question'): void => {
+  const pushToast = (termId: string, status: 'done' | 'question'): void => {
     const t = termTabs.find((x) => x.id === termId)
     const key = ++toastSeq.current
     setToasts((ts) => [
       ...ts.filter((x) => x.termId !== termId),
       { key, termId, title: t?.title ?? '세션', status }
     ])
-    setTimeout(() => setToasts((ts) => ts.filter((x) => x.key !== key)), 12000)
+    if (status === 'done') {
+      setTimeout(() => setToasts((ts) => ts.filter((x) => x.key !== key)), 12000)
+    }
   }
   const dismissToastForTerm = (termId: string): void =>
     setToasts((ts) => ts.filter((x) => x.termId !== termId))
@@ -5210,8 +5229,41 @@ export default function App(): JSX.Element {
     key: number
     termId: string
     title: string
-    status: 'question'
+    status: 'done' | 'question'
   }[]>([])
+
+  // 독/작업표시줄 배지 = 미확인 완료·질문 개수
+  useEffect(() => {
+    window.lt.app.setBadgeCount(termAttention.size)
+  }, [termAttention])
+
+  // 창 포커스 복귀 → 화면에 보이는 작업의 알림(배지·토스트·OS 알림)은 확인한 것으로 처리.
+  // OS 알림 클릭 → 해당 터미널/에이전트 탭으로 이동.
+  const notifyFocusAckRef = useRef<() => void>(() => {})
+  notifyFocusAckRef.current = () => {
+    const visible = [...termAttention].filter((id) => isTermVisibleInCurrentWorkspace(id))
+    if (visible.length === 0) return
+    setTermAttention((s) => {
+      const n = new Set(s)
+      for (const id of visible) n.delete(id)
+      return n
+    })
+    for (const id of visible) {
+      dismissToastForTerm(id)
+      window.lt.app.dismissNotify(id)
+    }
+  }
+  const selectTermRef = useRef<(id: string) => void>(() => {})
+  selectTermRef.current = selectTerm
+  useEffect(() => {
+    const onFocus = (): void => notifyFocusAckRef.current()
+    window.addEventListener('focus', onFocus)
+    const offActivate = window.lt.app.onNotifyActivate((termId) => selectTermRef.current(termId))
+    return () => {
+      window.removeEventListener('focus', onFocus)
+      offActivate()
+    }
+  }, [])
 
   const termsForCaseTab = (tab: CaseWorkspaceTab): TermTab[] =>
     termTabs.filter((term) => caseIdForTerm(term) === tab.id)
@@ -7217,10 +7269,14 @@ export default function App(): JSX.Element {
                 dismissToast(t.key)
               }}
             >
-              <span className="toast-icon">?</span>
+              <span className="toast-icon">{t.status === 'question' ? '?' : '✓'}</span>
               <span className="toast-body">
                 <b>{t.title}</b>
-                <span className="toast-sub">claude가 확인/입력을 기다립니다 · 클릭하여 이동</span>
+                <span className="toast-sub">
+                  {t.status === 'question'
+                    ? '확인/입력을 기다립니다 · 클릭하여 이동'
+                    : '작업이 완료되었습니다 · 클릭하여 이동'}
+                </span>
               </span>
               <button
                 className="toast-x"
@@ -10121,6 +10177,24 @@ function SettingsView(): JSX.Element {
             }}
           />
           <span className="setting-range-value">{notificationVolume}%</span>
+        </div>
+      </section>
+
+      <section className="setting-row">
+        <div className="setting-label">
+          작업 완료 알림 <span className="muted small">— 질문 대기 알림은 항상 표시</span>
+        </div>
+        <div className="setting-value">
+          <label className="setting-checkbox">
+            <input
+              type="checkbox"
+              checked={s.notifyDone !== false}
+              onChange={(e) => {
+                void savePatch({ notifyDone: e.currentTarget.checked })
+              }}
+            />
+            <span>완료 시 알림음·토스트·OS 알림 표시 (끄면 탭 배지만)</span>
+          </label>
         </div>
       </section>
 

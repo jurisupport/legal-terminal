@@ -376,6 +376,7 @@ interface AppSettings {
   termFontSize?: number
   notificationSound?: string
   notificationVolume?: number
+  notifyDone?: boolean
   mdFont?: string
   mdFontSize?: number
   agentFontSize?: number
@@ -595,6 +596,15 @@ const api = {
       ipcRenderer.invoke('app:setWindowTitle', title),
     requestAttention: (reason?: 'done' | 'question'): void =>
       ipcRenderer.send('app:requestAttention', { reason }),
+    notify: (payload: { termId: string; title: string; body: string; urgency: 'done' | 'question' }): void =>
+      ipcRenderer.send('app:notify', payload),
+    dismissNotify: (termId: string): void => ipcRenderer.send('app:dismissNotify', { termId }),
+    setBadgeCount: (count: number): void => ipcRenderer.send('app:setBadgeCount', count),
+    onNotifyActivate: (cb: (termId: string) => void): (() => void) => {
+      const listener = (_e: unknown, termId: string): void => cb(termId)
+      ipcRenderer.on('app:notifyActivate', listener)
+      return () => ipcRenderer.removeListener('app:notifyActivate', listener)
+    },
     onCloseActiveTab: (cb: () => void): (() => void) => {
       const listener = (): void => cb()
       ipcRenderer.on('app:closeActiveTab', listener)

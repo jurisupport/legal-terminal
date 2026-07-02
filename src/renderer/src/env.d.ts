@@ -374,6 +374,7 @@ export interface AppSettings {
   termFontSize?: number
   notificationSound?: string
   notificationVolume?: number
+  notifyDone?: boolean
   mdFont?: string
   mdFontSize?: number
   agentFontSize?: number
@@ -654,6 +655,10 @@ export interface LtApi {
     forceCloseWindow: () => Promise<void>
     setWindowTitle: (title: string) => Promise<void>
     requestAttention: (reason?: 'done' | 'question') => void
+    notify: (payload: { termId: string; title: string; body: string; urgency: 'done' | 'question' }) => void
+    dismissNotify: (termId: string) => void
+    setBadgeCount: (count: number) => void
+    onNotifyActivate: (cb: (termId: string) => void) => () => void
     onCloseActiveTab: (cb: () => void) => () => void
     onCloseActiveCaseTab: (cb: () => void) => () => void
     onCloseWindowRequest: (cb: () => void) => () => void
