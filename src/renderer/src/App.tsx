@@ -5807,6 +5807,8 @@ export default function App(): JSX.Element {
 
   // 좌클릭: 사건 작업환경 열기 (폴더 매칭 → 없으면 직접 지정 → 사건 컨텍스트 연결)
   const openCaseWorkspace = async (c: JsCase, detailLoaded = false): Promise<OpenedCase | null> => {
+    // 사건 선택 즉시 탐색기로 전환 — 상세 조회·폴더 매칭이 끝날 때까지 대시보드에 머물지 않는다
+    setMode('explorer')
     if (!detailLoaded) c = await loadCaseDetail(c)
     const saved = c.id ? await window.lt.case.getJsPairing(c.id) : undefined
     let drafts = saved?.drafts
@@ -5886,7 +5888,6 @@ export default function App(): JSX.Element {
     } else {
       openCaseContext(openedCase)
     }
-    setMode('explorer')
     return { ...openedCase, term, termId }
   }
 
@@ -5918,6 +5919,8 @@ export default function App(): JSX.Element {
     caseData: JsCase
   } | null>(null)
   const openCaseRemote = async (c: JsCase, profile: SshProfile): Promise<void> => {
+    // 사건 선택 즉시 탐색기로 전환 — 상세 조회·원격 폴더 매칭(SSH)이 끝날 때까지 대시보드에 머물지 않는다
+    setMode('explorer')
     c = await loadCaseDetail(c)
     const court = c.court || ''
     const client = c.parties
@@ -5948,7 +5951,6 @@ export default function App(): JSX.Element {
     if (savedRemote?.profileId === profile.id) {
       const opened = openRemoteCaseContext(profile, savedRemote.path, name, meta, savedRecords)
       if (!savedRecords) resolveRemoteRecordsLater(opened.id, profile, savedRemote.path, opened.title, c)
-      setMode('explorer')
       return
     }
     // 원격 작성서류 루트에서 폴더명(사건번호/당사자) 자동 매칭
@@ -5962,7 +5964,6 @@ export default function App(): JSX.Element {
       if (c.id) window.lt.case.setJsPairing(remoteJsPairingKey(profile.id, c.id), matchedUri)
       // 소송기록 매칭은 사건 컨텍스트를 먼저 띄운 뒤 비동기로 붙인다.
       resolveRemoteRecordsLater(opened.id, profile, remotePath, opened.title, c)
-      setMode('explorer')
     } else {
       // 작성서류 매칭 실패 → 폴더 선택기로 직접 지정 (소송기록은 picker onPick에서 resolve)
       setRemoteCasePick({ profile, name, meta, caseData: c })
@@ -6470,7 +6471,11 @@ export default function App(): JSX.Element {
             onBrief={briefCaseToClaude}
             onHearingRecord={(c) => void openHearingRecordForCase(c)}
             onResumeSession={(c, s) => void resumeCaseSession(c, s)}
-            onResumePath={(sessionId, cwd, title) => openPastSession(sessionId, cwd, title)}
+            onResumePath={(sessionId, cwd, title) => {
+              // 대시보드에서 폴더 세션을 이어 열 때도 탐색기 화면으로 전환
+              setMode('explorer')
+              openPastSession(sessionId, cwd, title)
+            }}
             onChanged={() => setJsNonce((n) => n + 1)}
           />
         </div>
