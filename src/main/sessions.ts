@@ -232,28 +232,52 @@ async function readIndexFile(file: string): Promise<SessionMeta[]> {
   return []
 }
 
-let legacyIndexChecked = false
+// 인덱스 읽기-수정-쓰기를 프로세스 안에서 직렬화한다. 앱 시작 시 이관·원격 풀·메타 저장이
+// 동시에 돌면 늦게 끝난 쪽이 빈(또는 옛) 스냅샷 기준으로 저장해 인덱스가 통째로 유실될 수 있다.
+let indexChain: Promise<unknown> = Promise.resolve()
 
-async function readSessionIndex(): Promise<SessionMeta[]> {
-  const current = await readIndexFile(sessionIndexPath())
-  if (legacyIndexChecked) return current
-  legacyIndexChecked = true
-  const legacyFile = legacySessionIndexPath()
-  const legacy = await readIndexFile(legacyFile)
-  if (!legacy.length) return current
-  const { entries, changed } = mergeMetaEntries(
-    current as unknown as SessionMetaRecord[],
-    legacy as unknown as SessionMetaRecord[]
-  )
-  const merged = entries as unknown as SessionMeta[]
-  if (changed) await writeSessionIndex(merged)
-  // 병합을 마친 구파일은 치워서 다음 실행부터 이 분기가 공짜가 되게 한다.
-  try {
-    await rename(legacyFile, `${legacyFile}.migrated`)
-  } catch {
-    await unlink(legacyFile).catch(() => {})
+function withIndexLock<T>(fn: () => Promise<T>): Promise<T> {
+  const run = indexChain.then(fn, fn)
+  indexChain = run.catch(() => undefined)
+  return run
+}
+
+// 구경로(userData) 인덱스를 공유 경로로 병합 — 프로세스당 1회.
+// .migrated 백업도 함께 재병합해, 과거에 이관이 꼬여 공유 인덱스가 비었더라도 자가 복구된다.
+let legacyMergePromise: Promise<void> | null = null
+
+function mergeLegacyIndexOnce(): Promise<void> {
+  if (!legacyMergePromise) {
+    legacyMergePromise = withIndexLock(async () => {
+      const legacyFile = legacySessionIndexPath()
+      const [current, legacy, backup] = await Promise.all([
+        readIndexFile(sessionIndexPath()),
+        readIndexFile(legacyFile),
+        readIndexFile(`${legacyFile}.migrated`)
+      ])
+      if (!legacy.length && !backup.length) return
+      const { entries, changed } = mergeMetaEntries(current as unknown as SessionMetaRecord[], [
+        ...legacy,
+        ...backup
+      ] as unknown as SessionMetaRecord[])
+      if (changed) await writeSessionIndex(entries as unknown as SessionMeta[])
+      if (legacy.length) {
+        // 구파일은 삭제하지 않고 백업 이름으로 옮겨 자가 복구 재료로 남긴다.
+        try {
+          await rename(legacyFile, `${legacyFile}.migrated`)
+        } catch {
+          await unlink(legacyFile).catch(() => {})
+        }
+      }
+    })
   }
-  return merged.slice(0, MAX_SESSION_INDEX_ENTRIES)
+  return legacyMergePromise
+}
+
+// 주의: withIndexLock 안에서는 이 함수를 부르지 말 것(락 재진입 불가 — readIndexFile을 직접 사용).
+async function readSessionIndex(): Promise<SessionMeta[]> {
+  await mergeLegacyIndexOnce().catch(() => {})
+  return readIndexFile(sessionIndexPath())
 }
 
 async function writeSessionIndex(entries: SessionMeta[]): Promise<void> {
@@ -289,26 +313,30 @@ function buildSessionMeta(input: SessionMetaInput): SessionMeta {
 export async function rememberSessionMeta(input: SessionMetaInput): Promise<{ ok: boolean; error?: string }> {
   try {
     if (!input.sessionId || !input.cwd) return { ok: false, error: '세션 ID와 cwd가 필요합니다.' }
-    const nextMeta = buildSessionMeta(input)
-    const entries = await readSessionIndex()
-    const previous = entries.find((entry) => entry.key === nextMeta.key)
-    const merged: SessionMeta = previous
-      ? buildSessionMeta({
-          ...previous,
-          ...input,
-          displayTitle: input.displayTitle || previous.displayTitle,
-          title: input.title || previous.title,
-          transcriptTitle: input.transcriptTitle || previous.transcriptTitle,
-          generatedTitle: input.generatedTitle || previous.generatedTitle,
-          workSummary: input.workSummary || previous.workSummary,
-          workSummaryAt: input.workSummaryAt ?? previous.workSummaryAt,
-          workSummaryAtTurn: input.workSummaryAtTurn ?? previous.workSummaryAtTurn,
-          mtime: input.mtime ?? previous.mtime,
-          folderName: input.folderName || previous.folderName,
-          ssh: input.ssh || previous.ssh
-        })
-      : nextMeta
-    await writeSessionIndex([merged, ...entries.filter((entry) => entry.key !== merged.key)])
+    await mergeLegacyIndexOnce().catch(() => {})
+    // 읽기-병합-쓰기를 락으로 묶어 동시 저장(터미널 여러 개·원격 풀)이 서로를 덮어쓰지 않게 한다.
+    await withIndexLock(async () => {
+      const nextMeta = buildSessionMeta(input)
+      const entries = await readIndexFile(sessionIndexPath())
+      const previous = entries.find((entry) => entry.key === nextMeta.key)
+      const merged: SessionMeta = previous
+        ? buildSessionMeta({
+            ...previous,
+            ...input,
+            displayTitle: input.displayTitle || previous.displayTitle,
+            title: input.title || previous.title,
+            transcriptTitle: input.transcriptTitle || previous.transcriptTitle,
+            generatedTitle: input.generatedTitle || previous.generatedTitle,
+            workSummary: input.workSummary || previous.workSummary,
+            workSummaryAt: input.workSummaryAt ?? previous.workSummaryAt,
+            workSummaryAtTurn: input.workSummaryAtTurn ?? previous.workSummaryAtTurn,
+            mtime: input.mtime ?? previous.mtime,
+            folderName: input.folderName || previous.folderName,
+            ssh: input.ssh || previous.ssh
+          })
+        : nextMeta
+      await writeSessionIndex([merged, ...entries.filter((entry) => entry.key !== merged.key)])
+    })
     // 원격 세션 메타는 그 호스트의 공유 인덱스에도 반영해 다른 기기에서 보이게 한다.
     if (input.ssh) scheduleRemoteIndexPush(input.ssh)
     return { ok: true }
@@ -569,9 +597,12 @@ async function runRemoteIndexSync(ssh: SshConn): Promise<void> {
     )
     .filter((entry): entry is SessionMetaRecord => !!entry)
   if (!pulled.length) return
-  const current = await readSessionIndex()
-  const { entries, changed } = mergeMetaEntries(current as unknown as SessionMetaRecord[], pulled)
-  if (changed) await writeSessionIndex(entries as unknown as SessionMeta[])
+  // 풀 병합도 락 안에서 — remember와 동시에 돌 때 서로의 항목을 덮어쓰지 않게 한다.
+  await withIndexLock(async () => {
+    const current = await readIndexFile(sessionIndexPath())
+    const { entries, changed } = mergeMetaEntries(current as unknown as SessionMetaRecord[], pulled)
+    if (changed) await writeSessionIndex(entries as unknown as SessionMeta[])
+  })
 }
 
 // TTL 안이면 재사용, 동시 호출은 한 번만 실행. 실패해도 다음 TTL에 재시도한다.
