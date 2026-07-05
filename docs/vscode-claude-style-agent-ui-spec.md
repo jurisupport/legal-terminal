@@ -447,7 +447,7 @@ MVP에서는 별도 MCP 서버 대신 Electron IPC로 충분하다. Claude/SDK �
 
 재사용할 기존 데이터:
 
-- `session-index.json`: Claude transcript metadata.
+- `~/.claude/legal-terminal-sessions.json`: Claude transcript metadata (구 `session-index.json` — SSH 호스트 간 세션 동기화를 위해 기기 공유 경로로 이동).
 - workspace snapshot: 열린 탭과 현재 사건 상태.
 
 ## 10. MVP 마일스톤

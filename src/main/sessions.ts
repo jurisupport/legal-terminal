@@ -1,9 +1,17 @@
 import { app } from 'electron'
 import { homedir } from 'os'
 import { dirname, join } from 'path'
-import { mkdir, open, readFile, readdir, realpath, rename, stat, writeFile } from 'fs/promises'
-import { execFile } from 'child_process'
+import { mkdir, open, readFile, readdir, realpath, rename, stat, unlink, writeFile } from 'fs/promises'
+import { execFile, spawn } from 'child_process'
 import type { SshProfile } from './settings'
+import {
+  computeSearchText,
+  fromRemoteLocalForm,
+  isSessionMetaRecord,
+  mergeMetaEntries,
+  toRemoteLocalForm,
+  type SessionMetaRecord
+} from './sessionSyncData'
 import {
   buildCaseActivity,
   buildFolderActivity,
@@ -128,7 +136,14 @@ function shq(s: string): string {
   return `'${s.replace(/'/g, "'\\''")}'`
 }
 
+// 세션 인덱스는 기기 공유 경로(~/.claude)에 둔다 — 같은 호스트에서 직접 실행한 앱과
+// 다른 컴퓨터에서 SSH로 접속한 앱(원격 동기화 스크립트)이 같은 파일을 보게 하기 위함.
 function sessionIndexPath(): string {
+  return join(homedir(), '.claude', 'legal-terminal-sessions.json')
+}
+
+// 구버전 경로(userData/session-index.json) — 최초 1회 새 파일에 병합 후 치운다.
+function legacySessionIndexPath(): string {
   return join(app.getPath('userData'), 'session-index.json')
 }
 
@@ -153,13 +168,6 @@ async function localCwdAliases(cwd: string): Promise<Set<string>> {
     /* The original cwd is still useful if the folder is unavailable. */
   }
   return aliases
-}
-
-function searchText(parts: (string | number | undefined)[]): string {
-  return parts
-    .filter((part): part is string | number => part !== undefined && String(part).trim().length > 0)
-    .map((part) => String(part).normalize('NFKC').toLowerCase())
-    .join(' ')
 }
 
 function recordValue(value: unknown): Record<string, unknown> | undefined {
@@ -205,10 +213,10 @@ function parseSessionIndex(text: string): SessionMeta[] | null {
   }
 }
 
-async function readSessionIndex(): Promise<SessionMeta[]> {
+async function readIndexFile(file: string): Promise<SessionMeta[]> {
   let raw: string
   try {
-    raw = await readFile(sessionIndexPath(), 'utf8')
+    raw = await readFile(file, 'utf8')
   } catch {
     return []
   }
@@ -222,6 +230,30 @@ async function readSessionIndex(): Promise<SessionMeta[]> {
     if (salvaged) return salvaged
   }
   return []
+}
+
+let legacyIndexChecked = false
+
+async function readSessionIndex(): Promise<SessionMeta[]> {
+  const current = await readIndexFile(sessionIndexPath())
+  if (legacyIndexChecked) return current
+  legacyIndexChecked = true
+  const legacyFile = legacySessionIndexPath()
+  const legacy = await readIndexFile(legacyFile)
+  if (!legacy.length) return current
+  const { entries, changed } = mergeMetaEntries(
+    current as unknown as SessionMetaRecord[],
+    legacy as unknown as SessionMetaRecord[]
+  )
+  const merged = entries as unknown as SessionMeta[]
+  if (changed) await writeSessionIndex(merged)
+  // 병합을 마친 구파일은 치워서 다음 실행부터 이 분기가 공짜가 되게 한다.
+  try {
+    await rename(legacyFile, `${legacyFile}.migrated`)
+  } catch {
+    await unlink(legacyFile).catch(() => {})
+  }
+  return merged.slice(0, MAX_SESSION_INDEX_ENTRIES)
 }
 
 async function writeSessionIndex(entries: SessionMeta[]): Promise<void> {
@@ -250,24 +282,7 @@ function buildSessionMeta(input: SessionMetaInput): SessionMeta {
     sourceKey: sourceKey(input.ssh),
     folderName,
     updatedAt: new Date().toISOString(),
-    searchText: searchText([
-      input.sessionId,
-      input.title,
-      input.transcriptTitle,
-      input.generatedTitle,
-      input.displayTitle,
-      input.caseNumber,
-      input.caseName,
-      input.court,
-      input.client,
-      folderName,
-      input.cwd,
-      input.recordsFolder,
-      input.profileId,
-      input.sshLabel,
-      input.ssh?.host,
-      input.ssh?.user
-    ])
+    searchText: computeSearchText({ ...input, folderName } as Record<string, unknown>)
   }
 }
 
@@ -294,6 +309,8 @@ export async function rememberSessionMeta(input: SessionMetaInput): Promise<{ ok
         })
       : nextMeta
     await writeSessionIndex([merged, ...entries.filter((entry) => entry.key !== merged.key)])
+    // 원격 세션 메타는 그 호스트의 공유 인덱스에도 반영해 다른 기기에서 보이게 한다.
+    if (input.ssh) scheduleRemoteIndexPush(input.ssh)
     return { ok: true }
   } catch (e) {
     return { ok: false, error: String(e instanceof Error ? e.message : e) }
@@ -382,6 +399,225 @@ async function remoteCwdAliases(ssh: SshConn, cwd: string): Promise<Set<string>>
   const resolved = await remoteRealpath(ssh, cwd)
   if (resolved) aliases.add(comparablePath(resolved))
   return aliases
+}
+
+// ── 원격 세션 인덱스 동기화 ──────────────────────────────────────────────
+// 각 SSH 호스트의 ~/.claude/legal-terminal-sessions.json 이 그 호스트 세션 메타의 원본이다.
+// 이 기기가 기록한 그 호스트의 세션 메타를 stdin으로 밀어 넣으면(푸시) 원격이 병합·저장한 뒤
+// 전체 항목을 돌려주고(풀), 그것을 로컬 인덱스에 합친다 — SSH 왕복 1회로 양방향 동기화.
+
+const REMOTE_INDEX_SYNC_TTL_MS = 45_000
+const REMOTE_INDEX_PUSH_DEBOUNCE_MS = 3_000
+const REMOTE_INDEX_SYNC_TIMEOUT_MS = 20_000
+const MAX_REMOTE_INDEX_OUTPUT_BYTES = 8 * 1024 * 1024
+
+// 병합 규칙은 sessionSyncData.mergeMetaPair와 동일해야 한다:
+// updatedAt이 새로운 쪽 기본 + 빈 필드는 옛 항목에서 채움, 정렬·개수 제한 포함.
+function remoteIndexMergeCommand(): string {
+  const py = `
+import json, os, sys
+path = os.path.expanduser("~/.claude/legal-terminal-sessions.json")
+REQUIRED = ("key", "sourceKey", "sessionId", "cwd", "updatedAt", "searchText")
+def valid(entry):
+    return isinstance(entry, dict) and all(isinstance(entry.get(k), str) for k in REQUIRED)
+def load():
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except Exception:
+        return []
+    entries = data.get("entries") if isinstance(data, dict) else None
+    return [e for e in entries if valid(e)] if isinstance(entries, list) else []
+try:
+    incoming = json.load(sys.stdin)
+except Exception:
+    incoming = []
+if not isinstance(incoming, list):
+    incoming = []
+by = {e["key"]: e for e in load()}
+for e in incoming:
+    if not valid(e):
+        continue
+    old = by.get(e["key"])
+    if old is None:
+        by[e["key"]] = e
+        continue
+    newer, older = (e, old) if e["updatedAt"] >= old["updatedAt"] else (old, e)
+    merged = dict(newer)
+    for k, v in older.items():
+        cur = merged.get(k)
+        if (cur is None or cur == "") and v is not None:
+            merged[k] = v
+    by[e["key"]] = merged
+entries = sorted(by.values(), key=lambda x: x["updatedAt"], reverse=True)[:${MAX_SESSION_INDEX_ENTRIES}]
+tmp = path + "." + str(os.getpid()) + ".tmp"
+with open(tmp, "w", encoding="utf-8") as fh:
+    json.dump({"version": ${SESSION_INDEX_VERSION}, "entries": entries}, fh, ensure_ascii=False)
+os.replace(tmp, path)
+sys.stdout.write(json.dumps(entries, ensure_ascii=False))
+`.trim()
+  return [
+    'mkdir -p "$HOME/.claude" 2>/dev/null',
+    'command -v python3 >/dev/null 2>&1 || exit 0',
+    `python3 -c ${shq(py)}`
+  ].join('\n')
+}
+
+// 푸시 항목을 stdin으로 보내고 병합된 원격 인덱스를 받는다. 실패(오프라인·python3 없음)는 null.
+function execRemoteIndexMerge(ssh: SshConn, push: SessionMetaRecord[]): Promise<SessionMetaRecord[] | null> {
+  return new Promise((resolve) => {
+    let proc: ReturnType<typeof spawn>
+    try {
+      proc = spawn(sshBin, [...sshBaseArgs(ssh), remoteIndexMergeCommand()], { windowsHide: true })
+    } catch {
+      resolve(null)
+      return
+    }
+    const chunks: Buffer[] = []
+    let outBytes = 0
+    let settled = false
+    const finish = (value: SessionMetaRecord[] | null): void => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      resolve(value)
+    }
+    const timer = setTimeout(() => {
+      proc.kill()
+      finish(null)
+    }, REMOTE_INDEX_SYNC_TIMEOUT_MS)
+    proc.stdout?.on('data', (chunk: Buffer) => {
+      outBytes += chunk.length
+      if (outBytes > MAX_REMOTE_INDEX_OUTPUT_BYTES) {
+        proc.kill()
+        finish(null)
+        return
+      }
+      chunks.push(chunk)
+    })
+    proc.stderr?.resume()
+    proc.on('error', () => finish(null))
+    proc.on('close', (code) => {
+      const out = Buffer.concat(chunks).toString('utf8')
+      if (code !== 0 || !out.trim()) {
+        finish(null)
+        return
+      }
+      try {
+        const parsed = JSON.parse(out) as unknown
+        finish(Array.isArray(parsed) ? parsed.filter(isSessionMetaRecord) : null)
+      } catch {
+        finish(null)
+      }
+    })
+    proc.stdin?.on('error', () => {
+      /* python3 없음 등으로 원격이 먼저 종료하면 EPIPE — close에서 처리된다. */
+    })
+    proc.stdin?.end(JSON.stringify(push))
+  })
+}
+
+interface RemoteIndexSyncState {
+  lastSyncAt: number
+  inflight: Promise<void> | null
+  pushTimer: NodeJS.Timeout | null
+}
+
+const remoteIndexSyncStates = new Map<string, RemoteIndexSyncState>()
+
+function remoteIndexSyncState(ssh: SshConn): RemoteIndexSyncState {
+  const key = remoteSourceKey(ssh)
+  let state = remoteIndexSyncStates.get(key)
+  if (!state) {
+    state = { lastSyncAt: 0, inflight: null, pushTimer: null }
+    remoteIndexSyncStates.set(key, state)
+  }
+  return state
+}
+
+async function findSshProfile(ssh: SshConn): Promise<SshProfile | undefined> {
+  const settings = await getSettings().catch(() => ({}) as { sshProfiles?: SshProfile[] })
+  return settings.sshProfiles?.find(
+    (p) => p.host === ssh.host && p.user === ssh.user && (p.port ?? 22) === (ssh.port ?? 22)
+  )
+}
+
+async function runRemoteIndexSync(ssh: SshConn): Promise<void> {
+  const srcKey = remoteSourceKey(ssh)
+  const local = await readSessionIndex()
+  // 매번 이 소스의 전체 항목을 푸시한다 — 이전 푸시가 유실됐어도 다음 동기화가 복구한다.
+  const push = local
+    .filter((meta) => meta.sourceKey === srcKey)
+    .map((meta) => toRemoteLocalForm(meta as unknown as SessionMetaRecord))
+  const remoteEntries = await execRemoteIndexMerge(ssh, push)
+  if (!remoteEntries) return
+  const profile = await findSshProfile(ssh)
+  const conn: SshConn = {
+    host: ssh.host,
+    user: ssh.user,
+    port: ssh.port,
+    identityFile: ssh.identityFile
+  }
+  const pulled = remoteEntries
+    .map((entry) =>
+      fromRemoteLocalForm(entry, {
+        sourceKey: srcKey,
+        ssh: conn as unknown as Record<string, unknown>,
+        profileId: profile?.id,
+        sshLabel: profile?.label
+      })
+    )
+    .filter((entry): entry is SessionMetaRecord => !!entry)
+  if (!pulled.length) return
+  const current = await readSessionIndex()
+  const { entries, changed } = mergeMetaEntries(current as unknown as SessionMetaRecord[], pulled)
+  if (changed) await writeSessionIndex(entries as unknown as SessionMeta[])
+}
+
+// TTL 안이면 재사용, 동시 호출은 한 번만 실행. 실패해도 다음 TTL에 재시도한다.
+export function syncRemoteSessionIndex(
+  ssh: SshConn,
+  maxAgeMs = REMOTE_INDEX_SYNC_TTL_MS
+): Promise<void> {
+  const state = remoteIndexSyncState(ssh)
+  if (state.inflight) return state.inflight
+  if (Date.now() - state.lastSyncAt < maxAgeMs) return Promise.resolve()
+  state.lastSyncAt = Date.now()
+  state.inflight = runRemoteIndexSync(ssh)
+    .catch(() => {
+      /* 오프라인이면 다음 TTL에 재시도 — 로컬 인덱스만으로도 동작한다. */
+    })
+    .finally(() => {
+      state.inflight = null
+    })
+  return state.inflight
+}
+
+// 메타 저장 직후의 잦은 왕복을 피하려고 몇 초 모아 1회 푸시한다.
+function scheduleRemoteIndexPush(ssh: SshConn): void {
+  const state = remoteIndexSyncState(ssh)
+  if (state.pushTimer) clearTimeout(state.pushTimer)
+  const conn: SshConn = {
+    host: ssh.host,
+    user: ssh.user,
+    port: ssh.port,
+    identityFile: ssh.identityFile
+  }
+  state.pushTimer = setTimeout(() => {
+    state.pushTimer = null
+    void syncRemoteSessionIndex(conn, 0)
+  }, REMOTE_INDEX_PUSH_DEBOUNCE_MS)
+  state.pushTimer.unref?.()
+}
+
+// 저장된 모든 SSH 프로필과 동기화 (사건 대시보드·작업일지 조회 시 배경 갱신용).
+export async function syncAllRemoteSessionIndexes(
+  maxAgeMs = REMOTE_INDEX_SYNC_TTL_MS
+): Promise<void> {
+  const settings = await getSettings().catch(() => ({}) as { sshProfiles?: SshProfile[] })
+  await Promise.all(
+    (settings.sshProfiles ?? []).map((p) => syncRemoteSessionIndex(p, maxAgeMs).catch(() => {}))
+  )
 }
 
 async function listTranscripts(): Promise<TranscriptRef[]> {
@@ -682,6 +918,13 @@ export async function listSessions(
   ssh?: SshConn,
   context?: SessionSearchContext
 ): Promise<SessionListEntry[]> {
+  // 목록을 열 때 원격 인덱스와 동기화해, 다른 기기가 기록한 제목·사건 연결·요약을 먼저 당겨온다.
+  // transcript 헤더 스캔과 병렬이라 추가 대기는 거의 없다. 인덱스는 동기화 후에 읽는다.
+  const remoteHeads = ssh
+    ? await Promise.all([listRemoteTranscriptHeads(ssh), syncRemoteSessionIndex(ssh)]).then(
+        ([heads]) => heads
+      )
+    : []
   const indexed = await readSessionIndex()
   const cwdAliases = ssh ? await remoteCwdAliases(ssh, cwd) : await localCwdAliases(cwd)
   const indexedByKey = new Map(
@@ -696,8 +939,7 @@ export async function listSessions(
   }
 
   if (ssh) {
-    const ts = await listRemoteTranscriptHeads(ssh)
-    for (const t of ts) {
+    for (const t of remoteHeads) {
       if (out.length >= limit) break
       const p = parseHead(t.head)
       if (p.cwd && pathMatchesAny(p.cwd, cwdAliases)) {
@@ -771,12 +1013,15 @@ export async function listSessions(
 // transcript 스캔 없이 인덱스 1회 + pairing 1회 읽기라 저렴하다.
 export async function listSessionsByCase(q: CaseActivityQuery): Promise<Record<string, CaseActivity>> {
   if (!q?.cases?.length) return {}
+  // 원격 인덱스 동기화는 배경에서 — 이번 응답은 로컬 인덱스로 즉시, 다음 조회(TTL)가 신선해진다.
+  void syncAllRemoteSessionIndexes()
   const [entries, pairings] = await Promise.all([readSessionIndex(), allJsPairings()])
   return buildCaseActivity(entries, pairings, q)
 }
 
 // 사건 대시보드: 어떤 사건에도 안 붙은 세션을 폴더별로 묶어 돌려준다.
 export async function listFolderActivity(q: CaseActivityQuery): Promise<FolderActivity[]> {
+  void syncAllRemoteSessionIndexes()
   const [entries, pairings] = await Promise.all([readSessionIndex(), allJsPairings()])
   return buildFolderActivity(entries, pairings, q ?? { cases: [] })
 }
@@ -956,22 +1201,25 @@ async function scanRemoteWorkLog(ssh: SshConn, days: number): Promise<SessionDay
 
 // 날짜별 작업일지: 로컬+원격 트랜스크립트 스캔을 합치고, 스캔이 닿지 못한 세션은 인덱스로 폴백.
 export async function listWorkLog(days = 30): Promise<WorkLogDay[]> {
-  const [entries, settings, local] = await Promise.all([
-    readSessionIndex(),
+  const [settings, local] = await Promise.all([
     getSettings().catch(() => ({}) as { sshProfiles?: SshProfile[] }),
     scanLocalWorkLog(days)
   ])
   const scans: WorkLogScanSource[] = [{ sourceKey: 'local', sessions: local }]
   const profiles = settings.sshProfiles ?? []
   const remotes = await Promise.all(
-    profiles.map(async (p) => ({
-      sourceKey: remoteSourceKey(p),
-      profileId: p.id,
-      sshLabel: p.label,
-      sessions: await scanRemoteWorkLog(p, days).catch(() => [])
-    }))
+    profiles.map(async (p) => {
+      // 트랜스크립트 스캔과 병렬로 원격 인덱스도 동기화 — 제목·요약이 작업일지에 반영된다.
+      const [sessions] = await Promise.all([
+        scanRemoteWorkLog(p, days).catch(() => [] as SessionDayScan[]),
+        syncRemoteSessionIndex(p).catch(() => {})
+      ])
+      return { sourceKey: remoteSourceKey(p), profileId: p.id, sshLabel: p.label, sessions }
+    })
   )
   scans.push(...remotes.filter((r) => r.sessions.length))
+  // 인덱스는 원격 동기화가 끝난 뒤 읽어야 방금 당겨온 제목·요약이 보인다.
+  const entries = await readSessionIndex()
   return mergeWorkLog(scans, entries, Date.now(), days)
 }
 

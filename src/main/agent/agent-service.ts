@@ -1888,7 +1888,10 @@ function sanitizeGeneratedTitle(raw: string | undefined): string | undefined {
 }
 
 function maybeGenerateSessionTitle(session: AgentSession): void {
-  if (session.provider !== 'claude' || session.source !== 'local') return
+  // 제목 생성은 로컬 SDK로 하므로 SSH 세션에도 가능 — 생성한 제목은 세션 인덱스에
+  // ssh 키로 저장돼 원격 인덱스 동기화로 다른 기기에서도 보인다.
+  if (session.provider !== 'claude') return
+  if (session.source === 'ssh' && !session.ssh) return
   if (session.titleGenRunning || !session.firstUserText) return
   const turns = session.turnCount ?? 0
   const due =
@@ -1955,7 +1958,8 @@ async function generateSessionTitle(session: AgentSession): Promise<void> {
       await rememberSessionMeta({
         sessionId: session.resumeSessionId,
         cwd: session.cwd,
-        generatedTitle: title
+        generatedTitle: title,
+        ssh: session.source === 'ssh' ? session.ssh : undefined
       })
     }
   } finally {
@@ -1980,7 +1984,8 @@ function sanitizeWorkSummary(raw: string | undefined): string | undefined {
 }
 
 function scheduleWorkSummary(session: AgentSession): void {
-  if (session.provider !== 'claude' || session.source !== 'local') return
+  if (session.provider !== 'claude') return
+  if (session.source === 'ssh' && !session.ssh) return
   if (!session.firstUserText) return
   if (session.workSummaryTimer) clearTimeout(session.workSummaryTimer)
   session.workSummaryTimer = setTimeout(() => {
@@ -1990,7 +1995,8 @@ function scheduleWorkSummary(session: AgentSession): void {
 }
 
 function flushWorkSummary(session: AgentSession): void {
-  if (session.provider !== 'claude' || session.source !== 'local') return
+  if (session.provider !== 'claude') return
+  if (session.source === 'ssh' && !session.ssh) return
   const turns = session.turnCount ?? 0
   if (turns < 1 || !session.firstUserText || !session.resumeSessionId) return
   if (session.workSummaryRunning || session.workSummaryAtTurn === turns) return
@@ -2054,7 +2060,8 @@ async function generateWorkSummary(session: AgentSession, turns: number): Promis
       cwd: session.cwd,
       workSummary: summary,
       workSummaryAt: Date.now(),
-      workSummaryAtTurn: turns
+      workSummaryAtTurn: turns,
+      ssh: session.source === 'ssh' ? session.ssh : undefined
     })
   } finally {
     clearTimeout(timer)
