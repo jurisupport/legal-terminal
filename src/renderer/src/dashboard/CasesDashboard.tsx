@@ -23,6 +23,9 @@ import {
 const SIGNUP_URL = 'https://jurisupport.com/signup'
 const CASES_URL = 'https://jurisupport.com/cases'
 
+// 설정창에서 토큰을 저장/삭제하면 이 이벤트로 대시보드가 즉시 다시 연결한다.
+export const JS_TOKEN_UPDATED_EVENT = 'lt-js-token-updated'
+
 const CASE_TYPE_KO: Record<string, string> = {
   civil: '민사',
   civilMain: '민사',
@@ -85,6 +88,8 @@ export default function CasesDashboard({
   onChanged?: () => void
 }): JSX.Element {
   const [tokenReady, setTokenReady] = useState<boolean | null>(null)
+  // 토큰이 저장돼 있는데 복호화가 안 되는 상태(앱 업데이트 후 키체인 접근 거부) — 재입력 안내용
+  const [tokenLocked, setTokenLocked] = useState(false)
   const [cases, setCases] = useState<JsCase[] | null>(
     () => readCachedCaseList({ status: 'active' }) ?? null
   )
@@ -144,10 +149,23 @@ export default function CasesDashboard({
   }
 
   useEffect(() => {
-    window.lt.js.hasToken().then((has) => {
-      setTokenReady(has)
-      if (has) load()
-    })
+    const applyTokenStatus = (st: 'ok' | 'missing' | 'locked', refresh: boolean): void => {
+      setTokenLocked(st === 'locked')
+      setTokenReady(st === 'ok')
+      if (st !== 'ok') return
+      if (refresh) {
+        clearCaseListCache()
+        load(undefined, true)
+      } else load()
+    }
+    window.lt.js.tokenStatus().then((st) => applyTokenStatus(st, false))
+    // 설정창에서 토큰을 바꾸면 즉시 반영
+    const onTokenUpdated = (): void => {
+      void window.lt.js.tokenStatus().then((st) => applyTokenStatus(st, true))
+    }
+    window.addEventListener(JS_TOKEN_UPDATED_EVENT, onTokenUpdated)
+    return () => window.removeEventListener(JS_TOKEN_UPDATED_EVENT, onTokenUpdated)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   useEffect(() => {
@@ -225,6 +243,12 @@ export default function CasesDashboard({
     return (
       <div className="dash-token">
         <h2>JuriSupport 연결</h2>
+        {tokenLocked && (
+          <p className="dash-err">
+            저장된 토큰을 불러오지 못했습니다. 앱 업데이트 후 키체인(암호 저장소) 접근이
+            초기화되면 생기는 현상입니다 — 아래에 토큰을 다시 붙여넣으면 됩니다.
+          </p>
+        )}
         <p className="muted">
           사건 관리·일정·당사자를 JuriSupport에서 가져와 이 화면에서 바로 다룹니다.
         </p>

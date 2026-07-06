@@ -49,7 +49,8 @@ import MarkdownEditor, {
 } from './editor/MarkdownEditor'
 import { markdownToPlainText, writeMarkdownClipboard } from './markdownClipboard'
 import FindBar from './search/FindBar'
-import CasesDashboard from './dashboard/CasesDashboard'
+import CasesDashboard, { JS_TOKEN_UPDATED_EVENT } from './dashboard/CasesDashboard'
+import { clearCaseListCache } from './dashboard/caseListCache'
 import UpcomingHearings from './dashboard/UpcomingHearings'
 import TodosDashboard from './dashboard/TodosDashboard'
 import TodayTodos from './dashboard/TodayTodos'
@@ -5219,6 +5220,15 @@ export default function App(): JSX.Element {
   // 토큰 변경 등으로 좌측 '다가오는 기일' 패널을 새로고침하기 위한 nonce
   const [jsNonce, setJsNonce] = useState(0)
   const [todoNonce, setTodoNonce] = useState(0)
+  // 설정창에서 JuriSupport 토큰을 바꾸면 기일·할 일 패널도 새로고침한다.
+  useEffect(() => {
+    const onTokenUpdated = (): void => {
+      setJsNonce((n) => n + 1)
+      setTodoNonce((n) => n + 1)
+    }
+    window.addEventListener(JS_TOKEN_UPDATED_EVENT, onTokenUpdated)
+    return () => window.removeEventListener(JS_TOKEN_UPDATED_EVENT, onTokenUpdated)
+  }, [])
   // 세션 목록 드롭다운 + 사건 필터('all' | jsId | '__folder__')
   const [sessionListOpen, setSessionListOpen] = useState(false)
   const [sessionFilter, setSessionFilter] = useState<string>('all')
@@ -9861,6 +9871,9 @@ function SettingsView(): JSX.Element {
   const [mdFontSizeInput, setMdFontSizeInput] = useState(String(DEFAULT_MD_FONT_SIZE))
   const [agentFontSizeInput, setAgentFontSizeInput] = useState(String(DEFAULT_AGENT_FONT_SIZE))
   const [notificationVolumeInput, setNotificationVolumeInput] = useState(DEFAULT_NOTIFICATION_VOLUME)
+  const [jsTokenStatus, setJsTokenStatus] = useState<'ok' | 'missing' | 'locked' | null>(null)
+  const [jsTokenInput, setJsTokenInput] = useState('')
+  const [jsTokenMsg, setJsTokenMsg] = useState('')
 
   useEffect(() => {
     const applySettings = (v: AppSettings): void => {
@@ -9872,10 +9885,35 @@ function SettingsView(): JSX.Element {
     }
     window.lt.settings.get().then(applySettings)
     window.lt.app.info().then((info) => setAppVersion(info.version)).catch(() => setAppVersion('알 수 없음'))
+    window.lt.js.tokenStatus().then(setJsTokenStatus).catch(() => setJsTokenStatus(null))
     const onSettingsUpdated = (e: Event): void => applySettings((e as CustomEvent<AppSettings>).detail)
     window.addEventListener(SETTINGS_UPDATED_EVENT, onSettingsUpdated)
     return () => window.removeEventListener(SETTINGS_UPDATED_EVENT, onSettingsUpdated)
   }, [])
+
+  // JuriSupport 토큰 저장/삭제 — 대시보드·기일 패널이 이벤트로 즉시 다시 연결된다.
+  const applyJsToken = async (token: string, doneMsg: string): Promise<void> => {
+    try {
+      await window.lt.js.setToken(token)
+      setJsTokenInput('')
+      setJsTokenMsg(doneMsg)
+      setJsTokenStatus(await window.lt.js.tokenStatus())
+      clearCaseListCache()
+      window.dispatchEvent(new Event(JS_TOKEN_UPDATED_EVENT))
+    } catch (e) {
+      setJsTokenMsg(`실패: ${String(e instanceof Error ? e.message : e)}`)
+    }
+  }
+
+  const saveJsToken = (): void => {
+    const t = jsTokenInput.trim()
+    if (t) void applyJsToken(t, '토큰을 저장했습니다. 사건 대시보드가 다시 연결됩니다.')
+  }
+
+  const deleteJsToken = (): void => {
+    if (!window.confirm('JuriSupport 토큰을 삭제할까요? 사건 대시보드 연결이 해제됩니다.')) return
+    void applyJsToken('', '토큰을 삭제했습니다.')
+  }
 
   useEffect(() => {
     setTermFontSizeInput(String(s.termFontSize ?? DEFAULT_TERM_FONT_SIZE))
@@ -10000,6 +10038,46 @@ function SettingsView(): JSX.Element {
             ))}
           </select>
         </div>
+      </section>
+
+      <section className="setting-row">
+        <div className="setting-label">
+          JuriSupport 토큰 <span className="muted small">— 사건 대시보드·기일·할 일 연동 (MCP)</span>
+        </div>
+        <div className="setting-value">
+          <code>
+            {jsTokenStatus === 'ok' && '연결됨 (토큰 저장됨)'}
+            {jsTokenStatus === 'missing' && '미설정'}
+            {jsTokenStatus === 'locked' && '불러오기 실패 — 다시 붙여넣기 필요'}
+            {jsTokenStatus === null && '확인 중…'}
+          </code>
+          <input
+            type="password"
+            className="setting-input"
+            placeholder="새 MCP 토큰(eyJ…) 붙여넣기"
+            value={jsTokenInput}
+            onChange={(e) => setJsTokenInput(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') saveJsToken()
+            }}
+          />
+          <button className="empty-action" onClick={saveJsToken} disabled={!jsTokenInput.trim()}>
+            저장
+          </button>
+          {jsTokenStatus !== 'missing' && jsTokenStatus !== null && (
+            <button className="empty-action" onClick={deleteJsToken}>
+              삭제
+            </button>
+          )}
+        </div>
+        {jsTokenStatus === 'locked' && (
+          <p className="muted small">
+            토큰이 저장돼 있지만 복호화하지 못했습니다. 앱 업데이트 후 키체인(암호 저장소) 접근이
+            초기화되면 생기는 현상으로, JuriSupport 웹 → 프로필 → MCP 연결에서 토큰을 복사해 다시
+            붙여넣으면 됩니다.
+          </p>
+        )}
+        {jsTokenMsg && <p className="muted small">{jsTokenMsg}</p>}
       </section>
 
       <section className="setting-row">

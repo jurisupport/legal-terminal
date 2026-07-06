@@ -63,6 +63,17 @@ export async function hasToken(): Promise<boolean> {
   return !!(await getToken())
 }
 
+// 토큰 상태 구분 — 'locked'는 토큰이 저장돼 있지만 복호화가 안 되는 경우다.
+// (무서명 배포라 앱 업데이트 후 macOS 키체인이 Safe Storage 접근을 거부하면 발생)
+// 이때는 "미설정"이 아니라 "토큰을 다시 붙여넣어 주세요"를 안내해야 한다.
+export type JsTokenStatus = 'ok' | 'missing' | 'locked'
+
+export async function tokenStatus(): Promise<JsTokenStatus> {
+  const enc = (await getSettings()).jurisupportTokenEnc
+  if (!enc) return 'missing'
+  return (await getToken()) ? 'ok' : 'locked'
+}
+
 // ── 저수준 HTTP ──
 async function rawPost(
   token: string,

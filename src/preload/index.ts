@@ -803,6 +803,7 @@ const api = {
   js: {
     setToken: (token: string): Promise<void> => ipcRenderer.invoke('js:setToken', token),
     hasToken: (): Promise<boolean> => ipcRenderer.invoke('js:hasToken'),
+    tokenStatus: (): Promise<'ok' | 'missing' | 'locked'> => ipcRenderer.invoke('js:tokenStatus'),
     listCases: (
       params?: {
         page?: number

@@ -622,6 +622,7 @@ ipcMain.handle('dialog:openCase', async () => {
 // ── JuriSupport(본체) MCP IPC ──
 ipcMain.handle('js:setToken', (_e, token: string) => js.setToken(token))
 ipcMain.handle('js:hasToken', () => js.hasToken())
+ipcMain.handle('js:tokenStatus', () => js.tokenStatus())
 ipcMain.handle('js:listCases', async (_e, params: Record<string, unknown>) => {
   try {
     return { ok: true, cases: await js.listCases(params ?? {}) }
