@@ -54,7 +54,17 @@ refresh_path() {
 ensure_claude() {
   refresh_path
   if command -v claude >/dev/null 2>&1; then
-    log "Claude Code found: $(command -v claude)"
+    local claude_version
+    claude_version="$(claude --version 2>/dev/null | head -1 || true)"
+    log "Claude Code found: $(command -v claude)${claude_version:+ (${claude_version})}"
+    if ask_yes_no "Update Claude Code to the latest version?" "LEGAL_TERMINAL_UPDATE_CLAUDE"; then
+      log "Updating Claude Code."
+      claude update || log "Claude Code update failed; keeping the current version."
+      refresh_path
+      log "Claude Code version now: $(claude --version 2>/dev/null | head -1 || echo unknown)"
+    else
+      log "Keeping the current Claude Code version."
+    fi
     return
   fi
 
@@ -74,9 +84,21 @@ jurisupport_plugins_installed() {
   claude plugin list 2>/dev/null | grep -E -q 'jurisupport@jurisupport-plugins|jurisupport-plugins|songmu-legal|korean-law'
 }
 
+run_jurisupport_plugins_bootstrap() {
+  curl -fsSL https://raw.githubusercontent.com/jurisupport/jurisupport-plugins/main/bootstrap.sh \
+    | JURISUPPORT_SKIP_LAWYER_PROFILE=1 JURISUPPORT_SKIP_LEGAL_TERMINAL=1 bash
+  refresh_path
+}
+
 install_jurisupport_plugins() {
   if jurisupport_plugins_installed; then
-    log "jurisupport-plugins already looks installed; skipping."
+    # 설치 여부만 보고 넘어가면 구버전이 계속 남는다 — 최신화 여부를 물어 재실행한다.
+    if ask_yes_no "jurisupport-plugins is already installed. Update it to the latest version?" "LEGAL_TERMINAL_UPDATE_JURI_SUPPORT"; then
+      log "Updating jurisupport-plugins."
+      run_jurisupport_plugins_bootstrap || log "jurisupport-plugins update failed; keeping the current version."
+    else
+      log "Keeping existing jurisupport-plugins."
+    fi
     return
   fi
 
@@ -86,9 +108,7 @@ install_jurisupport_plugins() {
   fi
 
   log "Installing jurisupport-plugins."
-  curl -fsSL https://raw.githubusercontent.com/jurisupport/jurisupport-plugins/main/bootstrap.sh \
-    | JURISUPPORT_SKIP_LAWYER_PROFILE=1 JURISUPPORT_SKIP_LEGAL_TERMINAL=1 bash
-  refresh_path
+  run_jurisupport_plugins_bootstrap
 }
 
 lawyer_profile_plugin_installed() {
@@ -96,9 +116,20 @@ lawyer_profile_plugin_installed() {
   claude plugin list 2>/dev/null | grep -q 'jurisupport-lawyer-profile'
 }
 
+run_lawyer_profile_plugin_installer() {
+  curl -fsSL https://raw.githubusercontent.com/jurisupport/jurisupport-lawyer-profile-plugin/main/install.sh \
+    | JURISUPPORT_LAWYER_PROFILE_SKIP_JURISUPPORT=1 JURISUPPORT_LAWYER_PROFILE_SKIP_LEGAL_TERMINAL=1 JURISUPPORT_CONNECT_MCP=0 bash
+  refresh_path
+}
+
 install_lawyer_profile_plugin() {
   if lawyer_profile_plugin_installed; then
-    log "JuriSupport lawyer profile plugin already looks installed; skipping."
+    if ask_yes_no "JuriSupport lawyer profile plugin is already installed. Update it to the latest version?" "LEGAL_TERMINAL_UPDATE_LAWYER_PROFILE"; then
+      log "Updating lawyer strength/profile plugin."
+      run_lawyer_profile_plugin_installer || log "Lawyer profile plugin update failed; keeping the current version."
+    else
+      log "Keeping existing lawyer strength/profile plugin."
+    fi
     return
   fi
 
@@ -108,9 +139,7 @@ install_lawyer_profile_plugin() {
   fi
 
   log "Installing lawyer strength/profile plugin."
-  curl -fsSL https://raw.githubusercontent.com/jurisupport/jurisupport-lawyer-profile-plugin/main/install.sh \
-    | JURISUPPORT_LAWYER_PROFILE_SKIP_JURISUPPORT=1 JURISUPPORT_LAWYER_PROFILE_SKIP_LEGAL_TERMINAL=1 JURISUPPORT_CONNECT_MCP=0 bash
-  refresh_path
+  run_lawyer_profile_plugin_installer
 }
 
 case "$(uname -s)" in

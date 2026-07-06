@@ -19,6 +19,7 @@ import {
   pathLeaf,
   searchNorm,
   type CaseActivity,
+  type CaseActivityMetaLike,
   type CaseActivityQuery,
   type FolderActivity
 } from './caseActivityData'
@@ -1041,20 +1042,33 @@ export async function listSessions(
 }
 
 // 사건 대시보드용: 세션 인덱스를 사건별로 그룹핑해 최근 작업을 돌려준다.
-// transcript 스캔 없이 인덱스 1회 + pairing 1회 읽기라 저렴하다.
+// 인덱스 + transcript 스캔(로컬 mtime 캐시, 원격 TTL 캐시)을 합쳐 작업일지와 같은 범위를 다룬다.
 export async function listSessionsByCase(q: CaseActivityQuery): Promise<Record<string, CaseActivity>> {
   if (!q?.cases?.length) return {}
   // 원격 인덱스 동기화는 배경에서 — 이번 응답은 로컬 인덱스로 즉시, 다음 조회(TTL)가 신선해진다.
   void syncAllRemoteSessionIndexes()
-  const [entries, pairings] = await Promise.all([readSessionIndex(), allJsPairings()])
-  return buildCaseActivity(entries, pairings, q)
+  const [entries, pairings, scans] = await Promise.all([
+    readSessionIndex(),
+    allJsPairings(),
+    collectWorkLogScans(30, false)
+  ])
+  // 인덱스에 없는 세션도 transcript 스캔에서 보완해 작업일지와 같은 범위를 다룬다.
+  return buildCaseActivity([...entries, ...syntheticScanMetas(scans, entries)], pairings, q)
 }
 
 // 사건 대시보드: 어떤 사건에도 안 붙은 세션을 폴더별로 묶어 돌려준다.
 export async function listFolderActivity(q: CaseActivityQuery): Promise<FolderActivity[]> {
   void syncAllRemoteSessionIndexes()
-  const [entries, pairings] = await Promise.all([readSessionIndex(), allJsPairings()])
-  return buildFolderActivity(entries, pairings, q ?? { cases: [] })
+  const [entries, pairings, scans] = await Promise.all([
+    readSessionIndex(),
+    allJsPairings(),
+    collectWorkLogScans(30, false)
+  ])
+  return buildFolderActivity(
+    [...entries, ...syntheticScanMetas(scans, entries)],
+    pairings,
+    q ?? { cases: [] }
+  )
 }
 
 // ── 날짜별 작업일지: 트랜스크립트 타임스탬프를 스캔해 세션을 날짜별로 쪼갠다 ──
@@ -1203,11 +1217,15 @@ PY
 `.trim()
 }
 
+const remoteWorkLogInflight = new Map<string, Promise<SessionDayScan[]>>()
+
 async function scanRemoteWorkLog(ssh: SshConn, days: number): Promise<SessionDayScan[]> {
   const key = remoteSourceKey(ssh)
   const cached = remoteWorkLogCache.get(key)
   if (cached && Date.now() - cached.fetchedAt < REMOTE_WORK_LOG_TTL_MS) return cached.sessions
-  const sessions = await new Promise<SessionDayScan[]>((resolve) => {
+  const inflight = remoteWorkLogInflight.get(key)
+  if (inflight) return inflight
+  const run = new Promise<SessionDayScan[]>((resolve) => {
     execFile(
       sshBin,
       [...sshBaseArgs(ssh), remoteWorkLogScript(days)],
@@ -1226,30 +1244,84 @@ async function scanRemoteWorkLog(ssh: SshConn, days: number): Promise<SessionDay
       }
     )
   })
-  if (sessions.length) remoteWorkLogCache.set(key, { fetchedAt: Date.now(), sessions })
-  return sessions
+    .then((sessions) => {
+      if (sessions.length) remoteWorkLogCache.set(key, { fetchedAt: Date.now(), sessions })
+      return sessions
+    })
+    .finally(() => {
+      remoteWorkLogInflight.delete(key)
+    })
+  remoteWorkLogInflight.set(key, run)
+  return run
 }
 
-// 날짜별 작업일지: 로컬+원격 트랜스크립트 스캔을 합치고, 스캔이 닿지 못한 세션은 인덱스로 폴백.
-export async function listWorkLog(days = 30): Promise<WorkLogDay[]> {
+// 캐시가 신선하면 그대로, 아니면 배경에서 갱신을 시작하고 옛 캐시(없으면 빈 목록)를 즉시 돌려준다.
+// 사건 대시보드처럼 응답 지연이 곤란한 호출자용.
+function cachedRemoteWorkLog(ssh: SshConn, days: number): Promise<SessionDayScan[]> {
+  const cached = remoteWorkLogCache.get(remoteSourceKey(ssh))
+  if (cached && Date.now() - cached.fetchedAt < REMOTE_WORK_LOG_TTL_MS) {
+    return Promise.resolve(cached.sessions)
+  }
+  void scanRemoteWorkLog(ssh, days).catch(() => {})
+  return Promise.resolve(cached?.sessions ?? [])
+}
+
+// 작업일지·사건별 이력 공용 transcript 스캔 수집.
+// waitRemote=false면 원격 스캔은 캐시만 쓰고 만료 시 배경 갱신한다.
+async function collectWorkLogScans(days: number, waitRemote: boolean): Promise<WorkLogScanSource[]> {
   const [settings, local] = await Promise.all([
     getSettings().catch(() => ({}) as { sshProfiles?: SshProfile[] }),
     scanLocalWorkLog(days)
   ])
   const scans: WorkLogScanSource[] = [{ sourceKey: 'local', sessions: local }]
-  const profiles = settings.sshProfiles ?? []
   const remotes = await Promise.all(
-    profiles.map(async (p) => {
-      // 트랜스크립트 스캔과 병렬로 원격 인덱스도 동기화 — 제목·요약이 작업일지에 반영된다.
-      const [sessions] = await Promise.all([
-        scanRemoteWorkLog(p, days).catch(() => [] as SessionDayScan[]),
-        syncRemoteSessionIndex(p).catch(() => {})
-      ])
+    (settings.sshProfiles ?? []).map(async (p) => {
+      // 트랜스크립트 스캔과 병렬로 원격 인덱스도 동기화 — 제목·요약·사건 연결이 함께 온다.
+      const sessions = waitRemote
+        ? await Promise.all([
+            scanRemoteWorkLog(p, days).catch(() => [] as SessionDayScan[]),
+            syncRemoteSessionIndex(p).catch(() => {})
+          ]).then(([s]) => s)
+        : await cachedRemoteWorkLog(p, days)
       return { sourceKey: remoteSourceKey(p), profileId: p.id, sshLabel: p.label, sessions }
     })
   )
   scans.push(...remotes.filter((r) => r.sessions.length))
-  // 인덱스는 원격 동기화가 끝난 뒤 읽어야 방금 당겨온 제목·요약이 보인다.
+  return scans
+}
+
+// 작업일지 스캔에는 있는데 인덱스에는 없는 세션(인덱스 유실분·앱 밖에서 돌린 세션)을
+// 사건 매칭용 합성 메타로 만든다 — "작업일지엔 보이는데 사건 아래엔 없다"를 없앤다.
+function syntheticScanMetas(
+  scans: WorkLogScanSource[],
+  indexed: SessionMeta[]
+): CaseActivityMetaLike[] {
+  const known = new Set(indexed.map((meta) => meta.sessionId))
+  const out: CaseActivityMetaLike[] = []
+  for (const source of scans) {
+    for (const scan of source.sessions) {
+      if (!scan.cwd || !scan.days.length || known.has(scan.sessionId)) continue
+      const last = scan.days[scan.days.length - 1]
+      out.push({
+        sessionId: scan.sessionId,
+        cwd: scan.cwd,
+        updatedAt: new Date(last.lastTs).toISOString(),
+        mtime: last.lastTs,
+        title: last.firstText,
+        folderName: pathLeaf(scan.cwd),
+        profileId: source.profileId,
+        sshLabel: source.sshLabel,
+        matchByFolder: true
+      })
+    }
+  }
+  return out
+}
+
+// 날짜별 작업일지: 로컬+원격 트랜스크립트 스캔을 합치고, 스캔이 닿지 못한 세션은 인덱스로 폴백.
+export async function listWorkLog(days = 30): Promise<WorkLogDay[]> {
+  const scans = await collectWorkLogScans(days, true)
+  // 인덱스는 원격 동기화(collectWorkLogScans 내)가 끝난 뒤 읽어야 방금 당겨온 제목·요약이 보인다.
   const entries = await readSessionIndex()
   return mergeWorkLog(scans, entries, Date.now(), days)
 }

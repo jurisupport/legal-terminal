@@ -346,10 +346,46 @@ function Ensure-NpmForClaudeCode {
   }
 }
 
+function Update-ClaudeCode {
+  $previousErrorActionPreference = $ErrorActionPreference
+  $ErrorActionPreference = 'Continue'
+  try {
+    $npm = Get-InstallerCommand -Names @('npm.cmd', 'npm')
+    if ($npm) {
+      Write-InstallStep 'npm으로 Claude Code를 최신 버전으로 업데이트합니다.'
+      & $npm install -g '@anthropic-ai/claude-code@latest' 2>&1 | ForEach-Object { Write-Host $_ }
+    } else {
+      Write-InstallStep 'claude update로 Claude Code를 업데이트합니다.'
+      & (Get-InstallerCommand -Names @('claude.cmd', 'claude')) update 2>&1 | ForEach-Object { Write-Host $_ }
+    }
+    if ($LASTEXITCODE -ne 0) {
+      Write-InstallStep '업데이트가 실패해 기존 버전을 유지합니다.'
+    }
+  } finally {
+    $ErrorActionPreference = $previousErrorActionPreference
+  }
+  Refresh-ProcessPath
+  $claudeVersion = & (Get-InstallerCommand -Names @('claude.cmd', 'claude')) --version 2>$null
+  Write-InstallStep "현재 Claude Code 버전: $claudeVersion"
+}
+
 function Ensure-ClaudeCode {
   if (Test-InstallerCommand -Names @('claude.cmd', 'claude')) {
     $claude = Get-InstallerCommand -Names @('claude.cmd', 'claude')
-    Write-InstallStep "Claude Code를 찾았습니다: $claude"
+    $claudeVersion = & $claude --version 2>$null
+    Write-InstallStep "Claude Code를 찾았습니다: $claude ($claudeVersion)"
+
+    # 설치 여부만 확인하고 넘어가면 구버전이 계속 남는다 — 최신화 여부를 묻는다.
+    $shouldUpdateClaude = Read-InstallerYesNo `
+      -Question 'Claude Code를 최신 버전으로 업데이트할까요?' `
+      -DefaultYes $true `
+      -OptionName 'UpdateClaude'
+
+    if ($shouldUpdateClaude) {
+      Update-ClaudeCode
+    } else {
+      Write-InstallStep '기존 Claude Code 버전을 유지합니다.'
+    }
     return
   }
 
@@ -480,19 +516,27 @@ function Test-LawyerProfilePluginInstalled {
 }
 
 function Invoke-LawyerProfilePluginInstaller {
-  $shouldInstall = Read-InstallerYesNo `
-    -Question '변호사 강점찾기 플러그인을 설치할까요?' `
-    -DefaultYes $true `
-    -OptionName 'InstallLawyerProfile'
-
-  if (-not $shouldInstall) {
-    Write-InstallStep '변호사 강점찾기 플러그인 설치를 건너뜁니다.'
-    return
-  }
-
   if (Test-LawyerProfilePluginInstalled) {
-    Write-InstallStep '변호사 강점찾기 플러그인이 이미 설치된 것으로 보여 건너뜁니다.'
-    return
+    # 설치 스크립트 재실행이 곧 업데이트다 — 설치 여부만 보고 건너뛰지 않는다.
+    $shouldUpdate = Read-InstallerYesNo `
+      -Question '변호사 강점찾기 플러그인이 이미 설치되어 있습니다. 최신 버전으로 업데이트할까요?' `
+      -DefaultYes $true `
+      -OptionName 'UpdateLawyerProfile'
+
+    if (-not $shouldUpdate) {
+      Write-InstallStep '기존 변호사 강점찾기 플러그인을 유지합니다.'
+      return
+    }
+  } else {
+    $shouldInstall = Read-InstallerYesNo `
+      -Question '변호사 강점찾기 플러그인을 설치할까요?' `
+      -DefaultYes $true `
+      -OptionName 'InstallLawyerProfile'
+
+    if (-not $shouldInstall) {
+      Write-InstallStep '변호사 강점찾기 플러그인 설치를 건너뜁니다.'
+      return
+    }
   }
 
   $previousSkipJuriSupport = $env:JURISUPPORT_LAWYER_PROFILE_SKIP_JURISUPPORT
@@ -610,8 +654,11 @@ $juriSupportOption = Get-InstallerOption -Name 'InstallJuriSupport' -DefaultValu
 if ($null -ne $juriSupportOption) {
   $shouldInstallJuriSupport = ConvertTo-InstallerBoolean -Value $juriSupportOption -DefaultValue $false
 } elseif (Test-JuriSupportPluginsInstalled) {
-  Write-InstallStep 'jurisupport-plugins가 이미 설치된 것으로 보여 준비 과정을 건너뜁니다.'
-  $shouldInstallJuriSupport = $false
+  # 설치 여부만 보고 건너뛰면 구버전이 계속 남는다 — 최신화 여부를 물어 준비 스크립트를 재실행한다.
+  $shouldInstallJuriSupport = Read-InstallerYesNo `
+    -Question 'jurisupport-plugins가 이미 설치되어 있습니다. 최신 버전으로 업데이트할까요?' `
+    -DefaultYes $true `
+    -OptionName 'UpdateJuriSupport'
 } else {
   $shouldInstallJuriSupport = Read-InstallerYesNo `
     -Question 'jurisupport-plugins(송무 플러그인/검색 도구)를 설치할까요?' `

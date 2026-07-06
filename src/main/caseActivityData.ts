@@ -64,6 +64,9 @@ export interface CaseActivityMetaLike {
   sshLabel?: string
   workSummary?: string
   workSummaryAt?: number
+  // transcript 스캔에서 온 합성 메타 — 사건 pairing 폴더와 이름이 같으면 매칭을 허용한다.
+  // (스캔 cwd는 심링크가 풀린 실제 경로라 pairing 경로와 문자열이 다를 수 있다)
+  matchByFolder?: boolean
 }
 
 export type JsPairingMap = Record<string, { drafts: string; records?: string }>
@@ -81,7 +84,8 @@ interface CaseMatcher {
   caseNo: string // searchNorm 적용
   caseName: string
   localDrafts: string // comparablePath 적용
-  remote?: { profileId: string; path: string }
+  localDraftsLeaf: string // searchNorm 적용한 pairing 폴더명 (matchByFolder 항목용)
+  remote?: { profileId: string; path: string; leaf: string }
 }
 
 function buildMatcher(c: CaseActivityCaseRef, pairings: JsPairingMap): CaseMatcher {
@@ -90,13 +94,20 @@ function buildMatcher(c: CaseActivityCaseRef, pairings: JsPairingMap): CaseMatch
   for (const [key, p] of Object.entries(pairings)) {
     if (!key.startsWith('remote:') || !key.endsWith(`:${c.id}`)) continue
     const parsed = parseRemoteDrafts(p.drafts)
-    if (parsed) remote = { profileId: parsed.profileId, path: comparablePath(parsed.path) }
+    if (parsed) {
+      remote = {
+        profileId: parsed.profileId,
+        path: comparablePath(parsed.path),
+        leaf: searchNorm(pathLeaf(parsed.path))
+      }
+    }
   }
   return {
     id: c.id,
     caseNo: searchNorm(c.caseNumber ?? undefined),
     caseName: searchNorm(c.caseName ?? undefined),
     localDrafts: comparablePath(local),
+    localDraftsLeaf: searchNorm(pathLeaf(local)),
     remote
   }
 }
@@ -111,6 +122,15 @@ function metaMatchesCase(meta: CaseActivityMetaLike, m: CaseMatcher): boolean {
   const cwd = comparablePath(meta.cwd)
   if (m.localDrafts && cwd === m.localDrafts && !meta.profileId) return true
   if (m.remote && meta.profileId === m.remote.profileId && cwd === m.remote.path) return true
+  // 스캔 합성 메타: cwd가 심링크 풀린 경로라 문자열이 달라도, pairing 폴더명과
+  // 정확히 같으면 매칭 (폴더명은 사건별로 고유하게 짓는 관행이라 완전일치만 허용)
+  if (meta.matchByFolder) {
+    const leaf = searchNorm(pathLeaf(meta.cwd))
+    if (leaf.length >= 2) {
+      if (m.localDraftsLeaf && leaf === m.localDraftsLeaf && !meta.profileId) return true
+      if (m.remote && meta.profileId === m.remote.profileId && leaf === m.remote.leaf) return true
+    }
+  }
   if (!m.caseNo && !metaNo && m.caseName && searchNorm(meta.caseName) === m.caseName) return true
   return false
 }

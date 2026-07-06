@@ -279,6 +279,25 @@ function createWindow(setMain = true, opts?: { docOnly?: boolean; termOnly?: boo
     if (mainWindow === win) mainWindow = null
   })
 
+  // 입력란 우클릭 메뉴 — Electron은 기본 컨텍스트 메뉴가 없어 우클릭 붙여넣기가 안 된다.
+  // (터미널처럼 렌더러가 contextmenu를 preventDefault한 곳에서는 이 이벤트가 오지 않는다.)
+  win.webContents.on('context-menu', (_event, params) => {
+    const template: Electron.MenuItemConstructorOptions[] = params.isEditable
+      ? [
+          { role: 'undo', label: '실행 취소' },
+          { type: 'separator' },
+          { role: 'cut', label: '잘라내기' },
+          { role: 'copy', label: '복사' },
+          { role: 'paste', label: '붙여넣기' },
+          { type: 'separator' },
+          { role: 'selectAll', label: '모두 선택' }
+        ]
+      : params.selectionText.trim()
+        ? [{ role: 'copy', label: '복사' }]
+        : []
+    if (template.length) Menu.buildFromTemplate(template).popup({ window: win })
+  })
+
   win.webContents.on('before-input-event', (event, input) => {
     const key = input.key.toLowerCase()
     const isW = key === 'w' || input.code === 'KeyW'
@@ -2557,8 +2576,14 @@ app.whenReady().then(() => {
   if (process.platform === 'win32') app.setAppUserModelId('kr.lawpid.legalterminal')
   applyDockIcon()
   // 기본 메뉴 제거 — 기본 메뉴가 Ctrl+W를 '창 닫기'에 바인딩해 터미널 Ctrl+W가 창을 닫는 문제 방지.
+  // 단 macOS는 메뉴가 아예 없으면 Cmd+C/V 같은 편집 단축키 자체가 죽으므로(설정창 토큰
+  // 붙여넣기 불가) 편집 롤만 담은 최소 메뉴를 단다 — 여기에는 Cmd+W 바인딩이 없다.
   // (메뉴바는 autoHideMenuBar로 이미 숨겨져 있어 UX 변화 없음. Ctrl+W는 렌더러에서 탭 닫기로 처리.)
-  Menu.setApplicationMenu(null)
+  if (process.platform === 'darwin') {
+    Menu.setApplicationMenu(Menu.buildFromTemplate([{ role: 'appMenu' }, { role: 'editMenu' }]))
+  } else {
+    Menu.setApplicationMenu(null)
+  }
   createWindow()
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()

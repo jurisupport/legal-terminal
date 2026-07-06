@@ -191,4 +191,48 @@ function dateKey(ts) {
   assert.ok(!out.flatMap((f) => f.sessions).some((s) => s.sessionId === 'case'))
 }
 
+// 10) 스캔 합성 메타(matchByFolder): 심링크 풀린 경로라도 pairing 폴더명 완전일치면 매칭
+{
+  const pairings = {
+    c1: { drafts: '/Users/u/OneDrive/작성서류/SKT' },
+    'remote:office:c2': { drafts: 'ssh://office/Users/u/OneDrive/작성서류/지미옥' }
+  }
+  const entries = [
+    // 로컬: 스캔 cwd가 CloudStorage 실경로 — 문자열은 다르지만 폴더명이 같다
+    meta({
+      sessionId: 'scan1',
+      cwd: '/Users/u/Library/CloudStorage/OneDrive-개인/작성서류/SKT',
+      matchByFolder: true,
+      mtime: now - 1000
+    }),
+    // 원격: 프로필 일치 + 폴더명 일치
+    meta({
+      sessionId: 'scan2',
+      cwd: '/Users/u/Library/CloudStorage/OneDrive-개인/작성서류/지미옥',
+      profileId: 'office',
+      matchByFolder: true,
+      mtime: now - 2000
+    }),
+    // matchByFolder 없는 일반 인덱스 항목은 폴더명만 같아선 매칭되지 않는다 (기존 보수적 규칙 유지)
+    meta({
+      sessionId: 'plain',
+      cwd: '/Users/u/Library/CloudStorage/OneDrive-개인/작성서류/SKT',
+      mtime: now - 3000
+    }),
+    // 프로필이 다르면 원격 폴더명이 같아도 제외
+    meta({
+      sessionId: 'scan3',
+      cwd: '/other/지미옥',
+      profileId: 'home',
+      matchByFolder: true,
+      mtime: now - 4000
+    })
+  ]
+  const out = buildCaseActivity(entries, pairings, {
+    cases: [{ id: 'c1' }, { id: 'c2' }]
+  })
+  assert.deepEqual(out.c1.sessions.map((s) => s.sessionId), ['scan1'])
+  assert.deepEqual(out.c2.sessions.map((s) => s.sessionId), ['scan2'])
+}
+
 console.log('case activity ok')
