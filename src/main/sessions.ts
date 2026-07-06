@@ -31,7 +31,15 @@ import {
   type WorkLogDay,
   type WorkLogScanSource
 } from './workLogData'
-import { allJsPairings } from './caseStore'
+import { allCasePairingRecords, allJsPairings, mergeCasePairingRecords } from './caseStore'
+import {
+  CASE_PAIRING_FILE_VERSION,
+  MAX_CASE_PAIRING_ENTRIES,
+  fromRemoteLocalCaseForm,
+  isCasePairingRecord,
+  toRemoteLocalCaseForm,
+  type CasePairingRecord
+} from './caseSyncData'
 import { getSettings } from './settings'
 
 // claude Code 세션 transcript: ~/.claude/projects/<인코딩폴더>/<sessionId>.jsonl
@@ -430,10 +438,11 @@ async function remoteCwdAliases(ssh: SshConn, cwd: string): Promise<Set<string>>
   return aliases
 }
 
-// ── 원격 세션 인덱스 동기화 ──────────────────────────────────────────────
-// 각 SSH 호스트의 ~/.claude/legal-terminal-sessions.json 이 그 호스트 세션 메타의 원본이다.
-// 이 기기가 기록한 그 호스트의 세션 메타를 stdin으로 밀어 넣으면(푸시) 원격이 병합·저장한 뒤
-// 전체 항목을 돌려주고(풀), 그것을 로컬 인덱스에 합친다 — SSH 왕복 1회로 양방향 동기화.
+// ── 원격 세션 인덱스·사건 폴더 지정 동기화 ─────────────────────────────────
+// 각 SSH 호스트의 ~/.claude/legal-terminal-sessions.json(세션 메타)과
+// ~/.claude/legal-terminal-cases.json(사건→폴더 지정)이 그 호스트 데이터의 원본이다.
+// 이 기기가 기록한 그 호스트의 항목을 stdin으로 밀어 넣으면(푸시) 원격이 병합·저장한 뒤
+// 전체 항목을 돌려주고(풀), 그것을 로컬에 합친다 — 파일당 SSH 왕복 1회로 양방향 동기화.
 
 const REMOTE_INDEX_SYNC_TTL_MS = 45_000
 const REMOTE_INDEX_PUSH_DEBOUNCE_MS = 3_000
@@ -492,12 +501,70 @@ sys.stdout.write(json.dumps(entries, ensure_ascii=False))
   ].join('\n')
 }
 
-// 푸시 항목을 stdin으로 보내고 병합된 원격 인덱스를 받는다. 실패(오프라인·python3 없음)는 null.
-function execRemoteIndexMerge(ssh: SshConn, push: SessionMetaRecord[]): Promise<SessionMetaRecord[] | null> {
+// 사건→폴더 지정 병합 스크립트 — 규칙은 caseSyncData.mergeCasePair와 동일해야 한다:
+// updatedAt이 새로운 쪽이 이기고, records는 drafts가 같을 때만 옛 항목에서 보충.
+function remoteCaseMergeCommand(): string {
+  const py = `
+import json, os, sys
+path = os.path.expanduser("~/.claude/legal-terminal-cases.json")
+REQUIRED = ("key", "drafts", "updatedAt")
+def valid(entry):
+    if not (isinstance(entry, dict) and all(isinstance(entry.get(k), str) for k in REQUIRED)):
+        return False
+    rec = entry.get("records")
+    return rec is None or isinstance(rec, str)
+def load():
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except Exception:
+        return []
+    entries = data.get("entries") if isinstance(data, dict) else None
+    return [e for e in entries if valid(e)] if isinstance(entries, list) else []
+try:
+    incoming = json.load(sys.stdin)
+except Exception:
+    incoming = []
+if not isinstance(incoming, list):
+    incoming = []
+by = {e["key"]: e for e in load()}
+for e in incoming:
+    if not valid(e):
+        continue
+    old = by.get(e["key"])
+    if old is None:
+        by[e["key"]] = e
+        continue
+    newer, older = (e, old) if e["updatedAt"] >= old["updatedAt"] else (old, e)
+    merged = dict(newer)
+    if not merged.get("records") and older.get("records") and older.get("drafts") == merged.get("drafts"):
+        merged["records"] = older["records"]
+    by[e["key"]] = merged
+entries = sorted(by.values(), key=lambda x: x["updatedAt"], reverse=True)[:${MAX_CASE_PAIRING_ENTRIES}]
+tmp = path + "." + str(os.getpid()) + ".tmp"
+with open(tmp, "w", encoding="utf-8") as fh:
+    json.dump({"version": ${CASE_PAIRING_FILE_VERSION}, "entries": entries}, fh, ensure_ascii=False)
+os.replace(tmp, path)
+sys.stdout.write(json.dumps(entries, ensure_ascii=False))
+`.trim()
+  return [
+    'mkdir -p "$HOME/.claude" 2>/dev/null',
+    'command -v python3 >/dev/null 2>&1 || exit 0',
+    `python3 -c ${shq(py)}`
+  ].join('\n')
+}
+
+// 푸시 항목을 stdin으로 보내고 병합된 원격 파일 전체를 배열로 받는다.
+// 실패(오프라인·python3 없음·타임아웃)는 null — 항목 검증은 호출부에서 한다.
+function execRemoteJsonExchange(
+  ssh: SshConn,
+  command: string,
+  payload: unknown
+): Promise<unknown[] | null> {
   return new Promise((resolve) => {
     let proc: ReturnType<typeof spawn>
     try {
-      proc = spawn(sshBin, [...sshBaseArgs(ssh), remoteIndexMergeCommand()], { windowsHide: true })
+      proc = spawn(sshBin, [...sshBaseArgs(ssh), command], { windowsHide: true })
     } catch {
       resolve(null)
       return
@@ -505,7 +572,7 @@ function execRemoteIndexMerge(ssh: SshConn, push: SessionMetaRecord[]): Promise<
     const chunks: Buffer[] = []
     let outBytes = 0
     let settled = false
-    const finish = (value: SessionMetaRecord[] | null): void => {
+    const finish = (value: unknown[] | null): void => {
       if (settled) return
       settled = true
       clearTimeout(timer)
@@ -534,7 +601,7 @@ function execRemoteIndexMerge(ssh: SshConn, push: SessionMetaRecord[]): Promise<
       }
       try {
         const parsed = JSON.parse(out) as unknown
-        finish(Array.isArray(parsed) ? parsed.filter(isSessionMetaRecord) : null)
+        finish(Array.isArray(parsed) ? parsed : null)
       } catch {
         finish(null)
       }
@@ -542,7 +609,7 @@ function execRemoteIndexMerge(ssh: SshConn, push: SessionMetaRecord[]): Promise<
     proc.stdin?.on('error', () => {
       /* python3 없음 등으로 원격이 먼저 종료하면 EPIPE — close에서 처리된다. */
     })
-    proc.stdin?.end(JSON.stringify(push))
+    proc.stdin?.end(JSON.stringify(payload))
   })
 }
 
@@ -572,15 +639,24 @@ async function findSshProfile(ssh: SshConn): Promise<SshProfile | undefined> {
 }
 
 async function runRemoteIndexSync(ssh: SshConn): Promise<void> {
+  const profile = await findSshProfile(ssh)
+  await Promise.all([
+    runRemoteSessionExchange(ssh, profile),
+    runRemoteCaseExchange(ssh, profile)
+  ])
+}
+
+async function runRemoteSessionExchange(ssh: SshConn, profile?: SshProfile): Promise<void> {
   const srcKey = remoteSourceKey(ssh)
   const local = await readSessionIndex()
   // 매번 이 소스의 전체 항목을 푸시한다 — 이전 푸시가 유실됐어도 다음 동기화가 복구한다.
   const push = local
     .filter((meta) => meta.sourceKey === srcKey)
     .map((meta) => toRemoteLocalForm(meta as unknown as SessionMetaRecord))
-  const remoteEntries = await execRemoteIndexMerge(ssh, push)
+  const remoteEntries = (await execRemoteJsonExchange(ssh, remoteIndexMergeCommand(), push))?.filter(
+    isSessionMetaRecord
+  )
   if (!remoteEntries) return
-  const profile = await findSshProfile(ssh)
   const conn: SshConn = {
     host: ssh.host,
     user: ssh.user,
@@ -604,6 +680,23 @@ async function runRemoteIndexSync(ssh: SshConn): Promise<void> {
     const { entries, changed } = mergeMetaEntries(current as unknown as SessionMetaRecord[], pulled)
     if (changed) await writeSessionIndex(entries as unknown as SessionMeta[])
   })
+}
+
+// 사건→폴더 지정도 같은 왕복으로 동기화한다. remote:<프로필id>:… 키 변환에
+// 프로필 id가 필요하므로, 저장된 프로필이 없는 즉석 접속은 건너뛴다.
+async function runRemoteCaseExchange(ssh: SshConn, profile?: SshProfile): Promise<void> {
+  if (!profile?.id) return
+  const local = await allCasePairingRecords()
+  const push = local
+    .map((rec) => toRemoteLocalCaseForm(rec, profile.id))
+    .filter((rec): rec is CasePairingRecord => !!rec)
+  const remoteEntries = await execRemoteJsonExchange(ssh, remoteCaseMergeCommand(), push)
+  if (!remoteEntries) return
+  const pulled = remoteEntries
+    .filter(isCasePairingRecord)
+    .map((rec) => fromRemoteLocalCaseForm(rec, profile.id))
+    .filter((rec): rec is CasePairingRecord => !!rec)
+  if (pulled.length) await mergeCasePairingRecords(pulled)
 }
 
 // TTL 안이면 재사용, 동시 호출은 한 번만 실행. 실패해도 다음 TTL에 재시도한다.
@@ -650,6 +743,35 @@ export async function syncAllRemoteSessionIndexes(
   await Promise.all(
     (settings.sshProfiles ?? []).map((p) => syncRemoteSessionIndex(p, maxAgeMs).catch(() => {}))
   )
+}
+
+function pairingKeyProfile(id: string): Promise<SshProfile | undefined> {
+  if (!id.startsWith('remote:')) return Promise.resolve(undefined)
+  const profileId = id.slice('remote:'.length).split(':')[0]
+  if (!profileId) return Promise.resolve(undefined)
+  return getSettings()
+    .then((s) => s.sshProfiles?.find((p) => p.id === profileId))
+    .catch(() => undefined)
+}
+
+// 원격 사건의 폴더 지정을 읽기 전에 그 호스트와 한 번 동기화한다(TTL 안이면 즉시 반환).
+// 첫 조회가 호스트 응답을 오래 기다리지 않도록 timeoutMs에서 끊는다 — 동기화는 배경에서 계속된다.
+export async function ensureRemoteCasePairingFresh(id: string, timeoutMs = 4000): Promise<void> {
+  const profile = await pairingKeyProfile(id)
+  if (!profile) return
+  await Promise.race([
+    syncRemoteSessionIndex(profile).catch(() => {}),
+    new Promise<void>((resolve) => {
+      const timer = setTimeout(resolve, timeoutMs)
+      timer.unref?.()
+    })
+  ])
+}
+
+// 폴더 지정 저장 직후 해당 호스트로 푸시를 예약한다 (case:setJsPairing IPC에서 호출).
+export async function scheduleCasePairingPush(id: string): Promise<void> {
+  const profile = await pairingKeyProfile(id)
+  if (profile) scheduleRemoteIndexPush(profile)
 }
 
 async function listTranscripts(): Promise<TranscriptRef[]> {

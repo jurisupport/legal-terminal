@@ -47,12 +47,14 @@ import {
 import type { SshProfile } from './settings'
 import {
   currentSession,
+  ensureRemoteCasePairingFresh,
   listFolderActivity,
   listSessions,
   listSessionsByCase,
   listWorkLog,
   readSessionTranscript,
   rememberSessionMeta,
+  scheduleCasePairingPush,
   type SessionSearchContext
 } from './sessions'
 import type { CaseActivityQuery } from './caseActivityData'
@@ -807,10 +809,15 @@ ipcMain.handle('case:getPairing', (_e, drafts: string) => getPairing(drafts))
 ipcMain.handle('case:setPairing', (_e, p: { drafts: string; records: string }) =>
   setPairing(p.drafts, p.records)
 )
-ipcMain.handle('case:getJsPairing', (_e, id: string) => getJsPairing(id))
-ipcMain.handle('case:setJsPairing', (_e, p: { id: string; drafts: string; records?: string }) =>
-  setJsPairing(p.id, { drafts: p.drafts, records: p.records })
-)
+ipcMain.handle('case:getJsPairing', async (_e, id: string) => {
+  // 원격 사건이면 그 호스트와 먼저 동기화 — 다른 기기에서 지정한 폴더가 바로 보이게.
+  await ensureRemoteCasePairingFresh(id)
+  return getJsPairing(id)
+})
+ipcMain.handle('case:setJsPairing', async (_e, p: { id: string; drafts: string; records?: string }) => {
+  await setJsPairing(p.id, { drafts: p.drafts, records: p.records })
+  void scheduleCasePairingPush(p.id)
+})
 ipcMain.handle('case:history', () => listHistory())
 ipcMain.handle('case:addHistory', (_e, entry: { drafts: string; records?: string; name: string }) =>
   addHistory(entry)
