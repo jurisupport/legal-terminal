@@ -12,6 +12,7 @@ import { isCommittedEnter, isImeComposing } from '../ime'
 type SpeakerRole = 'court' | 'plaintiff' | 'defendant' | 'preparation' | 'other'
 type SaveStatus = 'idle' | 'saving' | 'saved' | 'error'
 type JsSyncStatus = 'idle' | 'syncing' | 'synced' | 'error'
+type LoadState = 'idle' | 'loading' | 'error'
 
 export interface HearingRecordCase {
   jsId?: string
@@ -207,6 +208,31 @@ export function buildHearingRecordPath(
   const date = ymd(dateFromHearing(hearing))
   const caseNo = safeFilePart(caseContext?.caseNumber || caseContext?.title)
   return pathJoin(dir, `${date}_${caseNo}.hearing.json`)
+}
+
+// 열기 시점의 날짜로 만든 경로에 기록이 없으면, 같은 사건의 가장 최근 기록을 이어서 연다.
+// (기록 파일명이 날짜 기준이라 다음 날 열면 빈 기록이 새로 만들어지던 문제 방지)
+export async function resolveHearingRecordPath(
+  draftsDir: string,
+  caseContext?: HearingRecordCase,
+  hearing?: JsHearing
+): Promise<string> {
+  const preferred = buildHearingRecordPath(draftsDir, caseContext, hearing)
+  const stat = await window.lt.fs
+    .stat(preferred)
+    .catch(() => ({ ok: false as const, error: 'stat failed' }))
+  if (stat.ok && !stat.isDir) return preferred
+  try {
+    const suffix = `_${safeFilePart(caseContext?.caseNumber || caseContext?.title)}.hearing.json`
+    const entries = await window.lt.fs.list(buildHearingRecordDir(draftsDir))
+    const latest = entries
+      .filter((entry) => !entry.isDir && entry.name.endsWith(suffix))
+      .sort((a, b) => (b.mtimeMs ?? 0) - (a.mtimeMs ?? 0) || b.name.localeCompare(a.name))[0]
+    if (latest) return latest.path
+  } catch {
+    // 기록 폴더가 없거나 목록을 못 읽으면 새 기록 경로로 진행한다.
+  }
+  return preferred
 }
 
 function buildHearingReportPath(
@@ -435,12 +461,23 @@ export default function HearingRecordPanel({
   const [lastSavedAt, setLastSavedAt] = useState('')
   const [jsStatus, setJsStatus] = useState<JsSyncStatus>('idle')
   const [jsMessage, setJsMessage] = useState('')
+  const loadStateRef = useRef<LoadState>(initialPath ? 'loading' : 'idle')
+  const [loadState, setLoadState] = useState<LoadState>(loadStateRef.current)
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const saveTimer = useRef<number | null>(null)
   const loadedPathRef = useRef<string | undefined>(undefined)
   const latestRecordRef = useRef(record)
   const hasContentRef = useRef(false)
   const lastSavedSourceStampRef = useRef('')
+  // onSavedPath는 부모가 인라인으로 넘겨 렌더마다 바뀌므로 ref로 받아
+  // saveRecord/flushAutoSave의 useCallback 재생성(→ 렌더마다 저장 루프)을 막는다.
+  const onSavedPathRef = useRef(onSavedPath)
+  onSavedPathRef.current = onSavedPath
+
+  const updateLoadState = useCallback((state: LoadState): void => {
+    loadStateRef.current = state
+    setLoadState(state)
+  }, [])
 
   const speakers = record.speakers
   const activeSpeaker =
@@ -488,8 +525,15 @@ export default function HearingRecordPanel({
   const saveRecord = useCallback(
     async (targetRecord = latestRecordRef.current): Promise<string> => {
       setSaveStatus('saving')
-        setSaveMessage('자동저장 중')
+      setSaveMessage('자동저장 중')
       try {
+        if (loadStateRef.current !== 'idle') {
+          throw new Error(
+            loadStateRef.current === 'loading'
+              ? '기록을 불러오는 중입니다. 잠시 후 다시 시도하세요.'
+              : "기록을 불러오지 못해 저장을 차단했습니다. '다시 불러오기' 또는 '새 기록'을 사용하세요."
+          )
+        }
         let nextPath = recordPath
         if (!nextPath) {
           await ensureRecordDir()
@@ -508,7 +552,7 @@ export default function HearingRecordPanel({
         setSaveStatus('saved')
         setSaveMessage('자동저장됨')
         setLastSavedAt(new Date().toISOString())
-        onSavedPath?.(nextPath, buildHearingRecordTitle(payload.case, payload.hearing))
+        onSavedPathRef.current?.(nextPath, buildHearingRecordTitle(payload.case, payload.hearing))
         return nextPath
       } catch (error) {
         setSaveStatus('error')
@@ -516,11 +560,26 @@ export default function HearingRecordPanel({
         throw error
       }
     },
-    [draftsDir, ensureRecordDir, onSavedPath, recordPath]
+    [draftsDir, ensureRecordDir, recordPath]
   )
 
   const loadFromPath = useCallback(
     async (path: string): Promise<void> => {
+      updateLoadState('loading')
+      const stat = await window.lt.fs
+        .stat(path)
+        .catch(() => ({ ok: false as const, error: 'stat failed' }))
+      if (!stat.ok) {
+        // 파일이 아직 없다 → 새 기록으로 시작
+        loadedPathRef.current = path
+        lastSavedSourceStampRef.current = ''
+        setRecord(createInitialRecord(initialCase, initialHearing))
+        setRecordPath(path)
+        updateLoadState('idle')
+        setSaveStatus('idle')
+        setSaveMessage('새 기록 · 입력하면 자동저장')
+        return
+      }
       try {
         const read = await window.lt.fs.readText(path)
         const parsed = JSON.parse(read.text) as unknown
@@ -529,19 +588,23 @@ export default function HearingRecordPanel({
         setRecord(next)
         setRecordPath(path)
         loadedPathRef.current = path
+        updateLoadState('idle')
         setSaveStatus('saved')
         setSaveMessage('불러옴')
         setLastSavedAt(next.updatedAt)
-        onSavedPath?.(path, buildHearingRecordTitle(next.case, next.hearing))
-      } catch {
+        onSavedPathRef.current?.(path, buildHearingRecordTitle(next.case, next.hearing))
+      } catch (error) {
+        // 파일은 있는데 읽기/파싱에 실패 — 빈 기록으로 덮어쓰지 않도록 저장을 막는다.
         loadedPathRef.current = path
-        setRecord(createInitialRecord(initialCase, initialHearing))
         setRecordPath(path)
-        setSaveStatus('idle')
-        setSaveMessage('새 기록 · 입력하면 자동저장')
+        updateLoadState('error')
+        setSaveStatus('error')
+        setSaveMessage(
+          `기록을 불러오지 못했습니다: ${error instanceof Error ? error.message : String(error)}`
+        )
       }
     },
-    [initialCase, initialHearing, onSavedPath]
+    [initialCase, initialHearing, updateLoadState]
   )
 
   useEffect(() => {
@@ -560,6 +623,7 @@ export default function HearingRecordPanel({
   }, [focusInput, visible])
 
   useEffect(() => {
+    if (loadState !== 'idle') return
     if (!hasContent || (!draftsDir && !recordPath)) return
     if (lastSavedSourceStampRef.current === record.updatedAt) return
     if (saveTimer.current) window.clearTimeout(saveTimer.current)
@@ -572,14 +636,17 @@ export default function HearingRecordPanel({
     return () => {
       if (saveTimer.current) window.clearTimeout(saveTimer.current)
     }
-  }, [draftsDir, hasContent, record, recordPath, saveRecord])
+  }, [draftsDir, hasContent, loadState, record, recordPath, saveRecord])
 
   const flushAutoSave = useCallback((): void => {
     if (saveTimer.current) {
       window.clearTimeout(saveTimer.current)
       saveTimer.current = null
     }
+    if (loadStateRef.current !== 'idle') return
     if (!hasContentRef.current || (!draftsDir && !recordPath)) return
+    // 변경 없으면 다시 쓰지 않는다 (렌더마다 flush가 호출되어도 무해하도록)
+    if (lastSavedSourceStampRef.current === latestRecordRef.current.updatedAt) return
     void saveRecord(latestRecordRef.current).catch(() => {})
   }, [draftsDir, recordPath, saveRecord])
 
@@ -595,6 +662,44 @@ export default function HearingRecordPanel({
       flushAutoSave()
     }
   }, [flushAutoSave])
+
+  // 이어서 열린 이전 기록 대신 오늘 날짜의 새 기록을 시작한다.
+  // 같은 날짜의 기록이 이미 있으면 덮어쓰지 않도록 -2, -3… 순번을 붙인다.
+  const startNewRecord = useCallback(async (): Promise<void> => {
+    if (saveTimer.current) {
+      window.clearTimeout(saveTimer.current)
+      saveTimer.current = null
+    }
+    const next = createInitialRecord(initialCase, initialHearing)
+    let nextPath: string | undefined
+    if (draftsDir) {
+      const dir = buildHearingRecordDir(draftsDir)
+      const date = ymd(dateFromHearing(next.hearing))
+      const caseNo = safeFilePart(next.case.caseNumber || next.case.title)
+      nextPath = pathJoin(dir, `${date}_${caseNo}.hearing.json`)
+      for (let seq = 2; seq <= 99; seq += 1) {
+        const stat = await window.lt.fs
+          .stat(nextPath)
+          .catch(() => ({ ok: false as const, error: 'stat failed' }))
+        if (!stat.ok) break
+        nextPath = pathJoin(dir, `${date}-${seq}_${caseNo}.hearing.json`)
+      }
+    }
+    lastSavedSourceStampRef.current = ''
+    if (nextPath) loadedPathRef.current = nextPath
+    setRecord(next)
+    setRecordPath(nextPath)
+    updateLoadState('idle')
+    setSaveStatus('idle')
+    setSaveMessage('새 기록 · 입력하면 자동저장')
+    setLastSavedAt('')
+    setJsStatus('idle')
+    setJsMessage('')
+    if (nextPath) {
+      onSavedPathRef.current?.(nextPath, buildHearingRecordTitle(next.case, next.hearing))
+    }
+    focusInput()
+  }, [draftsDir, focusInput, initialCase, initialHearing, updateLoadState])
 
   const setActiveSpeaker = (speakerId: string): void => {
     touch((current) => ({ ...current, activeSpeakerId: speakerId }))
@@ -976,10 +1081,17 @@ export default function HearingRecordPanel({
           <div className="hearing-subtitle">{subtitle || '사건 정보를 불러오면 기일 메타가 표시됩니다.'}</div>
         </div>
         <div className="hearing-actions">
+          <button
+            className="hearing-small-btn"
+            title="오늘 날짜로 새 기일 기록 시작"
+            onClick={() => void startNewRecord()}
+          >
+            새 기록
+          </button>
           <button className="hearing-small-btn" onClick={toggleReader}>
             읽기
           </button>
-          <button className="hearing-small-btn" onClick={() => void saveRecord()}>
+          <button className="hearing-small-btn" onClick={() => void saveRecord().catch(() => {})}>
             저장
           </button>
           <button className="hearing-primary-btn" onClick={() => void generateReport()}>
@@ -1005,6 +1117,11 @@ export default function HearingRecordPanel({
       {(saveMessage || jsMessage || recordPath) && (
         <div className="hearing-status-row">
           <span className={`hearing-save-status st-${saveStatus}`}>{saveMessage || '대기'}</span>
+          {loadState === 'error' && recordPath && (
+            <button className="hearing-small-btn" onClick={() => void loadFromPath(recordPath)}>
+              다시 불러오기
+            </button>
+          )}
           {lastSavedAt && <span>{formatTime(lastSavedAt)} 저장</span>}
           {recordPath && <span className="hearing-path">{recordPath}</span>}
           {jsMessage && <span className={`hearing-js-status st-${jsStatus}`}>{jsMessage}</span>}
@@ -1030,9 +1147,15 @@ export default function HearingRecordPanel({
                   key={item.path}
                   className="hearing-reader-item"
                   onClick={() => {
+                    loadedPathRef.current = item.path
+                    lastSavedSourceStampRef.current = item.data.updatedAt
+                    updateLoadState('idle')
                     setRecord(item.data)
                     setRecordPath(item.path)
                     setReaderOpen(false)
+                    setSaveStatus('saved')
+                    setSaveMessage('불러옴')
+                    setLastSavedAt(item.data.updatedAt)
                     onSavedPath?.(item.path, item.title)
                     focusInput()
                   }}

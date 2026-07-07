@@ -57,8 +57,8 @@ import UpcomingHearings from './dashboard/UpcomingHearings'
 import TodosDashboard from './dashboard/TodosDashboard'
 import TodayTodos from './dashboard/TodayTodos'
 import HearingRecordPanel, {
-  buildHearingRecordPath,
   buildHearingRecordTitle,
+  resolveHearingRecordPath,
   type HearingRecordCase
 } from './hearing/HearingRecordPanel'
 import { cancelIfTerminalPointerDrag } from './dragGuard'
@@ -5817,13 +5817,14 @@ export default function App(): JSX.Element {
     return valid[0]?.hearing
   }
 
-  const openHearingRecordTab = (
+  const openHearingRecordTab = async (
     drafts: string,
     hearingCase: HearingRecordCase,
     hearing?: JsHearing,
     side: DockSide = 'right'
-  ): void => {
-    const path = buildHearingRecordPath(drafts, hearingCase, hearing)
+  ): Promise<void> => {
+    // 해당 날짜의 기록이 없으면 같은 사건의 최근 기록을 이어서 연다.
+    const path = await resolveHearingRecordPath(drafts, hearingCase, hearing)
     const existing = docTabs.find((tab) => tab.kind === 'hearing' && tab.path === path)
     if (existing) {
       moveDocToSide(existing.id, side)
@@ -5848,7 +5849,7 @@ export default function App(): JSX.Element {
   const openHearingRecordForCurrent = (side: DockSide = 'right'): void => {
     const source = activeTermTab ? currentCaseFromTerm(activeTermTab) : currentCase
     if (!source?.drafts) return
-    openHearingRecordTab(source.drafts, hearingCaseFromCurrent(source), undefined, side)
+    void openHearingRecordTab(source.drafts, hearingCaseFromCurrent(source), undefined, side)
   }
 
   const resolveFolderMatch = (
@@ -6005,7 +6006,7 @@ export default function App(): JSX.Element {
     const detail = await loadCaseDetail(c)
     const opened = await openCaseWorkspace(detail, true)
     if (!opened) return
-    openHearingRecordTab(opened.drafts, hearingCaseFromJsCase(detail), nearestHearing(detail.hearings), 'right')
+    await openHearingRecordTab(opened.drafts, hearingCaseFromJsCase(detail), nearestHearing(detail.hearings), 'right')
   }
 
   // 우클릭: 사건을 원격(SSH 프로필)에서 열기 — 원격 draftsRoot에서 폴더명 매칭, 실패 시 수동 선택.
@@ -6202,7 +6203,9 @@ export default function App(): JSX.Element {
           visible={activeDoc === tab.id}
           onSavedPath={(path, title) =>
             setDocTabs((tabs) =>
-              tabs.map((item) => (item.id === tab.id ? { ...item, path, title } : item))
+              tabs.some((item) => item.id === tab.id && (item.path !== path || item.title !== title))
+                ? tabs.map((item) => (item.id === tab.id ? { ...item, path, title } : item))
+                : tabs
             )
           }
           onOpenReport={(path, title) => openFile(path, title, 'left')}
