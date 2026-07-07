@@ -96,6 +96,8 @@ export default function PdfViewer({
   const taskRef = useRef<RenderTask | null>(null)
   const numPagesRef = useRef(0)
   const pageRef = useRef(1)
+  const modeRef = useRef<PdfZoomMode>('fit_page')
+  const effScaleRef = useRef(1) // 현재 화면에 그려진 실효 배율 (맞춤 모드 포함)
   const nextDocRef = useRef<(() => void) | undefined>(onNextDoc)
   const prevDocRef = useRef<(() => void) | undefined>(onPrevDoc)
   const initialStatusRef = useRef<PdfViewStatus | undefined>(initialStatus)
@@ -126,6 +128,7 @@ export default function PdfViewer({
 
   numPagesRef.current = numPages
   pageRef.current = page
+  modeRef.current = mode
   nextDocRef.current = onNextDoc
   prevDocRef.current = onPrevDoc
   initialStatusRef.current = initialStatus
@@ -312,6 +315,7 @@ export default function PdfViewer({
         scale = mode === 'fit_width' ? sW : Math.min(sW, sH)
       }
       scale = Math.max(0.1, Math.min(scale, 6))
+      effScaleRef.current = scale
       setEffPct(Math.round(scale * 100))
 
       const viewport = pg.getViewport({ scale, rotation })
@@ -384,9 +388,17 @@ export default function PdfViewer({
       setPage(Math.min(Math.max(1, jumpTo.page), numPagesRef.current || jumpTo.page))
   }, [jumpTo?.nonce]) // eslint-disable-line react-hooks/exhaustive-deps
 
+  // 맞춤 모드에서 줌을 시작하면 화면에 보이는 실효 배율에서 이어간다.
+  // (이전엔 내부 customScale(기본 100%)에서 시작해, 쪽맞춤 배율이 100%를 넘는
+  // 가로문서·큰 화면에서 확대를 눌러도 처음 크기 근처로만 그려졌다.)
   const zoomBy = useCallback((factor: number) => {
+    const fromFit = modeRef.current !== 'custom'
+    modeRef.current = 'custom'
     setMode('custom')
-    setCustomScale((s) => Math.max(0.1, Math.min(6, +(s * factor).toFixed(3))))
+    setCustomScale((s) => {
+      const base = fromFit ? effScaleRef.current : s
+      return Math.max(0.1, Math.min(6, +(base * factor).toFixed(3)))
+    })
   }, [])
 
   // 휠: Ctrl+휠=줌, 확대 시 가로/세로 스크롤, 끝에서는 페이지 넘김.
