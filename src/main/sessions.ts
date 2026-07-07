@@ -319,8 +319,13 @@ function buildSessionMeta(input: SessionMetaInput): SessionMeta {
   }
 }
 
-export async function rememberSessionMeta(input: SessionMetaInput): Promise<{ ok: boolean; error?: string }> {
+export async function rememberSessionMeta(raw: SessionMetaInput): Promise<{ ok: boolean; error?: string }> {
   try {
+    // undefined 필드는 "값 없음"이지 "지워라"가 아니다 — 스프레드 병합에서 기존 사건 연결
+    // (caseNumber 등)을 덮어쓰지 않도록 키 자체를 제거한다.
+    const input = Object.fromEntries(
+      Object.entries(raw).filter(([, v]) => v !== undefined)
+    ) as SessionMetaInput
     if (!input.sessionId || !input.cwd) return { ok: false, error: '세션 ID와 cwd가 필요합니다.' }
     await mergeLegacyIndexOnce().catch(() => {})
     // 읽기-병합-쓰기를 락으로 묶어 동시 저장(터미널 여러 개·원격 풀)이 서로를 덮어쓰지 않게 한다.

@@ -82,7 +82,6 @@ function parseRemoteDrafts(drafts: string): { profileId: string; path: string } 
 interface CaseMatcher {
   id: string
   caseNo: string // searchNorm 적용
-  caseName: string
   localDrafts: string // comparablePath 적용
   localDraftsLeaf: string // searchNorm 적용한 pairing 폴더명 (matchByFolder 항목용)
   remote?: { profileId: string; path: string; leaf: string }
@@ -105,7 +104,6 @@ function buildMatcher(c: CaseActivityCaseRef, pairings: JsPairingMap): CaseMatch
   return {
     id: c.id,
     caseNo: searchNorm(c.caseNumber ?? undefined),
-    caseName: searchNorm(c.caseName ?? undefined),
     localDrafts: comparablePath(local),
     localDraftsLeaf: searchNorm(pathLeaf(local)),
     remote
@@ -114,7 +112,8 @@ function buildMatcher(c: CaseActivityCaseRef, pairings: JsPairingMap): CaseMatch
 
 // 대시보드 대량 매칭 규칙 — matchIndexedSession(단일 사건 검색)보다 보수적:
 // a) 사건번호 정규화 일치  b) cwd↔pairing 일치(단, 서로 다른 사건번호면 제외)
-// c) 양쪽 다 사건번호가 없을 때만 사건명 완전일치. folderName 부분일치는 오탐이 많아 쓰지 않는다.
+// 사건명('손해배상(기)'·'사기' 등)은 유형명이라 여러 사건이 공유하므로 완전일치라도 쓰지 않고,
+// folderName 부분일치도 오탐이 많아 쓰지 않는다.
 function metaMatchesCase(meta: CaseActivityMetaLike, m: CaseMatcher): boolean {
   const metaNo = searchNorm(meta.caseNumber)
   if (m.caseNo && metaNo && metaNo === m.caseNo) return true
@@ -131,7 +130,6 @@ function metaMatchesCase(meta: CaseActivityMetaLike, m: CaseMatcher): boolean {
       if (m.remote && meta.profileId === m.remote.profileId && leaf === m.remote.leaf) return true
     }
   }
-  if (!m.caseNo && !metaNo && m.caseName && searchNorm(meta.caseName) === m.caseName) return true
   return false
 }
 

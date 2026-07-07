@@ -66,14 +66,17 @@ const meta = (over) => ({
   assert.equal(out.c1.sessions[0].sshLabel, '사무실')
 }
 
-// 5) 양쪽 다 사건번호 없을 때만 사건명 완전일치 (부분일치 아님)
+// 5) 사건명은 유형명('손해배상(기)' 등)이라 여러 사건이 공유 — 사건명만으로는 매칭하지 않는다
 {
   const entries = [
-    meta({ sessionId: 'a', caseName: '대여금 청구', mtime: now - 1000 }),
-    meta({ sessionId: 'b', caseName: '대여금', mtime: now - 2000 })
+    meta({ sessionId: 'a', cwd: '/drafts/위킵', caseName: '손해배상(기)', mtime: now - 1000 }),
+    meta({ sessionId: 'b', cwd: '/drafts/최재혁', caseName: '손해배상(기)', mtime: now - 2000 })
   ]
-  const out = buildCaseActivity(entries, {}, { cases: [{ id: 'c1', caseName: '대여금청구' }] })
-  assert.equal(out.c1.total, 1) // 공백 무시 완전일치만
+  const pairings = { c1: { drafts: '/drafts/위킵' } }
+  const out = buildCaseActivity(entries, pairings, {
+    cases: [{ id: 'c1', caseName: '손해배상(기)' }]
+  })
+  assert.equal(out.c1.total, 1) // pairing cwd가 일치하는 세션만, 같은 사건명의 남의 세션은 제외
   assert.equal(out.c1.sessions[0].sessionId, 'a')
 }
 

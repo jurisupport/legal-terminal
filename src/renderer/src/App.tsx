@@ -1035,16 +1035,22 @@ const loadPastSessions = (
     .list(cwd, source?.ssh, context)
     .then((entries) => {
       if (source) {
+        // 제목·시각 등 세션 고유 정보만 인덱스에 보충한다. 현재 사건의 caseNumber·caseName을
+        // 폴더의 모든 과거 세션에 일괄로 찍으면, 폴더를 공유하는 다른 사건의 세션까지
+        // 이 사건 것으로 기록돼 사건 대시보드 매칭이 틀어진다 — 사건 연결은 실제로
+        // 세션이 열린 터미널에서만(sessionRememberInput 단건 호출) 기록한다.
         entries.forEach((entry) => {
           void window.lt.sessions
-            .remember(
-              sessionRememberInput(
-                source,
-                entry.sessionId,
-                entry.transcriptTitle || entry.title,
-                entry.mtime
-              )
-            )
+            .remember({
+              sessionId: entry.sessionId,
+              cwd: entry.cwd || source.cwd,
+              transcriptTitle: entry.transcriptTitle || entry.title,
+              mtime: entry.mtime,
+              folderName: pathLeaf(entry.cwd || source.cwd),
+              profileId: source.profileId,
+              sshLabel: source.sshLabel,
+              ssh: source.ssh
+            })
             .catch(() => {})
         })
       }
