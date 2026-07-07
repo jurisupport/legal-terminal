@@ -2028,7 +2028,8 @@ export default function App(): JSX.Element {
   const addDoc = (side: DockSide = 'left'): void => {
     const t = termTabs.find((t) => t.id === activeTerm)
     // 원격 사건이면 ssh:// URI로 만들어 원격에 생성 (plain cwd면 로컬에 잘못 생성됨)
-    const dir = t ? (t.ssh && t.profileId ? remoteUri(t.profileId, t.cwd) : t.cwd) : undefined
+    // 터미널이 아직 없으면(폴더 연 직후) 사건 컨텍스트의 작성서류 폴더로 폴백 — 원격이면 ssh:// URI
+    const dir = t ? (t.ssh && t.profileId ? remoteUri(t.profileId, t.cwd) : t.cwd) : activeDraftsFolder
     if (dir) {
       setMode('explorer')
       setPendingCreate({ type: 'file', dir, side })
