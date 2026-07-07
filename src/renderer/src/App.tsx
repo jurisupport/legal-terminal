@@ -41,6 +41,8 @@ import {
 import MarkdownEditor, {
   MARKDOWN_CENTER_SELECTION_EVENT,
   TEXT_SELECTION_OVERLAY_EVENT,
+  claudeDraftFileName,
+  type MarkdownClaudeDraftHandler,
   type MarkdownSaveHandler,
   type MarkdownDocumentPayload,
   type MarkdownRevealRequest,
@@ -1467,6 +1469,7 @@ export default function App(): JSX.Element {
   const [markdownRevealRequests, setMarkdownRevealRequests] = useState<Record<string, MarkdownRevealRequest>>({})
   const markdownRevealSeqRef = useRef(0)
   const markdownSaveHandlersRef = useRef<Map<string, MarkdownSaveHandler>>(new Map())
+  const markdownClaudeDraftHandlersRef = useRef<Map<string, MarkdownClaudeDraftHandler>>(new Map())
   const requestWindowCloseRef = useRef<() => void>(() => {})
   const [closeWindowPrompt, setCloseWindowPrompt] = useState<CloseWindowPromptState | null>(null)
 
@@ -4994,6 +4997,73 @@ export default function App(): JSX.Element {
     if (created) pasteDraftToAgent(created, payload)
   }
 
+  // 미저장 편집 중(dirty)인 md 문서 탭을 경로로 찾는다.
+  const isEditableMarkdownTab = (tab: DocTab): boolean => tab.kind === 'markdown' || tab.kind === 'mdview'
+
+  const dirtyMarkdownTabForPath = (path?: string): DocTab | undefined => {
+    if (!path) return undefined
+    return docTabsRef.current.find(
+      (tab) => isEditableMarkdownTab(tab) && tab.path === path && dirtyDocsRef.current.has(tab.id)
+    )
+  }
+
+  // dirty 문서의 현재 편집 내용으로 Claude 작업본(.claude-draft.md)을 만든다.
+  // 편집기가 화면에 떠 있으면 라이브 버퍼를, 아니면 복구용 임시저장본을 쓴다.
+  const createDirtyDocClaudeDraft = async (
+    tab: DocTab
+  ): Promise<{ draftPath: string; sourcePath?: string; sourceTitle?: string } | undefined> => {
+    const handler = markdownClaudeDraftHandlersRef.current.get(tab.id)
+    if (handler) {
+      const draftPath = await handler().catch(() => undefined)
+      if (!draftPath) return undefined
+      setTreeRefresh((current) => current + 1)
+      return { draftPath, sourcePath: tab.path, sourceTitle: tab.title }
+    }
+    if (!tab.path) return undefined
+    const loaded = await window.lt.fs.loadDocumentDraft({ path: tab.path, draftId: tab.id }).catch(() => null)
+    if (!loaded?.ok || !loaded.draft) return undefined
+    const dir = dirnameForClaudeContext(tab.path)
+    if (!dir) return undefined
+    const created = await window.lt.fs
+      .createFile(dir, claudeDraftFileName(tab.path, tab.title), loaded.draft.content)
+      .catch(() => null)
+    if (!created?.ok || !created.path) return undefined
+    setTreeRefresh((current) => current + 1)
+    return { draftPath: created.path, sourcePath: tab.path, sourceTitle: tab.title }
+  }
+
+  // 에이전트 패널 전송 직전: 첨부한 md 파일이 미저장 편집 중이면 작업본 첨부로 치환한다.
+  const prepareAgentAttachmentForSend = async (attachment: AgentAttachment): Promise<AgentAttachment | null> => {
+    if (attachment.kind !== 'file' || !attachment.path || attachment.access !== 'workspace-path') return null
+    const tab =
+      dirtyMarkdownTabForPath(attachment.path) ??
+      docTabsRef.current.find(
+        (candidate) =>
+          isEditableMarkdownTab(candidate) &&
+          !!candidate.path &&
+          dirtyDocsRef.current.has(candidate.id) &&
+          parseRemoteUri(candidate.path)?.path === attachment.path
+      )
+    if (!tab) return null
+    const draft = await createDirtyDocClaudeDraft(tab)
+    if (!draft) return null
+    return {
+      ...attachment,
+      // 같은 SSH 프로필 첨부는 원격 URI 대신 원격 실제 경로를 쓴다 (attachmentForPath와 동일 규칙)
+      path: parseRemoteUri(draft.draftPath)?.path ?? draft.draftPath,
+      label: `${attachment.label} (임시저장본)`,
+      source: { path: tab.path, title: tab.title },
+      text: [
+        attachment.text,
+        '이 첨부는 사용자가 편집기에서 아직 저장하지 않은 최신 편집 내용을 담은 임시 작업본 파일입니다.',
+        draft.sourcePath ? `원본 문서(디스크 저장본, 오래된 내용일 수 있음): ${draft.sourcePath}` : undefined,
+        '분석과 수정은 이 작업본 파일을 기준으로 하고, 원본 문서 파일은 직접 수정하지 마세요.'
+      ]
+        .filter(Boolean)
+        .join('\n')
+    }
+  }
+
   const buildFreshFilePrompt = async (
     path: string,
     label: string,
@@ -5120,12 +5190,28 @@ export default function App(): JSX.Element {
   const askClaude = (text: string, opts?: ClaudeAskOptions): void => {
     void (async () => {
       const d = docTabs.find((x) => x.id === activeDoc)
-      const docPath = opts?.docPath === null ? undefined : (opts?.docPath ?? d?.path)
+      let docPath = opts?.docPath === null ? undefined : (opts?.docPath ?? d?.path)
+      let sourcePath = opts?.sourcePath
+      let sourceTitle = opts?.sourceTitle
+      // 대상 md 문서가 미저장 편집 중이면 작업본을 만들어 그걸 분석 기준으로 삼는다.
+      if (!sourcePath && opts?.docPath !== null) {
+        const dirtyTab = docPath
+          ? dirtyMarkdownTabForPath(docPath)
+          : !opts?.docPath && d && isEditableMarkdownTab(d) && dirtyDocs.has(d.id)
+            ? d
+            : undefined
+        const draft = dirtyTab ? await createDirtyDocClaudeDraft(dirtyTab) : undefined
+        if (draft) {
+          docPath = draft.draftPath
+          sourcePath = draft.sourcePath
+          sourceTitle = draft.sourceTitle
+        }
+      }
       const docName =
         opts?.docPath === null
           ? undefined
-          : opts?.docPath
-            ? (opts.docPath.split(/[\\/]/).pop() ?? d?.title)
+          : docPath && docPath !== d?.path
+            ? fileNameFromPath(docPath)
             : d?.title
       const sourceLabel = opts?.sourceLabel ?? docName
       const ref = sourceLabel ? `「${sourceLabel}」${docPath ? `(${docPath})` : ''}` : ''
@@ -5153,8 +5239,8 @@ export default function App(): JSX.Element {
       const filePrompt =
         docPath && docName
           ? await buildFreshFilePrompt(docPath, docName, promptTarget, {
-              sourcePath: opts?.sourcePath,
-              sourceTitle: opts?.sourceTitle
+              sourcePath,
+              sourceTitle
             })
           : ''
       let payload: string
@@ -6149,6 +6235,10 @@ export default function App(): JSX.Element {
             if (handler) markdownSaveHandlersRef.current.set(tab.id, handler)
             else markdownSaveHandlersRef.current.delete(tab.id)
           }}
+          onClaudeDraftHandler={(handler) => {
+            if (handler) markdownClaudeDraftHandlersRef.current.set(tab.id, handler)
+            else markdownClaudeDraftHandlersRef.current.delete(tab.id)
+          }}
           onDirty={(d) =>
             setDirtyDocs((s) => {
               const has = s.has(tab.id)
@@ -6437,6 +6527,7 @@ export default function App(): JSX.Element {
                 onOpenDiff={(request) => openAgentDiff(request, caseIdForTerm(t))}
                 onOpenFile={(path, title) => openFile(path, title ?? fileNameFromPath(path), 'left', t.caseTabId)}
                 onOpenAttachmentSource={openAgentAttachmentSource}
+                onPrepareAttachment={prepareAgentAttachmentForSend}
               />
             ) : (
               <Terminal
@@ -6804,6 +6895,7 @@ export default function App(): JSX.Element {
                   onOpenDiff={(request) => openAgentDiff(request, caseIdForTerm(t))}
                   onOpenFile={(path, title) => openFile(path, title ?? fileNameFromPath(path), 'left', t.caseTabId)}
                   onOpenAttachmentSource={openAgentAttachmentSource}
+                  onPrepareAttachment={prepareAgentAttachmentForSend}
                 />
               ) : (
                 <Terminal

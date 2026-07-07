@@ -129,6 +129,8 @@ interface AgentPanelProps {
   onOpenDiff?: (request: AgentDiffOpenRequest) => void
   onOpenFile?: (path: string, title?: string) => void
   onOpenAttachmentSource?: (attachment: AgentAttachment) => void
+  // 전송 직전 첨부를 바꿔치기할 기회 (예: 미저장 md 문서 → 임시저장 작업본). null이면 원본 유지.
+  onPrepareAttachment?: (attachment: AgentAttachment) => Promise<AgentAttachment | null>
 }
 
 export interface AgentAttachmentRequest {
@@ -1725,7 +1727,8 @@ export default function AgentPanel({
   onOpenTerminal,
   onOpenDiff,
   onOpenFile,
-  onOpenAttachmentSource
+  onOpenAttachmentSource,
+  onPrepareAttachment
 }: AgentPanelProps): JSX.Element {
   const usesClaudeRemoteAuth = Boolean(ssh) && provider === 'claude'
   const usesAgentAuth = usesClaudeRemoteAuth || provider === 'codex'
@@ -2669,10 +2672,16 @@ export default function AgentPanel({
     setError('')
     const nextDelivery = delivery ?? (queuesNewInput ? 'queue' : 'normal')
     const handoff = pendingHandoff
+    // 미저장 문서 첨부 등을 전송 시점 내용으로 치환한다.
+    const outgoingAttachments = onPrepareAttachment
+      ? await Promise.all(
+          sendAttachments.map(async (attachment) => (await onPrepareAttachment(attachment).catch(() => null)) ?? attachment)
+        )
+      : sendAttachments
     const result = await window.lt.agent.send(id, {
       text: handoff ? `${handoff.preamble}\n${text}` : text,
       ...(handoff ? { displayText: text } : {}),
-      attachments: sendAttachments,
+      attachments: outgoingAttachments,
       permissionMode: nextMode,
       delivery: nextDelivery
     })

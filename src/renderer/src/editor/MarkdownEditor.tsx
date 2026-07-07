@@ -138,6 +138,9 @@ export interface MarkdownDocumentPayload {
 
 export type MarkdownSaveHandler = () => Promise<string | undefined>
 
+// 현재 화면 버퍼를 .claude-draft.md 작업본 파일로 만들어 경로를 돌려준다 (실패 시 undefined)
+export type MarkdownClaudeDraftHandler = () => Promise<string | undefined>
+
 function makeTheme(family: string, size: number): ReturnType<typeof EditorView.theme> {
   return EditorView.theme(
     {
@@ -190,7 +193,7 @@ function dirnameOf(value?: string): string | undefined {
   return clean.slice(0, slash)
 }
 
-function claudeDraftFileName(currentPath?: string, title?: string): string {
+export function claudeDraftFileName(currentPath?: string, title?: string): string {
   const raw = fileNameOf(currentPath) ?? defaultSaveName(title)
   const safe = raw.trim().replace(/[\\/]+/g, '-') || DEFAULT_UNTITLED_NAME
   const dot = safe.lastIndexOf('.')
@@ -458,6 +461,7 @@ export default function MarkdownEditor({
   onAsk,
   onSendToJuriSupport,
   onSaveHandler,
+  onClaudeDraftHandler,
   scrollKey,
   initialScroll,
   onScrollPosition,
@@ -477,6 +481,8 @@ export default function MarkdownEditor({
   ) => void
   onSendToJuriSupport?: (doc: MarkdownDocumentPayload) => void
   onSaveHandler?: (handler: MarkdownSaveHandler | null) => void
+  // 에이전트 패널이 미저장 편집본을 분석할 때 쓰는 작업본 생성 핸들러
+  onClaudeDraftHandler?: (handler: MarkdownClaudeDraftHandler | null) => void
   scrollKey?: string
   initialScroll?: DocumentScrollPosition
   onScrollPosition?: (position: DocumentScrollPosition) => void
@@ -506,6 +512,7 @@ export default function MarkdownEditor({
   const savedContentRef = useRef('')
   const localDirtyRef = useRef(false)
   const saveNowRef = useRef<MarkdownSaveHandler>(() => Promise.resolve(undefined))
+  const claudeDraftNowRef = useRef<MarkdownClaudeDraftHandler>(() => Promise.resolve(undefined))
   const applyingRemoteRef = useRef(false)
   const remoteSigRef = useRef<FileSignature | null>(null)
   const remoteConflictContentRef = useRef('')
@@ -872,6 +879,14 @@ export default function MarkdownEditor({
       setClaudeDrafting(false)
     }
   }
+  claudeDraftNowRef.current = createClaudeDraftNow
+
+  useEffect(() => {
+    if (!onClaudeDraftHandler) return
+    const handler: MarkdownClaudeDraftHandler = () => claudeDraftNowRef.current()
+    onClaudeDraftHandler(handler)
+    return () => onClaudeDraftHandler(null)
+  }, [onClaudeDraftHandler])
 
   const conflictHistoryTitle = (): string => {
     const base = fileNameOf(pathRef.current) ?? titleRef.current ?? '문서'
