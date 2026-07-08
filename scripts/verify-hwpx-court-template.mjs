@@ -114,7 +114,7 @@ assert.match(officeSection, /이메일: test@example\.com/)
 assert.match(officeSection, /서울 서초구 서초대로 1/)
 assert.match(officeSection, /binaryItemIDRef="logo"/)
 assert.match(officeXml, /BinData\/logo\.png/)
-assert.match(officeXml, /<opf:item id="logo" href="BinData\/logo\.png" media-type="image\/png" isEmbeded="1" \/>/)
+assert.match(officeXml, /<opf:item id="logo" href="BinData\/logo\.png" media-type="image\/png" isEmbeded="1"\/>/)
 // 본문 표가 아닌 푸터 표: 4행 2열
 assert.match(officeSection, /rowCnt="4" colCnt="2"/)
 // placeholder가 남아 있으면 안 된다

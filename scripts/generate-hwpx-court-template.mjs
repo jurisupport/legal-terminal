@@ -39,9 +39,34 @@ function topLevelParagraphs(xml) {
 
 const tmp = mkdtempSync(join(tmpdir(), 'hwpx-template-'))
 try {
-  execFileSync('unzip', ['-o', '-q', samplePath, 'Contents/header.xml', 'Contents/section0.xml', '-d', tmp])
+  execFileSync('unzip', [
+    '-o',
+    '-q',
+    samplePath,
+    'Contents/header.xml',
+    'Contents/section0.xml',
+    'Contents/content.hpf',
+    'version.xml',
+    'settings.xml',
+    'META-INF/container.xml',
+    'META-INF/manifest.xml',
+    'META-INF/container.rdf',
+    '-d',
+    tmp
+  ])
   let header = readFileSync(join(tmp, 'Contents/header.xml'), 'utf8')
   const rawSection = readFileSync(join(tmp, 'Contents/section0.xml'), 'utf8')
+
+  // 패키징 메타데이터 — 윈도 정품 한글은 이 파일들에 훨씬 까다로워 샘플 그대로 쓴다.
+  const versionXml = readFileSync(join(tmp, 'version.xml'), 'utf8')
+  const settingsXml = readFileSync(join(tmp, 'settings.xml'), 'utf8')
+  const containerXml = readFileSync(join(tmp, 'META-INF/container.xml'), 'utf8')
+  const manifestXml = readFileSync(join(tmp, 'META-INF/manifest.xml'), 'utf8')
+  const containerRdf = readFileSync(join(tmp, 'META-INF/container.rdf'), 'utf8')
+  const contentHpf = readFileSync(join(tmp, 'Contents/content.hpf'), 'utf8')
+  const IMAGE1_ITEM = '<opf:item id="image1" href="BinData/image1.PNG" media-type="image/png" isEmbeded="1"/>'
+  if (!contentHpf.includes(IMAGE1_ITEM)) throw new Error('content.hpf에서 image1 항목을 찾지 못했습니다.')
+  if (!contentHpf.includes('<opf:title/>')) throw new Error('content.hpf에서 opf:title 자리를 찾지 못했습니다.')
 
   // 정렬용 문단 모양 추가:
   //  20/21 — 본문(paraPr 6: 앞뒤 여백, 줄간격 250%) 복제, lt-align center/right용
@@ -130,6 +155,16 @@ try {
     '/** "…법원 귀중" 문단 원형(왼쪽 정렬·휴먼고딕 15pt 굵게)과 교체용 텍스트 */',
     `export const COURT_COURT_PARA = ${lit(courtPara)}`,
     `export const COURT_COURT_TEXT = ${lit(courtText)}`,
+    '',
+    '// ── 패키징 메타데이터 (샘플 그대로 — 윈도 정품 한글이 까다롭게 검사한다) ──',
+    `export const COURT_VERSION_XML = ${lit(versionXml)}`,
+    `export const COURT_SETTINGS_XML = ${lit(settingsXml)}`,
+    `export const COURT_CONTAINER_XML = ${lit(containerXml)}`,
+    `export const COURT_MANIFEST_XML = ${lit(manifestXml)}`,
+    `export const COURT_CONTAINER_RDF = ${lit(containerRdf)}`,
+    '/** content.hpf 원형 — <opf:title/>에 제목, image1 항목 자리에 로고 항목(또는 제거) */',
+    `export const COURT_CONTENT_HPF = ${lit(contentHpf)}`,
+    `export const COURT_IMAGE1_ITEM = ${lit(IMAGE1_ITEM)}`,
     ''
   ].join('\n')
 

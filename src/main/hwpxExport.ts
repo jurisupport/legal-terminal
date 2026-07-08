@@ -2,37 +2,27 @@ import { marked, type Token, type Tokens } from 'marked'
 import {
   COURT_BODY_PARA,
   COURT_BODY_TEXT,
+  COURT_CONTAINER_RDF,
+  COURT_CONTAINER_XML,
+  COURT_CONTENT_HPF,
   COURT_COURT_PARA,
   COURT_COURT_TEXT,
   COURT_HEADER_XML,
+  COURT_IMAGE1_ITEM,
+  COURT_MANIFEST_XML,
   COURT_OUTLINE_PARAS,
   COURT_PIC_XML,
   COURT_SECTION_PROLOG,
   COURT_SEC_OPEN,
-  COURT_TITLE_PARA
+  COURT_SETTINGS_XML,
+  COURT_TITLE_PARA,
+  COURT_VERSION_XML
 } from './hwpxCourtTemplate.ts'
 
-const XML_VERSION = '1.31'
 const MIME_TYPE = 'application/hwp+zip'
 const APP_XML_TYPE = 'application/xml'
 const APP_TEXT_TYPE = 'text/xml'
 const APP_RDF_TYPE = 'application/rdf+xml'
-const PACKAGE_TYPE = 'application/hwpml-package+xml'
-
-const NS = {
-  hv: 'http://www.hancom.co.kr/hwpml/2011/version',
-  ha: 'http://www.hancom.co.kr/hwpml/2011/app',
-  hp: 'http://www.hancom.co.kr/hwpml/2011/paragraph',
-  hs: 'http://www.hancom.co.kr/hwpml/2011/section',
-  hc: 'http://www.hancom.co.kr/hwpml/2011/core',
-  hh: 'http://www.hancom.co.kr/hwpml/2011/head',
-  hpf: 'http://www.hancom.co.kr/schema/2011/hpf',
-  opf: 'http://www.idpf.org/2007/opf/',
-  dc: 'http://purl.org/dc/elements/1.1/',
-  ocf: 'urn:oasis:names:tc:opendocument:xmlns:container',
-  manifest: 'urn:oasis:names:tc:opendocument:xmlns:manifest:1.0',
-  rdf: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#'
-}
 
 interface ZipEntryInput {
   name: string
@@ -775,88 +765,16 @@ function headerXml(): string {
   return COURT_HEADER_XML
 }
 
-function versionXml(): string {
-  return [
-    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
-    `<hv:HCFVersion xmlns:hv="${NS.hv}" targetApplication="HWP" major="5" minor="1" micro="0" buildNumber="0" os="1" xmlVersion="${XML_VERSION}" application="legal-terminal" appVersion="0.1" />`
-  ].join('\n')
-}
-
-function settingsXml(): string {
-  return [
-    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
-    `<ha:HWPApplicationSetting xmlns:ha="${NS.ha}">`,
-    '<ha:CaretPosition listIDRef="0" paraIDRef="0" pos="0" />',
-    '</ha:HWPApplicationSetting>'
-  ].join('\n')
-}
-
-function contentXml(title: string, logoEntry?: ZipEntryInput): string {
-  const safeTitle = escapeXml(title || '문서')
-  return [
-    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
-    `<opf:package xmlns:opf="${NS.opf}" xmlns:dc="${NS.dc}" xmlns:hpf="${NS.hpf}" version="1.0" unique-identifier="uid" id="legal-terminal">`,
-    '<opf:metadata>',
-    `<dc:title>${safeTitle}</dc:title>`,
-    '<dc:language>ko-KR</dc:language>',
-    '<dc:identifier id="uid">legal-terminal-md-to-hwpx</dc:identifier>',
-    '</opf:metadata>',
-    '<opf:manifest>',
-    `<opf:item id="header" href="Contents/header.xml" media-type="${APP_XML_TYPE}" />`,
-    ...(logoEntry
-      ? [
-          `<opf:item id="logo" href="${escapeXml(logoEntry.name)}" media-type="${escapeXml(logoEntry.mediaType ?? 'image/png')}" isEmbeded="1" />`
-        ]
-      : []),
-    `<opf:item id="section0" href="Contents/section0.xml" media-type="${APP_XML_TYPE}" />`,
-    `<opf:item id="settings" href="settings.xml" media-type="${APP_TEXT_TYPE}" />`,
-    '</opf:manifest>',
-    '<opf:spine>',
-    '<opf:itemref idref="section0" linear="yes" />',
-    '</opf:spine>',
-    '</opf:package>'
-  ].join('\n')
-}
-
-function containerXml(): string {
-  return [
-    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
-    `<ocf:container xmlns:ocf="${NS.ocf}">`,
-    '<ocf:rootfiles>',
-    `<ocf:rootfile full-path="Contents/content.hpf" media-type="${PACKAGE_TYPE}" />`,
-    `<ocf:rootfile full-path="Preview/PrvText.txt" media-type="${APP_TEXT_TYPE}" />`,
-    `<ocf:rootfile full-path="META-INF/container.rdf" media-type="${APP_RDF_TYPE}" />`,
-    '</ocf:rootfiles>',
-    '</ocf:container>'
-  ].join('\n')
-}
-
-function manifestXml(entries: ZipEntryInput[]): string {
-  const fileEntries = entries
-    .filter((entry) => entry.name !== 'META-INF/manifest.xml' && entry.mediaType)
-    .map(
-      (entry) =>
-        `<odf:file-entry odf:full-path="${escapeXml(entry.name)}" odf:media-type="${escapeXml(entry.mediaType ?? '')}" />`
-    )
-
-  return [
-    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
-    `<odf:manifest xmlns:odf="${NS.manifest}">`,
-    ...fileEntries,
-    '</odf:manifest>'
-  ].join('\n')
-}
-
-function rdfXml(title: string): string {
-  const safeTitle = escapeXml(title || '문서')
-  return [
-    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
-    `<rdf:RDF xmlns:rdf="${NS.rdf}" xmlns:dc="${NS.dc}">`,
-    '<rdf:Description rdf:about="Contents/content.hpf">',
-    `<dc:title>${safeTitle}</dc:title>`,
-    '</rdf:Description>',
-    '</rdf:RDF>'
-  ].join('\n')
+// 패키징 메타(version/settings/container/manifest/rdf/content.hpf)는 샘플 그대로 쓴다.
+// 윈도 정품 한글은 이 파일들(특히 version.xml의 xmlVersion, content.hpf 구조)을 까다롭게 본다.
+function contentHpfXml(title: string, logoEntry?: ZipEntryInput): string {
+  const logoItem = logoEntry
+    ? `<opf:item id="logo" href="${escapeXml(logoEntry.name)}" media-type="${escapeXml(logoEntry.mediaType ?? 'image/png')}" isEmbeded="1"/>`
+    : ''
+  return replaceSlot(COURT_CONTENT_HPF, COURT_IMAGE1_ITEM, logoItem).replace(
+    '<opf:title/>',
+    `<opf:title>${escapeXml(title || '문서')}</opf:title>`
+  )
 }
 
 function previewText(markdown: string): string {
@@ -883,13 +801,13 @@ export function createHwpxFromMarkdown(
         mediaType: office.logo.mime
       }
     : undefined
-  const entriesWithoutManifest: ZipEntryInput[] = [
+  const entries: ZipEntryInput[] = [
     { name: 'mimetype', data: textEntry(MIME_TYPE), mediaType: MIME_TYPE },
-    { name: 'version.xml', data: textEntry(versionXml()), mediaType: APP_TEXT_TYPE },
-    { name: 'settings.xml', data: textEntry(settingsXml()), mediaType: APP_TEXT_TYPE },
+    { name: 'version.xml', data: textEntry(COURT_VERSION_XML), mediaType: APP_TEXT_TYPE },
+    { name: 'settings.xml', data: textEntry(COURT_SETTINGS_XML), mediaType: APP_TEXT_TYPE },
     {
       name: 'Contents/content.hpf',
-      data: textEntry(contentXml(title, logoEntry)),
+      data: textEntry(contentHpfXml(title, logoEntry)),
       mediaType: APP_TEXT_TYPE
     },
     { name: 'Contents/header.xml', data: textEntry(headerXml()), mediaType: APP_XML_TYPE },
@@ -899,17 +817,10 @@ export function createHwpxFromMarkdown(
       mediaType: APP_XML_TYPE
     },
     ...(logoEntry ? [logoEntry] : []),
-    { name: 'META-INF/container.xml', data: textEntry(containerXml()), mediaType: APP_TEXT_TYPE },
-    { name: 'META-INF/container.rdf', data: textEntry(rdfXml(title)), mediaType: APP_RDF_TYPE },
+    { name: 'META-INF/container.xml', data: textEntry(COURT_CONTAINER_XML), mediaType: APP_TEXT_TYPE },
+    { name: 'META-INF/manifest.xml', data: textEntry(COURT_MANIFEST_XML), mediaType: APP_TEXT_TYPE },
+    { name: 'META-INF/container.rdf', data: textEntry(COURT_CONTAINER_RDF), mediaType: APP_RDF_TYPE },
     { name: 'Preview/PrvText.txt', data: textEntry(previewText(markdown)), mediaType: APP_TEXT_TYPE }
-  ]
-  const entries: ZipEntryInput[] = [
-    ...entriesWithoutManifest,
-    {
-      name: 'META-INF/manifest.xml',
-      data: textEntry(manifestXml(entriesWithoutManifest)),
-      mediaType: APP_TEXT_TYPE
-    }
   ]
   return createZip(entries)
 }
