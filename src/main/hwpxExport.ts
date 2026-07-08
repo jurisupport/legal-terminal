@@ -105,9 +105,9 @@ const FOOTER_9PT_CHAR_PR = 20
 const FOOTER_9PT_BOLD_CHAR_PR = 21
 /** 날짜·당사자 지위(서명 블록) 앞에 넣는 탭 수 — 샘플서면과 동일하게 왼쪽정렬+탭 */
 const SIGNATURE_TAB_COUNT = 7
-/** 구분 표제("다 음"·"첨부서류" 등) — 가운데, 휴먼고딕 굵게 (사용자 편집본 기준) */
+/** 구분 표제("다 음"·"첨부서류" 등) — 가운데, 휴먼고딕 14pt 굵게 */
 const LABEL_PARA_PR = 5
-const LABEL_SMALL_CHAR_PR = 10 // 12pt — 다 음 / 아 래
+const LABEL_SMALL_CHAR_PR = 11 // 14pt — 다 음 / 아 래
 const LABEL_LARGE_CHAR_PR = 11 // 14pt — 첨부서류·입증방법 등
 const SMALL_SECTION_LABELS = new Set(['다음', '아래'])
 const LARGE_SECTION_LABELS = new Set([
@@ -125,6 +125,9 @@ const LARGE_SECTION_LABELS = new Set([
 /** "사    건    2024나…"처럼 당사자 표시로 시작하는 줄 — 사건표시 원형(고딕·들여쓰기 없음)으로 */
 const CASE_LABEL_LINE_RE =
   /^(사\s*건|원\s*고|피\s*고\s*인|피\s*고|신\s*청\s*인|피\s*신\s*청\s*인|채\s*권\s*자|채\s*무\s*자|항\s*소\s*인|피\s*항\s*소\s*인|상\s*고\s*인|피\s*상\s*고\s*인|피\s*의\s*자|피\s*해\s*자|고\s*소\s*인|변\s*호\s*인|수\s*신|참\s*조|제\s*목)\s{2,}/
+/** 서명 블록 병합용 — 날짜 단독 줄과 당사자 지위·변호사 줄 */
+const DATE_ONLY_LINE_RE = /^\d{4}\.\s*\d{1,2}\.\s*\d{1,2}\.?$/
+const SIGNER_LINE_RE = /(소송대리인|변호인|대리인|담당변호사|변호사|법무법인|법률사무소)/
 const OUTLINE_MARKER_RE =
   /^(?:(?:\d{1,3}|[가-힣])\.(?:\s+|(?=[^\d\s]))|(?:\d{1,3}|[가-힣])\)(?:\s+|(?=[^\d\s]))|\((?:\d{1,3}|[가-힣])\)(?:\s+|(?=\S)))/
 const HWP_UNIT_PER_CM = 2835
@@ -353,6 +356,79 @@ function spacedLabel(text: string): string {
   return key.length === 2 ? key.split('').join('     ') : key.split('').join(' ')
 }
 
+function isPlainParagraph(block: MarkdownBlock): block is MarkdownParagraph {
+  return (
+    block.kind === 'paragraph' &&
+    !block.title &&
+    !block.sectionLabel &&
+    !block.outlineLevel
+  )
+}
+
+function isCaseLabelBlock(block: MarkdownBlock): boolean {
+  return (
+    isPlainParagraph(block) &&
+    block.text.split('\n').every((line) => CASE_LABEL_LINE_RE.test(line))
+  )
+}
+
+// 마크다운에서 빈 줄로 나뉘어 온 줄들을 서면 관례대로 한 문단(쉬프트엔터)으로 병합:
+//  - 사건/피고인/원고… 당사자 표시 줄들 → 사건표시 한 문단
+//  - 날짜 단독 줄 + 당사자 지위·변호사 줄 → 서명 블록 한 문단(탭+왼쪽정렬로 렌더)
+function mergeCourtBlocks(blocks: MarkdownBlock[]): MarkdownBlock[] {
+  const out: MarkdownBlock[] = []
+  for (let i = 0; i < blocks.length; i += 1) {
+    const block = blocks[i]
+    if (!isPlainParagraph(block)) {
+      out.push(block)
+      continue
+    }
+
+    const prev = out[out.length - 1]
+    if (prev && isCaseLabelBlock(prev) && isCaseLabelBlock(block)) {
+      const prevPara = prev as MarkdownParagraph
+      prevPara.text += `\n${block.text}`
+      prevPara.caseStyle = true
+      continue
+    }
+
+    // 연속 줄로 쓴 "날짜↵지위↵변호사" 한 문단도 서명 블록으로 취급
+    if (!block.align && block.text.includes('\n')) {
+      const lines = block.text.split('\n')
+      if (
+        DATE_ONLY_LINE_RE.test(lines[0].trim()) &&
+        lines.slice(1).every((line) => SIGNER_LINE_RE.test(line) && !/귀중\s*$/.test(line))
+      ) {
+        out.push({ ...block, align: 'right' })
+        continue
+      }
+    }
+
+    if (DATE_ONLY_LINE_RE.test(block.text.trim()) && !block.text.includes('\n')) {
+      const lines = [block.text.trim()]
+      let j = i + 1
+      while (j < blocks.length) {
+        const next = blocks[j]
+        if (!isPlainParagraph(next)) break
+        const ok = next.text
+          .split('\n')
+          .every((line) => SIGNER_LINE_RE.test(line) && !/귀중\s*$/.test(line))
+        if (!ok) break
+        lines.push(next.text)
+        j += 1
+      }
+      if (lines.length > 1) {
+        out.push({ kind: 'paragraph', text: lines.join('\n'), align: 'right' })
+        i = j - 1
+        continue
+      }
+    }
+
+    out.push(block)
+  }
+  return out
+}
+
 /** 서명 줄 이름 자간 — "변호사 하희봉" → "변호사 하 희 봉" (줄 전체가 직함+이름일 때만) */
 function spacedSignature(text: string): string {
   return text
@@ -534,7 +610,7 @@ function markdownBlocks(markdown: string): MarkdownBlock[] {
     }
   }
 
-  return blocks.length > 0 ? blocks : [{ kind: 'paragraph', text: '' }]
+  return blocks.length > 0 ? mergeCourtBlocks(blocks) : [{ kind: 'paragraph', text: '' }]
 }
 
 // 한/글이 쓰는 형식 그대로: 줄바꿈·탭을 <hp:t> "안"에 넣는다 (밖에 두면 뷰어가 무시/오해석).

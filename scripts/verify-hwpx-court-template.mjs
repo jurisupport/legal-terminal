@@ -77,10 +77,10 @@ assert.match(
   sectionOf(createHwpxFromMarkdown(['사    건    2024나0000', '원    고    강00', '피    고    이00'].join('\n'), '검증')),
   /paraPrIDRef="6"[^>]*>[\s\S]*?<hp:t>사    건    2024나0000<hp:lineBreak\/>원    고    강00<hp:lineBreak\/>피    고    이00<\/hp:t>/
 )
-// 날짜 줄 + 서명 줄이 한 문단 두 줄로 살아남아야 한다 (marked 순서목록 오파싱 방지)
+// 연속 줄로 쓴 날짜+서명도 서명 블록(탭+lineBreak)으로, 내용은 소실되지 않는다
 assert.match(
   sectionOf(createHwpxFromMarkdown(['2026. 7. 8.', '피고의 소송대리인 변호사 하희봉'].join('\n'), '검증')),
-  /<hp:t>2026\. 7\. 8\.<hp:lineBreak\/>피고의 소송대리인 변호사 하희봉<\/hp:t>/
+  /(?:<hp:tab\/>){7}2026\. 7\. 8\.<hp:lineBreak\/>(?:<hp:tab\/>){7}피고의 소송대리인 변호사 하희봉<\/hp:t>/
 )
 // "…귀중" 줄은 샘플 수신 법원 원형(paraPr 6·charPr 14, 왼쪽 정렬)
 assert.match(
@@ -95,7 +95,7 @@ assert.match(
 // "## 다음" → 가운데 12pt 굵게(charPr 10, paraPr 5), "## 첨부서류" → 14pt(charPr 11) + 자간
 {
   const s = sectionOf(createHwpxFromMarkdown(['## 다음', '', '## 첨부서류', '', '- 합의서 1부'].join('\n'), '검증'))
-  assert.match(s, /paraPrIDRef="5"[^>]*>[\s\S]*?charPrIDRef="10"><hp:t>다     음<\/hp:t>/)
+  assert.match(s, /paraPrIDRef="5"[^>]*>[\s\S]*?charPrIDRef="11"><hp:t>다     음<\/hp:t>/)
   assert.match(s, /paraPrIDRef="5"[^>]*>[\s\S]*?charPrIDRef="11"><hp:t>첨 부 서 류<\/hp:t>/)
   // 목록 항목은 사건표시 서식(paraPr 6·charPr 9)
   assert.match(s, /paraPrIDRef="6"[^>]*>[\s\S]*?charPrIDRef="9"><hp:t>- 합의서 1부<\/hp:t>/)
@@ -108,7 +108,17 @@ assert.match(
 // 서명 줄 이름 자간: "변호사 하희봉" → "변호사 하 희 봉"
 {
   const s = sectionOf(createHwpxFromMarkdown(['2026. 7. 8.', '피고인의 국선변호인', '변호사 하희봉'].join('\n'), '검증'))
-  assert.match(s, /피고인의 국선변호인<hp:lineBreak\/>변호사 하 희 봉<\/hp:t>/)
+  assert.match(s, /피고인의 국선변호인<hp:lineBreak\/>(?:<hp:tab\/>){7}변호사 하 희 봉<\/hp:t>/)
+}
+// 빈 줄로 나뉜 사건/피고인 줄도 한 문단(쉬프트엔터)으로 병합
+{
+  const s = sectionOf(createHwpxFromMarkdown(['사    건    2026고단101112 폭행', '', '피고인    구은회'].join('\n'), '검증'))
+  assert.match(s, /charPrIDRef="9"><hp:t>사    건    2026고단101112 폭행<hp:lineBreak\/>피고인    구은회<\/hp:t>/)
+}
+// 빈 줄로 나뉜 날짜+지위+변호사 줄도 서명 블록(탭+lineBreak)으로 병합
+{
+  const s = sectionOf(createHwpxFromMarkdown(['2026. 7. 8.', '', '피고인의 국선변호인', '', '변호사 하희봉'].join('\n'), '검증'))
+  assert.match(s, /(?:<hp:tab\/>){7}2026\. 7\. 8\.<hp:lineBreak\/>(?:<hp:tab\/>){7}피고인의 국선변호인<hp:lineBreak\/>(?:<hp:tab\/>){7}변호사 하 희 봉<\/hp:t>/)
 }
 // lt-align:right(서명 블록) → 탭 7개 + 왼쪽정렬(사건표시 원형), 줄은 lineBreak
 {
