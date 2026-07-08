@@ -350,6 +350,17 @@ function spacedLabel(text: string): string {
   return key.length === 2 ? key.split('').join('     ') : key.split('').join(' ')
 }
 
+/** 서명 줄 이름 자간 — "변호사 하희봉" → "변호사 하 희 봉" (줄 전체가 직함+이름일 때만) */
+function spacedSignature(text: string): string {
+  return text
+    .split('\n')
+    .map((line) => {
+      const m = line.trim().match(/^(변호사|담당변호사)\s+([가-힣]{2,4})$/)
+      return m ? line.replace(/\S.*$/, `${m[1]} ${m[2].split('').join(' ')}`) : line
+    })
+    .join('\n')
+}
+
 // 개요 수준 결정 — 제목에 이미 붙은 번호 형식(1. 가. 1) 가) (1) (가))이 우선이고,
 // 없으면 마크다운 heading 깊이를 쓴다(문서 제목 문단이 있으면 ##부터 1수준).
 function outlineLevelFor(raw: string, depth: number, hasTitle: boolean): number {
@@ -481,13 +492,17 @@ function markdownBlocks(markdown: string): MarkdownBlock[] {
           blocks.push({ ...paragraph(rawLine), caseStyle: /^(?:[-*+]|\d{1,3}\.)\s/.test(rawLine) })
           break
         }
-        list.items.forEach((item: Tokens.ListItem, index: number) => {
-          const text = listItemText(item)
-          if (!text) return
-          const marker = list.ordered ? `${Number(list.start || 1) + index}.` : '-'
-          // 목록 항목(첨부서류 목록 등)은 사건표시 서식(고딕·들여쓰기 없음) — 사용자 편집본 기준
-          blocks.push({ ...paragraph(`${marker} ${text}`), caseStyle: true })
-        })
+        // 목록(첨부서류 등)은 한 문단 안에서 줄바꿈(알트엔터)으로 잇고
+        // 사건표시 서식(고딕·들여쓰기 없음)으로 낸다 — 사용자 편집본 기준
+        const lines = list.items
+          .map((item: Tokens.ListItem, index: number) => {
+            const text = listItemText(item)
+            if (!text) return ''
+            const marker = list.ordered ? `${Number(list.start || 1) + index}.` : '-'
+            return `${marker} ${text}`
+          })
+          .filter(Boolean)
+        if (lines.length) blocks.push({ ...paragraph(lines.join('\n')), caseStyle: true })
         break
       }
       case 'table': {
@@ -822,13 +837,14 @@ function sectionXml(blocks: MarkdownBlock[], office?: HwpxOfficeInfo): string {
         : block.align === 'right'
           ? RIGHT_PARA_PR_ID
           : undefined
+    const text = spacedSignature(block.text)
     // 사건표시 서식(고딕·들여쓰기 없음): 목록 항목, "사    건 …" 표시줄, 줄바꿈으로 이어진 블록
-    if (block.caseStyle || CASE_LABEL_LINE_RE.test(block.text) || block.text.includes('\n')) {
-      paras.push(protoParagraphXml(COURT_CASE_PARA, COURT_CASE_T, block.text, alignParaPr))
+    if (block.caseStyle || CASE_LABEL_LINE_RE.test(text) || text.includes('\n')) {
+      paras.push(protoParagraphXml(COURT_CASE_PARA, COURT_CASE_T, text, alignParaPr))
       continue
     }
     paras.push(
-      protoParagraphXml(COURT_BODY_PARA, `<hp:t>${COURT_BODY_TEXT}</hp:t>`, block.text, alignParaPr)
+      protoParagraphXml(COURT_BODY_PARA, `<hp:t>${COURT_BODY_TEXT}</hp:t>`, text, alignParaPr)
     )
   }
 

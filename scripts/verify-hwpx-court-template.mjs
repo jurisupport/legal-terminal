@@ -100,6 +100,16 @@ assert.match(
   // 목록 항목은 사건표시 서식(paraPr 6·charPr 9)
   assert.match(s, /paraPrIDRef="6"[^>]*>[\s\S]*?charPrIDRef="9"><hp:t>- 합의서 1부<\/hp:t>/)
 }
+// 여러 목록 항목은 한 문단 안에서 줄바꿈(알트엔터)으로 잇는다
+{
+  const s = sectionOf(createHwpxFromMarkdown(['1. 합의서 1부', '2. 처벌불원서 1부'].join('\n'), '검증'))
+  assert.match(s, /charPrIDRef="9"><hp:t>1\. 합의서 1부<hp:lineBreak\/>2\. 처벌불원서 1부<\/hp:t>/)
+}
+// 서명 줄 이름 자간: "변호사 하희봉" → "변호사 하 희 봉"
+{
+  const s = sectionOf(createHwpxFromMarkdown(['2026. 7. 8.', '피고인의 국선변호인', '변호사 하희봉'].join('\n'), '검증'))
+  assert.match(s, /피고인의 국선변호인<hp:lineBreak\/>변호사 하 희 봉<\/hp:t>/)
+}
 // lt-align:right → paraPr 21
 assert.match(section, /paraPrIDRef="21"[^>]*>[\s\S]*?2026\. 7\. 8\./)
 // 사무실 정보가 없으면 푸터는 쪽번호만
