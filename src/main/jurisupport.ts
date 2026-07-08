@@ -1258,8 +1258,34 @@ export async function getOfficeInfo(refresh = false): Promise<JsOfficeInfo | nul
   return (await officeInflight) ?? cached
 }
 
-/** hwpx 내보내기용 사무실 정보 — 네트워크가 늦으면 제한 시간 안에 캐시로 대체 */
+function trimmed(value?: string): string | undefined {
+  const v = value?.trim()
+  return v ? v : undefined
+}
+
+/** 설정에 입력한 로고 파일을 읽어 hwpx용으로 변환 (PNG/JPEG만) */
+async function manualLogo(logoPath?: string): Promise<HwpxOfficeInfo['logo']> {
+  const path = trimmed(logoPath)
+  if (!path) return undefined
+  try {
+    const data = await readFile(path)
+    const info = imageInfo(data)
+    if (!info || info.width <= 0 || info.height <= 0) {
+      console.warn('[jurisupport] 로고 파일이 PNG/JPEG가 아닙니다:', path)
+      return undefined
+    }
+    return { data, mime: info.mime, width: info.width, height: info.height }
+  } catch (error) {
+    console.warn('[jurisupport] 로고 파일을 읽지 못했습니다:', path, error)
+    return undefined
+  }
+}
+
+/** hwpx 내보내기용 사무실 정보 — 설정에서 직접 입력한 값이 JuriSupport 계정 정보보다 우선.
+ *  네트워크가 늦으면 제한 시간 안에 캐시로 대체한다. */
 export async function officeInfoForHwpx(timeoutMs = 6000): Promise<HwpxOfficeInfo | undefined> {
+  const manual = (await getSettings()).officeProfile ?? {}
+
   let info: JsOfficeInfo | null = null
   try {
     info = await Promise.race([
@@ -1270,23 +1296,36 @@ export async function officeInfoForHwpx(timeoutMs = 6000): Promise<HwpxOfficeInf
     info = null
   }
   if (!info) info = await readOfficeCache()
-  if (!info) return undefined
 
-  const { profile, logo } = info
-  return {
-    officeName: profile.officeName,
-    phone: profile.phone,
-    fax: profile.fax,
-    email: profile.email,
-    address: profile.address,
-    footerText: profile.footerText,
-    logo: logo
+  const profile = info?.profile ?? {}
+  const jsLogo = info?.logo
+  const logo =
+    (await manualLogo(manual.logoPath)) ??
+    (jsLogo
       ? {
-          data: Buffer.from(logo.base64, 'base64'),
-          mime: logo.mime,
-          width: logo.width,
-          height: logo.height
+          data: Buffer.from(jsLogo.base64, 'base64'),
+          mime: jsLogo.mime,
+          width: jsLogo.width,
+          height: jsLogo.height
         }
-      : undefined
+      : undefined)
+
+  const merged: HwpxOfficeInfo = {
+    officeName: trimmed(manual.officeName) ?? trimmed(profile.officeName),
+    phone: trimmed(manual.phone) ?? trimmed(profile.phone),
+    fax: trimmed(manual.fax) ?? trimmed(profile.fax),
+    email: trimmed(manual.email) ?? trimmed(profile.email),
+    address: trimmed(manual.address) ?? trimmed(profile.address),
+    footerText: trimmed(manual.footerText) ?? trimmed(profile.footerText),
+    logo
   }
+  const hasData =
+    merged.officeName ||
+    merged.phone ||
+    merged.fax ||
+    merged.email ||
+    merged.address ||
+    merged.footerText ||
+    merged.logo
+  return hasData ? merged : undefined
 }

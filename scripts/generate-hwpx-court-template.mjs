@@ -121,6 +121,10 @@ try {
   const courtPara = need((p) => p.includes('귀중</hp:t>'), '귀중(수신 법원)')
   const courtText = courtPara.match(/<hp:t>([^<]*귀중)<\/hp:t>/)?.[1]
   if (!courtText) throw new Error('귀중 원형 텍스트를 찾지 못했습니다.')
+  // 사건표시 블록(사   건 / 원   고 / 피   고) — 들여쓰기 없는 휴먼고딕 문단
+  const casePara = need((p) => /<hp:t>사\s+건/.test(p), '사건표시')
+  const caseT = casePara.match(/<hp:t>[\s\S]*?<\/hp:t>/)?.[0]
+  if (!caseT) throw new Error('사건표시 원형 텍스트를 찾지 못했습니다.')
 
   const esc = (s) => s.replace(/\\/g, '\\\\').replace(/`/g, '\\`').replace(/\$\{/g, '\\${')
   const lit = (s) => `\`${esc(s)}\``
@@ -155,6 +159,11 @@ try {
     '/** "…법원 귀중" 문단 원형(왼쪽 정렬·휴먼고딕 15pt 굵게)과 교체용 텍스트 */',
     `export const COURT_COURT_PARA = ${lit(courtPara)}`,
     `export const COURT_COURT_TEXT = ${lit(courtText)}`,
+    '',
+    '/** 사건표시 문단 원형(들여쓰기 없음·휴먼고딕 12pt) — 사건/원고/피고·첨부목록·다줄 블록용.',
+    ' *  COURT_CASE_T(hp:t 요소 전체)를 통째로 바꿔 쓴다. */',
+    `export const COURT_CASE_PARA = ${lit(casePara)}`,
+    `export const COURT_CASE_T = ${lit(caseT)}`,
     '',
     '// ── 패키징 메타데이터 (샘플 그대로 — 윈도 정품 한글이 까다롭게 검사한다) ──',
     `export const COURT_VERSION_XML = ${lit(versionXml)}`,

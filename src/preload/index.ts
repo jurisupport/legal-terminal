@@ -367,7 +367,18 @@ interface SessionTranscript {
 type AgentPermissionMode = 'ask' | 'plan' | 'acceptEdits' | 'bypassPermissions' | 'dontAsk'
 type AgentProvider = 'claude' | 'codex'
 
+interface OfficeProfileSettings {
+  officeName?: string
+  phone?: string
+  fax?: string
+  email?: string
+  address?: string
+  footerText?: string
+  logoPath?: string
+}
+
 interface AppSettings {
+  officeProfile?: OfficeProfileSettings
   draftsRoot?: string
   recordsRoot?: string
   caseOpenTarget?: string
@@ -628,7 +639,10 @@ const api = {
       title?: string
       defaultPath?: string
     }): Promise<{ path: string; name: string } | null> =>
-      ipcRenderer.invoke('dialog:pickFolder', opts)
+      ipcRenderer.invoke('dialog:pickFolder', opts),
+    pickOfficeLogo: (): Promise<
+      { path: string; name: string; width: number; height: number; error?: never } | { error: string } | null
+    > => ipcRenderer.invoke('dialog:pickOfficeLogo')
   },
   settings: {
     get: (): Promise<AppSettings> => ipcRenderer.invoke('settings:get'),

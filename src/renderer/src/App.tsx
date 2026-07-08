@@ -67,6 +67,7 @@ import type {
   AppSettings,
   AgentAttachment,
   AgentProvider,
+  OfficeProfileSettings,
   CaseSessionSummary,
   JsCase,
   JsHearing,
@@ -9988,6 +9989,8 @@ function SettingsView(): JSX.Element {
   const [jsTokenStatus, setJsTokenStatus] = useState<'ok' | 'missing' | 'locked' | null>(null)
   const [jsTokenInput, setJsTokenInput] = useState('')
   const [jsTokenMsg, setJsTokenMsg] = useState('')
+  const [office, setOffice] = useState<OfficeProfileSettings>({})
+  const [officeMsg, setOfficeMsg] = useState('')
 
   useEffect(() => {
     const applySettings = (v: AppSettings): void => {
@@ -10028,6 +10031,10 @@ function SettingsView(): JSX.Element {
     if (!window.confirm('JuriSupport 토큰을 삭제할까요? 사건 대시보드 연결이 해제됩니다.')) return
     void applyJsToken('', '토큰을 삭제했습니다.')
   }
+
+  useEffect(() => {
+    setOffice(s.officeProfile ?? {})
+  }, [s.officeProfile])
 
   useEffect(() => {
     setTermFontSizeInput(String(s.termFontSize ?? DEFAULT_TERM_FONT_SIZE))
@@ -10076,6 +10083,46 @@ function SettingsView(): JSX.Element {
       await savePatch({ notificationVolume: next })
     }
   }
+
+  // 사무실 정보 — 입력 필드에서 포커스가 빠질 때 저장 (빈 값은 제거)
+  const commitOffice = async (next: OfficeProfileSettings): Promise<void> => {
+    const cleaned: OfficeProfileSettings = {}
+    for (const [key, value] of Object.entries(next)) {
+      const trimmed = typeof value === 'string' ? value.trim() : value
+      if (trimmed) cleaned[key as keyof OfficeProfileSettings] = trimmed as string
+    }
+    if (JSON.stringify(cleaned) !== JSON.stringify(s.officeProfile ?? {})) {
+      await savePatch({ officeProfile: cleaned })
+    }
+  }
+
+  const pickOfficeLogo = async (): Promise<void> => {
+    const r = await window.lt.dialog.pickOfficeLogo()
+    if (!r) return
+    if (!('path' in r)) {
+      setOfficeMsg(r.error)
+      return
+    }
+    setOfficeMsg('')
+    const next = { ...office, logoPath: r.path }
+    setOffice(next)
+    await commitOffice(next)
+  }
+
+  const officeField = (
+    key: Exclude<keyof OfficeProfileSettings, 'footerText' | 'logoPath'>,
+    placeholder: string
+  ): JSX.Element => (
+    <input
+      className="setting-input"
+      placeholder={placeholder}
+      value={office[key] ?? ''}
+      onChange={(e) => setOffice({ ...office, [key]: e.target.value })}
+      onBlur={() => {
+        void commitOffice(office)
+      }}
+    />
+  )
 
   const pick = async (key: 'draftsRoot' | 'recordsRoot'): Promise<void> => {
     const title =
@@ -10192,6 +10239,51 @@ function SettingsView(): JSX.Element {
           </p>
         )}
         {jsTokenMsg && <p className="muted small">{jsTokenMsg}</p>}
+      </section>
+
+      <section className="setting-row">
+        <div className="setting-label">
+          서면 사무실 정보{' '}
+          <span className="muted small">
+            — HWPX 내보내기 하단(푸터)에 표시. 직접 입력한 값이 JuriSupport 계정 정보보다 우선
+          </span>
+        </div>
+        <div className="setting-value setting-office">
+          {officeField('officeName', '상호 (예: 법무법인 ○○)')}
+          {officeField('phone', '전화 (예: 02-000-0000)')}
+          {officeField('fax', '팩스')}
+          {officeField('email', '이메일')}
+          {officeField('address', '주소')}
+          <textarea
+            className="setting-input setting-office-footer"
+            placeholder={'별도 푸터 텍스트 — 입력하면 사무실 정보 표 대신 이 내용이 들어갑니다 (줄바꿈 가능)'}
+            rows={2}
+            value={office.footerText ?? ''}
+            onChange={(e) => setOffice({ ...office, footerText: e.target.value })}
+            onBlur={() => {
+              void commitOffice(office)
+            }}
+          />
+          <div className="setting-office-logo">
+            <code>{office.logoPath ? office.logoPath : '로고 미설정'}</code>
+            <button className="empty-action" onClick={() => void pickOfficeLogo()}>
+              로고 선택
+            </button>
+            {office.logoPath && (
+              <button
+                className="empty-action"
+                onClick={() => {
+                  const next = { ...office, logoPath: undefined }
+                  setOffice(next)
+                  void commitOffice(next)
+                }}
+              >
+                제거
+              </button>
+            )}
+          </div>
+          {officeMsg && <p className="muted small">{officeMsg}</p>}
+        </div>
       </section>
 
       <section className="setting-row">

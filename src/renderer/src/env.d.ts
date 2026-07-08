@@ -365,7 +365,18 @@ export interface SessionTranscript {
 export type AgentPermissionMode = 'ask' | 'plan' | 'acceptEdits' | 'bypassPermissions' | 'dontAsk'
 export type AgentProvider = 'claude' | 'codex'
 
+export interface OfficeProfileSettings {
+  officeName?: string
+  phone?: string
+  fax?: string
+  email?: string
+  address?: string
+  footerText?: string
+  logoPath?: string
+}
+
 export interface AppSettings {
+  officeProfile?: OfficeProfileSettings
   draftsRoot?: string
   recordsRoot?: string
   caseOpenTarget?: string
@@ -670,6 +681,11 @@ export interface LtApi {
       title?: string
       defaultPath?: string
     }) => Promise<{ path: string; name: string } | null>
+    pickOfficeLogo: () => Promise<
+      | { path: string; name: string; width: number; height: number; error?: never }
+      | { error: string }
+      | null
+    >
   }
   settings: {
     get: () => Promise<AppSettings>

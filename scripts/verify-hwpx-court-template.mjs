@@ -87,6 +87,19 @@ assert.match(
   sectionOf(createHwpxFromMarkdown('서울중앙지방법원 제0민사부 귀중', '검증')),
   /paraPrIDRef="6"[^>]*>[\s\S]*?charPrIDRef="14"[\s\S]*?<hp:t>서울중앙지방법원 제0민사부 귀중<\/hp:t>/
 )
+// 따옴표가 &#39;로 이중 이스케이프되지 않아야 한다
+assert.match(
+  sectionOf(createHwpxFromMarkdown("피해자는 '원만히 합의' 하고 \"처벌불원\" 했다", '검증')),
+  /<hp:t[^>]*>피해자는 &apos;원만히 합의&apos; 하고 &quot;처벌불원&quot; 했다<\/hp:t>/
+)
+// "## 다음" → 가운데 12pt 굵게(charPr 10, paraPr 5), "## 첨부서류" → 14pt(charPr 11) + 자간
+{
+  const s = sectionOf(createHwpxFromMarkdown(['## 다음', '', '## 첨부서류', '', '- 합의서 1부'].join('\n'), '검증'))
+  assert.match(s, /paraPrIDRef="5"[^>]*>[\s\S]*?charPrIDRef="10"><hp:t>다     음<\/hp:t>/)
+  assert.match(s, /paraPrIDRef="5"[^>]*>[\s\S]*?charPrIDRef="11"><hp:t>첨 부 서 류<\/hp:t>/)
+  // 목록 항목은 사건표시 서식(paraPr 6·charPr 9)
+  assert.match(s, /paraPrIDRef="6"[^>]*>[\s\S]*?charPrIDRef="9"><hp:t>- 합의서 1부<\/hp:t>/)
+}
 // lt-align:right → paraPr 21
 assert.match(section, /paraPrIDRef="21"[^>]*>[\s\S]*?2026\. 7\. 8\./)
 // 사무실 정보가 없으면 푸터는 쪽번호만

@@ -25,8 +25,23 @@ export interface SshProfile {
   quickStartPaths?: string[]
 }
 
+/** 서면(hwpx) 푸터에 넣는 사무실 정보 — 직접 입력분이 JuriSupport 계정 정보보다 우선 */
+export interface OfficeProfileSettings {
+  officeName?: string
+  phone?: string
+  fax?: string
+  email?: string
+  address?: string
+  /** 별도 푸터 텍스트 — 지정 시 사무실 정보 표 대신 이 텍스트를 쓴다 (줄바꿈 가능) */
+  footerText?: string
+  /** 로고 이미지 파일 경로 (PNG/JPEG) */
+  logoPath?: string
+}
+
 /** 앱 전역 설정 (userData/config.json에 영구 저장) */
 export interface Settings {
+  /** 서면 푸터 사무실 정보 (직접 입력) */
+  officeProfile?: OfficeProfileSettings
   /** 저장된 SSH 접속 프로필 목록 */
   sshProfiles?: SshProfile[]
   /** 작성서류 루트 — 모든 사건의 작성서류가 하위 폴더로 존재 */

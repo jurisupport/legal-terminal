@@ -6199,6 +6199,27 @@ button.agent-attachment-chip {
 .setting-cache-options {
   flex-wrap: wrap;
 }
+/* 서면 사무실 정보 (hwpx 푸터) 입력 */
+.setting-office {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+  max-width: 560px;
+}
+.setting-office .setting-input {
+  width: 100%;
+  box-sizing: border-box;
+}
+.setting-office-footer {
+  resize: vertical;
+  min-height: 44px;
+  font-family: inherit;
+}
+.setting-office-logo {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
 .setting-value code {
   flex: 1;
   background: var(--bg-alt);

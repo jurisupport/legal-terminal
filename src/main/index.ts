@@ -8,6 +8,7 @@ import { existsSync, watch, type Dirent, type FSWatcher } from 'fs'
 import { fileURLToPath } from 'url'
 import { inflateRawSync } from 'zlib'
 import { getSettings, setSettings, type Settings } from './settings'
+import { imageInfo } from './imageSize'
 import {
   getPairing,
   setPairing,
@@ -627,6 +628,27 @@ ipcMain.handle('dialog:pickFolder', async (e, opts?: { title?: string; defaultPa
   if (r.canceled || r.filePaths.length === 0) return null
   const path = r.filePaths[0]
   return { path, name: basename(path) }
+})
+
+// 서면 푸터 로고 이미지 선택 — PNG/JPEG 검사까지 해서 경로를 돌려준다
+ipcMain.handle('dialog:pickOfficeLogo', async (e) => {
+  const win = BrowserWindow.fromWebContents(e.sender)
+  const od: Electron.OpenDialogOptions = {
+    title: '사무실 로고 이미지 선택 (PNG/JPEG)',
+    properties: ['openFile'],
+    filters: [{ name: '이미지', extensions: ['png', 'jpg', 'jpeg'] }]
+  }
+  const r = win ? await dialog.showOpenDialog(win, od) : await dialog.showOpenDialog(od)
+  if (r.canceled || r.filePaths.length === 0) return null
+  const path = r.filePaths[0]
+  try {
+    const info = imageInfo(await readFile(path))
+    if (!info) return { error: 'PNG 또는 JPEG 파일이 아닙니다.' }
+    if ((await stat(path)).size > 3 * 1024 * 1024) return { error: '3MB 이하 이미지만 사용할 수 있습니다.' }
+    return { path, name: basename(path), width: info.width, height: info.height }
+  } catch {
+    return { error: '이미지 파일을 읽지 못했습니다.' }
+  }
 })
 
 // (구) 사건 폴더 직접 선택 — 설정 기반 흐름으로 대체 예정이나 호환 유지 (비모달)

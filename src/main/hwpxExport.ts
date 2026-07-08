@@ -2,6 +2,8 @@ import { marked, type Token, type Tokens } from 'marked'
 import {
   COURT_BODY_PARA,
   COURT_BODY_TEXT,
+  COURT_CASE_PARA,
+  COURT_CASE_T,
   COURT_CONTAINER_RDF,
   COURT_CONTAINER_XML,
   COURT_CONTENT_HPF,
@@ -37,6 +39,10 @@ interface MarkdownParagraph {
   title?: boolean
   /** 개요 1~6수준 (1. / 가. / 1) / 가) / (1) / (가)) — 샘플 개요 원형에 들어간다 */
   outlineLevel?: number
+  /** 구분 표제("다 음"·"첨부서류" 등) — 가운데 굵게 */
+  sectionLabel?: 'small' | 'large'
+  /** 목록 항목 등 사건표시 서식(고딕·들여쓰기 없음)으로 낼 문단 */
+  caseStyle?: boolean
   /** lt-align 주석에 의한 본문 정렬 */
   align?: 'center' | 'right'
 }
@@ -83,9 +89,6 @@ interface HwpxXmlContext {
 // 아래 ID는 내장 header.xml 안의 정의를 가리킨다.
 /** 바탕글 글자 모양(휴먼명조 12pt) — 표 셀·푸터 텍스트에 사용 */
 const BODY_CHAR_PR = 1
-/** 들여쓰기 없는 본문 문단(샘플의 사건/원고/피고 블록) — 줄바꿈 있는 문단에 사용.
- *  바탕글의 첫 줄 들여쓰기가 첫 줄에만 붙어 어긋나 보이는 것을 막는다. */
-const BODY_MULTILINE_PARA_PR = 6
 /** lt-align용 — generate-hwpx-court-template.mjs 가 표준 header에 덧붙인 문단 모양 */
 const CENTER_PARA_PR_ID = 20
 const RIGHT_PARA_PR_ID = 21
@@ -99,6 +102,26 @@ const TABLE_HEADER_CHAR_PR = 2
 const TABLE_CELL_PARA_PR = 0
 /** 푸터 별도 텍스트용 글자 모양(휴먼고딕 12pt) */
 const FOOTER_TEXT_CHAR_PR = 16
+/** 구분 표제("다 음"·"첨부서류" 등) — 가운데, 휴먼고딕 굵게 (사용자 편집본 기준) */
+const LABEL_PARA_PR = 5
+const LABEL_SMALL_CHAR_PR = 10 // 12pt — 다 음 / 아 래
+const LABEL_LARGE_CHAR_PR = 11 // 14pt — 첨부서류·입증방법 등
+const SMALL_SECTION_LABELS = new Set(['다음', '아래'])
+const LARGE_SECTION_LABELS = new Set([
+  '첨부서류',
+  '첨부자료',
+  '입증방법',
+  '증거방법',
+  '소명방법',
+  '증거자료',
+  '신청취지',
+  '신청이유',
+  '청구취지',
+  '청구원인'
+])
+/** "사    건    2024나…"처럼 당사자 표시로 시작하는 줄 — 사건표시 원형(고딕·들여쓰기 없음)으로 */
+const CASE_LABEL_LINE_RE =
+  /^(사\s*건|원\s*고|피\s*고\s*인|피\s*고|신\s*청\s*인|피\s*신\s*청\s*인|채\s*권\s*자|채\s*무\s*자|항\s*소\s*인|피\s*항\s*소\s*인|상\s*고\s*인|피\s*상\s*고\s*인|피\s*의\s*자|피\s*해\s*자|고\s*소\s*인|변\s*호\s*인|수\s*신|참\s*조|제\s*목)\s{2,}/
 const OUTLINE_MARKER_RE =
   /^(?:(?:\d{1,3}|[가-힣])\.(?:\s+|(?=[^\d\s]))|(?:\d{1,3}|[가-힣])\)(?:\s+|(?=[^\d\s]))|\((?:\d{1,3}|[가-힣])\)(?:\s+|(?=\S)))/
 const HWP_UNIT_PER_CM = 2835
@@ -222,6 +245,19 @@ function normalizeText(value: string): string {
   return value.replace(/\r\n?/g, '\n').replace(/[ \t]+\n/g, '\n')
 }
 
+// marked는 인라인 text 토큰을 HTML 엔티티로 이스케이프한다(' → &#39; 등).
+// 그대로 두면 XML 이스케이프가 겹쳐 문서에 &#39;가 글자로 찍힌다.
+function decodeHtmlEntities(value: string): string {
+  return value
+    .replace(/&#x([0-9a-f]+);/gi, (_m, hex: string) => String.fromCodePoint(parseInt(hex, 16)))
+    .replace(/&#(\d+);/g, (_m, dec: string) => String.fromCodePoint(Number(dec)))
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&amp;/g, '&')
+}
+
 function inlineText(tokens?: Token[], fallback = ''): string {
   if (!tokens || tokens.length === 0) return normalizeText(fallback)
   return normalizeText(tokens.map(tokenText).join(''))
@@ -237,9 +273,10 @@ function tokenText(token: Token): string {
       const raw = String(token.raw ?? '')
       return raw.startsWith('~') && !raw.startsWith('~~') ? raw : inlineText(token.tokens)
     }
-    case 'codespan':
     case 'text':
     case 'escape':
+      return decodeHtmlEntities(token.text)
+    case 'codespan':
     case 'html':
       return token.text
     case 'br':
@@ -297,6 +334,20 @@ function stripLeadingOutlineMarkers(value: string): string {
 /** 서면 제목 자동 자간 — "준비서면" → "준 비 서 면" (짧은 순한글 제목만) */
 function spacedTitle(value: string): string {
   return /^[가-힣]{2,5}$/.test(value) ? value.split('').join(' ') : value
+}
+
+/** 구분 표제 판별 — "다음"/"첨부서류" 등 (공백 무시) */
+function sectionLabelKind(text: string): 'small' | 'large' | null {
+  const key = text.replace(/\s+/g, '')
+  if (SMALL_SECTION_LABELS.has(key)) return 'small'
+  if (LARGE_SECTION_LABELS.has(key)) return 'large'
+  return null
+}
+
+/** 구분 표제 자간 — 두 글자는 "다     음", 네 글자는 "첨 부 서 류" (사용자 편집본 기준) */
+function spacedLabel(text: string): string {
+  const key = text.replace(/\s+/g, '')
+  return key.length === 2 ? key.split('').join('     ') : key.split('').join(' ')
 }
 
 // 개요 수준 결정 — 제목에 이미 붙은 번호 형식(1. 가. 1) 가) (1) (가))이 우선이고,
@@ -389,6 +440,12 @@ function markdownBlocks(markdown: string): MarkdownBlock[] {
           blocks.push({ kind: 'paragraph', text: spacedTitle(text), title: true })
           break
         }
+        // "## 다음"/"## 첨부서류"처럼 번호 없는 구분 표제는 개요 번호 대신 가운데 굵게.
+        const label = sectionLabelKind(text)
+        if (label && !OUTLINE_MARKER_RE.test(raw)) {
+          blocks.push({ kind: 'paragraph', text: spacedLabel(text), sectionLabel: label })
+          break
+        }
         blocks.push({
           kind: 'paragraph',
           text,
@@ -398,7 +455,10 @@ function markdownBlocks(markdown: string): MarkdownBlock[] {
       }
       case 'paragraph': {
         const text = inlineText(token.tokens, token.text)
-        if (text) blocks.push(paragraph(text))
+        if (!text) break
+        const label = sectionLabelKind(text)
+        if (label) blocks.push({ kind: 'paragraph', text: spacedLabel(text), sectionLabel: label })
+        else blocks.push(paragraph(text))
         break
       }
       case 'code': {
@@ -417,14 +477,16 @@ function markdownBlocks(markdown: string): MarkdownBlock[] {
         // → 한 줄짜리 목록 토큰은 원문 그대로 문단으로 살린다.
         const rawLine = normalizeText(list.raw ?? '').trim()
         if (rawLine && !rawLine.includes('\n')) {
-          blocks.push(paragraph(rawLine))
+          // 진짜 목록 표기(-, 1. 등)면 사건표시 서식, 날짜 오파싱("2026. 7. 8.")이면 본문
+          blocks.push({ ...paragraph(rawLine), caseStyle: /^(?:[-*+]|\d{1,3}\.)\s/.test(rawLine) })
           break
         }
         list.items.forEach((item: Tokens.ListItem, index: number) => {
           const text = listItemText(item)
           if (!text) return
           const marker = list.ordered ? `${Number(list.start || 1) + index}.` : '-'
-          blocks.push(paragraph(`${marker} ${text}`))
+          // 목록 항목(첨부서류 목록 등)은 사건표시 서식(고딕·들여쓰기 없음) — 사용자 편집본 기준
+          blocks.push({ ...paragraph(`${marker} ${text}`), caseStyle: true })
         })
         break
       }
@@ -724,6 +786,20 @@ function sectionXml(blocks: MarkdownBlock[], office?: HwpxOfficeInfo): string {
       )
       continue
     }
+    // "다 음"·"첨부서류" 같은 구분 표제 — 가운데 굵게 (사용자 편집본 기준)
+    if (block.sectionLabel) {
+      const charPr = block.sectionLabel === 'small' ? LABEL_SMALL_CHAR_PR : LABEL_LARGE_CHAR_PR
+      paras.push(
+        [
+          `<hp:p id="0" paraPrIDRef="${LABEL_PARA_PR}" styleIDRef="1" pageBreak="0" columnBreak="0" merged="0">`,
+          `<hp:run charPrIDRef="${charPr}">`,
+          tXml(block.text),
+          '</hp:run>',
+          '</hp:p>'
+        ].join('')
+      )
+      continue
+    }
     // "…법원 귀중" 한 줄은 샘플의 수신 법원 원형(왼쪽 정렬, 휴먼고딕 15pt 굵게)으로.
     if (/귀중\s*$/.test(block.text) && !block.text.includes('\n')) {
       paras.push(
@@ -740,19 +816,19 @@ function sectionXml(blocks: MarkdownBlock[], office?: HwpxOfficeInfo): string {
       )
       continue
     }
+    const alignParaPr =
+      block.align === 'center'
+        ? CENTER_PARA_PR_ID
+        : block.align === 'right'
+          ? RIGHT_PARA_PR_ID
+          : undefined
+    // 사건표시 서식(고딕·들여쓰기 없음): 목록 항목, "사    건 …" 표시줄, 줄바꿈으로 이어진 블록
+    if (block.caseStyle || CASE_LABEL_LINE_RE.test(block.text) || block.text.includes('\n')) {
+      paras.push(protoParagraphXml(COURT_CASE_PARA, COURT_CASE_T, block.text, alignParaPr))
+      continue
+    }
     paras.push(
-      protoParagraphXml(
-        COURT_BODY_PARA,
-        `<hp:t>${COURT_BODY_TEXT}</hp:t>`,
-        block.text,
-        block.align === 'center'
-          ? CENTER_PARA_PR_ID
-          : block.align === 'right'
-            ? RIGHT_PARA_PR_ID
-            : block.text.includes('\n')
-              ? BODY_MULTILINE_PARA_PR
-              : undefined
-      )
+      protoParagraphXml(COURT_BODY_PARA, `<hp:t>${COURT_BODY_TEXT}</hp:t>`, block.text, alignParaPr)
     )
   }
 
