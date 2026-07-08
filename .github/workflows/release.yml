@@ -18,13 +18,16 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
+        # prerelease로 먼저 만든다 — 빌드가 끝나기 전에 /releases/latest가
+        # 자산 없는 새 릴리스를 가리켜 설치 스크립트가 404 나는 것을 막는다.
+        # 빌드 완료 후 finalize-release가 정식 릴리스로 전환한다.
         run: |
           tag="${GITHUB_REF_NAME}"
           title="${tag#v}"
           if gh release view "$tag" >/dev/null 2>&1; then
             exit 0
           fi
-          gh release create "$tag" --title "$title" --notes "Automated release $tag"
+          gh release create "$tag" --title "$title" --notes "Automated release $tag" --prerelease
 
   build-macos:
     name: macOS (${{ matrix.arch }})
@@ -86,3 +89,16 @@ jobs:
         run: npx electron-builder --win --publish always
         env:
           GH_TOKEN: ${{ github.token }}
+
+  finalize-release:
+    name: Publish release
+    needs: [build-macos, build-windows]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Mark release as latest
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          gh release edit "$tag" --prerelease=false --latest

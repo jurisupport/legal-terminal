@@ -162,9 +162,27 @@ function Get-AssetName {
 }
 
 function Get-ReleaseBaseUrl {
-  param([string]$SelectedVersion)
+  param(
+    [string]$SelectedVersion,
+    [string]$AssetName
+  )
 
   if ($SelectedVersion -eq 'latest') {
+    # 릴리스 빌드가 도는 몇 분 동안 latest에 자산이 아직 없을 수 있다(404).
+    # API로 요청한 파일이 실제로 들어 있는 최신 릴리스를 찾고, 실패하면 latest로 폴백.
+    try {
+      $releases = Invoke-RestMethod `
+        -Uri 'https://api.github.com/repos/jurisupport/legal-terminal/releases?per_page=10' `
+        -Headers @{ 'User-Agent' = 'legal-terminal-install' } -TimeoutSec 15
+      foreach ($release in $releases) {
+        if ($release.draft -or $release.prerelease) { continue }
+        if ($release.assets | Where-Object { $_.name -eq $AssetName }) {
+          return "https://github.com/jurisupport/legal-terminal/releases/download/$($release.tag_name)"
+        }
+      }
+    } catch {
+      # API 실패 시 아래 latest 경로 사용
+    }
     return 'https://github.com/jurisupport/legal-terminal/releases/latest/download'
   }
 
@@ -609,7 +627,7 @@ Refresh-ProcessPath
 Ensure-ClaudeCode
 
 $assetName = Get-AssetName -SelectedChannel $Channel
-$releaseBaseUrl = Get-ReleaseBaseUrl -SelectedVersion $Version
+$releaseBaseUrl = Get-ReleaseBaseUrl -SelectedVersion $Version -AssetName $assetName
 $downloadUrl = "$releaseBaseUrl/$assetName"
 $downloadPath = Resolve-DownloadPath `
   -RequestedDestination $Destination `
