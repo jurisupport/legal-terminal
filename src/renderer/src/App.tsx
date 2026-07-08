@@ -10295,6 +10295,10 @@ function SettingsView(): JSX.Element {
             )}
           </div>
           {officeMsg && <p className="muted small">{officeMsg}</p>}
+          <p className="muted small">
+            로고 권장: 투명 배경 PNG, 3MB 이하, 가로:세로 2:1~4:1(4:1 최적), 세로 400px 이상,
+            이미지 자체 여백 제거. 높이 약 1.7cm에 꽉 차게 들어갑니다.
+          </p>
         </div>
       </section>
 
