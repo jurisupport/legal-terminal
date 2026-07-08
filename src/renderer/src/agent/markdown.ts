@@ -134,6 +134,8 @@ export function selectedHtml(selection: Selection): string {
   for (let index = 0; index < selection.rangeCount; index += 1) {
     wrap.appendChild(selection.getRangeAt(index).cloneContents())
   }
+  // 복사 버튼 툴바 등 UI 요소는 붙여넣기 결과에 섞이면 안 된다.
+  wrap.querySelectorAll('.agent-msg-tools, .agent-code-toolbar, button').forEach((el) => el.remove())
   return DOMPurify.sanitize(wrap.innerHTML, {
     USE_PROFILES: { html: true },
     ADD_ATTR: ['target', 'rel']
@@ -162,9 +164,7 @@ export function writeSelectionToClipboard(clipboardData: DataTransfer, selection
   return true
 }
 
-async function writeRichClipboard(markdown: string): Promise<void> {
-  const html = richClipboardHtml(markdown)
-  const plain = markdownToPlainText(markdown)
+export async function writeHtmlPlainClipboard(html: string, plain: string): Promise<void> {
   if (navigator.clipboard?.write && 'ClipboardItem' in window) {
     try {
       const ClipboardItemCtor = window.ClipboardItem
@@ -199,8 +199,128 @@ async function writeRichClipboard(markdown: string): Promise<void> {
 
 export async function copyAgentOutput(markdown: string, mode: AgentCopyMode): Promise<void> {
   if (mode === 'rich') {
-    await writeRichClipboard(markdown)
+    await writeHtmlPlainClipboard(richClipboardHtml(markdown), markdownToPlainText(markdown))
     return
   }
   await navigator.clipboard.writeText(mode === 'markdown' ? markdown : markdownToPlainText(markdown))
+}
+
+// ── 선택 영역 HTML → Markdown 역변환 ──
+// marked가 만든 예측 가능한 구조(문단·제목·강조·목록·코드·표)만 다루면 충분하다.
+
+function tableToMarkdown(table: HTMLTableElement): string {
+  const rows = Array.from(table.querySelectorAll('tr')).map((tr) =>
+    Array.from(tr.querySelectorAll('th, td')).map((cell) =>
+      childMarkdown(cell).replace(/\n+/g, ' ').replace(/\|/g, '\\|').trim()
+    )
+  )
+  if (!rows.length) return ''
+  const width = Math.max(...rows.map((cells) => cells.length))
+  const line = (cells: string[]): string =>
+    `| ${Array.from({ length: width }, (_, i) => cells[i] ?? '').join(' | ')} |`
+  const hasHeader = Boolean(table.tHead?.rows.length) || Boolean(rows.length > 1 && table.querySelector('tr:first-child th'))
+  const header = hasHeader ? rows[0] : Array.from({ length: width }, () => '')
+  const body = hasHeader ? rows.slice(1) : rows
+  return [line(header), `|${' --- |'.repeat(width)}`, ...body.map(line)].join('\n')
+}
+
+function childMarkdown(node: Node): string {
+  return Array.from(node.childNodes).map(nodeToMarkdown).join('')
+}
+
+function blockMarkdown(node: Node): string {
+  // 공백만 있는 줄을 먼저 지워야 빈 줄 병합이 제대로 된다.
+  return childMarkdown(node).replace(/[ \t]+\n/g, '\n').replace(/\n[ \t]+\n/g, '\n\n').replace(/\n{3,}/g, '\n\n').trim()
+}
+
+function nodeToMarkdown(node: Node): string {
+  if (node.nodeType === Node.TEXT_NODE) return (node.textContent ?? '').replace(/[ \t\r\n]+/g, ' ')
+  if (!(node instanceof HTMLElement)) return ''
+  if (node.classList.contains('agent-code-toolbar')) return ''
+  const tag = node.tagName.toLowerCase()
+  switch (tag) {
+    case 'br':
+      return '\n'
+    case 'hr':
+      return '\n\n---\n\n'
+    case 'h1':
+    case 'h2':
+    case 'h3':
+    case 'h4':
+    case 'h5':
+    case 'h6':
+      return `\n\n${'#'.repeat(Number(tag[1]))} ${childMarkdown(node).trim()}\n\n`
+    case 'p':
+      return `\n\n${childMarkdown(node).trim()}\n\n`
+    case 'strong':
+    case 'b': {
+      const inner = childMarkdown(node).trim()
+      return inner ? `**${inner}**` : ''
+    }
+    case 'em':
+    case 'i': {
+      const inner = childMarkdown(node).trim()
+      return inner ? `*${inner}*` : ''
+    }
+    case 'del':
+    case 's': {
+      const inner = childMarkdown(node).trim()
+      return inner ? `~~${inner}~~` : ''
+    }
+    case 'code': {
+      const raw = node.textContent ?? ''
+      return raw ? `\`${raw}\`` : ''
+    }
+    case 'pre': {
+      const code = node.querySelector('code')
+      const language = code?.className.match(/(?:^|\s)language-([^\s]+)/)?.[1] ?? ''
+      const raw = ((code ?? node).textContent ?? '').replace(/\n$/, '')
+      return `\n\n\`\`\`${language}\n${raw}\n\`\`\`\n\n`
+    }
+    case 'a': {
+      const href = node.getAttribute('href') ?? ''
+      const label = childMarkdown(node).trim() || href
+      return href ? `[${label}](${href})` : label
+    }
+    case 'img': {
+      const src = node.getAttribute('src') ?? ''
+      return src ? `![${node.getAttribute('alt') ?? ''}](${src})` : ''
+    }
+    case 'ul':
+    case 'ol': {
+      const ordered = tag === 'ol'
+      const start = ordered ? Number(node.getAttribute('start') ?? '1') || 1 : 1
+      const items = Array.from(node.children).filter((child) => child.tagName.toLowerCase() === 'li')
+      const lines = items.map((li, index) => {
+        const marker = ordered ? `${start + index}. ` : '- '
+        const pad = ' '.repeat(marker.length)
+        const [first = '', ...rest] = blockMarkdown(li).split('\n')
+        const continuation = rest.map((line) => (line ? pad + line : line)).join('\n')
+        return marker + first + (rest.length ? `\n${continuation}` : '')
+      })
+      return `\n\n${lines.join('\n')}\n\n`
+    }
+    case 'blockquote': {
+      const inner = blockMarkdown(node)
+      return `\n\n${inner.split('\n').map((line) => (line ? `> ${line}` : '>')).join('\n')}\n\n`
+    }
+    case 'table':
+      return node instanceof HTMLTableElement ? `\n\n${tableToMarkdown(node)}\n\n` : childMarkdown(node)
+    case 'button':
+    case 'style':
+    case 'script':
+      return ''
+    case 'div':
+    case 'section':
+    case 'article':
+      return `\n\n${blockMarkdown(node)}\n\n`
+    default:
+      return childMarkdown(node)
+  }
+}
+
+export function htmlToMarkdown(html: string): string {
+  const host = document.createElement('div')
+  host.innerHTML = DOMPurify.sanitize(html, { USE_PROFILES: { html: true }, ADD_ATTR: ['target', 'rel'] })
+  return blockMarkdown(host)
 }

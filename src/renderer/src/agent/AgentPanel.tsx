@@ -7,7 +7,8 @@ import {
   useState,
   type CSSProperties,
   type ClipboardEvent,
-  type DragEvent
+  type DragEvent,
+  type MouseEvent
 } from 'react'
 import * as pdfjs from 'pdfjs-dist'
 import type { PDFDocumentProxy } from 'pdfjs-dist'
@@ -50,8 +51,11 @@ import {
 } from './transcriptCache'
 import {
   copyAgentOutput,
+  htmlToMarkdown,
   markdownPreviewText,
+  selectedHtml,
   selectionIntersectsElement,
+  writeHtmlPlainClipboard,
   writeSelectionToClipboard,
   type AgentCopyMode
 } from './markdown'
@@ -1753,6 +1757,12 @@ export default function AgentPanel({
   const [expandedProcessIds, setExpandedProcessIds] = useState<Set<string>>(new Set())
   const [agentFontSize, setAgentFontSize] = useState(DEFAULT_AGENT_FONT_SIZE)
   const [copyFeedback, setCopyFeedback] = useState('')
+  const [selectionMenu, setSelectionMenu] = useState<{
+    x: number
+    y: number
+    html: string
+    text: string
+  } | null>(null)
   const [dialogChoices, setDialogChoices] = useState<Record<string, Record<string, string[]>>>({})
   const [dialogResponses, setDialogResponses] = useState<Record<string, string>>({})
   const [attachments, setAttachments] = useState<AgentAttachment[]>(() => initialDraft?.attachments ?? [])
@@ -2198,6 +2208,24 @@ export default function AgentPanel({
     document.addEventListener('copy', onCopy, true)
     return () => document.removeEventListener('copy', onCopy, true)
   }, [])
+
+  useEffect(() => {
+    if (!selectionMenu) return
+    const close = (): void => setSelectionMenu(null)
+    const closeFromKey = (event: KeyboardEvent): void => {
+      if (event.key === 'Escape') close()
+    }
+    document.addEventListener('mousedown', close)
+    document.addEventListener('scroll', close, true)
+    window.addEventListener('keydown', closeFromKey)
+    window.addEventListener('blur', close)
+    return () => {
+      document.removeEventListener('mousedown', close)
+      document.removeEventListener('scroll', close, true)
+      window.removeEventListener('keydown', closeFromKey)
+      window.removeEventListener('blur', close)
+    }
+  }, [selectionMenu])
 
   const hasPrompt = useMemo(() => input.trim().length > 0 || attachments.length > 0, [attachments.length, input])
   const queuedCount = useMemo(
@@ -3033,6 +3061,49 @@ export default function AgentPanel({
     copyFeedbackTimerRef.current = setTimeout(() => setCopyFeedback(''), 1200)
   }
 
+  // 답변 드래그 후 우클릭 — 원문(Markdown)/서식 문서/텍스트 복사 메뉴.
+  // 선택 내용은 메뉴를 여는 시점에 캡처한다(메뉴 클릭으로 선택이 풀려도 복사 가능).
+  const openSelectionMenu = (event: MouseEvent<HTMLDivElement>): void => {
+    const target = event.target
+    if (
+      target instanceof HTMLElement &&
+      (target.closest('input, textarea') || target.isContentEditable)
+    )
+      return
+    const selection = window.getSelection()
+    const timeline = scrollRef.current
+    if (!selection || selection.isCollapsed || !timeline || !selectionIntersectsElement(selection, timeline)) return
+    const text = selection.toString()
+    if (!text.trim()) return
+    event.preventDefault()
+    setSelectionMenu({
+      x: Math.min(event.clientX, window.innerWidth - 240),
+      y: Math.min(event.clientY, window.innerHeight - 132),
+      html: selectedHtml(selection),
+      text
+    })
+  }
+
+  const copySelectionFromMenu = async (mode: AgentCopyMode): Promise<void> => {
+    const menu = selectionMenu
+    setSelectionMenu(null)
+    if (!menu) return
+    try {
+      if (mode === 'rich') {
+        await writeHtmlPlainClipboard(`<meta charset="utf-8"><div>${menu.html}</div>`, menu.text)
+      } else if (mode === 'markdown') {
+        await navigator.clipboard.writeText(htmlToMarkdown(menu.html))
+      } else {
+        await navigator.clipboard.writeText(menu.text)
+      }
+      showTransientFeedback(
+        mode === 'rich' ? '서식 문서로 복사됨' : mode === 'markdown' ? 'Markdown 원문으로 복사됨' : '텍스트로 복사됨'
+      )
+    } catch {
+      setError('선택 영역을 클립보드에 복사할 수 없습니다.')
+    }
+  }
+
   const attachableTransfer = (dataTransfer: DataTransfer | null): dataTransfer is DataTransfer =>
     Boolean(
       dataTransfer &&
@@ -3218,6 +3289,7 @@ export default function AgentPanel({
           onTouchMove={markTimelineUserScroll}
           onKeyDown={markTimelineUserScroll}
           onCopy={copySelection}
+          onContextMenu={openSelectionMenu}
         >
           {items.length === 0 && (
             <div className="agent-empty">
@@ -3740,6 +3812,44 @@ export default function AgentPanel({
       )}
       {error && <div className="agent-error">{error}</div>}
       {copyFeedback && <div className="agent-copy-feedback">{copyFeedback}</div>}
+      {selectionMenu && (
+        <div
+          className="tab-context-menu"
+          role="menu"
+          aria-label="선택 영역 복사"
+          style={{ left: selectionMenu.x, top: selectionMenu.y }}
+          onMouseDown={(e) => {
+            e.preventDefault()
+            e.stopPropagation()
+          }}
+          onContextMenu={(e) => e.preventDefault()}
+        >
+          <button
+            className="tab-context-menu-item"
+            role="menuitem"
+            title="Markdown 원문으로 복사"
+            onClick={() => void copySelectionFromMenu('markdown')}
+          >
+            <span>원문 복사 (Markdown)</span>
+          </button>
+          <button
+            className="tab-context-menu-item"
+            role="menuitem"
+            title="서식을 유지한 채 복사 — 한글·워드에 붙여넣기"
+            onClick={() => void copySelectionFromMenu('rich')}
+          >
+            <span>서식 문서로 복사</span>
+          </button>
+          <button
+            className="tab-context-menu-item"
+            role="menuitem"
+            title="서식 없는 일반 텍스트로 복사"
+            onClick={() => void copySelectionFromMenu('text')}
+          >
+            <span>텍스트로 복사 (txt)</span>
+          </button>
+        </div>
+      )}
 
       <footer className="agent-prompt">
         {showSlashMenu && (
