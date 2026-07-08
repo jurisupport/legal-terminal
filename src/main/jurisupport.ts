@@ -1072,7 +1072,9 @@ export interface JsOfficeInfo {
   fetchedAt: string
 }
 
-const OFFICE_CACHE_TTL_MS = 24 * 60 * 60_000
+// 서버에 get_office_profile이 생긴 뒤로는 조회가 가볍다(tools/list + 호출 1회).
+// 웹 /company 설정에서 바꾼 정보가 곧 반영되도록 짧게 잡고, 실패 시엔 이전 캐시를 쓴다.
+const OFFICE_CACHE_TTL_MS = 10 * 60_000
 const OFFICE_TOOL_CANDIDATES = [
   'get_office_profile',
   'get_office',
