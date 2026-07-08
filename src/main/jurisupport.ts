@@ -1313,7 +1313,9 @@ export async function officeInfoForHwpx(timeoutMs = 6000): Promise<HwpxOfficeInf
       : undefined)
 
   const merged: HwpxOfficeInfo = {
-    officeName: trimmed(manual.officeName) ?? trimmed(profile.officeName),
+    officeName: manual.hideOfficeName
+      ? undefined
+      : trimmed(manual.officeName) ?? trimmed(profile.officeName),
     phone: trimmed(manual.phone) ?? trimmed(profile.phone),
     fax: trimmed(manual.fax) ?? trimmed(profile.fax),
     email: trimmed(manual.email) ?? trimmed(profile.email),

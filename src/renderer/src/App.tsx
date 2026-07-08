@@ -10089,7 +10089,7 @@ function SettingsView(): JSX.Element {
     const cleaned: OfficeProfileSettings = {}
     for (const [key, value] of Object.entries(next)) {
       const trimmed = typeof value === 'string' ? value.trim() : value
-      if (trimmed) cleaned[key as keyof OfficeProfileSettings] = trimmed as string
+      if (trimmed) cleaned[key as keyof OfficeProfileSettings] = trimmed as never
     }
     if (JSON.stringify(cleaned) !== JSON.stringify(s.officeProfile ?? {})) {
       await savePatch({ officeProfile: cleaned })
@@ -10110,7 +10110,7 @@ function SettingsView(): JSX.Element {
   }
 
   const officeField = (
-    key: Exclude<keyof OfficeProfileSettings, 'footerText' | 'logoPath'>,
+    key: Exclude<keyof OfficeProfileSettings, 'footerText' | 'logoPath' | 'hideOfficeName'>,
     placeholder: string
   ): JSX.Element => (
     <input
@@ -10250,6 +10250,18 @@ function SettingsView(): JSX.Element {
         </div>
         <div className="setting-value setting-office">
           {officeField('officeName', '상호 (예: 법무법인 ○○)')}
+          <label className="setting-checkbox">
+            <input
+              type="checkbox"
+              checked={office.hideOfficeName === true}
+              onChange={(e) => {
+                const next = { ...office, hideOfficeName: e.currentTarget.checked }
+                setOffice(next)
+                void commitOffice(next)
+              }}
+            />
+            상호 표시 안 함 (로고만) — JuriSupport 상호도 무시
+          </label>
           {officeField('phone', '전화 (예: 02-000-0000)')}
           {officeField('fax', '팩스')}
           {officeField('email', '이메일')}

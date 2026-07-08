@@ -110,8 +110,11 @@ assert.match(
   const s = sectionOf(createHwpxFromMarkdown(['2026. 7. 8.', '피고인의 국선변호인', '변호사 하희봉'].join('\n'), '검증'))
   assert.match(s, /피고인의 국선변호인<hp:lineBreak\/>변호사 하 희 봉<\/hp:t>/)
 }
-// lt-align:right → paraPr 21
-assert.match(section, /paraPrIDRef="21"[^>]*>[\s\S]*?2026\. 7\. 8\./)
+// lt-align:right(서명 블록) → 탭 7개 + 왼쪽정렬(사건표시 원형), 줄은 lineBreak
+{
+  const s = sectionOf(createHwpxFromMarkdown(['<!-- lt-align:right -->', '2026. 7. 8.', '변호사 하희봉', '<!-- /lt-align -->'].join('\n'), '검증'))
+  assert.match(s, /charPrIDRef="9"><hp:t>(?:<hp:tab\/>){7}2026\. 7\. 8\.<hp:lineBreak\/>(?:<hp:tab\/>){7}변호사 하 희 봉<\/hp:t>/)
+}
 // 사무실 정보가 없으면 푸터는 쪽번호만
 assert.match(section, /numType="TOTAL_PAGE"/)
 assert.doesNotMatch(section, /전화:/)
@@ -142,6 +145,13 @@ assert.match(officeXml, /<opf:item id="logo" href="BinData\/logo\.png" media-typ
 assert.match(officeSection, /rowCnt="4" colCnt="2"/)
 // placeholder가 남아 있으면 안 된다
 assert.doesNotMatch(officeSection, /\[전화번호\]|\[팩스번호\]|\[이메일\]|\[주소\]|\[법무법인/)
+// 푸터 글자는 9pt(charPr 20/21)로, 내부 여백은 0으로
+assert.match(officeXml, /<hh:charPr id="20" height="900"/)
+assert.match(officeSection, /charPrIDRef="21">[\s\S]*?법무법인 검증/)
+assert.match(officeSection, /charPrIDRef="20"><hp:t>전화: 02-000-0000/)
+assert.doesNotMatch(officeSection.match(/<hp:tbl [\s\S]*?<\/hp:tbl>/)[0], /cellMargin left="510"/)
+// 로고는 칸 높이(4729)에 맞춤 — 1×1 정사각 로고면 4729×4729
+assert.match(officeSection, /<hp:sz width="4729" widthRelTo="ABSOLUTE" height="4729"/)
 
 // ── 3) 별도 푸터 텍스트가 있으면 표 대신 텍스트 ──
 const withFooterText = createHwpxFromMarkdown(md, '준비서면', {

@@ -84,6 +84,22 @@ try {
     .replace(paraCnt[0], `<hh:paraProperties itemCnt="${Number(paraCnt[1]) + extras.length}">`)
     .replace('</hh:paraProperties>', `${extras.join('')}</hh:paraProperties>`)
 
+  // 푸터 9pt 글자 모양 추가:
+  //  20 — 연락처용(charPr 9: 휴먼고딕 12pt 일반) 복제 후 9pt
+  //  21 — 상호용(charPr 10: 휴먼고딕 12pt 굵게) 복제 후 9pt
+  const cloneChar = (src, id) => {
+    const base = header.match(new RegExp(`<hh:charPr id="${src}" .*?</hh:charPr>`, 's'))?.[0]
+    if (!base) throw new Error(`charPr id=${src} 를 찾지 못했습니다.`)
+    if (!base.includes('height="1200"')) throw new Error(`charPr ${src} 크기가 12pt가 아닙니다.`)
+    return base.replace(`id="${src}"`, `id="${id}"`).replace('height="1200"', 'height="900"')
+  }
+  const charExtras = [cloneChar(9, 20), cloneChar(10, 21)]
+  const charCnt = header.match(/<hh:charProperties itemCnt="(\d+)">/)
+  if (!charCnt) throw new Error('charProperties itemCnt 를 찾지 못했습니다.')
+  header = header
+    .replace(charCnt[0], `<hh:charProperties itemCnt="${Number(charCnt[1]) + charExtras.length}">`)
+    .replace('</hh:charProperties>', `${charExtras.join('')}</hh:charProperties>`)
+
   // 줄배치 정보 제거 — 텍스트를 바꿔 넣으면 어차피 맞지 않고, 없으면 재계산된다.
   const section = rawSection.replace(/<hp:linesegarray>.*?<\/hp:linesegarray>/gs, '')
 

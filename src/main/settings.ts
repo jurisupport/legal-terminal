@@ -28,6 +28,8 @@ export interface SshProfile {
 /** 서면(hwpx) 푸터에 넣는 사무실 정보 — 직접 입력분이 JuriSupport 계정 정보보다 우선 */
 export interface OfficeProfileSettings {
   officeName?: string
+  /** 상호 숨김 — 로고만 표시 (JuriSupport 상호도 무시) */
+  hideOfficeName?: boolean
   phone?: string
   fax?: string
   email?: string

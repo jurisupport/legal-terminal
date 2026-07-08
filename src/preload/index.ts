@@ -369,6 +369,7 @@ type AgentProvider = 'claude' | 'codex'
 
 interface OfficeProfileSettings {
   officeName?: string
+  hideOfficeName?: boolean
   phone?: string
   fax?: string
   email?: string

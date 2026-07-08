@@ -100,8 +100,11 @@ const PLAIN_PARA_PR = 18
 const TABLE_BORDER_FILL_ID = 4
 const TABLE_HEADER_CHAR_PR = 2
 const TABLE_CELL_PARA_PR = 0
-/** 푸터 별도 텍스트용 글자 모양(휴먼고딕 12pt) */
-const FOOTER_TEXT_CHAR_PR = 16
+/** 푸터 글자 모양 — 9pt 휴먼고딕 (generate 스크립트가 header에 덧붙인 20/21) */
+const FOOTER_9PT_CHAR_PR = 20
+const FOOTER_9PT_BOLD_CHAR_PR = 21
+/** 날짜·당사자 지위(서명 블록) 앞에 넣는 탭 수 — 샘플서면과 동일하게 왼쪽정렬+탭 */
+const SIGNATURE_TAB_COUNT = 7
 /** 구분 표제("다 음"·"첨부서류" 등) — 가운데, 휴먼고딕 굵게 (사용자 편집본 기준) */
 const LABEL_PARA_PR = 5
 const LABEL_SMALL_CHAR_PR = 10 // 12pt — 다 음 / 아 래
@@ -676,10 +679,10 @@ function tableXml(
 
 /** 푸터 왼쪽 칸에 넣는 로고 그림 — 샘플의 hp:pic 원형에서 크기·참조만 바꾼다(셀 안 글자취급) */
 function footerLogoPicXml(ctx: HwpxXmlContext, logo: NonNullable<HwpxOfficeInfo['logo']>): string {
-  // 1px(96dpi) = 75 HWPUNIT. 칸(약 6.7cm×1.7cm)에 맞게 축소만 한다.
+  // 1px(96dpi) = 75 HWPUNIT. 칸 높이(4729, 약 1.7cm)에 꽉 차게 맞추고 폭(18999)은 넘지 않게.
   const orgW = Math.max(75, Math.round(logo.width * 75))
   const orgH = Math.max(75, Math.round(logo.height * 75))
-  const scale = Math.min(17000 / orgW, 3400 / orgH, 1)
+  const scale = Math.min(18999 / orgW, 4729 / orgH)
   const w = Math.max(1, Math.round(orgW * scale))
   const h = Math.max(1, Math.round(orgH * scale))
   const id = ctx.nextShapeId
@@ -746,7 +749,7 @@ function titleParaXml(ctx: HwpxXmlContext, title: string, office?: HwpxOfficeInf
         .map((line) =>
           [
             `<hp:p id="0" paraPrIDRef="${CELL_CENTER_PARA_PR_ID}" styleIDRef="0" pageBreak="0" columnBreak="0" merged="0">`,
-            `<hp:run charPrIDRef="${FOOTER_TEXT_CHAR_PR}">`,
+            `<hp:run charPrIDRef="${FOOTER_9PT_CHAR_PR}">`,
             tXml(line),
             '</hp:run>',
             '</hp:p>'
@@ -759,23 +762,42 @@ function titleParaXml(ctx: HwpxXmlContext, title: string, office?: HwpxOfficeInf
     return out
   }
 
-  // 사무실 정보 표의 자리(placeholder) 치환 — 상호/로고 칸
+  // 사무실 정보 표의 자리(placeholder) 치환 — run째로 바꿔 글자 크기를 9pt로 낮춘다.
   const officeInfo = office as HwpxOfficeInfo
   const nameT = officeInfo.officeName ? tXml(officeInfo.officeName) : '<hp:t/>'
-  out = officeInfo.logo
-    ? replaceSlot(
-        out,
-        '<hp:t>[법무법인/법률사무소 상호/로고]</hp:t>',
-        `${footerLogoPicXml(ctx, officeInfo.logo)}${nameT}`
-      )
-    : replaceSlot(out, '<hp:t>[법무법인/법률사무소 상호/로고]</hp:t>', nameT)
-  out = replaceSlot(out, '<hp:t>전화: [전화번호]  팩스: [팩스번호]</hp:t>', tXml(telFax))
+  const logoXml = officeInfo.logo ? footerLogoPicXml(ctx, officeInfo.logo) : ''
   out = replaceSlot(
     out,
-    '<hp:t>이메일: [이메일]</hp:t>',
-    tXml(officeInfo.email ? `이메일: ${officeInfo.email}` : '')
+    '<hp:run charPrIDRef="10"><hp:t>[법무법인/법률사무소 상호/로고]</hp:t></hp:run>',
+    `<hp:run charPrIDRef="${FOOTER_9PT_BOLD_CHAR_PR}">${logoXml}${nameT}</hp:run>`
   )
-  out = replaceSlot(out, '<hp:t>[주소]</hp:t>', tXml(officeInfo.address ?? ''))
+  out = replaceSlot(
+    out,
+    '<hp:run charPrIDRef="9"><hp:t>전화: [전화번호]  팩스: [팩스번호]</hp:t></hp:run>',
+    `<hp:run charPrIDRef="${FOOTER_9PT_CHAR_PR}">${tXml(telFax)}</hp:run>`
+  )
+  out = replaceSlot(
+    out,
+    '<hp:run charPrIDRef="9"><hp:t>이메일: [이메일]</hp:t></hp:run>',
+    `<hp:run charPrIDRef="${FOOTER_9PT_CHAR_PR}">${tXml(officeInfo.email ? `이메일: ${officeInfo.email}` : '')}</hp:run>`
+  )
+  out = replaceSlot(
+    out,
+    '<hp:run charPrIDRef="9"><hp:t>[주소]</hp:t></hp:run>',
+    `<hp:run charPrIDRef="${FOOTER_9PT_CHAR_PR}">${tXml(officeInfo.address ?? '')}</hp:run>`
+  )
+  // 푸터 내부 여백 제거 (표 안쪽·셀 여백 0)
+  out = out.replace(/<hp:tbl [\s\S]*?<\/hp:tbl>/, (tbl) =>
+    tbl
+      .replace(
+        /<hp:inMargin left="\d+" right="\d+" top="\d+" bottom="\d+"\/>/g,
+        '<hp:inMargin left="0" right="0" top="0" bottom="0"/>'
+      )
+      .replace(
+        /<hp:cellMargin left="\d+" right="\d+" top="\d+" bottom="\d+"\/>/g,
+        '<hp:cellMargin left="0" right="0" top="0" bottom="0"/>'
+      )
+  )
   return out
 }
 
@@ -831,13 +853,19 @@ function sectionXml(blocks: MarkdownBlock[], office?: HwpxOfficeInfo): string {
       )
       continue
     }
-    const alignParaPr =
-      block.align === 'center'
-        ? CENTER_PARA_PR_ID
-        : block.align === 'right'
-          ? RIGHT_PARA_PR_ID
-          : undefined
     const text = spacedSignature(block.text)
+    // 날짜·당사자 지위(서명 블록, lt-align:right): 오른쪽 정렬 대신 샘플서면처럼
+    // 탭으로 밀고 왼쪽정렬, 줄은 쉬프트엔터(lineBreak)로 잇는다.
+    if (block.align === 'right') {
+      const tabs = '\t'.repeat(SIGNATURE_TAB_COUNT)
+      const tabbed = text
+        .split('\n')
+        .map((line) => tabs + line)
+        .join('\n')
+      paras.push(protoParagraphXml(COURT_CASE_PARA, COURT_CASE_T, tabbed))
+      continue
+    }
+    const alignParaPr = block.align === 'center' ? CENTER_PARA_PR_ID : undefined
     // 사건표시 서식(고딕·들여쓰기 없음): 목록 항목, "사    건 …" 표시줄, 줄바꿈으로 이어진 블록
     if (block.caseStyle || CASE_LABEL_LINE_RE.test(text) || text.includes('\n')) {
       paras.push(protoParagraphXml(COURT_CASE_PARA, COURT_CASE_T, text, alignParaPr))
