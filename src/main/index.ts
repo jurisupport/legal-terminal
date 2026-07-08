@@ -2469,8 +2469,11 @@ ipcMain.handle(
     if (r.canceled || !r.filePath) return { ok: false }
     try {
       const title = p.title?.trim() || basename(r.filePath).replace(/\.[^.]+$/, '') || '문서'
-      await writeFile(r.filePath, createHwpxFromMarkdown(p.markdown, title))
-      return { ok: true, path: r.filePath }
+      // JuriSupport 계정의 사무실 정보(로고·연락처·별도 푸터)를 표준 서식 푸터에 넣는다.
+      // 미등록·오프라인이면 쪽번호만 있는 푸터로 내보낸다.
+      const office = await js.officeInfoForHwpx().catch(() => undefined)
+      await writeFile(r.filePath, createHwpxFromMarkdown(p.markdown, title, office))
+      return { ok: true, path: r.filePath, officeFooter: !!office }
     } catch (e) {
       return { ok: false, error: String(e) }
     }

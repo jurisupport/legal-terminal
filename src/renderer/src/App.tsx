@@ -18,6 +18,7 @@ import AgentPanel, {
   type AgentDiffOpenRequest,
   type AgentProviderHandoff
 } from './agent/AgentPanel'
+import { preloadSessionTranscripts } from './agent/transcriptCache'
 import FileTree, { LT_PATH, sortEntries, type PendingCreateRequest, type SortMode } from './filetree/FileTree'
 import PdfViewer, { type PdfViewStatus } from './viewer/PdfViewer'
 import RecordViewer from './viewer/RecordViewer'
@@ -1064,9 +1065,20 @@ const loadPastSessions = (
   return request
 }
 
+// 사건/폴더를 열면 세션 목록에 더해 최근 세션 transcript까지 미리 받아둔다.
+// 에이전트 탭이 하나도 없어도 이어서 열기 시 히스토리가 즉시 보이게 하기 위함.
+const PRELOAD_TRANSCRIPT_COUNT = 3
+
 const preloadPastSessions = (cwd?: string, source?: TermTab): void => {
   if (!cwd) return
-  void loadPastSessions(cwd, source).catch(() => {})
+  void loadPastSessions(cwd, source)
+    .then((entries) => {
+      preloadSessionTranscripts(
+        entries.slice(0, PRELOAD_TRANSCRIPT_COUNT).map((entry) => entry.sessionId),
+        source?.ssh
+      )
+    })
+    .catch(() => {})
 }
 
 const currentCaseSessionSource = (

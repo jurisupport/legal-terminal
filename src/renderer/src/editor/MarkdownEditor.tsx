@@ -17,7 +17,15 @@ import { livePreview } from './livePreview'
 import { mdToPrintHtml, type PrintLayoutProfile } from './mdExport'
 import { mergeTextAgainstBase } from './threeWayMerge'
 import FindBar from '../search/FindBar'
-import { IconAlignCenter, IconHistory, IconSave, IconSaveAs, IconSearch } from '../icons/Icons'
+import {
+  IconAlignCenter,
+  IconAlignLeft,
+  IconAlignRight,
+  IconHistory,
+  IconSave,
+  IconSaveAs,
+  IconSearch
+} from '../icons/Icons'
 import { writeMarkdownDataTransfer } from '../markdownClipboard'
 import type { DocumentDraftHistoryEntry } from '../env'
 
@@ -25,8 +33,11 @@ const DEFAULT_MD_FONT = "'D2Coding', 'Cascadia Mono', Consolas, monospace"
 const DEFAULT_UNTITLED_NAME = '무제.md'
 const EXTERNAL_FILE_POLL_MS = 2500
 const CLAUDE_DRAFT_FILE_POLL_MS = 750
-const ALIGN_CENTER_OPEN = '<!-- lt-align:center -->'
-const ALIGN_CENTER_CLOSE = '<!-- /lt-align -->'
+const ALIGN_OPEN_RE = /^\s*<!--\s*lt-align:(left|center|right)\s*-->\s*$/
+const ALIGN_CLOSE_RE = /^\s*<!--\s*\/lt-align\s*-->\s*$/
+const ALIGN_CLOSE = '<!-- /lt-align -->'
+type BlockAlign = 'left' | 'center' | 'right'
+const alignOpenTag = (align: BlockAlign): string => `<!-- lt-align:${align} -->`
 export const TEXT_SELECTION_OVERLAY_EVENT = 'lt:text-selection-overlay'
 export const MARKDOWN_CENTER_SELECTION_EVENT = 'lt:markdown-center-selection'
 
@@ -321,18 +332,79 @@ function selectedMarkdown(view: EditorView): string {
   return ranges.map((range) => view.state.sliceDoc(range.from, range.to)).join('\n')
 }
 
-function centerAlignBlock(value: string): string {
-  return [ALIGN_CENTER_OPEN, value, ALIGN_CENTER_CLOSE].join('\n')
+// 선택 영역을 감싸는 기존 lt-align 블록의 여닫는 주석 행 번호
+function enclosingAlignBlock(
+  state: EditorState,
+  startLineNo: number,
+  endLineNo: number
+): { open: number; close: number } | null {
+  let open: number | null = null
+  const upFrom = ALIGN_CLOSE_RE.test(state.doc.line(startLineNo).text)
+    ? startLineNo - 1
+    : startLineNo
+  for (let n = upFrom; n >= 1; n--) {
+    const text = state.doc.line(n).text
+    if (ALIGN_OPEN_RE.test(text)) {
+      open = n
+      break
+    }
+    if (ALIGN_CLOSE_RE.test(text)) break
+  }
+  if (open === null) return null
+  for (let n = Math.max(endLineNo, open + 1); n <= state.doc.lines; n++) {
+    const text = state.doc.line(n).text
+    if (ALIGN_CLOSE_RE.test(text)) return { open, close: n }
+    if (ALIGN_OPEN_RE.test(text)) break
+  }
+  return null
 }
 
-function centerAlignSelectionInView(view: EditorView): void {
-  const sel = view.state.selection.main
-  const from = sel.empty ? view.state.doc.lineAt(sel.from).from : view.state.doc.lineAt(Math.min(sel.from, sel.to)).from
-  const to = sel.empty ? view.state.doc.lineAt(sel.to).to : view.state.doc.lineAt(Math.max(sel.from, sel.to)).to
-  const text = view.state.sliceDoc(from, to)
+function alignSelectionInView(view: EditorView, align: BlockAlign): void {
+  const state = view.state
+  const sel = state.selection.main
+  const startLine = state.doc.lineAt(Math.min(sel.from, sel.to))
+  const endLine = state.doc.lineAt(Math.max(sel.from, sel.to))
+
+  const block = enclosingAlignBlock(state, startLine.number, endLine.number)
+  if (block) {
+    const openLine = state.doc.line(block.open)
+    if (align === 'left') {
+      // 왼쪽은 기본값 → 정렬 주석 제거
+      const closeLine = state.doc.line(block.close)
+      view.dispatch({
+        changes: [
+          { from: openLine.from, to: Math.min(openLine.to + 1, state.doc.length) },
+          { from: closeLine.from, to: Math.min(closeLine.to + 1, state.doc.length) }
+        ],
+        scrollIntoView: true
+      })
+    } else {
+      view.dispatch({
+        changes: { from: openLine.from, to: openLine.to, insert: alignOpenTag(align) },
+        scrollIntoView: true
+      })
+    }
+    view.focus()
+    return
+  }
+
+  const from = startLine.from
+  const to = endLine.to
+  const inner = state
+    .sliceDoc(from, to)
+    .split('\n')
+    .filter((line) => !ALIGN_OPEN_RE.test(line) && !ALIGN_CLOSE_RE.test(line))
+    .join('\n')
+  if (align === 'left') {
+    if (inner !== state.sliceDoc(from, to))
+      view.dispatch({ changes: { from, to, insert: inner }, scrollIntoView: true })
+    view.focus()
+    return
+  }
+  const open = alignOpenTag(align)
   view.dispatch({
-    changes: { from, to, insert: centerAlignBlock(text) },
-    selection: { anchor: from + ALIGN_CENTER_OPEN.length + 1 },
+    changes: { from, to, insert: [open, inner, ALIGN_CLOSE].join('\n') },
+    selection: { anchor: from + open.length + 1 },
     scrollIntoView: true
   })
   view.focus()
@@ -1002,7 +1074,7 @@ export default function MarkdownEditor({
       const detail = (event as CustomEvent<{ draftId?: string }>).detail
       if (detail?.draftId !== draftId) return
       const view = viewRef.current
-      if (view) centerAlignSelectionInView(view)
+      if (view) alignSelectionInView(view, 'center')
     }
     window.addEventListener(MARKDOWN_CENTER_SELECTION_EVENT, onCenterSelection)
     return () => window.removeEventListener(MARKDOWN_CENTER_SELECTION_EVENT, onCenterSelection)
@@ -1324,10 +1396,10 @@ export default function MarkdownEditor({
     if (defaultDir && !isRemotePath(defaultDir)) return joinDefaultPath(defaultDir, `${stem}.${extension}`)
     return `${stem}.${extension}`
   }
-  const centerAlignSelection = (): void => {
+  const alignSelection = (align: BlockAlign): void => {
     const v = viewRef.current
     if (!v) return
-    centerAlignSelectionInView(v)
+    alignSelectionInView(v, align)
   }
   const exportPdfNow = (): void => {
     const v = viewRef.current
@@ -1372,11 +1444,27 @@ export default function MarkdownEditor({
             <span className="tb-divider" />
             <button
               className="tb-btn"
+              title="왼쪽 정렬"
+              aria-label="왼쪽 정렬"
+              onClick={() => alignSelection('left')}
+            >
+              <IconAlignLeft size={14} />
+            </button>
+            <button
+              className="tb-btn"
               title="가운데 정렬"
               aria-label="가운데 정렬"
-              onClick={centerAlignSelection}
+              onClick={() => alignSelection('center')}
             >
               <IconAlignCenter size={14} />
+            </button>
+            <button
+              className="tb-btn"
+              title="오른쪽 정렬"
+              aria-label="오른쪽 정렬"
+              onClick={() => alignSelection('right')}
+            >
+              <IconAlignRight size={14} />
             </button>
             <span className="tb-divider" />
           </>

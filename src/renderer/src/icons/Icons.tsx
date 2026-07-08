@@ -251,3 +251,25 @@ export function IconAlignCenter({ size = 16 }: IconProps): JSX.Element {
     </svg>
   )
 }
+
+export function IconAlignLeft({ size = 16 }: IconProps): JSX.Element {
+  return (
+    <svg {...base(size)}>
+      <path d="M4 5h12" />
+      <path d="M4 9h16" />
+      <path d="M4 13h10" />
+      <path d="M4 17h14" />
+    </svg>
+  )
+}
+
+export function IconAlignRight({ size = 16 }: IconProps): JSX.Element {
+  return (
+    <svg {...base(size)}>
+      <path d="M8 5h12" />
+      <path d="M4 9h16" />
+      <path d="M10 13h10" />
+      <path d="M6 17h14" />
+    </svg>
+  )
+}

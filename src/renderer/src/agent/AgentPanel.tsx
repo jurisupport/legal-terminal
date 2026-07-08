@@ -44,6 +44,11 @@ import { DiffPreview } from './DiffPreview'
 import { MarkdownMessage } from './MarkdownMessage'
 import { ToolRow, toolStepDisplay, type ProcessStep } from './ToolRow'
 import {
+  invalidateSessionTranscript,
+  loadSessionTranscript,
+  transcriptSourceKey
+} from './transcriptCache'
+import {
   copyAgentOutput,
   markdownPreviewText,
   selectionIntersectsElement,
@@ -2073,7 +2078,7 @@ export default function AgentPanel({
       .then(async (result) => {
         if (!result.ok) setError(result.error ?? 'Agent 세션을 만들 수 없습니다.')
         if (!result.ok || !forkFromSessionId || resumeSessionId) return
-        const transcript = await window.lt.sessions.transcript(forkFromSessionId, ssh).catch(() => null)
+        const transcript = await loadSessionTranscript(forkFromSessionId, ssh, { refresh: true }).catch(() => null)
         if (!transcript || transcript.messages.length === 0) return
         const sendResult = await window.lt.agent.send(id, {
           text: forkContextPrompt(transcript),
@@ -2096,14 +2101,14 @@ export default function AgentPanel({
   useEffect(() => {
     if (provider !== 'claude') return
     if (!resumeSessionId) return
-    const sourceKey = ssh ? `ssh:${ssh.user}@${ssh.host}:${ssh.port ?? 22}:${ssh.identityFile ?? ''}` : 'local'
-    const historyKey = `${sourceKey}:${resumeSessionId}`
+    const historyKey = `${transcriptSourceKey(ssh)}:${resumeSessionId}`
     if (loadedHistoryKeyRef.current === historyKey) return
     loadedHistoryKeyRef.current = historyKey
     let alive = true
-    void window.lt.sessions
-      .transcript(resumeSessionId, ssh)
+    void loadSessionTranscript(resumeSessionId, ssh)
       .then((transcript) => {
+        // 이어 열린 순간부터 대화가 늘어나므로, 프리로드본은 여기서 한 번 쓰고 버린다.
+        invalidateSessionTranscript(resumeSessionId, ssh)
         if (!alive || !transcript || transcript.messages.length === 0) return
         const historyItems = transcriptToTimeline(transcript, agentLabel)
         rememberPrompts(

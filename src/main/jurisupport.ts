@@ -1,5 +1,9 @@
-import { safeStorage } from 'electron'
+import { app, safeStorage } from 'electron'
+import { readFile, writeFile, rm } from 'fs/promises'
+import { join } from 'path'
 import { getSettings, setSettings } from './settings'
+import { imageInfo } from './imageSize'
+import type { HwpxOfficeInfo } from './hwpxExport'
 import {
   normalizeCase,
   normalizeCaseList,
@@ -163,8 +167,34 @@ async function callToolNow(name: string, args: Record<string, unknown>): Promise
   return rpc?.result
 }
 
-// 같은 MCP 세션에 동시 tools/call이 겹치면 서버/세션 타이밍에 따라 간헐 실패할 수 있어 순차화한다.
-async function callTool(name: string, args: Record<string, unknown>): Promise<unknown> {
+// MCP 서버가 제공하는 도구 목록. 사무실 프로필 도구 탐색에 쓴다.
+async function listMcpToolsNow(): Promise<{ name: string; description?: string }[]> {
+  const token = await getToken()
+  if (!token) throw new Error('JuriSupport 토큰이 설정되지 않았습니다.')
+  if (!sessionId) sessionId = await ensureSession(token)
+
+  const call = (): Promise<{ status: number; sid: string | null; text: string }> =>
+    rawPost(token, { jsonrpc: '2.0', id: 3, method: 'tools/list', params: {} }, sessionId)
+
+  let resp = await call()
+  let rpc = parseRpc(resp.text)
+  if (rpc?.error && /session/i.test(rpc.error.message || '')) {
+    sessionId = await ensureSession(token)
+    resp = await call()
+    rpc = parseRpc(resp.text)
+  }
+  if (!rpc || rpc.error || !('result' in rpc)) {
+    throw new Error(rpc?.error?.message ?? `JuriSupport tools/list 실패 (HTTP ${resp.status})`)
+  }
+  const tools = (rpc.result as { tools?: { name?: string; description?: string }[] })?.tools
+  if (!Array.isArray(tools)) return []
+  return tools
+    .filter((t): t is { name: string; description?: string } => typeof t?.name === 'string')
+    .map((t) => ({ name: t.name, description: t.description }))
+}
+
+// 같은 MCP 세션에 동시 요청이 겹치면 서버/세션 타이밍에 따라 간헐 실패할 수 있어 순차화한다.
+async function enqueueMcp<T>(run: () => Promise<T>): Promise<T> {
   const previous = toolQueue
   let release: () => void = () => {}
   toolQueue = new Promise<void>((resolve) => {
@@ -172,10 +202,18 @@ async function callTool(name: string, args: Record<string, unknown>): Promise<un
   })
   await previous.catch(() => {})
   try {
-    return await callToolNow(name, args)
+    return await run()
   } finally {
     release()
   }
+}
+
+async function callTool(name: string, args: Record<string, unknown>): Promise<unknown> {
+  return enqueueMcp(() => callToolNow(name, args))
+}
+
+async function listMcpTools(): Promise<{ name: string; description?: string }[]> {
+  return enqueueMcp(listMcpToolsNow)
 }
 
 export interface JsTodoProgress {
@@ -661,6 +699,9 @@ function clearJuriSupportCaches(): void {
   todoCaseCache.clear()
   caseListCache.clear()
   caseListInflight.clear()
+  officeInflight = null
+  // 계정이 바뀌면 이전 사무실 정보(로고·연락처)를 쓰면 안 된다.
+  rm(officeCachePath(), { force: true }).catch(() => {})
 }
 
 function caseListCacheKey(params: CaseListQuery): string {
@@ -1000,4 +1041,252 @@ export async function applyTodoTerminalCommand(
   }
 
   return { ok: false, message: todoHelp() }
+}
+
+// ── 사무실 프로필 (hwpx 푸터용 로고·연락처) ──────────────────────────────
+// JuriSupport 계정에 등록한 사무실 정보를 가져와 법원제출문서 푸터에 넣는다.
+// 서버 도구 이름이 확정돼 있지 않아 tools/list로 탐색한 뒤 프로필류 도구를 호출한다.
+
+export interface JsOfficeProfile {
+  officeName?: string
+  phone?: string
+  fax?: string
+  email?: string
+  address?: string
+  /** 계정에 별도 푸터가 등록돼 있으면 표 대신 이 텍스트를 쓴다 */
+  footerText?: string
+  logoUrl?: string
+  sourceTool?: string
+}
+
+export interface JsOfficeLogo {
+  mime: 'image/png' | 'image/jpeg'
+  base64: string
+  width: number
+  height: number
+}
+
+export interface JsOfficeInfo {
+  profile: JsOfficeProfile
+  logo?: JsOfficeLogo
+  fetchedAt: string
+}
+
+const OFFICE_CACHE_TTL_MS = 24 * 60 * 60_000
+const OFFICE_TOOL_CANDIDATES = [
+  'get_office_profile',
+  'get_office',
+  'get_my_office',
+  'get_firm_profile',
+  'get_firm',
+  'get_my_profile',
+  'get_profile',
+  'get_user_profile',
+  'get_member_profile',
+  'get_lawyer_profile',
+  'get_account',
+  'get_me',
+  'whoami',
+  'get_letterhead',
+  'get_document_footer'
+]
+const OFFICE_TOOL_RE = /(office|firm|profile|account|letterhead|lawyer|member)/i
+const OFFICE_TOOL_EXCLUDE_RE =
+  /(case|task|todo|hearing|schedule|client|party|list_|create|update|delete|search|upload|set_)/i
+
+const OFFICE_FIELD_ALIASES: Record<Exclude<keyof JsOfficeProfile, 'sourceTool'>, string[]> = {
+  officeName: [
+    'officename',
+    'firmname',
+    'lawfirmname',
+    'lawfirm',
+    'companyname',
+    'organization',
+    'organizationname',
+    'orgname'
+  ],
+  phone: ['phone', 'phonenumber', 'tel', 'telephone', 'officephone', 'contactphone'],
+  fax: ['fax', 'faxnumber', 'officefax'],
+  email: ['email', 'contactemail', 'officeemail'],
+  address: ['address', 'officeaddress', 'addr', 'roadaddress', 'fulladdress'],
+  footerText: ['footertext', 'documentfooter', 'docfooter', 'footer', 'letterheadfooter'],
+  logoUrl: ['logourl', 'logoimageurl', 'logoimage', 'logo', 'logopath', 'logodataurl']
+}
+
+function normalizeKey(key: string): string {
+  return key.toLowerCase().replace(/[^a-z0-9]/g, '')
+}
+
+// 응답 형태를 모르는 채로 중첩 객체를 훑어 별칭 필드를 수집한다.
+function collectOfficeFields(value: unknown, depth = 0, parentKey = ''): JsOfficeProfile {
+  const out: JsOfficeProfile = {}
+  const obj = asObject(value)
+  if (!obj || depth > 4) return out
+  for (const [key, raw] of Object.entries(obj)) {
+    const nk = normalizeKey(key)
+    if (typeof raw === 'string' && raw.trim()) {
+      for (const [field, aliases] of Object.entries(OFFICE_FIELD_ALIASES)) {
+        const f = field as keyof typeof OFFICE_FIELD_ALIASES
+        if (!out[f] && aliases.includes(nk)) out[f] = raw.trim()
+      }
+      // 'name'은 사무실류 부모 객체 안에서만 상호로 인정 (변호사 개인 이름과 혼동 방지)
+      if (!out.officeName && nk === 'name' && /(office|firm|company|org)/.test(normalizeKey(parentKey))) {
+        out.officeName = raw.trim()
+      }
+    } else if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+      const nested = collectOfficeFields(raw, depth + 1, key)
+      for (const [field, v] of Object.entries(nested)) {
+        const f = field as keyof JsOfficeProfile
+        if (!out[f] && v) out[f] = v
+      }
+    }
+  }
+  return out
+}
+
+function officeProfileHasData(profile: JsOfficeProfile): boolean {
+  return !!(
+    profile.officeName ||
+    profile.phone ||
+    profile.fax ||
+    profile.email ||
+    profile.address ||
+    profile.footerText ||
+    profile.logoUrl
+  )
+}
+
+async function fetchOfficeLogo(url: string): Promise<JsOfficeLogo | null> {
+  try {
+    let buf: Buffer
+    if (url.startsWith('data:')) {
+      const m = url.match(/^data:image\/(?:png|jpe?g);base64,(.+)$/i)
+      if (!m) return null
+      buf = Buffer.from(m[1], 'base64')
+    } else if (/^https?:\/\//i.test(url)) {
+      const ctrl = new AbortController()
+      const timer = setTimeout(() => ctrl.abort(), 10000)
+      try {
+        const res = await fetch(url, { signal: ctrl.signal })
+        if (!res.ok) return null
+        const bytes = await res.arrayBuffer()
+        if (bytes.byteLength > 3 * 1024 * 1024) return null
+        buf = Buffer.from(bytes)
+      } finally {
+        clearTimeout(timer)
+      }
+    } else {
+      return null
+    }
+    const info = imageInfo(buf)
+    if (!info || info.width <= 0 || info.height <= 0) return null
+    return { mime: info.mime, base64: buf.toString('base64'), width: info.width, height: info.height }
+  } catch (error) {
+    console.warn('[jurisupport] 로고 다운로드 실패', error)
+    return null
+  }
+}
+
+function officeCachePath(): string {
+  return join(app.getPath('userData'), 'jurisupport-office.json')
+}
+
+async function readOfficeCache(): Promise<JsOfficeInfo | null> {
+  try {
+    const parsed = JSON.parse(await readFile(officeCachePath(), 'utf8')) as JsOfficeInfo
+    return parsed && typeof parsed === 'object' && parsed.profile ? parsed : null
+  } catch {
+    return null
+  }
+}
+
+async function fetchOfficeInfoFresh(): Promise<JsOfficeInfo | null> {
+  const tools = await listMcpTools()
+  const names = tools.map((t) => t.name)
+  const discovered = names.filter(
+    (name) =>
+      !OFFICE_TOOL_CANDIDATES.includes(name) &&
+      OFFICE_TOOL_RE.test(name) &&
+      !OFFICE_TOOL_EXCLUDE_RE.test(name) &&
+      /^(get|fetch|read|my|show)[_a-z]/i.test(name)
+  )
+  const ordered = [...OFFICE_TOOL_CANDIDATES.filter((name) => names.includes(name)), ...discovered]
+  if (ordered.length === 0) {
+    console.warn('[jurisupport] 사무실 프로필 도구를 찾지 못했습니다. 사용 가능:', names.join(', '))
+    return null
+  }
+
+  for (const name of ordered) {
+    try {
+      const result = await callTool(name, {})
+      const profile = collectOfficeFields(result)
+      if (!officeProfileHasData(profile)) continue
+      profile.sourceTool = name
+      const logo = profile.logoUrl ? await fetchOfficeLogo(profile.logoUrl) : null
+      return { profile, logo: logo ?? undefined, fetchedAt: new Date().toISOString() }
+    } catch (error) {
+      console.warn(`[jurisupport] ${name} 호출 실패`, error)
+    }
+  }
+  return null
+}
+
+let officeInflight: Promise<JsOfficeInfo | null> | null = null
+
+/** 사무실 프로필 조회 — 24시간 캐시, 실패 시 이전 캐시 반환 */
+export async function getOfficeInfo(refresh = false): Promise<JsOfficeInfo | null> {
+  const cached = await readOfficeCache()
+  if (!refresh && cached && Date.now() - Date.parse(cached.fetchedAt || '') < OFFICE_CACHE_TTL_MS) {
+    return cached
+  }
+  if (!(await hasToken())) return cached
+
+  if (!officeInflight) {
+    officeInflight = fetchOfficeInfoFresh()
+      .then(async (fresh) => {
+        if (fresh) await writeFile(officeCachePath(), JSON.stringify(fresh, null, 2), 'utf8')
+        return fresh
+      })
+      .catch((error) => {
+        console.warn('[jurisupport] 사무실 프로필 조회 실패', error)
+        return null
+      })
+      .finally(() => {
+        officeInflight = null
+      })
+  }
+  return (await officeInflight) ?? cached
+}
+
+/** hwpx 내보내기용 사무실 정보 — 네트워크가 늦으면 제한 시간 안에 캐시로 대체 */
+export async function officeInfoForHwpx(timeoutMs = 6000): Promise<HwpxOfficeInfo | undefined> {
+  let info: JsOfficeInfo | null = null
+  try {
+    info = await Promise.race([
+      getOfficeInfo(),
+      new Promise<null>((resolve) => setTimeout(() => resolve(null), timeoutMs).unref())
+    ])
+  } catch {
+    info = null
+  }
+  if (!info) info = await readOfficeCache()
+  if (!info) return undefined
+
+  const { profile, logo } = info
+  return {
+    officeName: profile.officeName,
+    phone: profile.phone,
+    fax: profile.fax,
+    email: profile.email,
+    address: profile.address,
+    footerText: profile.footerText,
+    logo: logo
+      ? {
+          data: Buffer.from(logo.base64, 'base64'),
+          mime: logo.mime,
+          width: logo.width,
+          height: logo.height
+        }
+      : undefined
+  }
 }

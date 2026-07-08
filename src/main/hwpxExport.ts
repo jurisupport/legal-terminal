@@ -1,4 +1,16 @@
 import { marked, type Token, type Tokens } from 'marked'
+import {
+  COURT_BODY_PARA,
+  COURT_BODY_TEXT,
+  COURT_COURT_PARA,
+  COURT_COURT_TEXT,
+  COURT_HEADER_XML,
+  COURT_OUTLINE_PARAS,
+  COURT_PIC_XML,
+  COURT_SECTION_PROLOG,
+  COURT_SEC_OPEN,
+  COURT_TITLE_PARA
+} from './hwpxCourtTemplate.ts'
 
 const XML_VERSION = '1.31'
 const MIME_TYPE = 'application/hwp+zip'
@@ -31,14 +43,39 @@ interface ZipEntryInput {
 interface MarkdownParagraph {
   kind: 'paragraph'
   text: string
-  charPrIDRef?: number
-  paraPrIDRef?: number
+  /** 첫 블록의 번호 없는 H1 — 샘플서면의 "준 비 서 면" 자리(제목 원형)에 들어간다 */
+  title?: boolean
+  /** 개요 1~6수준 (1. / 가. / 1) / 가) / (1) / (가)) — 샘플 개요 원형에 들어간다 */
+  outlineLevel?: number
+  /** lt-align 주석에 의한 본문 정렬 */
+  align?: 'center' | 'right'
 }
+
+/** hwpx 푸터에 넣을 사무실 정보(JuriSupport 프로필 등에서 공급) */
+export interface HwpxOfficeInfo {
+  officeName?: string
+  phone?: string
+  fax?: string
+  email?: string
+  address?: string
+  /** 별도 푸터 텍스트 — 지정 시 사무실 정보 표 대신 이 텍스트를 쓴다 */
+  footerText?: string
+  logo?: {
+    data: Buffer
+    mime: 'image/png' | 'image/jpeg'
+    width: number
+    height: number
+  }
+}
+
+type CellAlign = 'left' | 'center' | 'right'
 
 interface MarkdownTable {
   kind: 'table'
   rows: string[][]
   widths?: ColWidthSlot[]
+  aligns?: (CellAlign | null)[]
+  cellAligns?: Record<string, CellAlign>
 }
 
 type MarkdownBlock = MarkdownParagraph | MarkdownTable
@@ -51,19 +88,27 @@ interface HwpxXmlContext {
   nextShapeId: number
 }
 
-const BASE_FONT_FACE = '휴먼명조'
-const BASE_FONT_HEIGHT = 1200
-const BODY_FIRST_LINE_INDENT = 1200
-const CENTER_PARA_PR_ID = 7
-const FONT_FACE_LANGS = ['HANGUL', 'LATIN', 'HANJA', 'JAPANESE', 'OTHER', 'SYMBOL', 'USER']
-const OUTLINE_HEADS = [
-  { numFormat: 'DIGIT', text: '^1.' },
-  { numFormat: 'HANGUL_SYLLABLE', text: '^2.' },
-  { numFormat: 'DIGIT', text: '^3)' },
-  { numFormat: 'HANGUL_SYLLABLE', text: '^4)' },
-  { numFormat: 'DIGIT', text: '(^5)' },
-  { numFormat: 'HANGUL_SYLLABLE', text: '(^6)' }
-]
+// ── 샘플서면.hwpx(법원제출문서 표준 서식) 스타일 ID ──
+// 문단 XML은 hwpxCourtTemplate.ts 의 원형을 그대로 쓰고 텍스트만 바꿔 넣는다.
+// 아래 ID는 내장 header.xml 안의 정의를 가리킨다.
+/** 바탕글 글자 모양(휴먼명조 12pt) — 표 셀·푸터 텍스트에 사용 */
+const BODY_CHAR_PR = 1
+/** 들여쓰기 없는 본문 문단(샘플의 사건/원고/피고 블록) — 줄바꿈 있는 문단에 사용.
+ *  바탕글의 첫 줄 들여쓰기가 첫 줄에만 붙어 어긋나 보이는 것을 막는다. */
+const BODY_MULTILINE_PARA_PR = 6
+/** lt-align용 — generate-hwpx-court-template.mjs 가 표준 header에 덧붙인 문단 모양 */
+const CENTER_PARA_PR_ID = 20
+const RIGHT_PARA_PR_ID = 21
+const CELL_CENTER_PARA_PR_ID = 22
+const CELL_RIGHT_PARA_PR_ID = 23
+/** 들여쓰기·앞뒤여백 없는 문단 — 표 앵커용 */
+const PLAIN_PARA_PR = 18
+/** 표: 실선 테두리 borderFill(1번은 테두리 없음), 머리글행 굵게 */
+const TABLE_BORDER_FILL_ID = 4
+const TABLE_HEADER_CHAR_PR = 2
+const TABLE_CELL_PARA_PR = 0
+/** 푸터 별도 텍스트용 글자 모양(휴먼고딕 12pt) */
+const FOOTER_TEXT_CHAR_PR = 16
 const OUTLINE_MARKER_RE =
   /^(?:(?:\d{1,3}|[가-힣])\.(?:\s+|(?=[^\d\s]))|(?:\d{1,3}|[가-힣])\)(?:\s+|(?=[^\d\s]))|\((?:\d{1,3}|[가-힣])\)(?:\s+|(?=\S)))/
 const HWP_UNIT_PER_CM = 2835
@@ -259,6 +304,23 @@ function stripLeadingOutlineMarkers(value: string): string {
   return text || original
 }
 
+/** 서면 제목 자동 자간 — "준비서면" → "준 비 서 면" (짧은 순한글 제목만) */
+function spacedTitle(value: string): string {
+  return /^[가-힣]{2,5}$/.test(value) ? value.split('').join(' ') : value
+}
+
+// 개요 수준 결정 — 제목에 이미 붙은 번호 형식(1. 가. 1) 가) (1) (가))이 우선이고,
+// 없으면 마크다운 heading 깊이를 쓴다(문서 제목 문단이 있으면 ##부터 1수준).
+function outlineLevelFor(raw: string, depth: number, hasTitle: boolean): number {
+  if (/^\(\d{1,3}\)/.test(raw)) return 5
+  if (/^\([가-힣]\)/.test(raw)) return 6
+  if (/^\d{1,3}\.(?:\s|[^\d\s])/.test(raw)) return 1
+  if (/^[가-힣]\.(?:\s|[^\d\s])/.test(raw)) return 2
+  if (/^\d{1,3}\)(?:\s|[^\d\s])/.test(raw)) return 3
+  if (/^[가-힣]\)(?:\s|[^\d\s])/.test(raw)) return 4
+  return Math.min(Math.max(depth - (hasTitle ? 1 : 0), 1), 6)
+}
+
 function parseColw(value: string, defaultUnit: ColWidth['unit'] = '%'): ColWidthSlot[] {
   return value
     .split(',')
@@ -281,38 +343,67 @@ function normalizeColw(widths: ColWidthSlot[], colCount: number): ColWidthSlot[]
   return normalized.some(Boolean) ? normalized : null
 }
 
+const CELL_ALIGN_CODE: Record<string, CellAlign> = { l: 'left', c: 'center', r: 'right' }
+
+function parseCellAligns(value: string): Record<string, CellAlign> | undefined {
+  const out: Record<string, CellAlign> = {}
+  for (const part of value.split(',')) {
+    const m = part.trim().match(/^(\d+):(\d+)=([lcr])$/)
+    if (m) out[`${m[1]}:${m[2]}`] = CELL_ALIGN_CODE[m[3]]
+  }
+  return Object.keys(out).length ? out : undefined
+}
+
+// "2026. 7. 8." 같은 날짜 줄을 marked가 순서 목록(시작번호 2026)으로 파싱해
+// 뒤 내용이 사라지거나 다음 줄(서명 등)과 합쳐진다 → 연도 뒤 마침표를 이스케이프.
+function escapeDateLines(markdown: string): string {
+  return markdown.replace(/^(\s*)(\d{4})\.(?=\s)/gm, '$1$2\\.')
+}
+
 function markdownBlocks(markdown: string): MarkdownBlock[] {
-  const tokens = marked.lexer(markdown, { gfm: true, breaks: true })
+  const tokens = marked.lexer(escapeDateLines(markdown), { gfm: true, breaks: true })
   const blocks: MarkdownBlock[] = []
-  let center = false
-  const paragraph = (
-    text: string,
-    opts: Omit<MarkdownParagraph, 'kind' | 'text'> = {}
-  ): MarkdownParagraph => ({
+  let align: 'none' | 'center' | 'right' = 'none'
+  let hasTitle = false
+  const paragraph = (text: string): MarkdownParagraph => ({
     kind: 'paragraph',
     text,
-    ...opts,
-    paraPrIDRef: center ? CENTER_PARA_PR_ID : opts.paraPrIDRef
+    align: align === 'center' || align === 'right' ? align : undefined
   })
 
   for (const token of tokens) {
     switch (token.type) {
-      case 'html':
-        if (/^<!--\s*lt-align:center\s*-->\s*$/.test(token.text.trim())) center = true
-        else if (/^<!--\s*\/lt-align\s*-->\s*$/.test(token.text.trim())) center = false
+      case 'html': {
+        const comment = token.text.trim()
+        const open = comment.match(/^<!--\s*lt-align:(left|center|right)\s*-->\s*$/)
+        if (open) align = open[1] === 'center' || open[1] === 'right' ? open[1] : 'none'
+        else if (/^<!--\s*\/lt-align\s*-->\s*$/.test(comment)) align = 'none'
         else {
-          const colw = token.text.trim().match(/^<!--\s*colw:\s*(.*?)\s*-->\s*$/)
           const last = blocks[blocks.length - 1]
+          const colw = comment.match(/^<!--\s*colw:\s*(.*?)\s*-->\s*$/)
+          const cellalign = comment.match(/^<!--\s*cellalign:\s*(.*?)\s*-->\s*$/)
           if (colw && last?.kind === 'table')
             last.widths = normalizeColw(parseColw(colw[1]), last.rows[0]?.length ?? 0) ?? undefined
+          else if (cellalign && last?.kind === 'table')
+            last.cellAligns = parseCellAligns(cellalign[1])
         }
         break
+      }
       case 'heading': {
-        const text = stripLeadingOutlineMarkers(inlineText(token.tokens, token.text))
-        if (text) {
-          const level = Math.min(token.depth, 6)
-          blocks.push(paragraph(text, { charPrIDRef: level, paraPrIDRef: level }))
+        const raw = inlineText(token.tokens, token.text)
+        const text = stripLeadingOutlineMarkers(raw)
+        if (!text) break
+        // 첫 블록이 번호 없는 H1이면 문서 제목(샘플의 "준 비 서 면" 자리)으로 본다.
+        if (blocks.length === 0 && token.depth === 1 && !OUTLINE_MARKER_RE.test(raw)) {
+          hasTitle = true
+          blocks.push({ kind: 'paragraph', text: spacedTitle(text), title: true })
+          break
         }
+        blocks.push({
+          kind: 'paragraph',
+          text,
+          outlineLevel: outlineLevelFor(raw, token.depth, hasTitle)
+        })
         break
       }
       case 'paragraph': {
@@ -332,6 +423,13 @@ function markdownBlocks(markdown: string): MarkdownBlock[] {
       }
       case 'list': {
         const list = token as Tokens.List
+        // "2026. 7. 8." 같은 날짜 한 줄을 marked가 중첩 순서목록으로 읽어 본문이 사라진다
+        // → 한 줄짜리 목록 토큰은 원문 그대로 문단으로 살린다.
+        const rawLine = normalizeText(list.raw ?? '').trim()
+        if (rawLine && !rawLine.includes('\n')) {
+          blocks.push(paragraph(rawLine))
+          break
+        }
         list.items.forEach((item: Tokens.ListItem, index: number) => {
           const text = listItemText(item)
           if (!text) return
@@ -352,7 +450,8 @@ function markdownBlocks(markdown: string): MarkdownBlock[] {
         if (columnCount > 0) {
           blocks.push({
             kind: 'table',
-            rows: rows.map((row) => Array.from({ length: columnCount }, (_v, index) => row[index] ?? ''))
+            rows: rows.map((row) => Array.from({ length: columnCount }, (_v, index) => row[index] ?? '')),
+            aligns: table.align?.map((value) => (value === 'center' || value === 'right' || value === 'left' ? value : null))
           })
         }
         break
@@ -368,32 +467,47 @@ function markdownBlocks(markdown: string): MarkdownBlock[] {
   return blocks.length > 0 ? blocks : [{ kind: 'paragraph', text: '' }]
 }
 
-function textXml(value: string): string {
+// 한/글이 쓰는 형식 그대로: 줄바꿈·탭을 <hp:t> "안"에 넣는다 (밖에 두면 뷰어가 무시/오해석).
+function tXml(value: string): string {
   const normalized = value.replace(/\r\n?/g, '\n')
-  if (!normalized) return '<hp:t />'
-  const parts: string[] = []
-  const lines = normalized.split('\n')
-  lines.forEach((line, lineIndex) => {
-    if (lineIndex > 0) parts.push('<hp:lineBreak />')
-    const segments = line.split('\t')
-    segments.forEach((segment, segmentIndex) => {
-      if (segmentIndex > 0) parts.push('<hp:tab />')
-      if (segment) parts.push(`<hp:t xml:space="preserve">${escapeXml(segment)}</hp:t>`)
-    })
-  })
-  return parts.length > 0 ? parts.join('') : '<hp:t />'
+  if (!normalized) return '<hp:t/>'
+  const inner = escapeXml(normalized).replace(/\n/g, '<hp:lineBreak/>').replace(/\t/g, '<hp:tab/>')
+  return `<hp:t>${inner}</hp:t>`
 }
 
-function paragraphXml(ctx: HwpxXmlContext, text: string, charPrIDRef = 0, paraPrIDRef = 0): string {
-  const id = ctx.nextParagraphId
-  ctx.nextParagraphId += 1
+function cellParagraphXml(text: string, charPrIDRef: number, paraPrIDRef: number): string {
   return [
-    `<hp:p id="${id}" paraPrIDRef="${paraPrIDRef}" styleIDRef="0" pageBreak="0" columnBreak="0" merged="0">`,
+    `<hp:p id="0" paraPrIDRef="${paraPrIDRef}" styleIDRef="0" pageBreak="0" columnBreak="0" merged="0">`,
     `<hp:run charPrIDRef="${charPrIDRef}">`,
-    textXml(text),
+    tXml(text),
     '</hp:run>',
     '</hp:p>'
   ].join('')
+}
+
+// ── 샘플 원형 치환 ──
+// 원형 문자열에서 알려진 자리를 찾아 바꾼다. 자리가 없으면(샘플 교체 후 재생성 누락 등)
+// 문서를 깨뜨리는 대신 경고만 남긴다.
+function replaceSlot(proto: string, find: string, replacement: string): string {
+  if (!proto.includes(find)) {
+    console.warn(`[hwpx] 표준 서식 원형에서 "${find.slice(0, 30)}" 자리를 찾지 못했습니다.`)
+    return proto
+  }
+  return proto.replace(find, replacement)
+}
+
+/** 본문/개요 원형에 텍스트를 넣는다. alignParaPr가 있으면 문단 모양만 바꾼다(lt-align). */
+function protoParagraphXml(
+  proto: string,
+  findT: string,
+  text: string,
+  alignParaPr?: number
+): string {
+  let out = replaceSlot(proto, findT, tXml(text))
+  if (alignParaPr !== undefined) {
+    out = out.replace(/paraPrIDRef="\d+"/, `paraPrIDRef="${alignParaPr}"`)
+  }
+  return out
 }
 
 function tableColumnWidths(colCount: number, widths?: ColWidthSlot[]): number[] {
@@ -414,10 +528,28 @@ function tableColumnWidths(colCount: number, widths?: ColWidthSlot[]): number[] 
   return Array.from({ length: colCount }, () => Math.floor(42520 / colCount))
 }
 
-function tableXml(ctx: HwpxXmlContext, rows: string[][], widths?: ColWidthSlot[]): string {
+function tableXml(
+  ctx: HwpxXmlContext,
+  rows: string[][],
+  widths?: ColWidthSlot[],
+  aligns?: (CellAlign | null)[],
+  cellAligns?: Record<string, CellAlign>,
+  prefixRuns = ''
+): string {
   const rowCount = rows.length
   const colCount = Math.max(1, ...rows.map((row) => row.length))
   const cellWidths = tableColumnWidths(colCount, widths)
+  const cellParaPr = (rowIndex: number, colIndex: number): number => {
+    const align =
+      (rowIndex > 0 ? cellAligns?.[`${rowIndex - 1}:${colIndex}`] : undefined) ??
+      aligns?.[colIndex] ??
+      null
+    return align === 'center'
+      ? CELL_CENTER_PARA_PR_ID
+      : align === 'right'
+        ? CELL_RIGHT_PARA_PR_ID
+        : TABLE_CELL_PARA_PR
+  }
   const width = cellWidths.reduce((sum, cellWidth) => sum + cellWidth, 0)
   const height = Math.max(5000, rowCount * 1400)
   const shapeId = ctx.nextShapeId
@@ -429,15 +561,20 @@ function tableXml(ctx: HwpxXmlContext, rows: string[][], widths?: ColWidthSlot[]
         '<hp:tr>',
         cells
           .map((cell, colIndex) =>
+            // 셀 자식 순서는 샘플과 동일하게 subList가 먼저 온다.
             [
-              `<hp:tc name="" header="${rowIndex === 0 ? '1' : '0'}" hasMargin="0" protect="0" editable="0" dirty="0" borderFillIDRef="1">`,
-              `<hp:cellAddr colAddr="${colIndex}" rowAddr="${rowIndex}" />`,
-              '<hp:cellSpan colSpan="1" rowSpan="1" />',
-              `<hp:cellSz width="${cellWidths[colIndex]}" height="1400" />`,
-              '<hp:cellMargin left="283" right="283" top="141" bottom="141" />',
-              '<hp:subList id="" textDirection="HORIZONTAL" lineWrap="BREAK" vertAlign="TOP" linkListIDRef="0" linkListNextIDRef="0" textWidth="0" textHeight="0" hasTextRef="0" hasNumRef="0">',
-              paragraphXml(ctx, cell, rowIndex === 0 ? 1 : 0),
+              `<hp:tc name="" header="${rowIndex === 0 ? '1' : '0'}" hasMargin="0" protect="0" editable="0" dirty="0" borderFillIDRef="${TABLE_BORDER_FILL_ID}">`,
+              '<hp:subList id="" textDirection="HORIZONTAL" lineWrap="BREAK" vertAlign="CENTER" linkListIDRef="0" linkListNextIDRef="0" textWidth="0" textHeight="0" hasTextRef="0" hasNumRef="0">',
+              cellParagraphXml(
+                cell,
+                rowIndex === 0 ? TABLE_HEADER_CHAR_PR : BODY_CHAR_PR,
+                cellParaPr(rowIndex, colIndex)
+              ),
               '</hp:subList>',
+              `<hp:cellAddr colAddr="${colIndex}" rowAddr="${rowIndex}"/>`,
+              '<hp:cellSpan colSpan="1" rowSpan="1"/>',
+              `<hp:cellSz width="${cellWidths[colIndex]}" height="1400"/>`,
+              '<hp:cellMargin left="283" right="283" top="141" bottom="141"/>',
               '</hp:tc>'
             ].join('')
           )
@@ -447,111 +584,195 @@ function tableXml(ctx: HwpxXmlContext, rows: string[][], widths?: ColWidthSlot[]
     })
     .join('')
 
-  return paragraphXml(
-    ctx,
-    ''
-  ).replace(
-    '<hp:t />',
-    [
-      `<hp:tbl id="${shapeId}" zOrder="0" numberingType="TABLE" textWrap="TOP_AND_BOTTOM" textFlow="BOTH_SIDES" lock="0" dropcapstyle="None" pageBreak="CELL" repeatHeader="1" rowCnt="${rowCount}" colCnt="${colCount}" cellSpacing="0" borderFillIDRef="1" noAdjust="0">`,
-      `<hp:sz width="${width}" widthRelTo="ABSOLUTE" height="${height}" heightRelTo="ABSOLUTE" protect="0" />`,
-      '<hp:pos treatAsChar="1" affectLSpacing="0" flowWithText="1" allowOverlap="0" holdAnchorAndSO="0" vertRelTo="PARA" horzRelTo="PARA" vertAlign="TOP" horzAlign="LEFT" vertOffset="0" horzOffset="0" />',
-      '<hp:outMargin left="0" right="0" top="0" bottom="0" />',
-      '<hp:inMargin left="0" right="0" top="0" bottom="0" />',
-      rowXml,
-      '</hp:tbl>'
-    ].join('')
-  )
+  const tbl = [
+    `<hp:tbl id="${shapeId}" zOrder="${shapeId}" numberingType="TABLE" textWrap="TOP_AND_BOTTOM" textFlow="BOTH_SIDES" lock="0" dropcapstyle="None" pageBreak="CELL" repeatHeader="1" rowCnt="${rowCount}" colCnt="${colCount}" cellSpacing="0" borderFillIDRef="${TABLE_BORDER_FILL_ID}" noAdjust="0">`,
+    `<hp:sz width="${width}" widthRelTo="ABSOLUTE" height="${height}" heightRelTo="ABSOLUTE" protect="0"/>`,
+    '<hp:pos treatAsChar="1" affectLSpacing="0" flowWithText="1" allowOverlap="0" holdAnchorAndSO="0" vertRelTo="PARA" horzRelTo="COLUMN" vertAlign="TOP" horzAlign="LEFT" vertOffset="0" horzOffset="0"/>',
+    '<hp:outMargin left="283" right="283" top="283" bottom="283"/>',
+    '<hp:inMargin left="510" right="510" top="141" bottom="141"/>',
+    rowXml,
+    '</hp:tbl>'
+  ].join('')
+
+  const pid = ctx.nextParagraphId
+  ctx.nextParagraphId += 1
+  return [
+    `<hp:p id="${pid}" paraPrIDRef="${PLAIN_PARA_PR}" styleIDRef="0" pageBreak="0" columnBreak="0" merged="0">`,
+    prefixRuns,
+    `<hp:run charPrIDRef="${BODY_CHAR_PR}">`,
+    tbl,
+    '<hp:t/>',
+    '</hp:run>',
+    '</hp:p>'
+  ].join('')
 }
 
-function sectionXml(blocks: MarkdownBlock[]): string {
-  const ctx: HwpxXmlContext = { nextParagraphId: 0, nextShapeId: 1 }
-  const body = blocks
-    .map((block) =>
-      block.kind === 'table'
-        ? tableXml(ctx, block.rows, block.widths)
-        : paragraphXml(ctx, block.text, block.charPrIDRef ?? 0, block.paraPrIDRef ?? 0)
+/** 푸터 왼쪽 칸에 넣는 로고 그림 — 샘플의 hp:pic 원형에서 크기·참조만 바꾼다(셀 안 글자취급) */
+function footerLogoPicXml(ctx: HwpxXmlContext, logo: NonNullable<HwpxOfficeInfo['logo']>): string {
+  // 1px(96dpi) = 75 HWPUNIT. 칸(약 6.7cm×1.7cm)에 맞게 축소만 한다.
+  const orgW = Math.max(75, Math.round(logo.width * 75))
+  const orgH = Math.max(75, Math.round(logo.height * 75))
+  const scale = Math.min(17000 / orgW, 3400 / orgH, 1)
+  const w = Math.max(1, Math.round(orgW * scale))
+  const h = Math.max(1, Math.round(orgH * scale))
+  const id = ctx.nextShapeId
+  ctx.nextShapeId += 1
+  return COURT_PIC_XML.replace(/<hp:pic [^>]*>/, (tag) =>
+    tag
+      .replace(/ id="\d+"/, ` id="${id}"`)
+      .replace(/instid="\d+"/, `instid="${624900000 + id}"`)
+  )
+    .replace(/<hp:orgSz width="\d+" height="\d+"\/>/, `<hp:orgSz width="${orgW}" height="${orgH}"/>`)
+    .replace(/<hp:curSz width="\d+" height="\d+"\/>/, `<hp:curSz width="${w}" height="${h}"/>`)
+    .replace(
+      /<hp:rotationInfo angle="0" centerX="\d+" centerY="\d+"/,
+      `<hp:rotationInfo angle="0" centerX="${Math.round(w / 2)}" centerY="${Math.round(h / 2)}"`
     )
-    .join('\n')
-
-  return [
-    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
-    `<hs:sec xmlns:hs="${NS.hs}" xmlns:hp="${NS.hp}" xmlns:hc="${NS.hc}">`,
-    body,
-    '</hs:sec>'
-  ].join('\n')
+    .replace(
+      /<hc:scaMatrix e1="[\d.]+" e2="0" e3="0" e4="0" e5="[\d.]+"/,
+      `<hc:scaMatrix e1="${scale.toFixed(6)}" e2="0" e3="0" e4="0" e5="${scale.toFixed(6)}"`
+    )
+    .replace(/binaryItemIDRef="[^"]*"/, 'binaryItemIDRef="logo"')
+    .replace(
+      /<hp:imgRect>[\s\S]*?<\/hp:imgRect>/,
+      `<hp:imgRect><hc:pt0 x="0" y="0"/><hc:pt1 x="${orgW}" y="0"/><hc:pt2 x="${orgW}" y="${orgH}"/><hc:pt3 x="0" y="${orgH}"/></hp:imgRect>`
+    )
+    .replace(
+      /<hp:imgClip left="\d+" right="\d+" top="\d+" bottom="\d+"\/>/,
+      `<hp:imgClip left="0" right="${orgW}" top="0" bottom="${orgH}"/>`
+    )
+    .replace(
+      /<hp:imgDim dimwidth="\d+" dimheight="\d+"\/>/,
+      `<hp:imgDim dimwidth="${orgW}" dimheight="${orgH}"/>`
+    )
+    .replace(
+      /<hp:sz width="\d+" widthRelTo="ABSOLUTE" height="\d+"/,
+      `<hp:sz width="${w}" widthRelTo="ABSOLUTE" height="${h}"`
+    )
+    .replace(
+      /<hp:pos [^>]*\/>/,
+      '<hp:pos treatAsChar="1" affectLSpacing="0" flowWithText="1" allowOverlap="0" holdAnchorAndSO="0" vertRelTo="PARA" horzRelTo="PARA" vertAlign="TOP" horzAlign="LEFT" vertOffset="0" horzOffset="0"/>'
+    )
+    .replace(/<hp:shapeComment>[\s\S]*?<\/hp:shapeComment>/, '')
 }
 
-function headerXml(): string {
-  const headingParaPrs = Array.from({ length: CENTER_PARA_PR_ID + 1 }, (_v, id) => {
-    const heading =
-      id > 0 && id < CENTER_PARA_PR_ID
-        ? `<hh:heading type="OUTLINE" idRef="0" level="${id - 1}" />`
-        : ''
-    const firstLineIndent = id === 0 ? BODY_FIRST_LINE_INDENT : 0
-    const horizontal = id === CENTER_PARA_PR_ID ? 'CENTER' : 'JUSTIFY'
-    return [
-      `<hh:paraPr id="${id}" tabPrIDRef="0" condense="0" fontLineHeight="0" snapToGrid="1" suppressLineNumbers="0" checked="0">`,
-      heading,
-      `<hh:align horizontal="${horizontal}" vertical="BASELINE" />`,
-      '<hh:breakSetting breakLatinWord="KEEP_WORD" breakNonLatinWord="KEEP_WORD" widowOrphan="0" keepWithNext="0" pageBreakBefore="0" lineWrap="BREAK" />',
-      '<hh:margin>',
-      `<hc:intent value="${firstLineIndent}" unit="HWPUNIT" />`,
-      '<hc:left value="0" unit="HWPUNIT" />',
-      '<hc:right value="0" unit="HWPUNIT" />',
-      '<hc:prev value="0" unit="HWPUNIT" />',
-      '<hc:next value="0" unit="HWPUNIT" />',
-      '</hh:margin>',
-      '<hh:lineSpacing type="PERCENT" value="160" />',
-      '</hh:paraPr>'
-    ].join('')
-  })
-  const outlineHeads = OUTLINE_HEADS.map(
-    (head, level) =>
-      `<hh:paraHead start="1" level="${level}" align="LEFT" useInstWidth="1" autoIndent="1" widthAdjust="0" textOffsetType="PERCENT" textOffset="50" numFormat="${head.numFormat}" charPrIDRef="0" checkable="0">${head.text}</hh:paraHead>`
-  )
-  const fontFaces = FONT_FACE_LANGS.map(
-    (lang) =>
-      `<hh:fontface lang="${lang}" fontCnt="1"><hh:font id="0" face="${BASE_FONT_FACE}" type="TTF" isEmbedded="0" /></hh:fontface>`
+// 제목 문단 원형(용지 설정·푸터 포함)에 제목과 사무실 정보를 채운다.
+// 원형은 샘플서면.hwpx의 첫 문단 그대로라서 한/글 뷰어가 그리는 모양이 보장된다.
+function titleParaXml(ctx: HwpxXmlContext, title: string, office?: HwpxOfficeInfo): string {
+  let out = replaceSlot(COURT_TITLE_PARA, '<hp:t>준 비 서 면</hp:t>', tXml(title))
+
+  const footerText = office?.footerText?.trim()
+  const telFax = [office?.phone && `전화: ${office.phone}`, office?.fax && `팩스: ${office.fax}`]
+    .filter(Boolean)
+    .join('  ')
+  const hasInfo = !!(
+    office &&
+    (office.officeName || telFax || office.email || office.address || office.logo)
   )
 
-  return [
-    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
-    `<hh:head xmlns:hh="${NS.hh}" xmlns:hp="${NS.hp}" xmlns:hc="${NS.hc}" version="${XML_VERSION}" secCnt="1">`,
-    '<hh:beginNum page="1" footnote="1" endnote="1" pic="1" tbl="1" equation="1" />',
-    '<hh:refList>',
-    `<hh:fontfaces itemCnt="${FONT_FACE_LANGS.length}">`,
-    ...fontFaces,
-    '</hh:fontfaces>',
-    '<hh:borderFills itemCnt="2">',
-    '<hh:borderFill id="0" threeD="0" shadow="0" breakCellSeparateLine="0" slash="NONE" backSlash="NONE" />',
-    '<hh:borderFill id="1" threeD="0" shadow="0" breakCellSeparateLine="0" slash="NONE" backSlash="NONE">',
-    '<hh:leftBorder type="SOLID" width="0.1 mm" color="#000000" />',
-    '<hh:rightBorder type="SOLID" width="0.1 mm" color="#000000" />',
-    '<hh:topBorder type="SOLID" width="0.1 mm" color="#000000" />',
-    '<hh:bottomBorder type="SOLID" width="0.1 mm" color="#000000" />',
-    '<hh:diagonal type="SOLID" width="0.1 mm" color="#000000" />',
-    '</hh:borderFill>',
-    '</hh:borderFills>',
-    '<hh:charProperties itemCnt="7">',
-    ...Array.from({ length: 7 }, (_v, id) =>
-      `<hh:charPr id="${id}" height="${BASE_FONT_HEIGHT}" textColor="#000000" shadeColor="#FFFFFF" useFontSpace="0" useKerning="0" symMark="NONE" borderFillIDRef="0"><hh:fontRef hangul="0" latin="0" hanja="0" japanese="0" other="0" symbol="0" user="0" /><hh:ratio hangul="100" latin="100" hanja="100" japanese="100" other="100" symbol="100" user="100" /><hh:spacing hangul="0" latin="0" hanja="0" japanese="0" other="0" symbol="0" user="0" /><hh:relSz hangul="100" latin="100" hanja="100" japanese="100" other="100" symbol="100" user="100" /><hh:offset hangul="0" latin="0" hanja="0" japanese="0" other="0" symbol="0" user="0" /></hh:charPr>`
-    ),
-    '</hh:charProperties>',
-    '<hh:numberings itemCnt="1">',
-    '<hh:numbering id="0" start="1">',
-    ...outlineHeads,
-    '</hh:numbering>',
-    '</hh:numberings>',
-    `<hh:paraProperties itemCnt="${headingParaPrs.length}">`,
-    ...headingParaPrs,
-    '</hh:paraProperties>',
-    '<hh:styles itemCnt="1">',
-    '<hh:style id="0" type="PARA" name="바탕글" engName="Normal" paraPrIDRef="0" charPrIDRef="0" nextStyleIDRef="0" langID="1042" lockForm="0" />',
-    '</hh:styles>',
-    '</hh:refList>',
-    '</hh:head>'
-  ].join('\n')
+  if (footerText || !hasInfo) {
+    // 별도 푸터를 쓰거나 사무실 정보가 없으면 정보 표를 뺀다 (쪽번호는 유지).
+    out = out.replace(/<hp:tbl [\s\S]*?<\/hp:tbl>/, '')
+    if (footerText) {
+      const paras = footerText
+        .split(/\r?\n/)
+        .map((line) =>
+          [
+            `<hp:p id="0" paraPrIDRef="${CELL_CENTER_PARA_PR_ID}" styleIDRef="0" pageBreak="0" columnBreak="0" merged="0">`,
+            `<hp:run charPrIDRef="${FOOTER_TEXT_CHAR_PR}">`,
+            tXml(line),
+            '</hp:run>',
+            '</hp:p>'
+          ].join('')
+        )
+        .join('')
+      // 쪽번호 문단(paraPr 19) 앞에 푸터 텍스트를 넣는다.
+      out = out.replace(/<hp:p [^>]*paraPrIDRef="19"/, `${paras}$&`)
+    }
+    return out
+  }
+
+  // 사무실 정보 표의 자리(placeholder) 치환 — 상호/로고 칸
+  const officeInfo = office as HwpxOfficeInfo
+  const nameT = officeInfo.officeName ? tXml(officeInfo.officeName) : '<hp:t/>'
+  out = officeInfo.logo
+    ? replaceSlot(
+        out,
+        '<hp:t>[법무법인/법률사무소 상호/로고]</hp:t>',
+        `${footerLogoPicXml(ctx, officeInfo.logo)}${nameT}`
+      )
+    : replaceSlot(out, '<hp:t>[법무법인/법률사무소 상호/로고]</hp:t>', nameT)
+  out = replaceSlot(out, '<hp:t>전화: [전화번호]  팩스: [팩스번호]</hp:t>', tXml(telFax))
+  out = replaceSlot(
+    out,
+    '<hp:t>이메일: [이메일]</hp:t>',
+    tXml(officeInfo.email ? `이메일: ${officeInfo.email}` : '')
+  )
+  out = replaceSlot(out, '<hp:t>[주소]</hp:t>', tXml(officeInfo.address ?? ''))
+  return out
+}
+
+function sectionXml(blocks: MarkdownBlock[], office?: HwpxOfficeInfo): string {
+  const ctx: HwpxXmlContext = { nextParagraphId: 1000, nextShapeId: 100 }
+  // 첫 문단은 항상 샘플의 제목 문단 원형 — 용지 설정(secPr)과 푸터를 그대로 담는다.
+  let title = ''
+  let bodyBlocks = blocks
+  if (blocks[0]?.kind === 'paragraph' && blocks[0].title) {
+    title = blocks[0].text
+    bodyBlocks = blocks.slice(1)
+  }
+  const paras = [titleParaXml(ctx, title, office)]
+  for (const block of bodyBlocks) {
+    if (block.kind === 'table') {
+      paras.push(tableXml(ctx, block.rows, block.widths, block.aligns, block.cellAligns))
+      continue
+    }
+    if (block.title || block.outlineLevel) {
+      const level = Math.min(Math.max(block.outlineLevel ?? 1, 1), 6)
+      paras.push(
+        protoParagraphXml(COURT_OUTLINE_PARAS[level - 1], `<hp:t>제${level}수준</hp:t>`, block.text)
+      )
+      continue
+    }
+    // "…법원 귀중" 한 줄은 샘플의 수신 법원 원형(왼쪽 정렬, 휴먼고딕 15pt 굵게)으로.
+    if (/귀중\s*$/.test(block.text) && !block.text.includes('\n')) {
+      paras.push(
+        protoParagraphXml(
+          COURT_COURT_PARA,
+          `<hp:t>${COURT_COURT_TEXT}</hp:t>`,
+          block.text,
+          block.align === 'center'
+            ? CENTER_PARA_PR_ID
+            : block.align === 'right'
+              ? RIGHT_PARA_PR_ID
+              : undefined
+        )
+      )
+      continue
+    }
+    paras.push(
+      protoParagraphXml(
+        COURT_BODY_PARA,
+        `<hp:t>${COURT_BODY_TEXT}</hp:t>`,
+        block.text,
+        block.align === 'center'
+          ? CENTER_PARA_PR_ID
+          : block.align === 'right'
+            ? RIGHT_PARA_PR_ID
+            : block.text.includes('\n')
+              ? BODY_MULTILINE_PARA_PR
+              : undefined
+      )
+    )
+  }
+
+  // 샘플과 동일한 프롤로그·네임스페이스, 문단 사이 공백 없이 이어 붙인다.
+  return `${COURT_SECTION_PROLOG}${COURT_SEC_OPEN}${paras.join('')}</hs:sec>`
+}
+
+// 글꼴·문단·개요 스타일은 샘플서면.hwpx의 header.xml을 그대로 쓴다 (hwpxCourtTemplate.ts).
+function headerXml(): string {
+  return COURT_HEADER_XML
 }
 
 function versionXml(): string {
@@ -570,7 +791,7 @@ function settingsXml(): string {
   ].join('\n')
 }
 
-function contentXml(title: string): string {
+function contentXml(title: string, logoEntry?: ZipEntryInput): string {
   const safeTitle = escapeXml(title || '문서')
   return [
     '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
@@ -582,6 +803,11 @@ function contentXml(title: string): string {
     '</opf:metadata>',
     '<opf:manifest>',
     `<opf:item id="header" href="Contents/header.xml" media-type="${APP_XML_TYPE}" />`,
+    ...(logoEntry
+      ? [
+          `<opf:item id="logo" href="${escapeXml(logoEntry.name)}" media-type="${escapeXml(logoEntry.mediaType ?? 'image/png')}" isEmbeded="1" />`
+        ]
+      : []),
     `<opf:item id="section0" href="Contents/section0.xml" media-type="${APP_XML_TYPE}" />`,
     `<opf:item id="settings" href="settings.xml" media-type="${APP_TEXT_TYPE}" />`,
     '</opf:manifest>',
@@ -644,15 +870,35 @@ function textEntry(value: string): Buffer {
   return Buffer.from(value, 'utf8')
 }
 
-export function createHwpxFromMarkdown(markdown: string, title = '문서'): Buffer {
+export function createHwpxFromMarkdown(
+  markdown: string,
+  title = '문서',
+  office?: HwpxOfficeInfo
+): Buffer {
   const blocks = markdownBlocks(markdown)
+  const logoEntry: ZipEntryInput | undefined = office?.logo
+    ? {
+        name: `BinData/logo.${office.logo.mime === 'image/jpeg' ? 'jpg' : 'png'}`,
+        data: office.logo.data,
+        mediaType: office.logo.mime
+      }
+    : undefined
   const entriesWithoutManifest: ZipEntryInput[] = [
     { name: 'mimetype', data: textEntry(MIME_TYPE), mediaType: MIME_TYPE },
     { name: 'version.xml', data: textEntry(versionXml()), mediaType: APP_TEXT_TYPE },
     { name: 'settings.xml', data: textEntry(settingsXml()), mediaType: APP_TEXT_TYPE },
-    { name: 'Contents/content.hpf', data: textEntry(contentXml(title)), mediaType: APP_TEXT_TYPE },
+    {
+      name: 'Contents/content.hpf',
+      data: textEntry(contentXml(title, logoEntry)),
+      mediaType: APP_TEXT_TYPE
+    },
     { name: 'Contents/header.xml', data: textEntry(headerXml()), mediaType: APP_XML_TYPE },
-    { name: 'Contents/section0.xml', data: textEntry(sectionXml(blocks)), mediaType: APP_XML_TYPE },
+    {
+      name: 'Contents/section0.xml',
+      data: textEntry(sectionXml(blocks, office)),
+      mediaType: APP_XML_TYPE
+    },
+    ...(logoEntry ? [logoEntry] : []),
     { name: 'META-INF/container.xml', data: textEntry(containerXml()), mediaType: APP_TEXT_TYPE },
     { name: 'META-INF/container.rdf', data: textEntry(rdfXml(title)), mediaType: APP_RDF_TYPE },
     { name: 'Preview/PrvText.txt', data: textEntry(previewText(markdown)), mediaType: APP_TEXT_TYPE }

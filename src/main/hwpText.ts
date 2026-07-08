@@ -188,7 +188,12 @@ function extractHwpxTextTokens(xml: string): string {
   let match: RegExpExecArray | null
   while ((match = tokenRe.exec(xml)) !== null) {
     if (match[1] !== undefined) {
-      text += decodeXmlText(match[1])
+      // 한/글은 줄바꿈·탭을 <hp:t> 안에 넣는다 — 태그 제거 전에 문자로 바꿔 보존
+      text += decodeXmlText(
+        match[1]
+          .replace(/<(?:[A-Za-z_][\w.-]*:)?lineBreak\b[^>]*\/?>/gi, '\n')
+          .replace(/<(?:[A-Za-z_][\w.-]*:)?tab\b[^>]*\/?>/gi, '\t')
+      )
       continue
     }
 
@@ -200,17 +205,23 @@ function extractHwpxTextTokens(xml: string): string {
   return text
 }
 
+// 머리말/꼬리말 subList는 본문이 아니고, 본문 문단 안에 중첩되면 문단 경계도 깨뜨린다 → 먼저 제거.
+function stripHeaderFooterBlocks(xml: string): string {
+  return removeBlocks(xml, [...findXmlBlocks(xml, 'header'), ...findXmlBlocks(xml, 'footer')])
+}
+
 function extractHwpxSectionLines(xml: string): string[] {
+  const body = stripHeaderFooterBlocks(xml)
   const paragraphRe =
     /<(?:[A-Za-z_][\w.-]*:)?p\b[^>]*>([\s\S]*?)<\/(?:[A-Za-z_][\w.-]*:)?p\s*>/gi
   const lines: string[] = []
   let match: RegExpExecArray | null
-  while ((match = paragraphRe.exec(xml)) !== null) {
+  while ((match = paragraphRe.exec(body)) !== null) {
     lines.push(extractHwpxTextTokens(match[1] ?? ''))
   }
 
   if (lines.length > 0) return lines
-  const fallback = extractHwpxTextTokens(xml)
+  const fallback = extractHwpxTextTokens(body)
   return fallback ? [fallback] : []
 }
 
@@ -496,7 +507,8 @@ function extractHwpxTableMarkdown(table: XmlBlock): string {
   return markdownTable(rows)
 }
 
-function extractHwpxSectionMarkdownBlocks(xml: string): string[] {
+function extractHwpxSectionMarkdownBlocks(rawXml: string): string[] {
+  const xml = stripHeaderFooterBlocks(rawXml)
   const tables = findXmlBlocks(xml, 'tbl')
   const paragraphs = findXmlBlocks(xml, 'p').filter((para) => !blockInside(para, tables))
   const blocks = [

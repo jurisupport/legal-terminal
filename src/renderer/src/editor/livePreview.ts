@@ -13,8 +13,10 @@ const hidden = Decoration.replace({})
 const HTML_BREAK_RE = /^<br\s*\/?>$/i
 const HTML_BREAK_TOKEN_RE = /<br\s*\/?>/gi
 const ENTITY_RE = /&(#x[\da-f]+|#\d+|[a-z][\da-z]+);/gi
-const ALIGN_CENTER_OPEN_RE = /^<!--\s*lt-align:center\s*-->\s*$/
-const ALIGN_CENTER_CLOSE_RE = /^<!--\s*\/lt-align\s*-->\s*$/
+const ALIGN_OPEN_RE = /^<!--\s*lt-align:(left|center|right)\s*-->\s*$/
+const ALIGN_CLOSE_RE = /^<!--\s*\/lt-align\s*-->\s*$/
+const COLW_COMMENT_RE = /^<!--\s*colw:\s*(.*?)\s*-->\s*$/
+const CELLALIGN_COMMENT_RE = /^<!--\s*cellalign:\s*(.*?)\s*-->\s*$/
 
 const ENTITY_TEXT: Record<string, string> = {
   amp: '&',
@@ -201,6 +203,31 @@ function formatColw(widths: ColWidthSlot[]): string {
   return widths.map((width) => (width ? formatWidth(width) : '')).join(',')
 }
 
+// 표 뒤 <!-- cellalign: 행:열=l|c|r, ... --> 주석 (행은 본문 행 0부터, 머리글 정렬은 GFM 열 정렬 사용)
+type CellAligns = Record<string, Align>
+const CELL_ALIGN_CODE: Record<string, Align> = { l: 'left', c: 'center', r: 'right' }
+
+function parseCellAligns(value: string): CellAligns | null {
+  const out: CellAligns = {}
+  for (const part of value.split(',')) {
+    const m = part.trim().match(/^(\d+):(\d+)=([lcr])$/)
+    if (m) out[`${m[1]}:${m[2]}`] = CELL_ALIGN_CODE[m[3]]
+  }
+  return Object.keys(out).length ? out : null
+}
+
+function formatCellAligns(ca: CellAligns, rowCount: number, colCount: number): string {
+  return Object.entries(ca)
+    .map(([key, align]) => {
+      const [r, c] = key.split(':').map(Number)
+      return { r, c, align }
+    })
+    .filter(({ r, c, align }) => align !== 'none' && r < rowCount && c < colCount)
+    .sort((a, b) => a.r - b.r || a.c - b.c)
+    .map(({ r, c, align }) => `${r}:${c}=${align[0]}`)
+    .join(',')
+}
+
 function splitRow(line: string): string[] {
   let s = line.trim()
   if (s.startsWith('|')) s = s.slice(1)
@@ -308,7 +335,8 @@ class TableWidget extends WidgetType {
     readonly src: string,
     readonly from: number,
     readonly to: number,
-    readonly widths?: ColWidthSlot[]
+    readonly widths?: ColWidthSlot[],
+    readonly cellAligns?: CellAligns | null
   ) {
     super()
   }
@@ -316,7 +344,8 @@ class TableWidget extends WidgetType {
     return (
       o.src === this.src &&
       o.from === this.from &&
-      JSON.stringify(o.widths) === JSON.stringify(this.widths)
+      JSON.stringify(o.widths) === JSON.stringify(this.widths) &&
+      JSON.stringify(o.cellAligns ?? null) === JSON.stringify(this.cellAligns ?? null)
     )
   }
   ignoreEvent(): boolean {
@@ -346,15 +375,21 @@ class TableWidget extends WidgetType {
     const htr = thead.insertRow()
     const tbody = table.createTBody()
 
+    const cellAligns: CellAligns = { ...(this.cellAligns ?? {}) }
+    // 마지막으로 포커스된 셀 (row: -1 = 머리글)
+    let sel: { row: number; col: number } | null = null
+
     const readModel = (): TableModel => ({
       headers: Array.from(htr.children).map(cellMarkdown),
-      aligns: model.aligns,
+      aligns: [...model.aligns],
       rows: Array.from(tbody.rows).map((tr) => Array.from(tr.cells).map(cellMarkdown))
     })
     const applyAll = (m: TableModel, w: ColWidthSlot[] | null): void => {
       let md = toMarkdown(m)
       if (w && w.length === m.headers.length && w.some(Boolean))
         md += '\n<!-- colw: ' + formatColw(w) + ' -->'
+      const ca = formatCellAligns(cellAligns, m.rows.length, m.headers.length)
+      if (ca) md += '\n<!-- cellalign: ' + ca + ' -->'
       view.dispatch({ changes: { from: this.from, to: this.to, insert: md } })
     }
 
@@ -394,7 +429,11 @@ class TableWidget extends WidgetType {
     model.headers.forEach((h, c) => {
       const th = document.createElement('th')
       th.contentEditable = 'false'
-      th.appendChild(makeCellContent(h))
+      const content = makeCellContent(h)
+      content.addEventListener('focus', () => {
+        sel = { row: -1, col: c }
+      })
+      th.appendChild(content)
       if (model.aligns[c] !== 'none') th.style.textAlign = model.aligns[c]
       if (c < ncol - 1) {
         const handle = document.createElement('div')
@@ -405,13 +444,18 @@ class TableWidget extends WidgetType {
       }
       htr.appendChild(th)
     })
-    model.rows.forEach((row) => {
+    model.rows.forEach((row, r) => {
       const tr = tbody.insertRow()
       row.forEach((cell, c) => {
         const td = tr.insertCell()
         td.contentEditable = 'false'
-        td.appendChild(makeCellContent(cell))
-        if (model.aligns[c] !== 'none') td.style.textAlign = model.aligns[c]
+        const content = makeCellContent(cell)
+        content.addEventListener('focus', () => {
+          sel = { row: r, col: c }
+        })
+        td.appendChild(content)
+        const align = cellAligns[`${r}:${c}`] ?? model.aligns[c]
+        if (align && align !== 'none') td.style.textAlign = align
       })
     })
 
@@ -423,10 +467,11 @@ class TableWidget extends WidgetType {
 
     const bar = document.createElement('div')
     bar.className = 'cm-md-table-bar'
-    const mkBtn = (label: string, fn: () => void): HTMLButtonElement => {
+    const mkBtn = (label: string, fn: () => void, title?: string): HTMLButtonElement => {
       const b = document.createElement('button')
       b.className = 'cm-md-tbtn'
       b.textContent = label
+      if (title) b.title = title
       b.addEventListener('mousedown', (e) => e.preventDefault())
       b.addEventListener('click', (e) => {
         e.preventDefault()
@@ -434,6 +479,29 @@ class TableWidget extends WidgetType {
       })
       return b
     }
+
+    const applyAlign = (a: Exclude<Align, 'none'>): void => {
+      const m = readModel()
+      if (!sel) {
+        // 셀 미선택 → 표 전체
+        m.aligns = m.aligns.map(() => (a === 'left' ? 'none' : a))
+        for (const key of Object.keys(cellAligns)) delete cellAligns[key]
+      } else if (sel.row < 0) {
+        // 머리글 셀 → 열 전체 (GFM 열 정렬), 그 열의 셀별 예외는 해제
+        m.aligns[sel.col] = a === 'left' ? 'none' : a
+        for (const key of Object.keys(cellAligns))
+          if (key.endsWith(`:${sel.col}`)) delete cellAligns[key]
+      } else {
+        // 본문 셀 → 해당 셀만 (열 정렬과 같아지면 예외 제거)
+        const colAlign = m.aligns[sel.col] === 'none' ? 'left' : m.aligns[sel.col]
+        const key = `${sel.row}:${sel.col}`
+        if (a === colAlign) delete cellAligns[key]
+        else cellAligns[key] = a
+      }
+      applyAll(m, widths)
+    }
+    const alignTitle = (name: string): string =>
+      `${name} — 선택한 셀에 적용 (머리글 셀: 열 전체, 셀 미선택: 표 전체)`
     bar.appendChild(
       mkBtn('+행', () => {
         const m = readModel()
@@ -450,6 +518,9 @@ class TableWidget extends WidgetType {
         applyAll(m, null) // 열 수 변경 → 너비 초기화
       })
     )
+    bar.appendChild(mkBtn('왼', () => applyAlign('left'), alignTitle('왼쪽 정렬')))
+    bar.appendChild(mkBtn('중', () => applyAlign('center'), alignTitle('가운데 정렬')))
+    bar.appendChild(mkBtn('오', () => applyAlign('right'), alignTitle('오른쪽 정렬')))
     bar.appendChild(
       mkBtn('폭(cm)', () => {
         const current = widths
@@ -492,26 +563,28 @@ function addAlignDecorations(
   active: Set<number>,
   deco: Range<Decoration>[]
 ): void {
-  let center = false
+  let align: Align = 'none'
   for (let lineNo = 1; lineNo <= state.doc.lines; lineNo++) {
     const line = state.doc.line(lineNo)
-    if (ALIGN_CENTER_OPEN_RE.test(line.text)) {
+    const open = line.text.match(ALIGN_OPEN_RE)
+    if (open) {
       if (!active.has(lineNo)) {
         deco.push(Decoration.line({ class: 'cm-md-hidden-line' }).range(line.from))
         deco.push(Decoration.replace({}).range(line.from, line.to))
       }
-      center = true
+      align = open[1] as Align
       continue
     }
-    if (ALIGN_CENTER_CLOSE_RE.test(line.text)) {
+    if (ALIGN_CLOSE_RE.test(line.text)) {
       if (!active.has(lineNo)) {
         deco.push(Decoration.line({ class: 'cm-md-hidden-line' }).range(line.from))
         deco.push(Decoration.replace({}).range(line.from, line.to))
       }
-      center = false
+      align = 'none'
       continue
     }
-    if (center) deco.push(Decoration.line({ class: 'cm-md-align-center' }).range(line.from))
+    if (align === 'center' || align === 'right')
+      deco.push(Decoration.line({ class: `cm-md-align-${align}` }).range(line.from))
   }
 }
 
@@ -565,15 +638,24 @@ function build(state: EditorState): DecorationSet {
           const sLine = state.doc.lineAt(node.from)
           let eLine = state.doc.lineAt(node.to)
           const tableTo = eLine.to
-          // 표 바로 뒤 colw 주석에서 열너비 읽기
+          // 표 바로 뒤 colw(열너비)/cellalign(셀 정렬) 주석 읽기 — 순서 무관
           let widths: ColWidthSlot[] | undefined
-          if (eLine.number < state.doc.lines) {
+          let cellAligns: CellAligns | null = null
+          while (eLine.number < state.doc.lines) {
             const nx = state.doc.line(eLine.number + 1)
-            const m = nx.text.match(/^<!--\s*colw:\s*(.*?)\s*-->\s*$/)
-            if (m) {
-              widths = parseColw(m[1])
+            const mw = nx.text.match(COLW_COMMENT_RE)
+            if (mw) {
+              widths = parseColw(mw[1])
               eLine = nx
+              continue
             }
+            const mc = nx.text.match(CELLALIGN_COMMENT_RE)
+            if (mc) {
+              cellAligns = parseCellAligns(mc[1])
+              eLine = nx
+              continue
+            }
+            break
           }
           let inside = false
           for (let l = sLine.number; l <= eLine.number; l++)
@@ -586,7 +668,13 @@ function build(state: EditorState): DecorationSet {
             const blockTo = eLine.to
             deco.push(
               Decoration.replace({
-                widget: new TableWidget(state.doc.sliceString(from, tableTo), from, blockTo, widths),
+                widget: new TableWidget(
+                  state.doc.sliceString(from, tableTo),
+                  from,
+                  blockTo,
+                  widths,
+                  cellAligns
+                ),
                 block: true
               }).range(from, blockTo)
             )

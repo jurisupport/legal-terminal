@@ -1168,6 +1168,9 @@ body {
 .cm-md-align-center {
   text-align: center;
 }
+.cm-md-align-right {
+  text-align: right;
+}
 .cm-md-hidden-line {
   height: 0;
   line-height: 0 !important;
