@@ -696,6 +696,23 @@ export default function PdfViewer({
           ↻
         </button>
 
+        <span className="tb-divider" />
+
+        <button
+          className="tb-btn"
+          title="이 서류를 내 컴퓨터에 저장"
+          onClick={() => {
+            void window.lt.fs
+              .download(path)
+              .then((r) => {
+                if (!r.canceled && !r.ok) window.alert('다운로드 실패: ' + (r.error ?? '알 수 없는 오류'))
+              })
+              .catch((e) => window.alert('다운로드 실패: ' + String(e)))
+          }}
+        >
+          ⬇
+        </button>
+
         {onAskDoc && (
           <>
             <span className="tb-divider" />

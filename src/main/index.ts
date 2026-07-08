@@ -2373,7 +2373,24 @@ ipcMain.handle('fs:copyInto', async (_e, p: { destDir: string; srcPaths: string[
 
 ipcMain.handle('fs:download', async (event, source: string) => {
   if (!mainWindow) return { ok: false, error: '메인 창을 찾을 수 없습니다.' }
-  if (!isRemote(source)) return { ok: false, error: '원격 경로만 다운로드할 수 있습니다.' }
+  if (!isRemote(source)) {
+    // 로컬 파일(자동 다운로드된 소송기록 캐시 등)은 '원하는 위치에 사본 저장'으로 동작한다.
+    try {
+      const st = await stat(source)
+      if (st.isDirectory()) return { ok: false, error: '로컬 폴더는 사본 저장을 지원하지 않습니다.' }
+      const r = await dialog.showSaveDialog(mainWindow, {
+        title: '내 컴퓨터에 저장',
+        defaultPath: join(await getDownloadDefaultDir(), basename(source))
+      })
+      if (r.canceled || !r.filePath) return { ok: true, canceled: true }
+      rememberDownloadDir(dirname(r.filePath))
+      await copyFile(source, r.filePath)
+      shell.showItemInFolder(r.filePath)
+      return { ok: true, path: r.filePath, count: 1 }
+    } catch (error) {
+      return { ok: false, error: String(error) }
+    }
+  }
   let progressBase: DownloadProgressBase | undefined
   try {
     const st = await rfsStat(source)
