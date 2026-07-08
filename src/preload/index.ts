@@ -726,6 +726,8 @@ const api = {
       ipcRenderer.invoke('fs:copyInto', { destDir, srcPaths }),
     clipboardFiles: (): Promise<{ paths: string[]; formats: string[] }> =>
       ipcRenderer.invoke('fs:clipboardFiles'),
+    saveClipboardImage: (data: Uint8Array, mimeType?: string): Promise<{ path: string }> =>
+      ipcRenderer.invoke('fs:saveClipboardImage', { data, mimeType }),
     download: (
       source: string
     ): Promise<{ ok: boolean; path?: string; count?: number; canceled?: boolean; error?: string }> =>

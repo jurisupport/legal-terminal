@@ -2216,6 +2216,29 @@ ipcMain.handle('fs:listPdfs', async (_e, dir: string) => {
 
 ipcMain.handle('fs:clipboardFiles', async () => readClipboardFilePaths())
 
+// 스크린샷 등 경로 없는 클립보드 이미지를 임시 파일로 저장해 첨부 가능한 경로로 만든다
+ipcMain.handle('fs:saveClipboardImage', async (_e, p: { data: Uint8Array; mimeType?: string }) => {
+  const data = Buffer.from(p.data)
+  if (data.byteLength === 0) throw new Error('클립보드 이미지 데이터가 비어 있습니다.')
+  const extByMime: Record<string, string> = {
+    'image/png': 'png',
+    'image/jpeg': 'jpg',
+    'image/gif': 'gif',
+    'image/webp': 'webp',
+    'image/bmp': 'bmp',
+    'image/svg+xml': 'svg'
+  }
+  const ext = extByMime[(p.mimeType ?? '').toLowerCase()] ?? 'png'
+  const dir = join(app.getPath('temp'), 'legal-terminal-clipboard')
+  await mkdir(dir, { recursive: true })
+  const stamp = new Date()
+  const pad = (value: number): string => String(value).padStart(2, '0')
+  const name = `클립보드이미지-${stamp.getFullYear()}${pad(stamp.getMonth() + 1)}${pad(stamp.getDate())}-${pad(stamp.getHours())}${pad(stamp.getMinutes())}${pad(stamp.getSeconds())}-${Math.random().toString(36).slice(2, 6)}.${ext}`
+  const filePath = join(dir, name)
+  await writeFile(filePath, data)
+  return { path: filePath }
+})
+
 ipcMain.handle('fs:readBytes', async (event, filePath: string) => {
   try {
     const buf = isRemote(filePath)

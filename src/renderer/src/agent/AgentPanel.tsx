@@ -3128,6 +3128,16 @@ export default function AgentPanel({
     addPathAttachments(dataTransferPaths(event.dataTransfer), 'drop')
   }
 
+  const addClipboardImageAttachment = async (file: File): Promise<void> => {
+    const bytes = new Uint8Array(await file.arrayBuffer())
+    if (bytes.byteLength === 0) {
+      setError('클립보드 이미지를 읽을 수 없습니다.')
+      return
+    }
+    const saved = await window.lt.fs.saveClipboardImage(bytes, file.type)
+    addPathAttachments([saved.path], 'paste')
+  }
+
   const onAttachmentPaste = (event: ClipboardEvent<HTMLElement>): void => {
     if (event.defaultPrevented || authActive) return
     const clipboard = event.clipboardData
@@ -3146,17 +3156,34 @@ export default function AgentPanel({
       addPathAttachments(pathsFromPathLikeText(text), 'paste')
       return
     }
-    if (!types.some(fileLikeClipboardType)) return
+    // 스크린샷 등 경로 없는 비트맵은 paste 이벤트 안에서만 동기적으로 꺼낼 수 있다
+    const imageFile =
+      Array.from(clipboard.items)
+        .find((item) => item.kind === 'file' && item.type.startsWith('image/'))
+        ?.getAsFile() ?? null
+    if (!types.some(fileLikeClipboardType)) {
+      if (!imageFile) return
+      event.preventDefault()
+      event.stopPropagation()
+      void addClipboardImageAttachment(imageFile).catch((e) =>
+        setError(String(e instanceof Error ? e.message : e))
+      )
+      return
+    }
     event.preventDefault()
     event.stopPropagation()
     void window.lt.fs
       .clipboardFiles()
-      .then((clip) => {
-        if (clip.paths.length === 0) {
-          setError('클립보드에서 파일 경로를 찾을 수 없습니다.')
+      .then(async (clip) => {
+        if (clip.paths.length > 0) {
+          addPathAttachments(clip.paths, 'paste')
           return
         }
-        addPathAttachments(clip.paths, 'paste')
+        if (imageFile) {
+          await addClipboardImageAttachment(imageFile)
+          return
+        }
+        setError('클립보드에서 파일 경로를 찾을 수 없습니다.')
       })
       .catch((e) => setError(String(e instanceof Error ? e.message : e)))
   }

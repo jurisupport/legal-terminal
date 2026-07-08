@@ -770,6 +770,7 @@ export interface LtApi {
       | { ok: false; error: string }
     >
     clipboardFiles: () => Promise<{ paths: string[]; formats: string[] }>
+    saveClipboardImage: (data: Uint8Array, mimeType?: string) => Promise<{ path: string }>
     download: (
       source: string
     ) => Promise<{ ok: boolean; path?: string; count?: number; canceled?: boolean; error?: string }>
