@@ -90,6 +90,7 @@ import type {
 
 type Mode = 'explorer' | 'cases' | 'viewer' | 'todos'
 type DockSide = 'left' | 'right'
+type ResizablePane = 'side' | 'left' | 'evidence'
 type RecentCase = { drafts: string; records?: string; name: string; ts: number }
 type SyncMode = 'full' | 'folders' | 'file'
 type SyncDirection = 'pull' | 'push' | 'bi'
@@ -134,6 +135,12 @@ const DEFAULT_TERM_FONT_SIZE = 13
 const DEFAULT_MD_FONT_SIZE = 14
 const DEFAULT_AGENT_FONT_SIZE = 13
 const DEFAULT_AGENT_PROVIDER: AgentProvider = 'claude'
+const DEFAULT_SIDE_PANE_WIDTH = 220
+const DEFAULT_EVIDENCE_PANE_WIDTH = 280
+const MIN_SIDE_PANE_WIDTH = 160
+const MIN_WORK_PANE_WIDTH = 220
+const MIN_EVIDENCE_PANE_WIDTH = 180
+const MIN_RIGHT_PANE_WIDTH = 220
 const FONT_SIZE_MIN = 8
 const FONT_SIZE_MAX = 32
 const APP_WINDOW_TITLE = 'legal-terminal'
@@ -1471,6 +1478,22 @@ export default function App(): JSX.Element {
   const docOnly = window.location.hash.includes('docOnly')
   const termOnly = window.location.hash.includes('termOnly')
   const [mode, setMode] = useState<Mode>('explorer')
+  const [explorerVisible, setExplorerVisible] = useState(true)
+  const [paneWidths, setPaneWidths] = useState<{
+    side: number
+    left?: number
+    evidence: number
+  }>({ side: DEFAULT_SIDE_PANE_WIDTH, evidence: DEFAULT_EVIDENCE_PANE_WIDTH })
+  const shellRef = useRef<HTMLDivElement>(null)
+  const paneResizeRef = useRef<{
+    pointerId: number
+    pane: ResizablePane
+    startX: number
+    startWidth: number
+    min: number
+    max: number
+    width: number
+  } | null>(null)
   const [bridgeStatus, setBridgeStatus] = useState<string>('')
   const [platform, setPlatform] = useState<string>('')
   const [selectionCharCount, setSelectionCharCount] = useState(0)
@@ -1804,7 +1827,7 @@ export default function App(): JSX.Element {
         if (tab) {
           const nextCase = currentCaseFromTerm(tab)
           setCurrentCase(nextCase)
-          registerCaseTab(nextCase, tab.id)
+          registerCaseTabFromTerm(tab)
         }
         if (isAgentTab(tab)) {
           focusWorkTargetSoon(side, key)
@@ -2114,7 +2137,7 @@ export default function App(): JSX.Element {
     void window.lt.app.newWindow()
   }
 
-  // 단축키: Ctrl/Cmd+T 새 Agent / Ctrl/Cmd+Shift+T 새 터미널 / Ctrl/Cmd+W 탭 닫기 / Ctrl/Cmd+Shift+W 사건탭 닫기(Windows: Ctrl+Alt+W도 지원) / Ctrl/Cmd+N 새 문서 / Ctrl/Cmd+Shift+N 새 사건
+  // 단축키: Ctrl/Cmd+Shift+E 탐색기 토글 / Ctrl/Cmd+T 새 Agent / Ctrl/Cmd+Shift+T 새 터미널 / Ctrl/Cmd+W 탭 닫기 / Ctrl/Cmd+Shift+W 사건탭 닫기(Windows: Ctrl+Alt+W도 지원) / Ctrl/Cmd+N 새 문서 / Ctrl/Cmd+Shift+N 새 사건
   useEffect(() => {
     const onKey = (e: KeyboardEvent): void => {
       const activeEl = document.activeElement as HTMLElement | null
@@ -2141,12 +2164,24 @@ export default function App(): JSX.Element {
       const termSideForShortcut =
         workSideForShortcut ?? termSide(termTabs.find((t) => t.id === sourceTermId))
       const primary = platform === 'darwin' ? e.metaKey && !e.ctrlKey : e.ctrlKey
+      const explorerShortcut =
+        primary && e.shiftKey && !e.altKey && isKey('e', 'KeyE')
       const closeCaseTabShortcut =
         primary && isKey('w', 'KeyW') && (e.shiftKey || (platform !== 'darwin' && e.altKey))
       const pageCycleShortcut = (k === 'pageup' || k === 'pagedown') && !e.altKey && (primary || e.ctrlKey)
       const macCtrlTab = platform === 'darwin' && e.ctrlKey && !e.metaKey && k === 'tab'
       const macCtrlTInWorkArea =
         platform === 'darwin' && !!(termId || workSideForShortcut) && e.ctrlKey && !e.metaKey && isT
+      if (explorerShortcut) {
+        e.preventDefault()
+        e.stopPropagation()
+        if (mode === 'explorer') setExplorerVisible((visible) => !visible)
+        else {
+          setMode('explorer')
+          setExplorerVisible(true)
+        }
+        return
+      }
       if (closeCaseTabShortcut) {
         e.preventDefault()
         e.stopPropagation()
@@ -2219,7 +2254,7 @@ export default function App(): JSX.Element {
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [activeDoc, activeTerm, activeWork, termTabs, docTabs, platform, caseTabs, activeCaseTabId]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [activeDoc, activeTerm, activeWork, termTabs, docTabs, platform, caseTabs, activeCaseTabId, mode]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const openSettings = (): void => {
     const existing = docTabs.find((t) => t.kind === 'settings')
@@ -6022,6 +6057,8 @@ export default function App(): JSX.Element {
   }
 
   const openHearingRecordForCase = async (c: JsCase): Promise<void> => {
+    // 클릭 즉시 탐색기로 전환 — 원격 사건 상세 조회가 끝날 때까지 대시보드에 머물지 않는다
+    setMode('explorer')
     const detail = await loadCaseDetail(c)
     const opened = await openCaseWorkspace(detail, true)
     if (!opened) return
@@ -6959,6 +6996,93 @@ export default function App(): JSX.Element {
     />
   ) : null
 
+  const paneSelector = (pane: ResizablePane): string =>
+    pane === 'side' ? '.side-col' : pane === 'left' ? '.work-left' : '.evid-panel'
+  const paneCssVariable = (pane: ResizablePane): string =>
+    pane === 'side'
+      ? '--side-pane-width'
+      : pane === 'left'
+        ? '--left-pane-width'
+        : '--evidence-pane-width'
+  const paneMinimum = (pane: ResizablePane): number =>
+    pane === 'side'
+      ? MIN_SIDE_PANE_WIDTH
+      : pane === 'left'
+        ? MIN_WORK_PANE_WIDTH
+        : MIN_EVIDENCE_PANE_WIDTH
+  const paneMaximum = (pane: ResizablePane): number => {
+    const paneWidth = currentPaneWidth(pane)
+    const rightWidth =
+      shellRef.current?.querySelector<HTMLElement>('.work-right')?.getBoundingClientRect().width ??
+      MIN_RIGHT_PANE_WIDTH
+    return Math.max(paneMinimum(pane), paneWidth + Math.max(0, rightWidth - MIN_RIGHT_PANE_WIDTH))
+  }
+  const currentPaneWidth = (pane: ResizablePane): number => {
+    const element = shellRef.current?.querySelector<HTMLElement>(paneSelector(pane))
+    return element?.getBoundingClientRect().width ?? paneMinimum(pane)
+  }
+  const setPaneWidth = (pane: ResizablePane, width: number): void => {
+    const nextWidth = Math.round(Math.max(paneMinimum(pane), Math.min(width, paneMaximum(pane))))
+    shellRef.current?.style.setProperty(paneCssVariable(pane), `${nextWidth}px`)
+    setPaneWidths((current) => ({ ...current, [pane]: nextWidth }))
+  }
+  const startPaneResize = (pane: ResizablePane, event: React.PointerEvent<HTMLDivElement>): void => {
+    if (!event.isPrimary || event.button !== 0) return
+    const startWidth = currentPaneWidth(pane)
+    paneResizeRef.current = {
+      pointerId: event.pointerId,
+      pane,
+      startX: event.clientX,
+      startWidth,
+      min: paneMinimum(pane),
+      max: paneMaximum(pane),
+      width: startWidth
+    }
+    event.currentTarget.setPointerCapture(event.pointerId)
+    document.documentElement.classList.add('pane-resizing')
+    event.preventDefault()
+    event.stopPropagation()
+  }
+  const movePaneResize = (event: React.PointerEvent<HTMLDivElement>): void => {
+    const resize = paneResizeRef.current
+    if (!resize || resize.pointerId !== event.pointerId) return
+    const width = Math.round(
+      Math.max(resize.min, Math.min(resize.startWidth + event.clientX - resize.startX, resize.max))
+    )
+    resize.width = width
+    shellRef.current?.style.setProperty(paneCssVariable(resize.pane), `${width}px`)
+    event.preventDefault()
+  }
+  const finishPaneResize = (event: React.PointerEvent<HTMLDivElement>): void => {
+    const resize = paneResizeRef.current
+    if (!resize || resize.pointerId !== event.pointerId) return
+    paneResizeRef.current = null
+    document.documentElement.classList.remove('pane-resizing')
+    setPaneWidths((current) => ({ ...current, [resize.pane]: resize.width }))
+  }
+  const resizePaneFromKey = (
+    pane: ResizablePane,
+    event: React.KeyboardEvent<HTMLDivElement>
+  ): void => {
+    if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return
+    event.preventDefault()
+    setPaneWidth(pane, currentPaneWidth(pane) + (event.key === 'ArrowLeft' ? -16 : 16))
+  }
+  const explorerShortcutLabel = platform === 'darwin' ? '⌘⇧E' : 'Ctrl+Shift+E'
+  const selectActivityMode = (nextMode: Mode): void => {
+    if (nextMode === 'explorer' && mode === 'explorer') {
+      setExplorerVisible((visible) => !visible)
+      return
+    }
+    setMode(nextMode)
+    setExplorerVisible(true)
+  }
+  const shellStyle = {
+    '--side-pane-width': `${paneWidths.side}px`,
+    ...(paneWidths.left ? { '--left-pane-width': `${paneWidths.left}px` } : {}),
+    '--evidence-pane-width': `${paneWidths.evidence}px`
+  } as React.CSSProperties
+
   // 탭을 창 밖으로 찢어낸 '문서 전용 창': 터미널·탐색기·액티비티바 없이 문서만.
   if (docOnly) {
     return (
@@ -7004,7 +7128,9 @@ export default function App(): JSX.Element {
 
   return (
     <div
-      className={`shell ${isViewer ? 'mode-viewer' : 'mode-default'}`}
+      ref={shellRef}
+      className={`shell ${isViewer ? 'mode-viewer' : 'mode-default'} ${explorerVisible ? '' : 'explorer-hidden'}`}
+      style={shellStyle}
       {...shellDragProps}
     >
       {/* ── 액티비티바 (모드 전환) ── */}
@@ -7013,9 +7139,14 @@ export default function App(): JSX.Element {
           {ACTIVITY.map((item) => (
             <button
               key={item.id}
-              className={`activity-item ${mode === item.id ? 'active' : ''}`}
-              title={item.label}
-              onClick={() => setMode(item.id)}
+              className={`activity-item ${mode === item.id && (item.id !== 'explorer' || explorerVisible) ? 'active' : ''}`}
+              title={
+                item.id === 'explorer'
+                  ? `탐색기 표시/숨기기 (${explorerShortcutLabel})`
+                  : item.label
+              }
+              aria-pressed={mode === item.id && (item.id !== 'explorer' || explorerVisible)}
+              onClick={() => selectActivityMode(item.id)}
             >
               <item.Icon />
             </button>
@@ -7197,14 +7328,62 @@ export default function App(): JSX.Element {
         </div>
       </div>
 
-      <div className="side-col" key="side">
-        {docsPanel}
-      </div>
+      {explorerVisible && (
+        <div className="side-col" key="side">
+          {docsPanel}
+        </div>
+      )}
+
+      {explorerVisible && (
+        <div
+          className="pane-resizer pane-resizer-side"
+          role="separator"
+          aria-label="탐색기 너비 조절"
+          aria-orientation="vertical"
+          tabIndex={0}
+          onPointerDown={(event) => startPaneResize('side', event)}
+          onPointerMove={movePaneResize}
+          onPointerUp={finishPaneResize}
+          onPointerCancel={finishPaneResize}
+          onLostPointerCapture={finishPaneResize}
+          onKeyDown={(event) => resizePaneFromKey('side', event)}
+        />
+      )}
 
       {renderWorkPane('left')}
 
+      <div
+        className="pane-resizer pane-resizer-work"
+        role="separator"
+        aria-label={isViewer ? '왼쪽 작업 영역과 서증 영역 너비 조절' : '좌우 작업 영역 너비 조절'}
+        aria-orientation="vertical"
+        tabIndex={0}
+        onPointerDown={(event) => startPaneResize('left', event)}
+        onPointerMove={movePaneResize}
+        onPointerUp={finishPaneResize}
+        onPointerCancel={finishPaneResize}
+        onLostPointerCapture={finishPaneResize}
+        onKeyDown={(event) => resizePaneFromKey('left', event)}
+      />
+
       {/* ── 서증·첨부서류 (뷰어 모드에서만) ── */}
       {isViewer && <EvidencePanel key="evid" record={panelRecord} onOpenItem={onOpenItem} />}
+
+      {isViewer && (
+        <div
+          className="pane-resizer pane-resizer-evidence"
+          role="separator"
+          aria-label="서증 영역과 오른쪽 작업 영역 너비 조절"
+          aria-orientation="vertical"
+          tabIndex={0}
+          onPointerDown={(event) => startPaneResize('evidence', event)}
+          onPointerMove={movePaneResize}
+          onPointerUp={finishPaneResize}
+          onPointerCancel={finishPaneResize}
+          onLostPointerCapture={finishPaneResize}
+          onKeyDown={(event) => resizePaneFromKey('evidence', event)}
+        />
+      )}
 
       {renderWorkPane('right')}
 

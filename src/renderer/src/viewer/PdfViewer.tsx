@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import * as pdfjs from 'pdfjs-dist'
-import type { PDFDocumentProxy, RenderTask } from 'pdfjs-dist'
+import type { PDFDocumentProxy, PDFPageProxy, RenderTask } from 'pdfjs-dist'
 import PdfJsWorker from 'pdfjs-dist/build/pdf.worker.min.mjs?worker&inline'
 import { parseRecordOutline, type ParsedRecord } from './recordOutline'
 
@@ -16,6 +16,13 @@ export interface PdfViewStatus {
   cropRatio: number
 }
 const CROP_OPTIONS = [0.05, 0.1, 0.15, 0.2, 0.25]
+// 인접 페이지 프리렌더 비트맵 캐시 크기. 4장이면 앞뒤로 연속 넘김 시 재렌더 없이 순환된다.
+const PAGE_BITMAP_CACHE_MAX = 4
+interface PageBitmapEntry {
+  bitmap: ImageBitmap
+  visW: number
+  visH: number
+}
 const WHEEL_SCROLL_SENSITIVITY = 0.45
 const WHEEL_PAGE_TURN_THRESHOLD_PX = 90
 const WHEEL_PAGE_TURN_LOCK_MS = 450
@@ -103,6 +110,7 @@ export default function PdfViewer({
   const initialStatusRef = useRef<PdfViewStatus | undefined>(initialStatus)
   const passwordCallbackRef = useRef<((password: string) => void) | null>(null)
   const wrapSizeRef = useRef('')
+  const pageCacheRef = useRef<Map<string, PageBitmapEntry>>(new Map())
 
   const [numPages, setNumPages] = useState(0)
   const [page, setPage] = useState(1)
@@ -124,6 +132,11 @@ export default function PdfViewer({
     const wrap = wrapRef.current
     if (!wrap) return
     wrap.scrollTop = 0
+  }, [])
+
+  const clearPageCache = useCallback((): void => {
+    pageCacheRef.current.forEach((entry) => entry.bitmap.close())
+    pageCacheRef.current.clear()
   }, [])
 
   numPagesRef.current = numPages
@@ -209,6 +222,7 @@ export default function PdfViewer({
       initialStatusRef.current?.path === path && Number.isFinite(initialStatusRef.current.rotation)
         ? ((Math.floor(initialStatusRef.current.rotation / 90) * 90) % 360 + 360) % 360
         : 0
+    clearPageCache() // 캐시 키에 경로가 없으므로 문서가 바뀌면 반드시 비운다
     setErr('')
     setLoading(true)
     setNumPages(0)
@@ -272,6 +286,7 @@ export default function PdfViewer({
       docRef.current?.destroy()
       docRef.current = null
       passwordCallbackRef.current = null
+      clearPageCache()
     }
   }, [path, reloadNonce]) // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -285,20 +300,31 @@ export default function PdfViewer({
     return () => clearInterval(timer)
   }, [loading, path])
 
-  // 현재 페이지 렌더 (배율/회전/여백자르기 반영)
+  // 현재 페이지 렌더 (배율/회전/여백자르기 반영) + 인접 페이지 프리렌더.
+  // 페이지 넘김 시 프리렌더된 비트맵을 즉시 붙여 디코드/렌더 대기를 없앤다.
   useEffect(() => {
     const doc = docRef.current
     const canvas = canvasRef.current
     if (!doc || !canvas || numPages === 0) return
     let cancelled = false
-    ;(async () => {
-      const pg = await doc.getPage(page)
-      if (cancelled) return
+    const prefetchTasks: RenderTask[] = []
+    const dpr = window.devicePixelRatio || 1
+    const r = cropOn ? cropRatio : 0
+    // 같은 렌더 파라미터에서만 캐시 재사용 (fit 모드는 컨테이너 크기에 따라 배율이 달라짐)
+    const sig = `${mode}:${customScale}:${rotation}:${r}:${dpr}:${wrapSizeRef.current}`
+
+    interface PageLayout {
+      viewport: pdfjs.PageViewport
+      scale: number
+      cropX: number
+      cropY: number
+      visW: number
+      visH: number
+    }
+    const layoutFor = (pg: PDFPageProxy): PageLayout | null => {
       const base = pg.getViewport({ scale: 1, rotation })
-      const r = cropOn ? cropRatio : 0
       const contentW = base.width * (1 - 2 * r)
       const contentH = base.height * (1 - 2 * r)
-
       let scale = customScale
       if (mode === 'fit_width' || mode === 'fit_page') {
         const wrap = wrapRef.current
@@ -308,39 +334,113 @@ export default function PdfViewer({
           const style = window.getComputedStyle(wrap)
           availW = wrap.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight)
           availH = wrap.clientHeight - parseFloat(style.paddingTop) - parseFloat(style.paddingBottom)
-          if (availW <= 0 || availH <= 0) return
+          if (availW <= 0 || availH <= 0) return null
         }
         const sW = availW / contentW
         const sH = availH / contentH
         scale = mode === 'fit_width' ? sW : Math.min(sW, sH)
       }
       scale = Math.max(0.1, Math.min(scale, 6))
-      effScaleRef.current = scale
-      setEffPct(Math.round(scale * 100))
-
       const viewport = pg.getViewport({ scale, rotation })
       const cropX = viewport.width * r
       const cropY = viewport.height * r
-      const visW = Math.floor(viewport.width - 2 * cropX)
-      const visH = Math.floor(viewport.height - 2 * cropY)
+      return {
+        viewport,
+        scale,
+        cropX,
+        cropY,
+        visW: Math.floor(viewport.width - 2 * cropX),
+        visH: Math.floor(viewport.height - 2 * cropY)
+      }
+    }
 
-      const ctx = canvas.getContext('2d')
+    const cachePut = (key: string, entry: PageBitmapEntry): void => {
+      const cache = pageCacheRef.current
+      cache.get(key)?.bitmap.close()
+      cache.delete(key)
+      cache.set(key, entry)
+      while (cache.size > PAGE_BITMAP_CACHE_MAX) {
+        const oldest = cache.keys().next().value as string
+        cache.get(oldest)?.bitmap.close()
+        cache.delete(oldest)
+      }
+    }
+
+    const prefetch = async (n: number): Promise<void> => {
+      if (cancelled || n < 1 || n > numPagesRef.current) return
+      const key = `${n}|${sig}`
+      if (pageCacheRef.current.has(key)) return
+      const pg = await doc.getPage(n)
+      if (cancelled) return
+      const layout = layoutFor(pg)
+      if (!layout || layout.visW <= 0 || layout.visH <= 0) return
+      const off = new OffscreenCanvas(Math.floor(layout.visW * dpr), Math.floor(layout.visH * dpr))
+      const ctx = off.getContext('2d')
       if (!ctx) return
-      const dpr = window.devicePixelRatio || 1
-      canvas.width = Math.floor(visW * dpr)
-      canvas.height = Math.floor(visH * dpr)
-      canvas.style.width = `${visW}px`
-      canvas.style.height = `${visH}px`
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
-      if (r > 0) ctx.translate(-cropX, -cropY) // 여백만큼 이동시켜 잘라냄
-
-      taskRef.current?.cancel()
-      const task = pg.render({ canvasContext: ctx, viewport })
-      taskRef.current = task
+      if (r > 0) ctx.translate(-layout.cropX, -layout.cropY)
+      const task = pg.render({
+        canvasContext: ctx as unknown as CanvasRenderingContext2D,
+        viewport: layout.viewport
+      })
+      prefetchTasks.push(task)
       try {
         await task.promise
       } catch {
-        /* 취소 무시 */
+        return // 취소 무시
+      }
+      if (cancelled) return
+      cachePut(key, { bitmap: off.transferToImageBitmap(), visW: layout.visW, visH: layout.visH })
+    }
+
+    ;(async () => {
+      const pg = await doc.getPage(page)
+      if (cancelled) return
+      const layout = layoutFor(pg)
+      if (!layout) return
+      const { viewport, scale, cropX, cropY, visW, visH } = layout
+      effScaleRef.current = scale
+      setEffPct(Math.round(scale * 100))
+
+      const ctx = canvas.getContext('2d')
+      if (!ctx) return
+      taskRef.current?.cancel()
+
+      const key = `${page}|${sig}`
+      const cache = pageCacheRef.current
+      const cached = cache.get(key)
+      if (cached) {
+        cache.delete(key) // LRU 갱신
+        cache.set(key, cached)
+        canvas.width = cached.bitmap.width
+        canvas.height = cached.bitmap.height
+        canvas.style.width = `${cached.visW}px`
+        canvas.style.height = `${cached.visH}px`
+        ctx.setTransform(1, 0, 0, 1, 0, 0)
+        ctx.drawImage(cached.bitmap, 0, 0)
+      } else {
+        canvas.width = Math.floor(visW * dpr)
+        canvas.height = Math.floor(visH * dpr)
+        canvas.style.width = `${visW}px`
+        canvas.style.height = `${visH}px`
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+        if (r > 0) ctx.translate(-cropX, -cropY) // 여백만큼 이동시켜 잘라냄
+
+        const task = pg.render({ canvasContext: ctx, viewport })
+        taskRef.current = task
+        let rendered = true
+        try {
+          await task.promise
+        } catch {
+          rendered = false // 취소 무시
+        }
+        if (rendered && !cancelled) {
+          try {
+            cachePut(key, { bitmap: await createImageBitmap(canvas), visW, visH })
+          } catch {
+            /* 스냅샷 실패 무시 */
+          }
+        }
       }
 
       // 텍스트 레이어 (드래그 선택 가능)
@@ -360,9 +460,14 @@ export default function PdfViewer({
           /* 텍스트 없는 페이지 무시 */
         }
       }
+
+      // 인접 페이지 프리렌더: 다음 페이지 먼저, 그다음 이전 페이지
+      await prefetch(page + 1)
+      await prefetch(page - 1)
     })()
     return () => {
       cancelled = true
+      prefetchTasks.forEach((t) => t.cancel())
     }
   }, [page, mode, customScale, rotation, cropOn, cropRatio, numPages, wrapTick])
 

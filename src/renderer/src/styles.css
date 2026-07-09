@@ -75,19 +75,43 @@ body {
   grid-template-rows: 1fr 22px;
   height: 100vh;
 }
-/* 기본: 액티비티 | 탐색기 | 왼쪽 작업 탭 | 오른쪽 작업 탭 */
+/* 기본: 액티비티 | 탐색기 | 조절선 | 왼쪽 작업 탭 | 조절선 | 오른쪽 작업 탭 */
 .shell.mode-default {
-  grid-template-columns: 48px 220px minmax(0, 1fr) minmax(320px, calc((100vw - 48px - 220px - 280px) / 2));
+  grid-template-columns:
+    48px var(--side-pane-width, 220px) 4px
+    minmax(220px, var(--left-pane-width, 1fr)) 4px
+    minmax(220px, 1fr);
   grid-template-areas:
-    'activity side workleft workright'
-    'status   status status status';
+    'activity side sidesplit workleft worksplit workright'
+    'status   status status    status   status    status';
 }
-/* 뷰어: 액티비티 | 탐색기/목차 | 왼쪽 작업 탭 | 서증·참고자료 | 오른쪽 작업 탭 */
+/* 뷰어: 액티비티 | 탐색기/목차 | 조절선 | 왼쪽 작업 탭 | 조절선 | 서증·참고자료 | 조절선 | 오른쪽 작업 탭 */
 .shell.mode-viewer {
-  grid-template-columns: 48px 220px minmax(0, 1fr) 280px minmax(320px, calc((100vw - 48px - 220px - 280px) / 2));
+  grid-template-columns:
+    48px var(--side-pane-width, 220px) 4px
+    minmax(220px, var(--left-pane-width, 1fr)) 4px
+    minmax(180px, var(--evidence-pane-width, 280px)) 4px
+    minmax(220px, 1fr);
   grid-template-areas:
-    'activity side workleft evid workright'
-    'status   status status status status';
+    'activity side sidesplit workleft worksplit evid evidsplit workright'
+    'status   status status    status   status    status status    status';
+}
+.shell.mode-default.explorer-hidden {
+  grid-template-columns:
+    48px minmax(220px, var(--left-pane-width, 1fr)) 4px
+    minmax(220px, 1fr);
+  grid-template-areas:
+    'activity workleft worksplit workright'
+    'status   status   status    status';
+}
+.shell.mode-viewer.explorer-hidden {
+  grid-template-columns:
+    48px minmax(220px, var(--left-pane-width, 1fr)) 4px
+    minmax(180px, var(--evidence-pane-width, 280px)) 4px
+    minmax(220px, 1fr);
+  grid-template-areas:
+    'activity workleft worksplit evid evidsplit workright'
+    'status   status   status    status status    status';
 }
 
 /* 문서 전용 창 (탭 찢어내기) — 본문만 가득 채움 */
@@ -146,6 +170,33 @@ body {
   grid-area: workright;
   border-left: 1px solid var(--border);
   background: #181818;
+}
+.pane-resizer {
+  position: relative;
+  z-index: 80;
+  min-width: 0;
+  background: var(--border);
+  cursor: col-resize;
+  touch-action: none;
+  outline: none;
+}
+.pane-resizer:hover,
+.pane-resizer:focus-visible {
+  background: var(--accent);
+}
+.pane-resizer-side {
+  grid-area: sidesplit;
+}
+.pane-resizer-work {
+  grid-area: worksplit;
+}
+.pane-resizer-evidence {
+  grid-area: evidsplit;
+}
+.pane-resizing,
+.pane-resizing * {
+  cursor: col-resize !important;
+  user-select: none !important;
 }
 .work-content {
   flex: 1;
@@ -4660,6 +4711,9 @@ body {
   color: #c7bdf0;
   font-size: var(--agent-micro-font-size);
   font-weight: 600;
+}
+.agent-question-head strong {
+  white-space: pre-wrap;
 }
 .agent-option-grid {
   display: grid;

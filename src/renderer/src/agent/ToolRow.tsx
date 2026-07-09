@@ -1,5 +1,5 @@
-// 도구 실행을 Claude Code 스타일 한 줄 행으로 렌더링한다.
-// `⏺ Read(소장.pdf)` 형태 — 클릭하면 입력/출력 미리보기를 펼친다.
+// 도구 실행을 한 줄 행으로 렌더링한다.
+// `⏺ 문서 읽기 (소장.pdf)` 형태 — 클릭하면 도구 원어 이름과 입력/출력 미리보기를 펼친다.
 import { asRecord, numberValue, recordArray, stringValue } from './values'
 
 export interface ProcessStep {

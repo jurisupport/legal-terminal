@@ -47,6 +47,7 @@ import type {
 interface PendingPermission {
   sessionId: string
   toolUseId: string
+  input: Record<string, unknown>
   suggestions?: PermissionUpdate[]
   finish: (value: any, decision: 'allow' | 'reject', emitWorking?: boolean) => void
   timer: NodeJS.Timeout
@@ -855,6 +856,87 @@ function buildQuestionDialogResult(
     ...(answer.response?.trim() ? { response: answer.response.trim() } : {})
   }
   return { behavior: 'completed', result }
+}
+
+// AskUserQuestion 답변은 권한 응답의 updatedInput(answers/response)으로 CLI에 전달된다.
+function questionPermissionUpdatedInput(
+  input: Record<string, unknown>,
+  answer: AgentDialogAnswer
+): Record<string, unknown> {
+  const response = answer.response?.trim()
+  return {
+    ...input,
+    answers: { ...(answer.answers ?? {}) },
+    ...(response ? { response } : {})
+  }
+}
+
+// AskUserQuestion 권한 요청을 선택지 카드로 띄우고, 답변을 PermissionResult로 돌려준다.
+// 카드 id를 tool_use id로 맞춰 SSH 스트림의 블록 기반 카드와 합쳐지게 한다(중복 방지).
+function awaitQuestionPermissionAnswer(
+  session: AgentSession,
+  toolName: string,
+  input: Record<string, unknown>,
+  toolUseId: string,
+  onResult: (result: PermissionResult, decision: 'allow' | 'reject') => void,
+  signal?: AbortSignal
+): boolean {
+  const dialog = makeQuestionDialog(session, {
+    dialogId: toolUseId,
+    dialogKind: toolName,
+    payload: input,
+    toolUseId,
+    blocking: true
+  })
+  if (!dialog) return false
+
+  let timer: NodeJS.Timeout
+  let settled = false
+  const finish = (_value: unknown, answer?: AgentDialogAnswer): void => {
+    if (settled) return
+    settled = true
+    clearTimeout(timer)
+    signal?.removeEventListener('abort', abort)
+    session.pendingDialogs.delete(toolUseId)
+    emit(session, {
+      type: 'dialog:resolved',
+      sessionId: session.id,
+      dialogId: toolUseId,
+      answers: answer?.answers,
+      response: answer?.response,
+      cancelled: answer?.cancelled
+    })
+    emit(session, { type: 'status', sessionId: session.id, status: 'working' })
+    if (answer && !answer.cancelled) {
+      onResult(
+        {
+          behavior: 'allow',
+          updatedInput: questionPermissionUpdatedInput(input, answer),
+          toolUseID: toolUseId
+        } as PermissionResult,
+        'allow'
+      )
+    } else {
+      onResult(
+        {
+          behavior: 'deny',
+          message: '사용자가 질문 선택에 응답하지 않았습니다.',
+          toolUseID: toolUseId,
+          decisionClassification: 'user_reject'
+        } as PermissionResult,
+        'reject'
+      )
+    }
+  }
+  function abort(): void {
+    finish(undefined, { sessionId: session.id, dialogId: toolUseId, cancelled: true })
+  }
+  timer = setTimeout(() => {
+    finish(undefined, { sessionId: session.id, dialogId: toolUseId, cancelled: true })
+  }, USER_DIALOG_TIMEOUT_MS)
+  session.pendingDialogs.set(toolUseId, { sessionId: session.id, finish, timer })
+  signal?.addEventListener('abort', abort, { once: true })
+  return true
 }
 
 function renderDialogAnswerText(dialog: AgentDialogRequest | undefined, answer: AgentDialogAnswer): string {
@@ -2322,6 +2404,7 @@ function handleCodexApprovalRequest(
   pending = {
     sessionId: session.id,
     toolUseId: itemId,
+    input,
     timer,
     finish: (value, decision, emitWorking = false): void => {
       if (settled) return
@@ -2921,8 +3004,26 @@ function handleRemotePermissionRequest(
     ? (request.permission_suggestions as PermissionUpdate[])
     : undefined
 
+  if (isAskUserQuestionTool(toolName)) {
+    const handled = awaitQuestionPermissionAnswer(session, toolName, input, toolUseId, (result) => {
+      writeRemoteControlResponse(session, requestId, result)
+    })
+    if (!handled) {
+      writeRemoteControlResponse(session, requestId, {
+        behavior: 'allow',
+        updatedInput: input,
+        toolUseID: toolUseId
+      })
+    }
+    return true
+  }
+
   if (shouldAutoAllow(session, toolName)) {
-    writeRemoteControlResponse(session, requestId, { behavior: 'allow', toolUseID: toolUseId })
+    writeRemoteControlResponse(session, requestId, {
+      behavior: 'allow',
+      updatedInput: input,
+      toolUseID: toolUseId
+    })
     return true
   }
 
@@ -2959,6 +3060,7 @@ function handleRemotePermissionRequest(
   pending = {
     sessionId: session.id,
     toolUseId,
+    input,
     suggestions,
     timer,
     finish: (value, decision, emitWorking = false): void => {
@@ -3216,7 +3318,6 @@ export function sendAgentAuthInput(sessionId: string, input: AgentAuthInput): Ag
 
 function shouldAutoAllow(session: AgentSession, toolName: string): boolean {
   if (session.permissionMode === 'bypassPermissions') return true
-  if (isAskUserQuestionTool(toolName)) return true
   if (READ_ONLY_TOOLS.has(toolName)) return true
   if (session.permissionMode === 'acceptEdits' && EDIT_TOOLS.has(toolName)) return true
   return false
@@ -3237,7 +3338,27 @@ function requestPermission(
     toolUseID: string
   }
 ): Promise<PermissionResult> {
-  if (shouldAutoAllow(session, toolName)) return Promise.resolve({ behavior: 'allow' })
+  if (isAskUserQuestionTool(toolName)) {
+    return new Promise<PermissionResult>((resolve) => {
+      const handled = awaitQuestionPermissionAnswer(
+        session,
+        toolName,
+        input,
+        options.toolUseID || randomUUID(),
+        (result) => resolve(result),
+        options.signal
+      )
+      // 질문 파싱이 안 되는 입력이면 그대로 허용해 CLI가 "무응답"으로 처리하게 둔다.
+      if (!handled) resolve({ behavior: 'allow', updatedInput: input, toolUseID: options.toolUseID } as PermissionResult)
+    })
+  }
+  if (shouldAutoAllow(session, toolName)) {
+    return Promise.resolve({
+      behavior: 'allow',
+      updatedInput: input,
+      toolUseID: options.toolUseID
+    } as PermissionResult)
+  }
   const requestId = options.toolUseID || randomUUID()
   const toolUseId = options.toolUseID || requestId
   const request: AgentPermissionRequest = {
@@ -3298,6 +3419,7 @@ function requestPermission(
     session.pendingPermissions.set(requestId, {
       sessionId: session.id,
       toolUseId,
+      input,
       suggestions: options.suggestions,
       finish,
       timer
@@ -3875,6 +3997,7 @@ function rejectPendingPermissions(session: AgentSession, message: string): void 
 function approvedPermissionResult(pending: PendingPermission, remember?: boolean): PermissionResult {
   return {
     behavior: 'allow',
+    updatedInput: pending.input,
     toolUseID: pending.toolUseId,
     decisionClassification: remember ? 'user_permanent' : 'user_temporary',
     ...(remember && pending.suggestions?.length ? { updatedPermissions: pending.suggestions } : {})
