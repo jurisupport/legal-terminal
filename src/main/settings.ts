@@ -90,6 +90,8 @@ export interface Settings {
   jurisupportTokenEnc?: string
   /** 사용자가 건너뛴 최신 릴리스 버전. 더 높은 버전이 나오면 다시 알린다. */
   ignoredUpdateVersion?: string
+  /** 스킬 이름 → 사용자가 "다시 묻지 않기"한 번들 SKILL.md 해시. 내용이 바뀌면 다시 묻는다. */
+  dismissedSkillHash?: Record<string, string>
 }
 
 function configPath(): string {

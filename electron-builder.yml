@@ -9,6 +9,9 @@ directories:
 extraResources:
   - from: build/icon.png
     to: icon.png
+  # Claude Code 스킬 번들 — 앱 시작 시 ~/.claude/skills 설치 여부를 묻는다 (skillInstall.ts)
+  - from: resources/skills
+    to: skills
 
 files:
   - out/**

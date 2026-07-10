@@ -8,6 +8,7 @@ import { existsSync, watch, type Dirent, type FSWatcher } from 'fs'
 import { fileURLToPath } from 'url'
 import { inflateRawSync } from 'zlib'
 import { getSettings, setSettings, type Settings } from './settings'
+import { promptBundledSkillInstall } from './skillInstall'
 import { imageInfo } from './imageSize'
 import {
   getPairing,
@@ -331,7 +332,13 @@ function createWindow(setMain = true, opts?: { docOnly?: boolean; termOnly?: boo
     win.moveTop()
     win.focus()
     if (process.platform === 'darwin') app.focus({ steal: true })
-    if (setMain && !detached) scheduleUpdateCheck(win)
+    if (setMain && !detached) {
+      scheduleUpdateCheck(win)
+      // 업데이트 대화상자와 겹치지 않게 잠시 뒤 번들 스킬 설치를 물어본다.
+      setTimeout(() => {
+        if (!win.isDestroyed()) void promptBundledSkillInstall(win)
+      }, 8000)
+    }
   }
   win.on('ready-to-show', revealWindow)
   win.webContents.once('did-finish-load', () => {
