@@ -43,7 +43,7 @@ import {
 } from './diff'
 import { DiffPreview } from './DiffPreview'
 import { MarkdownMessage } from './MarkdownMessage'
-import { ToolRow, toolStepDisplay, type ProcessStep } from './ToolRow'
+import { ToolRow, toolDisplayName, toolStepDisplay, type ProcessStep } from './ToolRow'
 import {
   invalidateSessionTranscript,
   loadSessionTranscript,
@@ -496,6 +496,43 @@ function timelineStatusLabel(item: TimelineItem): string | undefined {
   if (item.status === 'started') return '실행 중'
   if (item.status === 'canceled') return '취소됨'
   return item.status
+}
+
+const INPUT_PREVIEW_LINE_LIMIT = 96
+
+// 권한 요청 등의 입력 미리보기를 기본 한 줄로 접고, '자세히'로 원문을 펼친다.
+function inputPreviewSummary(preview: string): string {
+  try {
+    const parsed = asRecord(JSON.parse(preview))
+    const command = parsed ? stringValue(parsed.command) : undefined
+    if (command) return command
+  } catch {
+    // JSON이 아니면 평문 전체를 한 줄로 접는다
+  }
+  return preview
+}
+
+function InputPreview({ text }: { text: string }): JSX.Element {
+  const [expanded, setExpanded] = useState(false)
+  const flat = inputPreviewSummary(text).replace(/\s+/g, ' ').trim()
+  const summary =
+    flat.length > INPUT_PREVIEW_LINE_LIMIT ? `${flat.slice(0, INPUT_PREVIEW_LINE_LIMIT)}…` : flat
+  if (summary === text) return <pre className="agent-card-input">{text}</pre>
+  return (
+    <div className="agent-card-input-wrap">
+      <pre className={`agent-card-input${expanded ? '' : ' single-line'}`}>
+        {expanded ? text : summary}
+      </pre>
+      <button
+        type="button"
+        className="agent-diff-toggle"
+        aria-expanded={expanded}
+        onClick={() => setExpanded((value) => !value)}
+      >
+        {expanded ? '접기' : '자세히'}
+      </button>
+    </div>
+  )
 }
 
 function isWaitingQueueItem(item: TimelineItem): boolean {
@@ -1424,7 +1461,7 @@ function reduceTimeline(items: TimelineItem[], event: AgentEvent, agentLabel: st
       {
         id: requestId,
         kind: 'permission',
-        title: stringValue(request?.title) ?? toolName ?? '권한 요청',
+        title: stringValue(request?.title) ?? (toolName ? toolDisplayName(toolName) : undefined) ?? '권한 요청',
         text: stringValue(request?.description) ?? stringValue(request?.decisionReason),
         requestId,
         toolName,
@@ -3558,10 +3595,57 @@ export default function AgentPanel({
             item.kind === 'diff' && !!onOpenFile && !!(item.diff?.filePath ?? item.filePath)
           const promptCopyText =
             item.kind === 'queue' && item.text && item.text.trim().length > 0 ? item.text : ''
+          const diffToggleKey = `diff:${item.id}`
+          if (item.kind === 'diff' && !expandedProcessIds.has(diffToggleKey)) {
+            const dotStatus =
+              item.status === 'applied' ? 'done' : item.status === 'reverted' ? 'cancelled' : ''
+            return (
+              <div key={item.id} className="agent-tools">
+                <div className={`agent-tool-row diff ${item.status ?? ''}`}>
+                  <button
+                    type="button"
+                    className="agent-tool-line"
+                    aria-expanded={false}
+                    title={item.diff?.filePath ?? item.filePath ?? item.title}
+                    onClick={() => toggleProcess(diffToggleKey)}
+                  >
+                    <span className={`agent-tool-dot ${dotStatus}`} aria-hidden="true" />
+                    <span className="agent-tool-name">{item.title}</span>
+                    {item.diff && (
+                      <span className="agent-diff-head-counts" aria-hidden="true">
+                        <span className="agent-diff-count add">+{item.diff.additions}</span>
+                        <span className="agent-diff-count remove">-{item.diff.deletions}</span>
+                      </span>
+                    )}
+                    <span className="agent-tool-meta">
+                      {item.status === 'reverted' && <span className="agent-tool-flag">되돌림</span>}
+                      <span className="agent-process-chevron" aria-hidden="true">
+                        ›
+                      </span>
+                    </span>
+                  </button>
+                </div>
+              </div>
+            )
+          }
           return (
             <section key={item.id} className={`agent-card ${item.kind} ${item.status ?? ''}`}>
               <div className="agent-card-head">
-                <span>{item.title}</span>
+                {item.kind === 'diff' ? (
+                  <button
+                    type="button"
+                    className="agent-card-head-toggle"
+                    aria-expanded={true}
+                    onClick={() => toggleProcess(diffToggleKey)}
+                  >
+                    <span className="agent-process-chevron expanded" aria-hidden="true">
+                      ›
+                    </span>
+                    <span>{item.title}</span>
+                  </button>
+                ) : (
+                  <span>{item.title}</span>
+                )}
                 <span className="agent-card-head-right">
                   {item.kind === 'diff' && item.diff && (
                     <span className="agent-diff-head-counts" aria-hidden="true">
@@ -3634,7 +3718,12 @@ export default function AgentPanel({
                   )}
                 </div>
               )}
-              {item.kind === 'diff' && item.diff && <DiffPreview diff={item.diff} />}
+              {item.kind === 'diff' && item.diff && (
+                <DiffPreview
+                  diff={item.diff}
+                  alwaysExpanded={item.diff.additions + item.diff.deletions <= 40}
+                />
+              )}
               {item.kind === 'diff' && !item.diff && item.text && (
                 <pre className="agent-card-text">{item.text}</pre>
               )}
@@ -3649,7 +3738,7 @@ export default function AgentPanel({
                 />
               )}
               {item.inputPreview && !(item.kind === 'permission' && (item.diff || item.planMarkdown)) && (
-                <pre className="agent-card-input">{item.inputPreview}</pre>
+                <InputPreview text={item.inputPreview} />
               )}
               {item.attachments && item.attachments.length > 0 && (
                 <div className="agent-attachments sent" aria-label="전송된 첨부">
@@ -3714,12 +3803,12 @@ export default function AgentPanel({
                     disabled={item.status !== 'waiting'}
                     title={
                       item.toolName
-                        ? `이 세션에서 ${item.toolName} 도구를 다시 묻지 않고 허용합니다`
+                        ? `이 세션에서 ${toolDisplayName(item.toolName)}(${item.toolName}) 도구를 다시 묻지 않고 허용합니다`
                         : '이 세션에서 같은 요청을 다시 묻지 않습니다'
                     }
                     onClick={() => void resolvePermission(item.requestId!, 'allow', true)}
                   >
-                    {item.toolName ? `${item.toolName} 항상 허용` : '항상 허용'} <kbd>2</kbd>
+                    {item.toolName ? `${toolDisplayName(item.toolName)} 항상 허용` : '항상 허용'} <kbd>2</kbd>
                   </button>
                   <button
                     disabled={item.status !== 'waiting'}

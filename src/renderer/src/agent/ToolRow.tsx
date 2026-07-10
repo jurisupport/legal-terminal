@@ -35,20 +35,22 @@ const TOOL_ARG_KEYS = [
 const TOOL_ARG_LIMIT = 72
 
 const toolNameLabels: Record<string, string> = {
-  Read: '읽기',
-  Write: '쓰기',
-  Edit: '편집',
-  MultiEdit: '편집',
-  NotebookEdit: '편집',
-  Bash: '명령',
-  Grep: '검색',
+  Read: '문서 읽기',
+  Write: '문서 작성',
+  Edit: '문서 수정',
+  MultiEdit: '문서 수정',
+  NotebookEdit: '문서 수정',
+  Bash: '명령 실행',
+  Shell: '명령 실행',
+  Grep: '내용 검색',
   Glob: '파일 찾기',
   WebSearch: '웹 검색',
-  WebFetch: '웹 문서',
-  Task: '하위 작업',
-  Agent: '하위 작업',
-  TodoWrite: '할 일',
+  WebFetch: '웹 문서 확인',
+  Task: '보조 작업',
+  Agent: '보조 작업',
+  TodoWrite: '할 일 정리',
   AskUserQuestion: '질문',
+  Skill: '기능 실행',
   ExitPlanMode: '계획 완료'
 }
 
@@ -72,26 +74,29 @@ function parsePreviewJson(preview: string | undefined): Record<string, unknown> 
   }
 }
 
-export function toolStepDisplay(step: ProcessStep): { name: string; arg?: string } {
-  const rawName = step.toolName ?? step.title.replace(/^도구 · /, '')
+export function toolDisplayName(rawName: string): string {
   const mcp = rawName.match(/^mcp__([^_]+)__(.+)$/)
-  const name = mcp ? `${mcp[1]} · ${mcp[2]}` : toolNameLabels[rawName] ? `${rawName}` : rawName
+  return toolNameLabels[rawName] ?? (mcp ? `${mcp[1]} · ${mcp[2]}` : rawName)
+}
+
+export function toolStepDisplay(step: ProcessStep): { name: string; arg?: string; rawName: string } {
+  const rawName = step.toolName ?? step.title.replace(/^도구 · /, '')
+  const name = toolDisplayName(rawName)
   const input = parsePreviewJson(step.input)
   if (input) {
     for (const key of TOOL_ARG_KEYS) {
       const value = stringValue(input[key])
-      if (value) return { name, arg: clipArg(key === 'command' ? value : shortenPathLike(value)) }
+      if (value) return { name, arg: clipArg(key === 'command' ? value : shortenPathLike(value)), rawName }
     }
     const todos = recordArray(input.todos)
-    if (todos.length > 0) return { name, arg: `${todos.length}개 항목` }
+    if (todos.length > 0) return { name, arg: `${todos.length}개 항목`, rawName }
+  } else if (step.input && (rawName === 'Bash' || rawName === 'Shell')) {
+    // Codex 계열은 inputPreview가 JSON이 아니라 `명령\n작업폴더` 평문으로 온다
+    const command = step.input.split('\n', 1)[0]
+    if (command.trim()) return { name, arg: clipArg(command), rawName }
   }
-  if (!step.toolName && step.text) return { name, arg: clipArg(step.text) }
-  return { name }
-}
-
-export function toolStepKoreanLabel(step: ProcessStep): string | undefined {
-  const rawName = step.toolName ?? ''
-  return toolNameLabels[rawName]
+  if (!step.toolName && step.text) return { name, arg: clipArg(step.text), rawName }
+  return { name, rawName }
 }
 
 export function todoChecklistFromStep(step: ProcessStep): TodoChecklistItem[] | null {
@@ -163,8 +168,7 @@ export function ToolRow({
     )
   }
 
-  const { name, arg } = toolStepDisplay(step)
-  const koreanLabel = toolStepKoreanLabel(step)
+  const { name, arg, rawName } = toolStepDisplay(step)
   const status = step.status ?? 'running'
   const elapsed = stepElapsedLabel(step)
   const hasDetails = Boolean(step.input || step.output || step.text)
@@ -175,7 +179,7 @@ export function ToolRow({
         className="agent-tool-line"
         aria-expanded={expanded}
         disabled={!hasDetails}
-        title={koreanLabel ? `${koreanLabel} · ${name}` : name}
+        title={name === rawName ? name : `${name} · ${rawName}`}
         onClick={onToggle}
       >
         <span className={`agent-tool-dot ${status}`} aria-hidden="true" />
@@ -196,6 +200,12 @@ export function ToolRow({
       </button>
       {expanded && hasDetails && (
         <div className="agent-tool-details">
+          {name !== rawName && (
+            <div className="agent-tool-detail">
+              <span className="agent-tool-detail-label">도구</span>
+              <pre className="agent-process-step-text">{rawName}</pre>
+            </div>
+          )}
           {step.input && (
             <div className="agent-tool-detail">
               <span className="agent-tool-detail-label">입력</span>

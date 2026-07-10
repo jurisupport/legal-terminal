@@ -3387,6 +3387,32 @@ body {
   justify-content: flex-end;
   gap: 8px;
 }
+.agent-card-head-toggle {
+  min-width: 0;
+  flex: 1 1 140px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}
+.agent-card-input-wrap {
+  min-width: 0;
+}
+.agent-card-input-wrap .agent-diff-toggle {
+  margin-top: 4px;
+}
+.agent-card-input.single-line {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 
 /* ── JuriSupport 할일 ── */
 .todo-bar {
