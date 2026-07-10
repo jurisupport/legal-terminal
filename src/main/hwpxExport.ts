@@ -103,6 +103,8 @@ const TABLE_CELL_PARA_PR = 0
 /** 푸터 글자 모양 — 9pt 휴먼고딕 (generate 스크립트가 header에 덧붙인 20/21) */
 const FOOTER_9PT_CHAR_PR = 20
 const FOOTER_9PT_BOLD_CHAR_PR = 21
+/** 푸터 로고 칸과 사무실 정보 칸 사이 가로 간격 — 5mm (HWP_UNIT_PER_CM 2835의 절반) */
+const FOOTER_INFO_GAP = 1417
 /** 날짜·당사자 지위(서명 블록) 앞에 넣는 탭 수 — 샘플서면과 동일하게 왼쪽정렬+탭 */
 const SIGNATURE_TAB_COUNT = 7
 /** 구분 표제("다 음"·"첨부서류" 등) — 가운데, 휴먼고딕 14pt 굵게 */
@@ -863,7 +865,8 @@ function titleParaXml(ctx: HwpxXmlContext, title: string, office?: HwpxOfficeInf
     '<hp:run charPrIDRef="9"><hp:t>[주소]</hp:t></hp:run>',
     `<hp:run charPrIDRef="${FOOTER_9PT_CHAR_PR}">${tXml(officeInfo.address ?? '')}</hp:run>`
   )
-  // 푸터 내부 여백 제거 (표 안쪽·셀 여백 0)
+  // 푸터 내부 여백 제거 (표 안쪽·셀 여백 0) 후,
+  // 오른쪽 정보 칸(colAddr 1)에만 왼쪽 여백 5mm — 로고 칸과의 간격.
   out = out.replace(/<hp:tbl [\s\S]*?<\/hp:tbl>/, (tbl) =>
     tbl
       .replace(
@@ -873,6 +876,13 @@ function titleParaXml(ctx: HwpxXmlContext, title: string, office?: HwpxOfficeInf
       .replace(
         /<hp:cellMargin left="\d+" right="\d+" top="\d+" bottom="\d+"\/>/g,
         '<hp:cellMargin left="0" right="0" top="0" bottom="0"/>'
+      )
+      .replace(/<hp:tc [\s\S]*?<\/hp:tc>/g, (tc) =>
+        tc.includes('colAddr="1"')
+          ? tc
+              .replace(/hasMargin="0"/, 'hasMargin="1"')
+              .replace(/<hp:cellMargin left="0"/, `<hp:cellMargin left="${FOOTER_INFO_GAP}"`)
+          : tc
       )
   )
   return out
