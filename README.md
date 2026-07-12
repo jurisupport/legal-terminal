@@ -12,9 +12,61 @@
 ![Locale](https://img.shields.io/badge/Locale-ko--KR-red)
 ![Claude Code](https://img.shields.io/badge/Claude%20Code-Required-orange)
 
-![legal-terminal demo](screenshots/demo.gif)
+<!-- 히어로 영상 교체 방법: screenshots/hero.mp4를 GitHub 웹의 README 편집 화면에 드래그하면
+     github.com/user-attachments/assets/... URL이 생긴다. 아래 GIF 줄을 그 URL 한 줄로 바꾸면
+     재생/일시정지/탐색이 되는 플레이어로 렌더링된다. -->
+![legal-terminal demo](screenshots/demo-record-drafting.gif)
 
 legal-terminal은 따로 떠 있던 `claude` 터미널, 문서 에디터, 전자소송기록 뷰어, 사건·기일 대시보드를 하나로 묶습니다. 개발자가 IDE 안에서 코드·터미널·디버거를 오가듯, 변호사는 legal-terminal 안에서 **기록을 옆에 띄워 두고 그대로 준비서면을 씁니다.** 기존 `jurisupport-plugins`의 `songmu-legal` 플러그인, korean-law MCP, 판례·법령·사건기록 검색 도구, PII 보호 훅도 그대로 사용할 수 있습니다.
+
+## 화면으로 보기
+
+각 항목을 펼치면 실제 조작 화면이 나옵니다. 모든 장면은 데모용 **가상 사건**(2026가단12345 임대차보증금, 가상 당사자)입니다.
+
+<details>
+<summary><b>📂 폴더를 여는 순간 사건 작업환경이 된다</b></summary>
+<br>
+
+![사건 열기](screenshots/demo-open-case.gif)
+
+새 사건 추가 → 작성서류 폴더 선택 한 번이면 끝. 탭 이름과 상태바가 법원·사건번호·사건명 기준으로 정리되고, 탐색기와 Claude가 그 사건 폴더를 기준으로 동작합니다.
+</details>
+
+<details>
+<summary><b>📑 기록을 옆에 띄우고 그대로 서면을 쓴다</b></summary>
+<br>
+
+![기록 나란히 서면 작성](screenshots/demo-record-drafting.gif)
+
+파일트리에서 서면과 서증 PDF를 열고 탭을 오른쪽 패널로 밀면 좌우 분할. 계약서 조항을 눈으로 확인하면서 준비서면에 바로 이어 씁니다. 별도 PDF 뷰어 창을 오갈 일이 없습니다.
+</details>
+
+<details>
+<summary><b>✍️ 마크다운인데 화면은 서면처럼 — 라이브 프리뷰</b></summary>
+<br>
+
+![라이브 프리뷰](screenshots/demo-live-preview.gif)
+
+원본(소스)과 서식(라이브 프리뷰)을 버튼 하나로 전환합니다. 개요 번호·사건표시 캡션이 서면 모양 그대로 보이는 상태에서 편집합니다.
+</details>
+
+<details>
+<summary><b>📄 클릭 한 번으로 한/글 법원서면(HWPX)</b></summary>
+<br>
+
+![HWPX 내보내기](screenshots/demo-hwpx-export.gif)
+
+툴바의 HWPX 버튼을 누르면 md가 한/글 표준 서면 서식(제목 자간, 사건표시 캡션, 개요 번호, 서명 블록)으로 변환됩니다. 내보낸 파일은 앱 안에서 바로 열어 확인할 수 있습니다.
+</details>
+
+<details>
+<summary><b>🤖 사건 폴더를 아는 Claude Agent</b></summary>
+<br>
+
+![Agent Panel](screenshots/demo-agent-panel.gif)
+
+`@`로 서면 파일을 첨부해 "보완할 점을 제안해줘"라고 요청하면, 사건 폴더 맥락에서 입증 공백·기재 누락 같은 실무형 피드백이 스트리밍으로 돌아옵니다. 토큰 사용량과 컨텍스트 잔량도 패널 하단에서 바로 확인합니다.
+</details>
 
 ## 빠른 설치
 
@@ -180,6 +232,17 @@ npm run dist:win   # Windows nsis/portable 패키징
 ```
 
 `@lydell/node-pty`는 prebuilt N-API라 일반적인 macOS/Windows 개발 환경에서는 별도 컴파일러 없이 설치됩니다.
+
+### 데모 GIF 재생성
+
+README의 "화면으로 보기" GIF와 `screenshots/hero.mp4`는 스크립트로 다시 만듭니다. Playwright가 dev 인스턴스를 띄워 가상 사건(`scripts/demo-fixtures/`)만 조작하며, 화면의 실사용 데이터(최근 사건·SSH 프로필·홈 경로)는 가린 채 녹화합니다. 샘플 PDF가 없으면 자동 생성하고, 끝나면 cases.json/세션 인덱스의 데모 흔적을 지웁니다.
+
+```bash
+npm run build
+node scripts/capture-demos.mjs              # 전체 (agent 장면은 실제 Claude 호출)
+node scripts/capture-demos.mjs --skip-agent # Claude 호출 없이
+node scripts/capture-demos.mjs --only hwpx-export,live-preview
+```
 
 릴리스 배포는 `v*` 태그 푸시로 GitHub Actions의 `Build & Release` 워크플로우가 실행됩니다.
 

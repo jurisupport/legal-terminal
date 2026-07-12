@@ -517,6 +517,15 @@ export interface AgentCommandResult {
 
 export type AgentEvent = { type: string; sessionId?: string; [key: string]: unknown }
 
+export interface UpdateCheckResult {
+  ok: boolean
+  currentVersion: string
+  latestVersion?: string
+  updateAvailable?: boolean
+  releaseUrl?: string
+  error?: string
+}
+
 export interface JsParty {
   role: string
   position: string | null
@@ -675,6 +684,9 @@ export interface LtApi {
     onCloseActiveTab: (cb: () => void) => () => void
     onCloseActiveCaseTab: (cb: () => void) => () => void
     onCloseWindowRequest: (cb: () => void) => () => void
+  }
+  update: {
+    check: () => Promise<UpdateCheckResult>
   }
   dialog: {
     openCase: () => Promise<{ path: string; name: string } | null>

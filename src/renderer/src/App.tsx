@@ -10157,10 +10157,18 @@ function ImageViewer({
   )
 }
 
+type UpdateUiState =
+  | { status: 'idle' }
+  | { status: 'checking' }
+  | { status: 'latest' }
+  | { status: 'available'; latestVersion: string }
+  | { status: 'error'; message: string }
+
 function SettingsView(): JSX.Element {
   const [s, setS] = useState<AppSettings>({})
   const [loaded, setLoaded] = useState(false)
   const [appVersion, setAppVersion] = useState('확인 중...')
+  const [update, setUpdate] = useState<UpdateUiState>({ status: 'idle' })
   const [termFontSizeInput, setTermFontSizeInput] = useState(String(DEFAULT_TERM_FONT_SIZE))
   const [mdFontSizeInput, setMdFontSizeInput] = useState(String(DEFAULT_MD_FONT_SIZE))
   const [agentFontSizeInput, setAgentFontSizeInput] = useState(String(DEFAULT_AGENT_FONT_SIZE))
@@ -10186,6 +10194,18 @@ function SettingsView(): JSX.Element {
     window.addEventListener(SETTINGS_UPDATED_EVENT, onSettingsUpdated)
     return () => window.removeEventListener(SETTINGS_UPDATED_EVENT, onSettingsUpdated)
   }, [])
+
+  const checkUpdateNow = async (): Promise<void> => {
+    setUpdate({ status: 'checking' })
+    const r = await window.lt.update.check()
+    if (!r.ok) {
+      setUpdate({ status: 'error', message: r.error ?? '알 수 없는 오류' })
+    } else if (!r.updateAvailable || !r.latestVersion) {
+      setUpdate({ status: 'latest' })
+    } else {
+      setUpdate({ status: 'available', latestVersion: r.latestVersion })
+    }
+  }
 
   // JuriSupport 토큰 저장/삭제 — 대시보드·기일 패널이 이벤트로 즉시 다시 연결된다.
   const applyJsToken = async (token: string, doneMsg: string): Promise<void> => {
@@ -10333,6 +10353,31 @@ function SettingsView(): JSX.Element {
         <div className="setting-label">현재 버전</div>
         <div className="setting-value">
           <code>{appVersion}</code>
+          {update.status === 'available' ? (
+            <button
+              className="empty-action"
+              onClick={() =>
+                void window.lt.app.openExternal('https://github.com/jurisupport/legal-terminal')
+              }
+            >
+              GitHub에서 받기
+            </button>
+          ) : (
+            <button
+              className="empty-action"
+              disabled={update.status === 'checking'}
+              onClick={() => void checkUpdateNow()}
+            >
+              {update.status === 'checking' ? '확인 중…' : '업데이트 확인'}
+            </button>
+          )}
+          {update.status === 'latest' && <span className="muted small">최신 버전입니다.</span>}
+          {update.status === 'available' && (
+            <span className="muted small">새 버전 {update.latestVersion}이 나왔습니다.</span>
+          )}
+          {update.status === 'error' && (
+            <span className="muted small">업데이트 확인 실패: {update.message}</span>
+          )}
         </div>
       </section>
 

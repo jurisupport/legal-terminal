@@ -88,6 +88,18 @@ export interface RemoteSyncChange {
   action: string // rclone dry-run 동작명 (copy, delete, ...)
 }
 
+export function cloudPathForms(dest: string): { root: string; segments: string[][] } {
+  const colon = dest.indexOf(':')
+  return {
+    root: colon >= 0 ? dest.slice(0, colon + 1) : '',
+    segments: (colon >= 0 ? dest.slice(colon + 1) : dest)
+      .replace(/^\/+/, '')
+      .split('/')
+      .filter(Boolean)
+      .map((segment) => [...new Set([segment, segment.normalize('NFC'), segment.normalize('NFD')])])
+  }
+}
+
 // rclone 공통 플래그 — 재시도는 rclone 기본값(3/10) 수준으로 유지해 OneDrive API 순단을 흡수
 const RCLONE_COMMON_FLAGS =
   '--transfers=4 --checkers=8 --retries=3 --low-level-retries=10 -v --stats-one-line --stats=1s'
@@ -105,22 +117,33 @@ export function runRemoteSync(
   wc: WebContents
 ): Promise<{ ok: boolean; code: number | null; error?: string; changes?: RemoteSyncChange[] }> {
   const mode = opts.mode ?? 'full'
-  const cloudDest = opts.dest.normalize('NFC')
+  const cloudDest = opts.dest
   const cloudArg = shq(cloudDest)
-  const macArg = shellPathArg(opts.macFolder.normalize('NFC'))
-  const src = opts.direction === 'pull' ? cloudArg : macArg
-  const dst = opts.direction === 'pull' ? macArg : cloudArg
-  const dryRunFlag = opts.dryRun ? ' --dry-run' : ''
-  const checkSource =
-    opts.direction === 'pull' && mode !== 'file'
+  const macArg = shellPathArg(opts.macFolder)
+  const { root: cloudRoot, segments: cloudSegments } = cloudPathForms(cloudDest)
+  const resolveCloudSource =
+    opts.direction === 'pull'
       ? [
-          'if ! "$rclone_bin" lsf ' + cloudArg + ' --max-depth 1 >/dev/null 2>&1; then',
-          `  echo "클라우드 경로를 찾을 수 없습니다: ${cloudDest}" >&2`,
-          '  echo "클라우드 경로 입력을 확인하거나, 먼저 올리기(맥 → 클라우드)로 폴더를 만드세요." >&2',
-          '  exit 66',
-          'fi'
+          `cloud=${shq(cloudRoot)}`,
+          'join_cloud() { case "$1" in *:|*/) printf "%s%s\\n" "$1" "$2" ;; *) printf "%s/%s\\n" "$1" "$2" ;; esac; }',
+          ...cloudSegments.flatMap((forms) => [
+            'next=',
+            `for part in ${forms.map(shq).join(' ')}; do`,
+            '  candidate=$(join_cloud "$cloud" "$part")',
+            '  if "$rclone_bin" lsjson "$candidate" --stat --retries=1 --low-level-retries=1 >/dev/null 2>&1; then next="$candidate"; break; fi',
+            'done',
+            'if [ -z "$next" ]; then',
+            `  echo ${shq(`클라우드 경로를 찾을 수 없습니다: ${cloudDest}`)} >&2`,
+            `  echo ${shq('클라우드 경로 입력을 확인하거나, 먼저 올리기(맥 → 클라우드)로 폴더를 만드세요.')} >&2`,
+            '  exit 66',
+            'fi',
+            'cloud=$next'
+          ])
         ].join('\n')
       : ''
+  const src = opts.direction === 'pull' ? '"$cloud"' : macArg
+  const dst = opts.direction === 'pull' ? macArg : cloudArg
+  const dryRunFlag = opts.dryRun ? ' --dry-run' : ''
   const ensureFolderDestination =
     opts.direction === 'pull' ? 'mkdir -p "$dst" || exit 1' : '"$rclone_bin" mkdir "$dst" || exit 1'
   const rcloneCmd =
@@ -139,7 +162,7 @@ export function runRemoteSync(
       : mode === 'folders'
       ? [
           remoteRcloneBootstrap(),
-          checkSource,
+          resolveCloudSource,
           `src=${src}`,
           `dst=${dst}`,
           ensureFolderDestination,
@@ -168,6 +191,7 @@ export function runRemoteSync(
       : mode === 'file'
         ? [
             remoteRcloneBootstrap(),
+            resolveCloudSource,
             `src=${src}`,
             `dst=${dst}`,
             'remote_parent() {',
@@ -189,7 +213,7 @@ export function runRemoteSync(
           ]
             .filter(Boolean)
             .join('\n')
-      : `${remoteRcloneBootstrap()}\n${checkSource}\n` +
+      : `${remoteRcloneBootstrap()}\n${resolveCloudSource}\n` +
         `"$rclone_bin" copy ${src} ${dst} --update --create-empty-src-dirs ${RCLONE_COMMON_FLAGS}${dryRunFlag}`
   const args = [...sshBaseArgs(opts.profile), rcloneCmd]
 

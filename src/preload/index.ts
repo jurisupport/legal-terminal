@@ -591,6 +591,15 @@ interface AgentCommandResult {
 
 type AgentEvent = { type: string; sessionId?: string; [key: string]: unknown }
 
+interface UpdateCheckResult {
+  ok: boolean
+  currentVersion: string
+  latestVersion?: string
+  updateAvailable?: boolean
+  releaseUrl?: string
+  error?: string
+}
+
 let fsWatchSeq = 0
 
 const api = {
@@ -632,6 +641,9 @@ const api = {
       ipcRenderer.on('app:closeWindowRequested', listener)
       return () => ipcRenderer.removeListener('app:closeWindowRequested', listener)
     }
+  },
+  update: {
+    check: (): Promise<UpdateCheckResult> => ipcRenderer.invoke('update:check')
   },
   dialog: {
     openCase: (): Promise<{ path: string; name: string } | null> =>

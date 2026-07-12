@@ -1,13 +1,13 @@
 import { app, BrowserWindow, shell, ipcMain, dialog, screen, Menu, clipboard, Notification, type WebContents } from 'electron'
 import { spawn } from 'child_process'
 import { createHash } from 'crypto'
-import { request } from 'https'
 import { join, basename, dirname, extname, resolve, sep, posix } from 'path'
 import { readdir, readFile, stat, writeFile, copyFile, rm, mkdir, rename, cp } from 'fs/promises'
 import { existsSync, watch, type Dirent, type FSWatcher } from 'fs'
 import { fileURLToPath } from 'url'
 import { inflateRawSync } from 'zlib'
 import { getSettings, setSettings, type Settings } from './settings'
+import { checkUpdate, compareVersions, fetchLatestRelease } from './update'
 import { promptBundledSkillInstall } from './skillInstall'
 import { imageInfo } from './imageSize'
 import {
@@ -100,70 +100,6 @@ function getAppIconPath(): string | undefined {
 function applyDockIcon(): void {
   const iconPath = getAppIconPath()
   if (iconPath && process.platform === 'darwin' && app.dock) app.dock.setIcon(iconPath)
-}
-
-interface GitHubRelease {
-  tag_name?: string
-}
-
-function parseVersionParts(version: string): number[] {
-  return version
-    .trim()
-    .replace(/^v/i, '')
-    .split(/[.-]/)
-    .slice(0, 3)
-    .map((part) => {
-      const n = Number.parseInt(part, 10)
-      return Number.isFinite(n) ? n : 0
-    })
-}
-
-function compareVersions(a: string, b: string): number {
-  const left = parseVersionParts(a)
-  const right = parseVersionParts(b)
-  for (let i = 0; i < 3; i += 1) {
-    const delta = (left[i] ?? 0) - (right[i] ?? 0)
-    if (delta !== 0) return delta
-  }
-  return 0
-}
-
-function fetchLatestRelease(): Promise<GitHubRelease> {
-  return new Promise((resolvePromise, reject) => {
-    const req = request(
-      'https://api.github.com/repos/jurisupport/legal-terminal/releases/latest',
-      {
-        headers: {
-          Accept: 'application/vnd.github+json',
-          'User-Agent': 'legal-terminal-update-check'
-        },
-        timeout: 8000
-      },
-      (res) => {
-        let body = ''
-        res.setEncoding('utf8')
-        res.on('data', (chunk) => {
-          body += chunk
-        })
-        res.on('end', () => {
-          if (!res.statusCode || res.statusCode < 200 || res.statusCode >= 300) {
-            reject(new Error(`GitHub release check failed: HTTP ${res.statusCode ?? 'unknown'}`))
-            return
-          }
-
-          try {
-            resolvePromise(JSON.parse(body) as GitHubRelease)
-          } catch (error) {
-            reject(error)
-          }
-        })
-      }
-    )
-
-    req.on('timeout', () => req.destroy(new Error('GitHub release check timed out')))
-    req.on('error', reject)
-    req.end()
-  })
 }
 
 async function checkForUpdates(win: BrowserWindow): Promise<void> {
@@ -620,6 +556,9 @@ ipcMain.handle('app:info', () => ({
     chrome: process.versions.chrome
   }
 }))
+
+// ── 수동 업데이트 확인 (설정화면) ──
+ipcMain.handle('update:check', () => checkUpdate())
 
 // ── 폴더 선택 다이얼로그 ──
 // 부모 창을 넘기지 않아 '비모달'로 띄운다 → 다이얼로그를 연 채 터미널에 입력 가능
