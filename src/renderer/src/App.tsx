@@ -63,6 +63,7 @@ import HearingRecordPanel, {
   type HearingRecordCase
 } from './hearing/HearingRecordPanel'
 import { cancelIfTerminalPointerDrag } from './dragGuard'
+import { closeTab } from './tabSelection'
 import type {
   AppSettings,
   AgentAttachment,
@@ -2122,7 +2123,7 @@ export default function App(): JSX.Element {
       delete n[id]
       return n
     })
-    setDocTabs((tabs) => closeTab(tabs, id, activeDoc, setActiveDoc))
+    setDocTabs((tabs) => closeTab(tabs, id, activeDoc, setActiveDoc, visibleDocTabs))
     if (nextKey !== undefined) activateWorkKeyAfterClose(side, nextKey)
     return true
   }
@@ -3573,7 +3574,7 @@ export default function App(): JSX.Element {
       tab && resolveActiveWorkKey(sideKeys, activeWork[side]) === closingKey
         ? nextWorkKeyAfterClose(sideKeys, closingKey)
         : undefined
-    setTermTabs((tabs) => closeTab(tabs, id, activeTerm, setActiveTerm))
+    setTermTabs((tabs) => closeTab(tabs, id, activeTerm, setActiveTerm, visibleTermTabs))
     setTermBracketedPasteMode((m) => {
       if (!(id in m)) return m
       const n = { ...m }
@@ -4851,7 +4852,7 @@ export default function App(): JSX.Element {
       )
       if (dead.length === 0) return tabs
       let next = tabs
-      for (const d of dead) next = closeTab(next, d.id, activeDoc, setActiveDoc)
+      for (const d of dead) next = closeTab(next, d.id, activeDoc, setActiveDoc, visibleDocTabs)
       return next
     })
   }
@@ -8013,19 +8014,6 @@ function SelectionAsk({ onAsk }: { onAsk: SelectionAskHandler }): JSX.Element | 
 
 function modeLabel(mode: Mode): string {
   return { explorer: '탐색기', cases: '사건', viewer: '기록뷰어', todos: '할일' }[mode]
-}
-
-/** 탭 닫기 공통: 닫힌 탭이 활성이면 이웃으로 활성 이동 */
-function closeTab<T extends { id: string }>(
-  tabs: T[],
-  id: string,
-  activeId: string,
-  setActive: (id: string) => void
-): T[] {
-  const idx = tabs.findIndex((t) => t.id === id)
-  const next = tabs.filter((t) => t.id !== id)
-  if (id === activeId) setActive(next.length > 0 ? next[Math.min(idx, next.length - 1)].id : '')
-  return next
 }
 
 // ── 좌측 문서 패널 (모드별) ──
