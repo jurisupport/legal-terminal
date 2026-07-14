@@ -23,6 +23,7 @@
     "verify:agent-rate-limits": "node --experimental-strip-types --no-warnings scripts/verify-agent-rate-limits.mjs",
     "verify:agent-rate-limit-labels": "node --experimental-strip-types --no-warnings scripts/verify-agent-rate-limit-labels.mjs",
     "verify:terminal-status": "node --experimental-strip-types --no-warnings scripts/verify-terminal-status.mjs",
+    "verify:skill-install": "node --experimental-strip-types --no-warnings scripts/verify-skill-install.mjs",
     "verify:hearing-ime": "node --experimental-strip-types --no-warnings scripts/verify-hearing-ime.mjs",
     "verify:md-compat": "node --experimental-strip-types --no-warnings scripts/verify-md-compat.mjs",
     "verify:record-outline": "node --experimental-strip-types --no-warnings scripts/verify-record-outline.mjs",

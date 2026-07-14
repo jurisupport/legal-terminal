@@ -1,14 +1,22 @@
-import { app, dialog, type BrowserWindow } from 'electron'
+import { app, clipboard, dialog, shell, type BrowserWindow } from 'electron'
 import { createHash } from 'crypto'
 import { homedir } from 'os'
-import { join } from 'path'
-import { mkdir, readFile, readdir, writeFile } from 'fs/promises'
+import { join, posix } from 'path'
+import { readFile, readdir } from 'fs/promises'
 import { getSettings, setSettings } from './settings'
+import { testSshConnection } from './ssh'
+import { makeRemote, rfsReadBytes } from './remoteFs'
+import {
+  resolveSkillInstallTarget,
+  skillDismissKey,
+  skillInstallCommand,
+  skillSourceUrls,
+  type SkillInstallTarget
+} from './skillInstallGuide'
 
 // 앱에 번들한 Claude Code 스킬(resources/skills/<이름>/SKILL.md)을
-// 사용자 스킬 폴더(~/.claude/skills)에 설치할지 시작 시 물어본다.
-// 이미 같은 내용이 설치돼 있으면 조용히 넘어가고, 번들 내용이 바뀌면
-// (앱 업데이트로 규칙이 갱신되면) 업데이트 여부를 다시 묻는다.
+// 기본 사건 열기 환경의 사용자 스킬 폴더에 설치할지 시작 시 안내한다.
+// 앱이 직접 설치하지 않고 GitHub 링크와 터미널에 붙여넣을 명령만 제공한다.
 
 function bundledSkillsDir(): string {
   return app.isPackaged
@@ -24,43 +32,97 @@ function contentHash(content: string): string {
   return createHash('sha256').update(content).digest('hex')
 }
 
+interface SkillReview {
+  content?: string
+  error?: string
+  label: string
+  path: string
+}
+
+async function reviewSkill(target: SkillInstallTarget, name: string): Promise<SkillReview> {
+  if (target.kind === 'local') {
+    const path = userSkillPath(name)
+    try {
+      return { content: await readFile(path, 'utf8'), label: '로컬', path }
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code
+      return code === 'ENOENT'
+        ? { label: '로컬', path }
+        : { error: String(error), label: '로컬', path }
+    }
+  }
+
+  const { profile } = target
+  const label = `SSH · ${profile.label} (${profile.user}@${profile.host})`
+  const connection = await testSshConnection(profile)
+  if (!connection.ok) {
+    return { error: connection.error, label, path: `~/.claude/skills/${name}/SKILL.md` }
+  }
+
+  const path = posix.join(connection.cwd, '.claude', 'skills', name, 'SKILL.md')
+  try {
+    return {
+      content: (await rfsReadBytes(makeRemote(profile.id, path))).toString('utf8'),
+      label,
+      path
+    }
+  } catch (error) {
+    const message = String(error)
+    return /no such file|not found|enoent/i.test(message)
+      ? { label, path }
+      : { error: message, label, path }
+  }
+}
+
 async function promptOneSkill(win: BrowserWindow, name: string): Promise<void> {
   const bundled = await readFile(join(bundledSkillsDir(), name, 'SKILL.md'), 'utf8')
   const hash = contentHash(bundled)
-  const targetPath = userSkillPath(name)
-  const installed = await readFile(targetPath, 'utf8').catch(() => undefined)
-  if (installed !== undefined && contentHash(installed) === hash) return
-
   const settings = await getSettings()
-  if (settings.dismissedSkillHash?.[name] === hash) return
+  const target = resolveSkillInstallTarget(settings)
+  const dismissKey = skillDismissKey(name, target)
+  if (settings.dismissedSkillHash?.[dismissKey] === hash) return
 
-  const isUpdate = installed !== undefined
+  const review = await reviewSkill(target, name)
+  if (review.content !== undefined && contentHash(review.content) === hash) return
+
+  const isUpdate = review.content !== undefined
+  const revision = app.isPackaged ? `v${app.getVersion()}` : 'main'
+  const urls = skillSourceUrls(name, revision)
+  const command = skillInstallCommand(name, urls.raw, target, process.platform)
   const result = await dialog.showMessageBox(win, {
     type: 'question',
     title: 'Claude 스킬 설치',
     message: isUpdate
-      ? `"${name}" 스킬의 업데이트가 있습니다. 적용할까요?`
-      : `"${name}" 스킬을 설치할까요?`,
+      ? `"${name}" 스킬의 업데이트가 있습니다.`
+      : `"${name}" 스킬 설치가 필요합니다.`,
     detail: [
       '소송문서(준비서면·소장 등) Markdown을 Claude가 작성할 때 한/글 표준 서식(HWPX)으로',
       '정확히 변환되는 형식 규칙을 알려주는 스킬입니다.',
       '',
-      `설치 위치: ${targetPath}`,
-      isUpdate ? '기존 스킬 파일을 새 내용으로 덮어씁니다.' : undefined
+      `확인 환경: ${review.label}`,
+      `확인 위치: ${review.path}`,
+      review.error ? `설치 상태 확인 실패: ${review.error}` : undefined,
+      '',
+      '아래 명령을 복사한 뒤 이 환경의 터미널에 직접 붙여넣으세요.',
+      command
     ]
       .filter((line): line is string => line !== undefined)
       .join('\n'),
-    buttons: [isUpdate ? '업데이트' : '설치', '나중에', '이 버전 다시 묻지 않기'],
+    buttons: [
+      'GitHub 열고 명령 복사',
+      '명령만 복사',
+      '나중에',
+      '이 버전 다시 묻지 않기'
+    ],
     defaultId: 0,
-    cancelId: 1
+    cancelId: 2
   })
 
-  if (result.response === 0) {
-    await mkdir(join(homedir(), '.claude', 'skills', name), { recursive: true })
-    await writeFile(targetPath, bundled, 'utf8')
-  } else if (result.response === 2) {
+  if (result.response === 0 || result.response === 1) clipboard.writeText(command)
+  if (result.response === 0) await shell.openExternal(urls.page)
+  if (result.response === 3) {
     await setSettings({
-      dismissedSkillHash: { ...(await getSettings()).dismissedSkillHash, [name]: hash }
+      dismissedSkillHash: { ...(await getSettings()).dismissedSkillHash, [dismissKey]: hash }
     })
   }
 }
