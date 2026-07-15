@@ -218,6 +218,8 @@ export async function resolveHearingRecordPath(
   hearing?: JsHearing
 ): Promise<string> {
   const preferred = buildHearingRecordPath(draftsDir, caseContext, hearing)
+  // ponytail: 원격 최근 기록 탐색은 탭 생성을 SSH 왕복만큼 막는다. 필요하면 탭을 연 뒤 비동기로 탐색한다.
+  if (draftsDir.startsWith('ssh://')) return preferred
   const stat = await window.lt.fs
     .stat(preferred)
     .catch(() => ({ ok: false as const, error: 'stat failed' }))
