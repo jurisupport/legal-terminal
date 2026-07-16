@@ -5959,7 +5959,11 @@ export default function App(): JSX.Element {
     (await matchCaseFolders(root, c))[0]?.path
 
   // 좌클릭: 사건 작업환경 열기 (폴더 매칭 → 없으면 직접 지정 → 사건 컨텍스트 연결)
-  const openCaseWorkspace = async (c: JsCase, detailLoaded = false): Promise<OpenedCase | null> => {
+  const openCaseWorkspace = async (
+    c: JsCase,
+    detailLoaded = false,
+    activateExistingTerm = true
+  ): Promise<OpenedCase | null> => {
     // 사건 선택 즉시 탐색기로 전환 — 상세 조회·폴더 매칭이 끝날 때까지 대시보드에 머물지 않는다
     setMode('explorer')
     if (!detailLoaded) c = await loadCaseDetail(c)
@@ -6022,7 +6026,7 @@ export default function App(): JSX.Element {
     if (existing) {
       term = existing
       termId = existing.id
-      activateTermTab(existing.id)
+      if (activateExistingTerm) activateTermTab(existing.id)
       openCaseContext(openedCase, existing.id)
       setTermTabs((tabs) =>
         tabs.map((t) =>
@@ -6058,12 +6062,75 @@ export default function App(): JSX.Element {
   }
 
   const openHearingRecordForCase = async (c: JsCase): Promise<void> => {
-    // 클릭 즉시 탐색기로 전환 — 원격 사건 상세 조회가 끝날 때까지 대시보드에 머물지 않는다
     setMode('explorer')
+    const existing = docTabsRef.current.find(
+      (tab) => tab.kind === 'hearing' && tab.hearingCase?.jsId === c.id
+    )
+    if (existing) {
+      if (existing.caseTabId) setActiveCaseTabId(existing.caseTabId)
+      moveDocToSide(existing.id, 'right')
+      return
+    }
+
+    // 재판정에서는 웹·폴더 조회보다 입력창이 먼저 열려야 한다.
+    const shellCase = hearingCaseFromJsCase(c)
+    const shellHearing = nearestHearing(c.hearings)
+    const shellSource: CurrentCase = {
+      drafts: '',
+      name: caseRef(c),
+      meta: {
+        jsId: shellCase.jsId,
+        court: shellCase.court,
+        caseNumber: shellCase.caseNumber,
+        caseName: shellCase.caseName,
+        client: shellCase.client,
+        opponent: shellCase.opponent,
+        partyNames: shellCase.partyNames,
+        memo: shellCase.memo
+      }
+    }
+    const knownCaseTab = caseTabs.find((tab) => tab.id === caseTabId(shellSource))
+    const shellCaseTab = knownCaseTab ?? registerCaseTab(shellSource)
+    if (knownCaseTab) setActiveCaseTabId(knownCaseTab.id)
+    const shellTab: DocTab = {
+      id: newId(),
+      title: buildHearingRecordTitle(shellCase, shellHearing),
+      kind: 'hearing',
+      caseTabId: shellCaseTab.id,
+      hearingCase: shellCase,
+      hearing: shellHearing,
+      side: 'right'
+    }
+    setCurrentCase(knownCaseTab ? currentCaseFromCaseTab(knownCaseTab) : shellSource)
+    setDocTabs((tabs) => [...tabs, shellTab])
+    setActiveDoc(shellTab.id)
+    setWorkActive('right', docKey(shellTab.id))
+    updateCaseTabActivity(shellCaseTab.id, {
+      activeDocId: shellTab.id,
+      activeWork: { ...activeWork, right: docKey(shellTab.id) }
+    })
+
     const detail = await loadCaseDetail(c)
-    const opened = await openCaseWorkspace(detail, true)
+    const opened = await openCaseWorkspace(detail, true, false)
     if (!opened) return
-    await openHearingRecordTab(opened.drafts, hearingCaseFromJsCase(detail), nearestHearing(detail.hearings), 'right')
+    const hearingCase = hearingCaseFromJsCase(detail)
+    const hearing = nearestHearing(detail.hearings)
+    const path = await resolveHearingRecordPath(opened.drafts, hearingCase, hearing)
+    setDocTabs((tabs) =>
+      tabs.map((tab) =>
+        tab.id === shellTab.id
+          ? {
+              ...tab,
+              title: buildHearingRecordTitle(hearingCase, hearing),
+              caseTabId: caseTabId(opened),
+              path,
+              hearingCase,
+              hearingDrafts: opened.drafts,
+              hearing
+            }
+          : tab
+      )
+    )
   }
 
   // 우클릭: 사건을 원격(SSH 프로필)에서 열기 — 원격 draftsRoot에서 폴더명 매칭, 실패 시 수동 선택.

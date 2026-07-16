@@ -23,6 +23,28 @@ const recent = {
   name: '원격 회귀',
   ts: Date.now()
 }
+const dashboardCase = {
+  id: 'hearing-shell-check',
+  caseNumber: '2026가단12345',
+  caseName: '손해배상',
+  court: '서울중앙지방법원',
+  division: '민사1단독',
+  caseType: 'civil',
+  status: 'active',
+  parties: [
+    { role: 'client', position: '원고', party: { name: '홍길동', type: 'person' } },
+    { role: 'opponent', position: '피고', party: { name: '김철수', type: 'person' } }
+  ],
+  hearings: [
+    {
+      type: 'hearing',
+      dateTime: '2026-07-16T14:00:00+09:00',
+      location: '301호',
+      note: '변론기일'
+    }
+  ]
+}
+const dashboardDrafts = path.join(os.tmpdir(), 'legal-terminal-hearing-shell-case')
 
 await fs.rm(userData, { recursive: true, force: true })
 const env = { ...process.env }
@@ -35,7 +57,7 @@ const app = await _electron.launch({
 
 try {
   const page = await app.firstWindow()
-  await app.evaluate(({ ipcMain }, { profile, recent }) => {
+  await app.evaluate(({ ipcMain }, { profile, recent, dashboardCase, dashboardDrafts }) => {
     const replace = (channel, handler) => {
       ipcMain.removeHandler(channel)
       ipcMain.handle(channel, handler)
@@ -44,13 +66,89 @@ try {
     replace('case:history', () => [recent])
     replace('case:addHistory', () => [recent])
     replace('sessions:list', () => [])
-    replace('fs:list', () => [])
-    replace('fs:stat', async () => {
+    replace('sessions:byCase', () => ({}))
+    replace('sessions:byFolder', () => [])
+    replace('js:tokenStatus', () => 'ok')
+    replace('js:listCases', () => ({ ok: true, cases: [dashboardCase] }))
+    replace('js:getCase', async () => {
       await new Promise((resolve) => setTimeout(resolve, 3_000))
+      return { ok: true, case: { ...dashboardCase, memo: '웹에서 늦게 도착한 상세 정보' } }
+    })
+    replace('case:getJsPairing', () => ({ drafts: dashboardDrafts }))
+    replace('case:setJsPairing', () => undefined)
+    replace('fs:list', () => [])
+    replace('fs:stat', async (_event, targetPath) => {
+      if (String(targetPath).startsWith('ssh://')) {
+        await new Promise((resolve) => setTimeout(resolve, 3_000))
+      }
+      if (String(targetPath).startsWith(dashboardDrafts) && String(targetPath).endsWith('.hearing.json')) {
+        return { ok: true, isDir: false, size: 512, mtimeMs: Date.now() }
+      }
       return { ok: false, error: 'missing' }
     })
-  }, { profile, recent })
+    replace('fs:readText', () => {
+      const text = JSON.stringify({
+        version: 1,
+        id: 'saved-hearing',
+        case: { caseNumber: dashboardCase.caseNumber, caseName: dashboardCase.caseName },
+        speakers: [
+          { id: 'court', label: '재판부', role: 'court' },
+          { id: 'plaintiff', label: '원고', role: 'plaintiff' },
+          { id: 'defendant', label: '피고', role: 'defendant' }
+        ],
+        activeSpeakerId: 'court',
+        requests: [],
+        entries: [
+          {
+            id: 'saved-entry',
+            speakerId: 'court',
+            text: '기존 기록',
+            createdAt: '2026-07-16T04:00:00.000Z'
+          }
+        ],
+        result: { nextActions: [] },
+        createdAt: '2026-07-16T04:00:00.000Z',
+        updatedAt: '2026-07-16T04:01:00.000Z'
+      })
+      return { ext: '.json', kind: 'text', text, size: text.length }
+    })
+    replace('fs:mkdir', (_event, payload) => ({
+      ok: true,
+      path: `${payload.dir}/${payload.name}`
+    }))
+    globalThis.__hearingWrites = []
+    replace('fs:writeText', (_event, payload) => {
+      globalThis.__hearingWrites.push(payload)
+      return { ok: true }
+    })
+  }, { profile, recent, dashboardCase, dashboardDrafts })
   await page.reload()
+
+  await page.locator('.activity-item[title*="새 사건 추가"]').click()
+  await page.locator('.new-case-row', { hasText: '사건 목록' }).click()
+  const card = page.locator('.case-card', { hasText: dashboardCase.caseNumber })
+  await card.waitFor({ state: 'visible' })
+  await card.click({ button: 'right' })
+  const shellStart = Date.now()
+  await page.locator('.ctx-item', { hasText: '기일 기록 시작' }).click()
+
+  const shellPanel = page.locator('.hearing-panel')
+  await shellPanel.waitFor({ state: 'visible', timeout: 2_000 })
+  assert.ok(Date.now() - shellStart < 2_500, '기일 기록 꾸러미는 웹 상세 조회 전에 열려야 한다')
+
+  const urgentMemo = '재판부가 석명을 요구함'
+  await shellPanel.locator('.hearing-composer textarea').fill(urgentMemo)
+  await shellPanel.locator('.hearing-composer .hearing-primary-btn', { hasText: '입력' }).click()
+  await shellPanel.locator('.hearing-message-bubble', { hasText: urgentMemo }).waitFor()
+  await page.waitForTimeout(4_500)
+  await shellPanel.locator('.hearing-message-bubble', { hasText: urgentMemo }).waitFor()
+  await shellPanel.locator('.hearing-message-bubble', { hasText: '기존 기록' }).waitFor()
+  const writes = await app.evaluate(() => globalThis.__hearingWrites ?? [])
+  assert.ok(
+    writes.some((write) => String(write.content).includes(urgentMemo)),
+    '웹 조회 중 입력한 메모는 기존 기록과 합쳐져 저장되어야 한다'
+  )
+  console.log('hearing shell opens before web detail and preserves urgent input')
 
   await page.locator('.activity-item[title*="새 사건 추가"]').click()
   await page.locator('.new-case-recent-row', { hasText: recent.name }).click()

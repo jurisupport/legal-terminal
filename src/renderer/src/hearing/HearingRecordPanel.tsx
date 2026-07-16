@@ -357,6 +357,55 @@ function sanitizeRecord(
   }
 }
 
+function recordHasContent(record: HearingRecordData): boolean {
+  return (
+    record.entries.length > 0 ||
+    record.requests.length > 0 ||
+    !!record.result.status ||
+    !!record.result.courtOrder ||
+    !!record.result.opponentSubmission ||
+    !!record.result.nextDate ||
+    !!record.result.nextActions?.length
+  )
+}
+
+function mergePendingRecord(
+  loaded: HearingRecordData,
+  pending: HearingRecordData
+): HearingRecordData {
+  const speakerIds = new Set(loaded.speakers.map((speaker) => speaker.id))
+  const speakers = withSequentialShortcuts([
+    ...loaded.speakers,
+    ...pending.speakers.filter((speaker) => !speakerIds.has(speaker.id))
+  ])
+  const mergeById = <T extends { id: string },>(saved: T[], added: T[]): T[] => {
+    const savedIds = new Set(saved.map((item) => item.id))
+    return [...saved, ...added.filter((item) => !savedIds.has(item.id))]
+  }
+  return {
+    ...loaded,
+    case: { ...pending.case, ...loaded.case },
+    speakers,
+    activeSpeakerId: speakers.some((speaker) => speaker.id === pending.activeSpeakerId)
+      ? pending.activeSpeakerId
+      : loaded.activeSpeakerId,
+    requests: mergeById(loaded.requests, pending.requests),
+    entries: mergeById(loaded.entries, pending.entries),
+    result: {
+      status: pending.result.status || loaded.result.status,
+      nextDate: pending.result.nextDate || loaded.result.nextDate,
+      courtOrder: pending.result.courtOrder || loaded.result.courtOrder,
+      opponentSubmission:
+        pending.result.opponentSubmission || loaded.result.opponentSubmission,
+      nextActions: [
+        ...new Set([...(loaded.result.nextActions ?? []), ...(pending.result.nextActions ?? [])])
+      ]
+    },
+    updatedAt: new Date().toISOString(),
+    jsSync: undefined
+  }
+}
+
 function roleClass(role?: SpeakerRole): string {
   return role ? `speaker-${role}` : 'speaker-other'
 }
@@ -459,7 +508,9 @@ export default function HearingRecordPanel({
   const [readerOpen, setReaderOpen] = useState(false)
   const [savedRecords, setSavedRecords] = useState<SavedRecordSummary[] | null>(null)
   const [saveStatus, setSaveStatus] = useState<SaveStatus>('idle')
-  const [saveMessage, setSaveMessage] = useState('')
+  const [saveMessage, setSaveMessage] = useState(
+    !draftsDir && !initialPath ? '사건 정보 불러오는 중 · 바로 입력 가능' : ''
+  )
   const [lastSavedAt, setLastSavedAt] = useState('')
   const [jsStatus, setJsStatus] = useState<JsSyncStatus>('idle')
   const [jsMessage, setJsMessage] = useState('')
@@ -486,14 +537,7 @@ export default function HearingRecordPanel({
     speakers.find((speaker) => speaker.id === record.activeSpeakerId) ?? speakers[0]
   const recordTitle = buildHearingRecordTitle(record.case, record.hearing)
   const subtitle = caseSubtitle(record.case, record.hearing)
-  const hasContent =
-    record.entries.length > 0 ||
-    record.requests.length > 0 ||
-    !!record.result.status ||
-    !!record.result.courtOrder ||
-    !!record.result.opponentSubmission ||
-    !!record.result.nextDate ||
-    !!record.result.nextActions?.length
+  const hasContent = recordHasContent(record)
 
   useEffect(() => {
     latestRecordRef.current = record
@@ -509,7 +553,11 @@ export default function HearingRecordPanel({
   }, [visible])
 
   const touch = useCallback((updater: (current: HearingRecordData) => HearingRecordData): void => {
-    setRecord((current) => ({ ...updater(current), updatedAt: new Date().toISOString() }))
+    setRecord((current) => {
+      const next = { ...updater(current), updatedAt: new Date().toISOString() }
+      latestRecordRef.current = next
+      return next
+    })
   }, [])
 
   const ensureRecordDir = useCallback(async (): Promise<string> => {
@@ -573,27 +621,47 @@ export default function HearingRecordPanel({
         .catch(() => ({ ok: false as const, error: 'stat failed' }))
       if (!stat.ok) {
         // 파일이 아직 없다 → 새 기록으로 시작
+        const pending = latestRecordRef.current
+        const base = createInitialRecord(initialCase, initialHearing)
+        const next = recordHasContent(pending)
+          ? {
+              ...pending,
+              case: { ...pending.case, ...base.case },
+              hearing: pending.hearing ?? base.hearing,
+              updatedAt: new Date().toISOString()
+            }
+          : base
         loadedPathRef.current = path
         lastSavedSourceStampRef.current = ''
-        setRecord(createInitialRecord(initialCase, initialHearing))
+        latestRecordRef.current = next
+        setRecord(next)
         setRecordPath(path)
         updateLoadState('idle')
         setSaveStatus('idle')
-        setSaveMessage('새 기록 · 입력하면 자동저장')
+        setSaveMessage(
+          recordHasContent(pending)
+            ? '현장 입력 유지 · 자동저장 대기'
+            : '새 기록 · 입력하면 자동저장'
+        )
+        setLastSavedAt('')
         return
       }
       try {
         const read = await window.lt.fs.readText(path)
         const parsed = JSON.parse(read.text) as unknown
-        const next = sanitizeRecord(parsed, initialCase, initialHearing)
-        lastSavedSourceStampRef.current = next.updatedAt
+        const loaded = sanitizeRecord(parsed, initialCase, initialHearing)
+        const pending = latestRecordRef.current
+        const hasPending = recordHasContent(pending)
+        const next = hasPending ? mergePendingRecord(loaded, pending) : loaded
+        lastSavedSourceStampRef.current = hasPending ? '' : next.updatedAt
+        latestRecordRef.current = next
         setRecord(next)
         setRecordPath(path)
         loadedPathRef.current = path
         updateLoadState('idle')
-        setSaveStatus('saved')
-        setSaveMessage('불러옴')
-        setLastSavedAt(next.updatedAt)
+        setSaveStatus(hasPending ? 'idle' : 'saved')
+        setSaveMessage(hasPending ? '기존 기록 + 현장 입력 · 자동저장 대기' : '불러옴')
+        setLastSavedAt(hasPending ? '' : next.updatedAt)
         onSavedPathRef.current?.(path, buildHearingRecordTitle(next.case, next.hearing))
       } catch (error) {
         // 파일은 있는데 읽기/파싱에 실패 — 빈 기록으로 덮어쓰지 않도록 저장을 막는다.
