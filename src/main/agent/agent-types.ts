@@ -263,6 +263,7 @@ export type AgentEvent =
       queueId: string
       text: string
       quote?: AgentMessageQuote
+      attachments: AgentAttachment[]
       position: number
       delivery: 'queue' | 'steer'
     }

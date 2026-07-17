@@ -1450,6 +1450,7 @@ function reduceTimeline(items: TimelineItem[], event: AgentEvent, agentLabel: st
       queueId,
       text: stringValue(event.text) ?? '',
       quote: messageQuote(event.quote),
+      attachments: normalizeAgentAttachments(event.attachments),
       status: delivery === 'steer' ? 'priority' : 'queued'
     }
     if (items.some((item) => item.queueId === queueId)) {

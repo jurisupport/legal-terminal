@@ -4068,6 +4068,7 @@ function enqueueAgentMessage(
     queueId,
     text: queuedTextPreview(input),
     quote: input.quote,
+    attachments: displayAgentAttachments(input.attachments),
     position: session.queue.findIndex((queued) => queued.queueId === queueId) + 1,
     delivery
   })
