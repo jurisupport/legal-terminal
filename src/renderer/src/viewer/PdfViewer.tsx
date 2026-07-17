@@ -713,7 +713,7 @@ export default function PdfViewer({
   return (
     <div className="pdf-viewer">
       <div className="pdf-toolbar">
-        <button className="tb-btn" onClick={goPrev} disabled={page <= 1} title="이전 페이지">
+        <button className="tb-btn" onClick={goPrev} disabled={page <= 1 && !onPrevDoc} title="이전 페이지">
           ◀
         </button>
         <input
@@ -728,7 +728,7 @@ export default function PdfViewer({
         <button
           className="tb-btn"
           onClick={goNext}
-          disabled={numPages === 0 || page >= numPages}
+          disabled={numPages === 0 || (page >= numPages && !onNextDoc)}
           title="다음 페이지"
         >
           ▶

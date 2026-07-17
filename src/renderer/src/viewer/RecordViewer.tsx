@@ -68,8 +68,12 @@ export default function RecordViewer({
       cropRatio={cropRatio}
       onCropOn={onCropOn}
       onCropRatio={onCropRatio}
-      onNextDoc={() => setIndex((i) => Math.min(items.length - 1, i + 1))}
-      onPrevDoc={() => setIndex((i) => Math.max(0, i - 1))}
+      onNextDoc={
+        index < items.length - 1
+          ? () => setIndex((i) => Math.min(items.length - 1, i + 1))
+          : undefined
+      }
+      onPrevDoc={index > 0 ? () => setIndex((i) => Math.max(0, i - 1)) : undefined}
       onAskDoc={onAskDoc}
       initialStatus={initialStatus}
       onStatus={onStatus}

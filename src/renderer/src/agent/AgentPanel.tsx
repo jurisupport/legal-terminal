@@ -122,6 +122,7 @@ interface AgentPanelProps {
   ssh?: SshConn
   profileId?: string
   caseTabId?: string
+  caseContext?: string
   visible: boolean
   focusNonce?: number
   initialDraft?: AgentDraftState
@@ -1758,6 +1759,7 @@ export default function AgentPanel({
   ssh,
   profileId,
   caseTabId,
+  caseContext,
   visible,
   focusNonce = 0,
   initialDraft,
@@ -2120,7 +2122,8 @@ export default function AgentPanel({
         resumeSessionId,
         permissionMode: mode,
         source: ssh ? 'ssh' : 'local',
-        ssh
+        ssh,
+        context: caseContext
       })
       .then(async (result) => {
         if (!result.ok) setError(result.error ?? 'Agent 세션을 만들 수 없습니다.')
@@ -2134,7 +2137,7 @@ export default function AgentPanel({
         if (!sendResult.ok) setError(sendResult.error ?? 'Fork 맥락을 가져올 수 없습니다.')
       })
       .catch((e) => setError(String(e instanceof Error ? e.message : e)))
-  }, [cwd, forkFromSessionId, id, mode, provider, resumeSessionId, settingsLoaded, ssh, title])
+  }, [caseContext, cwd, forkFromSessionId, id, mode, provider, resumeSessionId, settingsLoaded, ssh, title])
 
   // 프로바이더 전환으로 넘어온 대화 맥락을 보류해뒀다가 첫 지시에 합쳐 보낸다.
   useEffect(() => {

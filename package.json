@@ -21,6 +21,7 @@
     "verify:case-sync": "node --experimental-strip-types --no-warnings scripts/verify-case-sync.mjs",
     "verify:drag-guard": "node --experimental-strip-types --no-warnings scripts/verify-drag-guard.mjs",
     "verify:agent-rate-limits": "node --experimental-strip-types --no-warnings scripts/verify-agent-rate-limits.mjs",
+    "verify:agent-case-context": "node --experimental-strip-types --no-warnings scripts/verify-agent-case-context.mjs",
     "verify:agent-rate-limit-labels": "node --experimental-strip-types --no-warnings scripts/verify-agent-rate-limit-labels.mjs",
     "verify:terminal-status": "node --experimental-strip-types --no-warnings scripts/verify-terminal-status.mjs",
     "verify:skill-install": "node --experimental-strip-types --no-warnings scripts/verify-skill-install.mjs",

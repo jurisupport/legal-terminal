@@ -43,6 +43,7 @@ import type {
   AgentWorktreeForkInput,
   AgentWorktreeForkResult
 } from './agent-types'
+import { prependAgentContext } from './agentPrompt'
 
 interface PendingPermission {
   sessionId: string
@@ -91,6 +92,7 @@ interface AgentSession {
   disallowedTools?: string[]
   source: AgentSource
   ssh?: AgentSshConn
+  context?: string
   authStatus?: AgentAuthStatus
   commandProbe?: AbortController
   slashCommands?: AgentSlashCommand[]
@@ -3579,6 +3581,7 @@ function prefetchClaudeSlashCommands(session: AgentSession): void {
 export function createAgentSession(opts: AgentCreateOptions, webContents: WebContents): AgentCommandResult {
   const existing = sessions.get(opts.id)
   if (existing) {
+    existing.context = opts.context?.trim() || existing.context
     attach(existing, webContents)
     emit(existing, {
       type: 'session:init',
@@ -3619,6 +3622,7 @@ export function createAgentSession(opts: AgentCreateOptions, webContents: WebCon
     disallowedTools: opts.disallowedTools,
     source,
     ssh: opts.ssh,
+    context: opts.context?.trim() || undefined,
     authStatus: provider === 'codex' || (source === 'ssh' && provider === 'claude') ? 'checking' : undefined,
     viewers: new Map(),
     pendingPermissions: new Map(),
@@ -4136,7 +4140,7 @@ function startAgentTurn(session: AgentSession, input: AgentSendInput): void {
   })
   emit(session, { type: 'status', sessionId, status: 'working' })
 
-  const prompt = renderPrompt(input)
+  const prompt = prependAgentContext(session.context, renderPrompt(input))
   void (async () => {
     let contextUsageTimer: NodeJS.Timeout | undefined
     let contextUsageActive = true

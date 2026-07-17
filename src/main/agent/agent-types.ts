@@ -50,6 +50,7 @@ export interface AgentCreateOptions {
   disallowedTools?: string[]
   source?: AgentSource
   ssh?: AgentSshConn
+  context?: string
 }
 
 export interface AgentWorktreeForkInput {

@@ -513,6 +513,7 @@ interface AgentCreateOptions {
   disallowedTools?: string[]
   source?: 'local' | 'ssh'
   ssh?: SshConn
+  context?: string
 }
 
 interface AgentWorktreeForkInput {

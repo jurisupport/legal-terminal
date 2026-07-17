@@ -6,6 +6,7 @@ import { dirname, join } from 'node:path'
 const root = dirname(dirname(fileURLToPath(import.meta.url)))
 const app = readFileSync(join(root, 'src/renderer/src/App.tsx'), 'utf8')
 const css = readFileSync(join(root, 'src/renderer/src/styles.css'), 'utf8')
+const pdfViewer = readFileSync(join(root, 'src/renderer/src/viewer/PdfViewer.tsx'), 'utf8')
 
 assert.match(
   app,
@@ -29,5 +30,16 @@ assert.match(viewer, /flex-direction:\s*column/, 'pdf viewer must reserve the re
 const wrap = blockFor('.pdf-canvas-wrap')
 assert.match(wrap, /flex:\s*1/, 'pdf canvas wrapper must take the remaining viewer height')
 assert.match(wrap, /min-height:\s*0/, 'pdf canvas wrapper must report the actual available height')
+
+assert.match(
+  pdfViewer,
+  /disabled=\{page <= 1 && !onPrevDoc\}/,
+  'the previous button must stay enabled at page one when a previous record exists'
+)
+assert.match(
+  pdfViewer,
+  /disabled=\{numPages === 0 \|\| \(page >= numPages && !onNextDoc\)\}/,
+  'the next button must stay enabled at the last page when a next record exists'
+)
 
 console.log('pdf layout ok')
