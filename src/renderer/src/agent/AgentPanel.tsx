@@ -44,6 +44,7 @@ import {
 import { DiffPreview } from './DiffPreview'
 import { MarkdownMessage } from './MarkdownMessage'
 import { ToolRow, toolDisplayName, toolStepDisplay, type ProcessStep } from './ToolRow'
+import { quoteAgentRequest } from './quote'
 import {
   invalidateSessionTranscript,
   loadSessionTranscript,
@@ -68,6 +69,7 @@ import {
 import type {
   AgentAttachment,
   AgentEvent,
+  AgentMessageQuote,
   AgentModelOption,
   AgentPermissionMode,
   AgentProvider,
@@ -94,6 +96,7 @@ const CONTEXT_ATTACHMENT_TEXT_LIMIT = 160_000
 const FOLDER_ATTACHMENT_ENTRY_LIMIT = 120
 const TIMELINE_BOTTOM_THRESHOLD = 36
 const TIMELINE_PREVIEW_LIMIT = 78
+const QUOTE_PREVIEW_LIMIT = 180
 const REMOTE_FILE_CHANGED_EVENT = 'lt:remote-file-changed'
 const ESC_INTERRUPT_ARM_MS = 2000
 
@@ -187,6 +190,11 @@ interface TimelineItem {
   urls?: string[]
   codes?: string[]
   processSteps?: ProcessStep[]
+  quote?: AgentMessageQuote
+}
+
+interface PendingAgentQuote extends AgentMessageQuote {
+  text: string
 }
 
 interface AgentDialogOption {
@@ -1186,6 +1194,47 @@ function canOpenAttachmentSource(attachment: AgentAttachment): boolean {
   return !!attachment.source && (!!attachment.source.docId || !!attachment.source.path)
 }
 
+function messageQuote(value: unknown): AgentMessageQuote | undefined {
+  const quote = asRecord(value)
+  const messageId = stringValue(quote?.messageId)
+  const preview = stringValue(quote?.preview)
+  return messageId && preview ? { messageId, preview } : undefined
+}
+
+function quotePreview(text: string): string {
+  const preview = markdownPreviewText(text).replace(/\s+/g, ' ').trim()
+  if (!preview) return '에이전트 답변'
+  return preview.length > QUOTE_PREVIEW_LIMIT ? `${preview.slice(0, QUOTE_PREVIEW_LIMIT)}...` : preview
+}
+
+function QuoteReference({
+  quote,
+  onOpen,
+  onRemove
+}: {
+  quote: AgentMessageQuote
+  onOpen: () => void
+  onRemove?: () => void
+}): JSX.Element {
+  return (
+    <div className="agent-quote-reference">
+      <span className="agent-quote-preview" title={quote.preview}>
+        {quote.preview}
+      </span>
+      <span className="agent-copy-actions">
+        <button type="button" title="인용한 답변으로 이동" onClick={onOpen}>
+          원문
+        </button>
+        {onRemove && (
+          <button type="button" title="인용 취소" aria-label="인용 취소" onClick={onRemove}>
+            ×
+          </button>
+        )}
+      </span>
+    </div>
+  )
+}
+
 function normalizeAgentAttachments(value: unknown): AgentAttachment[] {
   return recordArray(value)
     .flatMap((attachment): AgentAttachment[] => {
@@ -1340,6 +1389,7 @@ function reduceTimeline(items: TimelineItem[], event: AgentEvent, agentLabel: st
         kind: 'user',
         title: '나',
         text: stringValue(event.text) ?? '',
+        quote: messageQuote(event.quote),
         attachments: normalizeAgentAttachments(event.attachments)
       }
     ]
@@ -1399,6 +1449,7 @@ function reduceTimeline(items: TimelineItem[], event: AgentEvent, agentLabel: st
       title,
       queueId,
       text: stringValue(event.text) ?? '',
+      quote: messageQuote(event.quote),
       status: delivery === 'steer' ? 'priority' : 'queued'
     }
     if (items.some((item) => item.queueId === queueId)) {
@@ -1782,6 +1833,7 @@ export default function AgentPanel({
   const usesAgentAuth = usesClaudeRemoteAuth || provider === 'codex'
   const [items, setItems] = useState<TimelineItem[]>([])
   const [input, setInput] = useState(() => initialDraft?.input ?? '')
+  const [quotedMessage, setQuotedMessage] = useState<PendingAgentQuote | null>(null)
   const [mode, setMode] = useState<AgentPermissionMode>(DEFAULT_AGENT_PERMISSION_MODE)
   const [status, setStatus] = useState<AgentPanelStatus>('idle')
   const [error, setError] = useState('')
@@ -1882,6 +1934,7 @@ export default function AgentPanel({
     setAuthActive(false)
     setAuthInput('')
     setAttachments([])
+    setQuotedMessage(null)
     setAuthStatus(usesAgentAuth ? 'checking' : 'unavailable')
     setAuthStatusMessage('')
     setModelOptions([])
@@ -1901,6 +1954,16 @@ export default function AgentPanel({
       textarea.setSelectionRange(caret, caret)
     })
   }, [])
+
+  const revealQuotedMessage = useCallback(
+    (messageId: string): void => {
+      document.getElementById(`agent-message-${id}-${messageId}`)?.scrollIntoView({
+        behavior: 'smooth',
+        block: 'center'
+      })
+    },
+    [id]
+  )
 
   useEffect(() => {
     if (!visible || authActive) return
@@ -1927,6 +1990,7 @@ export default function AgentPanel({
     resetPromptHistoryCursor()
     setInput('')
     setAttachments([])
+    setQuotedMessage(null)
   }, [clearDraftNonce, resetPromptHistoryCursor])
 
   const rememberPrompts = useCallback(
@@ -2699,7 +2763,10 @@ export default function AgentPanel({
           setError(result.error ?? `${commandName} 명령을 실행할 수 없습니다.`)
           return
         }
-        if (commandName === '/clear' || commandName === '/new') setItems([])
+        if (commandName === '/clear' || commandName === '/new') {
+          setItems([])
+          setQuotedMessage(null)
+        }
       }
       rememberPrompts([rawText])
       setInput('')
@@ -2745,6 +2812,9 @@ export default function AgentPanel({
     setError('')
     const nextDelivery = delivery ?? (queuesNewInput ? 'queue' : 'normal')
     const handoff = pendingHandoff
+    const quote = quotedMessage
+    const requestText = quote ? quoteAgentRequest(quote.text, text) : text
+    const displayText = text || (quote ? '인용한 답변에 대해' : '')
     // 미저장 문서 첨부 등을 전송 시점 내용으로 치환한다.
     const outgoingAttachments = onPrepareAttachment
       ? await Promise.all(
@@ -2752,8 +2822,9 @@ export default function AgentPanel({
         )
       : sendAttachments
     const result = await window.lt.agent.send(id, {
-      text: handoff ? `${handoff.preamble}\n${text}` : text,
-      ...(handoff ? { displayText: text } : {}),
+      text: handoff ? `${handoff.preamble}\n${requestText}` : requestText,
+      ...(handoff || quote ? { displayText } : {}),
+      ...(quote ? { quote: { messageId: quote.messageId, preview: quote.preview } } : {}),
       attachments: outgoingAttachments,
       permissionMode: nextMode,
       delivery: nextDelivery
@@ -2763,6 +2834,7 @@ export default function AgentPanel({
       setStatus('error')
       return
     }
+    if (quote) setQuotedMessage((current) => (current === quote ? null : current))
     if (handoff) {
       setPendingHandoff(null)
       onHandoffConsumed?.()
@@ -3424,6 +3496,12 @@ export default function AgentPanel({
               return (
                 <section key={item.id} className="agent-msg user">
                   <div className="agent-msg-bubble">
+                    {item.quote && (
+                      <QuoteReference
+                        quote={item.quote}
+                        onOpen={() => revealQuotedMessage(item.quote!.messageId)}
+                      />
+                    )}
                     <pre className="agent-card-text">{item.text}</pre>
                     {item.attachments && item.attachments.length > 0 && (
                       <div className="agent-attachments sent" aria-label="전송된 첨부">
@@ -3472,7 +3550,11 @@ export default function AgentPanel({
             if (item.kind === 'assistant') {
               const cancelled = item.status === 'cancelled' || item.status === 'canceled'
               return (
-                <section key={item.id} className={`agent-msg assistant ${item.status ?? ''}`}>
+                <section
+                  key={item.id}
+                  id={`agent-message-${id}-${item.id}`}
+                  className={`agent-msg assistant ${item.status ?? ''}`}
+                >
                   {item.text && (
                     <MarkdownMessage
                       text={item.text}
@@ -3482,7 +3564,31 @@ export default function AgentPanel({
                   )}
                   {cancelled && <div className="agent-msg-cancelled">중지됨</div>}
                   {item.text && item.status !== 'streaming' && (
-                    <div className="agent-msg-tools" aria-label="출력 복사">
+                    <div className="agent-msg-tools" aria-label="출력 작업">
+                      <button
+                        type="button"
+                        title="선택한 부분 또는 이 답변 전체를 인용해 지시"
+                        onClick={() => {
+                          const source = document.getElementById(`agent-message-${id}-${item.id}`)
+                          const selection = window.getSelection()
+                          const selected =
+                            source &&
+                            selection &&
+                            !selection.isCollapsed &&
+                            selectionIntersectsElement(selection, source)
+                              ? selection.toString().trim()
+                              : ''
+                          const text = selected || item.text!
+                          setQuotedMessage({
+                            messageId: item.id,
+                            preview: quotePreview(text),
+                            text
+                          })
+                          focusPrompt()
+                        }}
+                      >
+                        인용
+                      </button>
                       <button
                         type="button"
                         title="리치텍스트로 복사"
@@ -3687,6 +3793,12 @@ export default function AgentPanel({
                   {cardStatus && <span className="agent-card-status">{cardStatus}</span>}
                 </span>
               </div>
+              {item.quote && (
+                <QuoteReference
+                  quote={item.quote}
+                  onOpen={() => revealQuotedMessage(item.quote!.messageId)}
+                />
+              )}
               {item.kind === 'diff' &&
                 (Boolean(item.diff && onOpenDiff) || showOpenChangedFile || showRevertDiff) && (
                 <div className="agent-card-actions">
@@ -4093,6 +4205,13 @@ export default function AgentPanel({
           </div>
         )}
         <div className="agent-composer">
+          {quotedMessage && (
+            <QuoteReference
+              quote={quotedMessage}
+              onOpen={() => revealQuotedMessage(quotedMessage.messageId)}
+              onRemove={() => setQuotedMessage(null)}
+            />
+          )}
           <textarea
           ref={textareaRef}
           value={input}

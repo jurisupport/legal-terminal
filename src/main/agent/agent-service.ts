@@ -4067,6 +4067,7 @@ function enqueueAgentMessage(
     sessionId: session.id,
     queueId,
     text: queuedTextPreview(input),
+    quote: input.quote,
     position: session.queue.findIndex((queued) => queued.queueId === queueId) + 1,
     delivery
   })
@@ -4136,6 +4137,7 @@ function startAgentTurn(session: AgentSession, input: AgentSendInput): void {
     sessionId,
     messageId,
     text: userDisplayText,
+    quote: input.quote,
     attachments: displayAgentAttachments(input.attachments)
   })
   emit(session, { type: 'status', sessionId, status: 'working' })

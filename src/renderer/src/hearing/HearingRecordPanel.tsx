@@ -517,6 +517,7 @@ export default function HearingRecordPanel({
   const loadStateRef = useRef<LoadState>(initialPath ? 'loading' : 'idle')
   const [loadState, setLoadState] = useState<LoadState>(loadStateRef.current)
   const inputRef = useRef<HTMLTextAreaElement>(null)
+  const latestEntryRef = useRef<HTMLDivElement>(null)
   const saveTimer = useRef<number | null>(null)
   const loadedPathRef = useRef<string | undefined>(undefined)
   const latestRecordRef = useRef(record)
@@ -959,6 +960,7 @@ export default function HearingRecordPanel({
       activeSpeakerId: speakerId,
       entries: [...current.entries, entry]
     }))
+    window.requestAnimationFrame(() => latestEntryRef.current?.scrollIntoView({ block: 'nearest' }))
     setDraft('')
     focusInput()
   }
@@ -1325,10 +1327,14 @@ export default function HearingRecordPanel({
             {sortedEntries.length === 0 ? (
               <p className="muted small hearing-empty-line">화자 버튼 또는 숫자키를 누르고 바로 입력하세요.</p>
             ) : (
-              sortedEntries.map((entry) => {
+              sortedEntries.map((entry, index) => {
                 const speaker = speakers.find((item) => item.id === entry.speakerId)
                 return (
-                  <div key={entry.id} className={`hearing-message ${roleClass(speaker?.role)}`}>
+                  <div
+                    key={entry.id}
+                    ref={index === sortedEntries.length - 1 ? latestEntryRef : undefined}
+                    className={`hearing-message ${roleClass(speaker?.role)}`}
+                  >
                     <div className="hearing-message-meta">
                       <span>{formatTime(entry.createdAt)}</span>
                       <strong>{speaker?.label ?? '사전준비'}</strong>

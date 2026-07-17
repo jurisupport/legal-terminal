@@ -482,6 +482,11 @@ export interface AgentModelListResult extends AgentCommandResult {
   selectedReasoningEffort?: string
 }
 
+export interface AgentMessageQuote {
+  messageId: string
+  preview: string
+}
+
 export interface AgentReasoningEffortOption {
   reasoningEffort: string
   description?: string
@@ -490,6 +495,7 @@ export interface AgentReasoningEffortOption {
 export interface AgentSendInput {
   text: string
   displayText?: string
+  quote?: AgentMessageQuote
   attachments?: AgentAttachment[]
   permissionMode?: AgentPermissionMode
   delivery?: 'normal' | 'queue' | 'steer'

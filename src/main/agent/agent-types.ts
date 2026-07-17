@@ -93,6 +93,11 @@ export interface AgentModelListResult extends AgentCommandResult {
   selectedReasoningEffort?: string
 }
 
+export interface AgentMessageQuote {
+  messageId: string
+  preview: string
+}
+
 export interface AgentReasoningEffortOption {
   reasoningEffort: string
   description?: string
@@ -101,6 +106,7 @@ export interface AgentReasoningEffortOption {
 export interface AgentSendInput {
   text: string
   displayText?: string
+  quote?: AgentMessageQuote
   attachments?: AgentAttachment[]
   permissionMode?: AgentPermissionMode
   delivery?: 'normal' | 'queue' | 'steer'
@@ -238,7 +244,14 @@ export type AgentEvent =
     }
   | { type: 'session:commands'; sessionId: string; commands: AgentSlashCommand[] }
   | { type: 'session:interrupted'; sessionId: string; message?: string }
-  | { type: 'message:user'; sessionId: string; messageId: string; text: string; attachments: AgentAttachment[] }
+  | {
+      type: 'message:user'
+      sessionId: string
+      messageId: string
+      text: string
+      quote?: AgentMessageQuote
+      attachments: AgentAttachment[]
+    }
   | { type: 'message:assistant_start'; sessionId: string; messageId: string }
   | { type: 'message:assistant_delta'; sessionId: string; messageId: string; text: string }
   | { type: 'message:assistant_replace'; sessionId: string; messageId: string; text: string }
@@ -249,6 +262,7 @@ export type AgentEvent =
       sessionId: string
       queueId: string
       text: string
+      quote?: AgentMessageQuote
       position: number
       delivery: 'queue' | 'steer'
     }

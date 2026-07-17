@@ -3201,6 +3201,30 @@ body {
   border-color: var(--border);
   background: rgba(255, 255, 255, 0.06);
 }
+.agent-quote-reference {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 7px;
+  border-left: 2px solid color-mix(in srgb, var(--accent) 68%, var(--border));
+  color: var(--fg-muted);
+  background: rgba(255, 255, 255, 0.035);
+  font-size: var(--agent-micro-font-size);
+}
+.agent-quote-preview {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.agent-msg-bubble .agent-quote-reference {
+  margin-bottom: 6px;
+}
+.agent-card > .agent-quote-reference {
+  margin-top: 7px;
+}
 .agent-card.permission {
   border-color: #9a6a1f;
   background: #261f14;
@@ -5203,6 +5227,9 @@ button.agent-attachment-chip {
   border-radius: 6px;
   background: var(--bg);
   transition: border-color 100ms ease, box-shadow 100ms ease;
+}
+.agent-composer > .agent-quote-reference {
+  margin: 6px 7px 0;
 }
 .agent-composer:focus-within {
   border-color: var(--accent);

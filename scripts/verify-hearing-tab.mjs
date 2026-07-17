@@ -150,6 +150,37 @@ try {
   )
   console.log('hearing shell opens before web detail and preserves urgent input')
 
+  const composer = shellPanel.locator('.hearing-composer textarea')
+  const submit = shellPanel.locator('.hearing-composer .hearing-primary-btn', { hasText: '입력' })
+  for (let index = 1; index <= 16; index += 1) {
+    await composer.fill(`연속 발언 ${index}`)
+    await submit.click()
+  }
+  const latestMessage = shellPanel.locator('.hearing-message').last()
+  await latestMessage.waitFor()
+  await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))))
+  const scrollMetrics = await shellPanel.locator('.hearing-body').evaluate((body) => {
+    const message = body.querySelector('.hearing-message:last-child')
+    if (!message) return null
+    const bodyRect = body.getBoundingClientRect()
+    const messageRect = message.getBoundingClientRect()
+    return {
+      scrollTop: body.scrollTop,
+      bodyTop: bodyRect.top,
+      bodyBottom: bodyRect.bottom,
+      messageTop: messageRect.top,
+      messageBottom: messageRect.bottom
+    }
+  })
+  assert.ok(
+    scrollMetrics &&
+      scrollMetrics.scrollTop > 0 &&
+      scrollMetrics.messageBottom <= scrollMetrics.bodyBottom + 1 &&
+      scrollMetrics.messageTop >= scrollMetrics.bodyTop - 1,
+    `새 발언이 쌓이면 기일기록 스크롤이 마지막 발언을 따라가야 한다: ${JSON.stringify(scrollMetrics)}`
+  )
+  console.log('hearing record follows the latest statement')
+
   await page.locator('.activity-item[title*="새 사건 추가"]').click()
   await page.locator('.new-case-recent-row', { hasText: recent.name }).click()
   const menu = page.locator('[data-work-side="right"] .tab-menu-trigger', {
