@@ -3316,14 +3316,14 @@ export default function AgentPanel({
       : authStatus === 'checking'
         ? '확인 중'
         : authStatus === 'authenticated'
-          ? '로그인됨'
+          ? '계정 변경'
           : authStatus === 'unavailable'
             ? 'CLI 없음'
             : '로그인'
   const authButtonTitle =
     authStatusMessage ||
     (authStatus === 'authenticated'
-      ? `${agentLabel} 로그인이 확인되었습니다`
+      ? `${agentLabel} 계정 변경`
       : authStatus === 'checking'
         ? `${agentLabel} 로그인 상태를 확인하고 있습니다`
         : authStatus === 'unavailable'
@@ -3333,7 +3333,6 @@ export default function AgentPanel({
     authActive ||
     status === 'working' ||
     authStatus === 'checking' ||
-    authStatus === 'authenticated' ||
     authStatus === 'unavailable'
   const visibleRateLimits = (usage.rateLimits?.length ? usage.rateLimits : usage.rateLimit ? [usage.rateLimit] : []).filter(
     showRateLimitInBar

@@ -344,6 +344,7 @@ function remoteClaudeAuthCommand(): string {
     unsetClaudeAuthEnvCommand(),
     'claude_bin=$(command -v claude 2>/dev/null || true)',
     'if [ -z "$claude_bin" ]; then echo "claude command not found on remote PATH" >&2; exit 127; fi',
+    '"$claude_bin" auth logout >/dev/null 2>&1 || true',
     'exec "$claude_bin" auth login --claudeai'
   ].join('; ')
   return `exec $SHELL -ilc ${shq(inner)}`
@@ -3231,9 +3232,6 @@ export function startAgentAuthLogin(sessionId: string): AgentCommandResult {
   if (session.running) return { ok: false, error: 'Agent 작업 실행 중에는 로그인할 수 없습니다.' }
   const label = session.provider === 'codex' ? 'Codex' : 'Claude'
   if (session.authProcess) return { ok: false, error: `이미 ${label} 로그인 절차가 실행 중입니다.` }
-  if (session.authStatus === 'authenticated') {
-    return { ok: false, error: `이미 ${label}에 로그인되어 있습니다.` }
-  }
   if (session.provider !== 'codex' && (session.source !== 'ssh' || !session.ssh)) {
     return { ok: false, error: '현재 구현은 원격 Agent 세션의 Claude 로그인만 지원합니다.' }
   }
@@ -3248,11 +3246,15 @@ export function startAgentAuthLogin(sessionId: string): AgentCommandResult {
               env: cleanEnv()
             })
           : process.platform === 'win32'
-            ? spawn(codexBin, ['login', '--device-auth'], {
-                cwd: session.cwd,
-                windowsHide: true,
-                env: cleanEnv()
-              })
+            ? spawn(
+                process.env.ComSpec || 'cmd.exe',
+                ['/d', '/s', '/c', `call ${codexBin} logout >NUL 2>&1 & call ${codexBin} login --device-auth`],
+                {
+                  cwd: session.cwd,
+                  windowsHide: true,
+                  env: cleanEnv()
+                }
+              )
             : spawn('/bin/sh', ['-lc', `${shq(codexBin)} logout >/dev/null 2>&1 || true; exec ${shq(codexBin)} login --device-auth`], {
                 cwd: session.cwd,
                 windowsHide: true,
@@ -3302,7 +3304,14 @@ export function startAgentAuthLogin(sessionId: string): AgentCommandResult {
       exitCode: code,
       message: ok ? `${label} 로그인이 완료되었습니다.` : `${label} 로그인 종료: code=${code ?? 'unknown'}`
     })
-    if (ok) emitAuthStatus(session, 'authenticated', `${label} 로그인이 완료되었습니다.`)
+    if (ok) {
+      emitAuthStatus(session, 'authenticated', `${label} 로그인이 완료되었습니다.`)
+      if (session.provider === 'codex') {
+        session.codexProcess?.kill()
+        session.codexProcess = undefined
+        session.codexInitialized = false
+      }
+    }
     emit(session, { type: 'status', sessionId: session.id, status: ok ? 'idle' : 'error' })
     refreshAgentAuthStatus(session)
   })
