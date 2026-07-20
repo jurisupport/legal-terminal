@@ -3021,6 +3021,12 @@ body {
   opacity: 0.45;
   cursor: default;
 }
+.agent-model-btn {
+  max-width: 240px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .agent-timeline-wrap {
   min-height: 0;
   min-width: 0;
@@ -4984,6 +4990,10 @@ button.agent-attachment-chip {
   justify-content: space-between;
   gap: 8px;
   margin-bottom: 8px;
+}
+.agent-model-current {
+  margin: -2px 0 8px;
+  color: var(--fg-muted);
 }
 .agent-model-picker-head button,
 .agent-model-list button {

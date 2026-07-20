@@ -8,6 +8,7 @@ import { basename, dirname, join, relative } from 'path'
 import { rememberSessionMeta } from '../sessions'
 import {
   query,
+  type EffortLevel,
   type McpServerStatus,
   type PermissionMode,
   type PermissionResult,
@@ -44,6 +45,9 @@ import type {
   AgentWorktreeForkResult
 } from './agent-types'
 import { prependAgentContext } from './agentPrompt'
+import { codexTurnRunStatus, codexWorkStepStatus } from './agentProgress'
+
+export { codexTurnRunStatus, codexWorkStepStatus } from './agentProgress'
 
 interface PendingPermission {
   sessionId: string
@@ -121,6 +125,7 @@ interface AgentSession {
   codexStdoutBuffer?: string
   codexTurnWaiter?: CodexTurnWaiter
   codexTokenUsageTurnIds?: Set<string>
+  codexActiveWork?: Set<string>
   tokenUsage: AgentTokenUsage
   contextUsage?: AgentContextUsage
   rateLimitUsage?: AgentRateLimitUsage
@@ -178,6 +183,12 @@ function sdkPermissionMode(mode: AgentPermissionMode): PermissionMode {
   if (mode === 'ask') return 'default'
   if (mode === 'acceptEdits') return 'acceptEdits'
   return mode
+}
+
+function claudeEffort(value: string | undefined): EffortLevel | undefined {
+  return value === 'low' || value === 'medium' || value === 'high' || value === 'xhigh' || value === 'max'
+    ? value
+    : undefined
 }
 
 function cliPermissionMode(mode: AgentPermissionMode): string {
@@ -259,6 +270,7 @@ function remoteClaudeCommand(session: AgentSession): string {
     session.permissionMode === 'bypassPermissions' ? '--allow-dangerously-skip-permissions' : '',
     shellArgFlag('--resume', session.resumeSessionId).trim(),
     shellArgFlag('--model', session.model).trim(),
+    shellArgFlag('--effort', claudeEffort(session.reasoningEffort)).trim(),
     shellListFlag('--tools', session.tools).trim(),
     shellListFlag('--allowedTools', session.allowedTools).trim(),
     shellListFlag('--disallowedTools', session.disallowedTools).trim()
@@ -281,7 +293,8 @@ function remoteClaudeSlashProbeCommand(session: AgentSession): string {
   const flags = [
     '--verbose --output-format stream-json --input-format stream-json',
     '--permission-mode dontAsk',
-    shellArgFlag('--model', session.model).trim()
+    shellArgFlag('--model', session.model).trim(),
+    shellArgFlag('--effort', claudeEffort(session.reasoningEffort)).trim()
   ].filter(Boolean).join(' ')
   const inner = [
     'PATH="/opt/homebrew/bin:/usr/local/bin:/opt/local/bin:$PATH"',
@@ -1124,7 +1137,7 @@ function emitProcessEvent(
 function currentSessionStatus(session: AgentSession): AgentStatus {
   if (session.pendingPermissions.size > 0) return 'waiting_permission'
   if (session.pendingDialogs.size > 0) return 'waiting_user'
-  if (session.running && !session.running.signal.aborted) return 'working'
+  if ((session.running && !session.running.signal.aborted) || session.codexActiveWork?.size) return 'working'
   return 'idle'
 }
 
@@ -2558,6 +2571,59 @@ function codexFileChangeText(item: Record<string, unknown>): { filePath?: string
   return { filePath, text: text || undefined }
 }
 
+function setCodexWork(session: AgentSession, id: string, status: ReturnType<typeof codexWorkStepStatus>): void {
+  if (!session.codexActiveWork) session.codexActiveWork = new Set()
+  if (status === 'running') {
+    session.codexActiveWork.add(id)
+    emit(session, { type: 'status', sessionId: session.id, status: 'working' })
+    return
+  }
+  const removed = session.codexActiveWork.delete(id)
+  if (removed && session.codexActiveWork.size === 0 && !session.running) {
+    emit(session, { type: 'status', sessionId: session.id, status: status === 'error' ? 'error' : 'done' })
+  }
+}
+
+function handleCodexCollabItem(session: AgentSession, item: Record<string, unknown>): boolean {
+  if (stringValue(item.type) !== 'collabAgentToolCall') return false
+  const tool = stringValue(item.tool)
+  const itemStatus = stringValue(item.status)
+  const states = asRecord(item.agentsStates) ?? {}
+  const agentIds = new Set([...stringArrayValue(item.receiverThreadIds), ...Object.keys(states)])
+  for (const agentId of agentIds) {
+    const state = asRecord(states[agentId])
+    const agentStatus = stringValue(state?.status)
+    const status = agentStatus
+      ? codexWorkStepStatus(agentStatus)
+      : itemStatus === 'failed'
+        ? 'error'
+        : itemStatus === 'inProgress' || tool === 'spawnAgent' || tool === 'sendInput' || tool === 'resumeAgent'
+          ? 'running'
+          : 'done'
+    setCodexWork(session, `agent:${agentId}`, status)
+    emitProcessEvent(
+      session,
+      `codex-agent:${agentId}`,
+      '도구 · Agent',
+      stringValue(state?.message) ?? (tool === 'spawnAgent' ? stringValue(item.prompt) : undefined),
+      status
+    )
+  }
+  return true
+}
+
+function handleCodexSubAgentActivity(session: AgentSession, item: Record<string, unknown>): boolean {
+  if (stringValue(item.type) !== 'subAgentActivity') return false
+  const kind = stringValue(item.kind)
+  if (kind !== 'started' && kind !== 'interrupted') return true
+  const agentId = stringValue(item.agentThreadId)
+  if (!agentId) return true
+  const status = kind === 'started' ? 'running' : 'cancelled'
+  setCodexWork(session, `agent:${agentId}`, status)
+  emitProcessEvent(session, `codex-agent:${agentId}`, '도구 · Agent', stringValue(item.agentPath), status)
+  return true
+}
+
 function base64Text(value: unknown): string | undefined {
   const text = stringValue(value)
   if (!text) return undefined
@@ -2569,6 +2635,7 @@ function base64Text(value: unknown): string | undefined {
 }
 
 function handleCodexItemStarted(session: AgentSession, item: Record<string, unknown>): void {
+  if (handleCodexCollabItem(session, item) || handleCodexSubAgentActivity(session, item)) return
   const itemId = stringValue(item.id) ?? randomUUID()
   const type = stringValue(item.type)
   if (type === 'agentMessage') {
@@ -2578,6 +2645,7 @@ function handleCodexItemStarted(session: AgentSession, item: Record<string, unkn
     return
   }
   if (type === 'commandExecution') {
+    setCodexWork(session, `item:${itemId}`, 'running')
     session.startedTools.add(itemId)
     emit(session, {
       type: 'tool:start',
@@ -2604,12 +2672,14 @@ function handleCodexItemStarted(session: AgentSession, item: Record<string, unkn
     return
   }
   if (type === 'mcpToolCall' || type === 'dynamicToolCall') {
+    setCodexWork(session, `item:${itemId}`, 'running')
     const name = [stringValue(item.server), stringValue(item.tool)].filter(Boolean).join('.') || type
     emit(session, { type: 'tool:start', sessionId: session.id, toolId: itemId, name, label: name, inputPreview: safeJsonPreview(item.arguments) })
   }
 }
 
 function handleCodexItemCompleted(session: AgentSession, item: Record<string, unknown>): void {
+  if (handleCodexCollabItem(session, item) || handleCodexSubAgentActivity(session, item)) return
   const itemId = stringValue(item.id) ?? randomUUID()
   const type = stringValue(item.type)
   if (type === 'agentMessage') {
@@ -2620,6 +2690,12 @@ function handleCodexItemCompleted(session: AgentSession, item: Record<string, un
   }
   if (type === 'commandExecution') {
     const status = stringValue(item.status)
+    const workStatus = codexWorkStepStatus(status)
+    setCodexWork(session, `item:${itemId}`, workStatus)
+    if (workStatus === 'running') {
+      emitProcessEvent(session, itemId, '도구 · Shell', stringValue(item.aggregatedOutput), 'running')
+      return
+    }
     emit(session, {
       type: 'tool:done',
       sessionId: session.id,
@@ -2642,13 +2718,19 @@ function handleCodexItemCompleted(session: AgentSession, item: Record<string, un
     return
   }
   if (type === 'mcpToolCall' || type === 'dynamicToolCall') {
+    const workStatus = codexWorkStepStatus(item.status)
+    setCodexWork(session, `item:${itemId}`, workStatus)
+    if (workStatus === 'running') {
+      emitProcessEvent(session, itemId, `도구 · ${stringValue(item.tool) ?? type}`, undefined, 'running')
+      return
+    }
     emit(session, {
       type: 'tool:done',
       sessionId: session.id,
       toolId: itemId,
       outputPreview: safeJsonPreview(item.result ?? item.contentItems ?? item.error),
       elapsedMs: numberValue(item.durationMs),
-      isError: item.success === false || Boolean(item.error)
+      isError: workStatus === 'error' || item.success === false || Boolean(item.error)
     })
   }
 }
@@ -2742,7 +2824,7 @@ function handleCodexNotification(session: AgentSession, message: Record<string, 
     emit(session, {
       type: 'status',
       sessionId: session.id,
-      status: status === 'failed' ? 'error' : 'done'
+      status: codexTurnRunStatus(status, session.codexActiveWork?.size ?? 0)
     })
     const waiter = session.codexTurnWaiter
     session.codexTurnWaiter = undefined
@@ -2853,6 +2935,7 @@ function remotePromptLine(prompt: string): string {
 }
 
 function spawnClaudeInitProbe(session: AgentSession): ChildProcessWithoutNullStreams {
+  const effort = claudeEffort(session.reasoningEffort)
   if (session.source === 'ssh' && session.ssh) {
     return spawn(sshBin, [...sshArgs(session.ssh), remoteClaudeSlashProbeCommand(session)], {
       windowsHide: true,
@@ -2869,7 +2952,8 @@ function spawnClaudeInitProbe(session: AgentSession): ChildProcessWithoutNullStr
       'stream-json',
       '--permission-mode',
       'dontAsk',
-      ...(session.model ? ['--model', session.model] : [])
+      ...(session.model ? ['--model', session.model] : []),
+      ...(effort ? ['--effort', effort] : [])
     ],
     {
       cwd: session.cwd,
@@ -2879,9 +2963,11 @@ function spawnClaudeInitProbe(session: AgentSession): ChildProcessWithoutNullStr
   )
 }
 
-function readClaudeInitMessage(
+function readClaudeProbeMessage(
   session: AgentSession,
   abortController: AbortController,
+  inputLine: string,
+  accept: (message: Record<string, unknown>) => Record<string, unknown> | undefined,
   timeoutMs = 15_000
 ): Promise<Record<string, unknown> | undefined> {
   return new Promise((resolve) => {
@@ -2910,7 +2996,8 @@ function readClaudeInitMessage(
       if (!line.trim()) return
       try {
         const message = asRecord(JSON.parse(line) as unknown)
-        if (message?.type === 'system' && message.subtype === 'init') settle(message)
+        const accepted = message ? accept(message) : undefined
+        if (accepted) settle(accepted)
       } catch {
         /* Ignore non-JSON startup noise. */
       }
@@ -2942,8 +3029,40 @@ function readClaudeInitMessage(
     proc.stdin.on('error', () => {
       /* The process close handler settles discovery. */
     })
-    proc.stdin.write(`${remotePromptLine(' ')}\n`)
+    proc.stdin.write(`${inputLine}\n`)
   })
+}
+
+function readClaudeInitMessage(
+  session: AgentSession,
+  abortController: AbortController,
+  timeoutMs = 15_000
+): Promise<Record<string, unknown> | undefined> {
+  return readClaudeProbeMessage(
+    session,
+    abortController,
+    remotePromptLine(' '),
+    (message) => message.type === 'system' && message.subtype === 'init' ? message : undefined,
+    timeoutMs
+  )
+}
+
+function readClaudeControlInit(
+  session: AgentSession,
+  abortController: AbortController
+): Promise<Record<string, unknown> | undefined> {
+  const requestId = randomUUID()
+  return readClaudeProbeMessage(
+    session,
+    abortController,
+    JSON.stringify({ type: 'control_request', request_id: requestId, request: { subtype: 'initialize' } }),
+    (message) => {
+      if (message.type !== 'control_response') return undefined
+      const response = asRecord(message.response)
+      if (response?.subtype !== 'success' || response.request_id !== requestId) return undefined
+      return asRecord(response.response) ?? undefined
+    }
+  )
 }
 
 function writeRemoteControlResponse(
@@ -3642,6 +3761,7 @@ export function createAgentSession(opts: AgentCreateOptions, webContents: WebCon
     assistantStreamed: new Set(),
     startedTools: new Set(),
     queue: [],
+    codexActiveWork: new Set(),
     tokenUsage: emptyTokenUsage(),
     rateLimitUsages: new Map()
   }
@@ -3714,10 +3834,41 @@ function codexModelOption(value: unknown): AgentModelOption | undefined {
   }
 }
 
+function claudeModelOption(value: unknown): AgentModelOption | undefined {
+  const record = asRecord(value)
+  const model = stringValue(record?.value)
+  if (!record || !model) return undefined
+  const efforts = stringArrayValue(record.supportedEffortLevels)
+    .filter((effort) => claudeEffort(effort))
+    .map((reasoningEffort) => ({ reasoningEffort }))
+  return {
+    id: model,
+    model,
+    displayName: stringValue(record.displayName) ?? model,
+    resolvedModel: stringValue(record.resolvedModel),
+    description: stringValue(record.description),
+    isDefault: model === 'default',
+    ...(efforts.length > 0 ? { supportedReasoningEfforts: efforts } : {})
+  }
+}
+
 export async function listAgentModels(sessionId: string): Promise<AgentModelListResult> {
   const session = sessions.get(sessionId)
   if (!session) return { ok: false, error: 'Agent 세션을 찾을 수 없습니다.' }
-  if (session.provider !== 'codex') return { ok: false, error: '모델 목록은 Codex Agent에서만 지원합니다.' }
+  if (session.provider === 'claude') {
+    const abortController = new AbortController()
+    try {
+      const init = await readClaudeControlInit(session, abortController)
+      const models = unknownArray(init?.models)
+        .map(claudeModelOption)
+        .filter((model): model is AgentModelOption => Boolean(model))
+      return { ok: true, models, selectedModel: session.model, selectedReasoningEffort: session.reasoningEffort }
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) }
+    } finally {
+      abortController.abort()
+    }
+  }
   try {
     await ensureCodexInitialized(session)
     const models: AgentModelOption[] = []
@@ -3746,14 +3897,22 @@ export async function listAgentModels(sessionId: string): Promise<AgentModelList
 export function setAgentModel(sessionId: string, model?: string, reasoningEffort?: string): AgentCommandResult {
   const session = sessions.get(sessionId)
   if (!session) return { ok: false, error: 'Agent 세션을 찾을 수 없습니다.' }
-  if (session.provider !== 'codex') return { ok: false, error: '모델 선택은 Codex Agent에서만 지원합니다.' }
+  if (session.provider === 'claude' && reasoningEffort && !claudeEffort(reasoningEffort)) {
+    return { ok: false, error: '지원하지 않는 Claude reasoning effort입니다.' }
+  }
   session.model = model?.trim() || undefined
   session.reasoningEffort = reasoningEffort?.trim() || undefined
   const label = [
     `모델: ${session.model ?? '기본값'}`,
     `Effort: ${session.reasoningEffort ?? '기본값'}`
   ].join('\n')
-  emitProcessEvent(session, `codex-model-${Date.now()}`, 'Codex 모델', label, 'done')
+  emitProcessEvent(
+    session,
+    `${session.provider}-model-${Date.now()}`,
+    `${session.provider === 'codex' ? 'Codex' : 'Claude'} 모델`,
+    label,
+    'done'
+  )
   return { ok: true }
 }
 
@@ -4173,6 +4332,7 @@ function startAgentTurn(session: AgentSession, input: AgentSendInput): void {
           cwd: session.cwd,
           resume: session.resumeSessionId,
           model: session.model,
+          effort: claudeEffort(session.reasoningEffort),
           tools: session.tools,
           allowedTools: session.allowedTools,
           disallowedTools: session.disallowedTools,
@@ -4321,6 +4481,7 @@ export function inspectAgentMcpStatus(sessionId: string): AgentCommandResult {
           abortController,
           cwd: session.cwd,
           model: session.model,
+          effort: claudeEffort(session.reasoningEffort),
           tools: [],
           pathToClaudeCodeExecutable: packagedClaudeAgentSdkExecutable(),
           permissionMode: 'dontAsk',
@@ -4469,6 +4630,7 @@ export function interruptAgentSession(sessionId: string): AgentCommandResult {
   session.authProcess = undefined
   session.codexProcess?.kill()
   session.codexProcess = undefined
+  session.codexActiveWork?.clear()
   session.running = undefined
   session.turnAssistantMessageId = undefined
   session.activeAssistantMessageId = undefined

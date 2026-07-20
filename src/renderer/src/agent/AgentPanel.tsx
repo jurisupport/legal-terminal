@@ -45,6 +45,7 @@ import { DiffPreview } from './DiffPreview'
 import { MarkdownMessage } from './MarkdownMessage'
 import { ToolRow, toolDisplayName, toolStepDisplay, type ProcessStep } from './ToolRow'
 import { quoteAgentRequest } from './quote'
+import { currentAgentModel } from './modelDisplay'
 import {
   invalidateSessionTranscript,
   loadSessionTranscript,
@@ -343,8 +344,7 @@ const slashCommands: SlashCommand[] = [
   {
     name: '/model',
     label: '모델',
-    description: 'Codex 모델을 선택합니다',
-    providers: ['codex']
+    description: '모델과 추론 정도를 선택합니다'
   },
   {
     name: '/brief-protocol',
@@ -449,7 +449,6 @@ const claudeTerminalOnlySlashCommandNames = new Set([
   '/ide',
   '/keymap',
   '/logout',
-  '/model',
   '/permissions',
   '/quit',
   '/status',
@@ -1884,6 +1883,7 @@ export default function AgentPanel({
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const slashMenuRef = useRef<HTMLDivElement>(null)
   const modeMenuRef = useRef<HTMLDivElement>(null)
+  const modelLoadStartedRef = useRef(false)
   const openedAuthUrlsRef = useRef<Set<string>>(new Set())
   const copyFeedbackTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const loadedHistoryKeyRef = useRef<string | null>(null)
@@ -1939,6 +1939,7 @@ export default function AgentPanel({
     setAuthStatus(usesAgentAuth ? 'checking' : 'unavailable')
     setAuthStatusMessage('')
     setModelOptions([])
+    modelLoadStartedRef.current = false
     setModelPickerOpen(false)
     setSelectedModel(undefined)
     setSelectedReasoningEffort(undefined)
@@ -2343,6 +2344,10 @@ export default function AgentPanel({
     [items]
   )
   const baseStatusLabel = agentStatusLabels[status]
+  const currentModel = currentAgentModel(modelOptions, selectedModel, selectedReasoningEffort)
+  const modelButtonLabel = modelLoading && modelOptions.length === 0
+    ? '모델 확인 중'
+    : currentModel.buttonLabel
   const escInterruptHint = `Esc ${Math.round(ESC_INTERRUPT_ARM_MS / 1000)}초 안에 한 번 더 누르면 중지`
   const statusLabel = escInterruptArmed ? `${baseStatusLabel}, ${escInterruptHint}` : baseStatusLabel
   const statusAccessibleLabel = queuedCount > 0 ? `${statusLabel}, 대기 ${queuedCount}` : statusLabel
@@ -2728,6 +2733,32 @@ export default function AgentPanel({
       setError('/mcp 설정/OAuth 조작은 터미널 TUI 전용입니다. 상단 터미널 버튼으로 터미널 모드에서 실행해 주세요.')
       return
     }
+    if (commandName === '/model') {
+      if (sendAttachments.length > 0) {
+        setError('/model에는 첨부를 사용할 수 없습니다.')
+        return
+      }
+      if (sendBlockedReason) {
+        setError(sendBlockedReason)
+        return
+      }
+      const tokens = slashArgument.split(/\s+/).filter(Boolean)
+      const effortFlagIndex = tokens.findIndex((token) => token === 'effort' || token === '--effort')
+      const requestedModel = tokens[0]
+      const requestedEffort =
+        effortFlagIndex >= 0 ? tokens[effortFlagIndex + 1] : tokens.length > 1 ? tokens[1] : undefined
+      if (requestedModel) {
+        const useDefault = requestedModel === 'default' || requestedModel === 'auto'
+        await chooseModel(useDefault ? undefined : requestedModel, useDefault ? undefined : requestedEffort)
+      } else {
+        await openModelPicker()
+      }
+      rememberPrompts([rawText])
+      setInput('')
+      setAttachments([])
+      setError('')
+      return
+    }
     if (
       commandName &&
       ((provider === 'claude' && claudeTerminalOnlySlashCommandNames.has(commandName)) ||
@@ -2746,28 +2777,14 @@ export default function AgentPanel({
         return
       }
       scrollTimelineToBottom()
-      if (commandName === '/model') {
-        const tokens = slashArgument.split(/\s+/).filter(Boolean)
-        const effortFlagIndex = tokens.findIndex((token) => token === 'effort' || token === '--effort')
-        const requestedModel = tokens[0]
-        const requestedEffort =
-          effortFlagIndex >= 0 ? tokens[effortFlagIndex + 1] : tokens.length > 1 ? tokens[1] : undefined
-        if (requestedModel) {
-          const useDefault = requestedModel === 'default' || requestedModel === 'auto'
-          await chooseModel(useDefault ? undefined : requestedModel, useDefault ? undefined : requestedEffort)
-        } else {
-          await openModelPicker()
-        }
-      } else {
-        const result = await window.lt.agent.slashCommand(id, commandName, slashArgument)
-        if (!result.ok) {
-          setError(result.error ?? `${commandName} 명령을 실행할 수 없습니다.`)
-          return
-        }
-        if (commandName === '/clear' || commandName === '/new') {
-          setItems([])
-          setQuotedMessage(null)
-        }
+      const result = await window.lt.agent.slashCommand(id, commandName, slashArgument)
+      if (!result.ok) {
+        setError(result.error ?? `${commandName} 명령을 실행할 수 없습니다.`)
+        return
+      }
+      if (commandName === '/clear' || commandName === '/new') {
+        setItems([])
+        setQuotedMessage(null)
       }
       rememberPrompts([rawText])
       setInput('')
@@ -3083,41 +3100,49 @@ export default function AgentPanel({
     if (!result.ok) setError(result.error ?? `${agentLabel} 로그인 입력을 보낼 수 없습니다.`)
   }
 
-  const openModelPicker = async (): Promise<void> => {
-    if (provider !== 'codex') {
-      setError('/model은 Codex Agent에서만 사용할 수 있습니다.')
-      return
-    }
-    setError('')
-    setModelPickerOpen(true)
-    if (modelOptions.length > 0) return
+  const loadModelOptions = useCallback(async (): Promise<void> => {
+    if (modelLoadStartedRef.current) return
+    modelLoadStartedRef.current = true
     setModelLoading(true)
     const result = await window.lt.agent.models(id)
     setModelLoading(false)
     if (!result.ok) {
-      setError(result.error ?? 'Codex 모델 목록을 불러올 수 없습니다.')
+      modelLoadStartedRef.current = false
+      setError(result.error ?? `${agentLabel} 모델 목록을 불러올 수 없습니다.`)
       return
     }
-    setModelOptions(result.models ?? [])
+    const models = result.models ?? []
+    setModelOptions(models)
+    if (models.length === 0) modelLoadStartedRef.current = false
     setSelectedModel(result.selectedModel)
     setSelectedReasoningEffort(result.selectedReasoningEffort)
+  }, [agentLabel, id])
+
+  useEffect(() => {
+    if (!settingsLoaded || !visible || (usesAgentAuth && authStatus !== 'authenticated')) return
+    void loadModelOptions()
+  }, [authStatus, loadModelOptions, settingsLoaded, usesAgentAuth, visible])
+
+  const openModelPicker = async (): Promise<void> => {
+    setError('')
+    setModelPickerOpen(true)
+    await loadModelOptions()
   }
 
   const chooseModel = async (model?: string, reasoningEffort?: string): Promise<void> => {
     const result = await window.lt.agent.setModel(id, model, reasoningEffort)
     if (!result.ok) {
-      setError(result.error ?? 'Codex 모델을 선택할 수 없습니다.')
+      setError(result.error ?? `${agentLabel} 모델을 선택할 수 없습니다.`)
       return
     }
     setSelectedModel(model)
     setSelectedReasoningEffort(reasoningEffort)
     setModelPickerOpen(false)
-    setInput('')
     setError('')
     showTransientFeedback(
       model
-        ? `Codex 모델: ${model}${reasoningEffort ? ` / ${reasoningEffort}` : ''}`
-        : 'Codex 모델: 기본값'
+        ? `${agentLabel} 모델: ${model}${reasoningEffort ? ` / ${reasoningEffort}` : ''}`
+        : `${agentLabel} 모델: 기본값`
     )
   }
 
@@ -3982,8 +4007,12 @@ export default function AgentPanel({
       {modelPickerOpen && (
         <div className="agent-model-picker">
           <div className="agent-model-picker-head">
-            <span>Codex 모델</span>
+            <span>{agentLabel} 모델</span>
             <button type="button" onClick={() => setModelPickerOpen(false)}>닫기</button>
+          </div>
+          <div className="agent-model-current">
+            현재 {currentModel.modelLabel}
+            {currentModel.effort ? ` · 추론 정도 ${currentModel.effort}` : ''}
           </div>
           {modelLoading ? (
             <div className="agent-model-loading">모델 목록 로드 중</div>
@@ -3995,11 +4024,10 @@ export default function AgentPanel({
                 onClick={() => void chooseModel(undefined, undefined)}
               >
                 <span>기본값</span>
-                <small>Codex 설정과 계정에 맞는 기본 모델</small>
+                <small>{agentLabel} 설정과 계정에 맞는 기본 모델</small>
               </button>
               {modelOptions.map((model) => {
                 const efforts = model.supportedReasoningEfforts ?? []
-                const defaultEffort = model.defaultReasoningEffort ?? efforts[0]?.reasoningEffort
                 return (
                   <div
                     key={model.id}
@@ -4008,13 +4036,13 @@ export default function AgentPanel({
                     <button
                       type="button"
                       className="agent-model-main"
-                      onClick={() => void chooseModel(model.model, defaultEffort)}
+                      onClick={() => void chooseModel(model.model, model.defaultReasoningEffort)}
                     >
                       <span>{model.displayName}</span>
                       <small>{model.description || model.model}</small>
                     </button>
                     {efforts.length > 0 && (
-                      <div className="agent-model-efforts" aria-label={`${model.displayName} reasoning effort`}>
+                      <div className="agent-model-efforts" aria-label={`${model.displayName} 추론 정도`}>
                         {efforts.map((effort) => (
                           <button
                             key={effort.reasoningEffort}
@@ -4374,16 +4402,15 @@ export default function AgentPanel({
               <option value="claude">Claude</option>
               <option value="codex">Codex</option>
             </select>
-            {provider === 'codex' && (
-              <button
-                type="button"
-                className="agent-auth-btn"
-                title="Codex 모델 선택"
-                onClick={() => void openModelPicker()}
-              >
-                모델
-              </button>
-            )}
+            <button
+              type="button"
+              className="agent-auth-btn agent-model-btn"
+              disabled={authActive || queuesNewInput || (usesAgentAuth && authStatus !== 'authenticated')}
+              title={`현재 모델: ${currentModel.modelLabel}${currentModel.effort ? ` / 추론 정도: ${currentModel.effort}` : ''}`}
+              onClick={() => void openModelPicker()}
+            >
+              {modelButtonLabel}
+            </button>
             {usesAgentAuth && (
               <button
                 className="agent-auth-btn"

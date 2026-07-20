@@ -544,6 +544,7 @@ interface AgentModelOption {
   id: string
   model: string
   displayName: string
+  resolvedModel?: string
   description?: string
   isDefault?: boolean
   supportedReasoningEfforts?: AgentReasoningEffortOption[]
