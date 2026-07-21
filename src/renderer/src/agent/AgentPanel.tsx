@@ -26,6 +26,7 @@ import {
 import {
   percentText,
   rateLimitLabel,
+  rateLimitTone,
   showRateLimitInBar,
   type AgentRateLimitUsageView
 } from './rateLimitDisplay'
@@ -3362,17 +3363,11 @@ export default function AgentPanel({
   const visibleRateLimits = (usage.rateLimits?.length ? usage.rateLimits : usage.rateLimit ? [usage.rateLimit] : []).filter(
     showRateLimitInBar
   )
-  const rateLimitState =
-    visibleRateLimits.some((limit) => limit.status === 'rejected')
-      ? 'error'
-      : visibleRateLimits.some((limit) => limit.status === 'allowed_warning')
-        ? 'warn'
-        : ''
   const contextLabel = usage.context
     ? `컨텍스트 ${percentText(usage.context.percentage)} · 잔여 ${tokenCount(usage.context.remainingTokens)}`
     : '컨텍스트 대기'
   const cacheTokens = cacheTokenTotal(usage.tokens)
-  const limitLabels = visibleRateLimits.map((limit) => rateLimitLabel(limit))
+  const limitLabels = visibleRateLimits.map((limit) => ({ label: rateLimitLabel(limit), tone: rateLimitTone(limit) }))
   const panelStyle = {
     '--agent-font-size': `${agentFontSize}px`
   } as CSSProperties
@@ -4472,7 +4467,7 @@ export default function AgentPanel({
         </div>
         </div>
         <div
-          className={`agent-usage-bar ${rateLimitState}`}
+          className="agent-usage-bar"
           title={usageTitle(usage, provider)}
           aria-live="polite"
         >
@@ -4487,7 +4482,7 @@ export default function AgentPanel({
           {cacheTokens > 0 && <span>캐시 {tokenCount(cacheTokens)}</span>}
           <span>{contextLabel}</span>
           {limitLabels.length > 0 &&
-            limitLabels.map((label) => <span key={label}>{label}</span>)}
+            limitLabels.map(({ label, tone }) => <span key={label} className={tone}>{label}</span>)}
           {provider === 'codex' && usage.tokens.totalCostUsd !== undefined && (
             <span>{costFormatter.format(usage.tokens.totalCostUsd)}</span>
           )}

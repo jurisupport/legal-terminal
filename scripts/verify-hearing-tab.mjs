@@ -150,6 +150,19 @@ try {
   )
   console.log('hearing shell opens before web detail and preserves urgent input')
 
+  const savedEntry = shellPanel.locator('.hearing-message', { hasText: '기존 기록' })
+  await savedEntry.locator('select[aria-label="발화자 수정"]').selectOption('plaintiff')
+  await page.waitForTimeout(1_100)
+  await savedEntry.waitFor({ state: 'visible' })
+  assert.ok(await savedEntry.evaluate((message) => message.classList.contains('speaker-plaintiff')))
+  const speakerWrites = await app.evaluate(() => globalThis.__hearingWrites ?? [])
+  const savedSpeaker = speakerWrites
+    .map((write) => JSON.parse(write.content))
+    .flatMap((record) => record.entries)
+    .findLast((entry) => entry.id === 'saved-entry')?.speakerId
+  assert.equal(savedSpeaker, 'plaintiff', '수정한 발화자는 기일기록에 저장되어야 한다')
+  console.log('saved hearing entry speaker can be changed')
+
   const composer = shellPanel.locator('.hearing-composer textarea')
   const submit = shellPanel.locator('.hearing-composer .hearing-primary-btn', { hasText: '입력' })
   for (let index = 1; index <= 16; index += 1) {

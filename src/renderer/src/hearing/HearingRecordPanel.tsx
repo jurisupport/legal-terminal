@@ -848,6 +848,15 @@ export default function HearingRecordPanel({
     focusInput()
   }
 
+  const updateEntrySpeaker = (entryId: string, speakerId: string): void => {
+    touch((current) => ({
+      ...current,
+      entries: current.entries.map((entry) =>
+        entry.id === entryId ? { ...entry, speakerId } : entry
+      )
+    }))
+  }
+
   const addRequest = (text: string): void => {
     const trimmed = text.trim()
     if (!trimmed) return
@@ -1337,7 +1346,19 @@ export default function HearingRecordPanel({
                   >
                     <div className="hearing-message-meta">
                       <span>{formatTime(entry.createdAt)}</span>
-                      <strong>{speaker?.label ?? '사전준비'}</strong>
+                      <select
+                        aria-label="발화자 수정"
+                        value={speaker?.id ?? ''}
+                        onChange={(event) => updateEntrySpeaker(entry.id, event.currentTarget.value)}
+                        disabled={speakers.length === 0}
+                      >
+                        {!speaker && <option value="">사전준비</option>}
+                        {speakers.map((item) => (
+                          <option key={item.id} value={item.id}>
+                            {item.label}
+                          </option>
+                        ))}
+                      </select>
                     </div>
                     <div className="hearing-message-bubble">{entry.text}</div>
                   </div>

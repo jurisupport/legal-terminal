@@ -54,6 +54,12 @@ export function showRateLimitInBar(value: AgentRateLimitUsageView): boolean {
   return value.isUsingOverage === true || value.status === 'rejected' || value.status === 'allowed_warning'
 }
 
+export function rateLimitTone(value: AgentRateLimitUsageView): '' | 'warn' | 'error' {
+  if (value.status === 'rejected') return 'error'
+  if (value.status === 'allowed_warning') return 'warn'
+  return ''
+}
+
 export function resetTimeText(value: number | undefined): string | undefined {
   if (value === undefined || !Number.isFinite(value)) return undefined
   return `갱신 ${resetTimeFormatter.format(new Date(value))}`

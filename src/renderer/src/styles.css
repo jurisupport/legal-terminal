@@ -4063,9 +4063,18 @@ body {
 }
 .hearing-message-meta {
   display: flex;
+  align-items: center;
   gap: 6px;
   color: var(--fg-muted);
   font-size: 11px;
+}
+.hearing-message-meta select {
+  border: 0;
+  color: inherit;
+  background: transparent;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
 }
 .hearing-message-bubble {
   padding: 7px 9px;
@@ -5217,15 +5226,11 @@ button.agent-attachment-chip {
   color: #d9e2ea;
   font-weight: 600;
 }
-.agent-usage-bar.warn {
-  border-color: rgba(215, 186, 125, 0.34);
+.agent-usage-bar > .warn {
   color: #d7ba7d;
-  background: rgba(215, 186, 125, 0.07);
 }
-.agent-usage-bar.error {
-  border-color: rgba(240, 160, 160, 0.4);
+.agent-usage-bar > .error {
   color: #f0a0a0;
-  background: rgba(240, 160, 160, 0.08);
 }
 .agent-usage-muted {
   color: var(--fg-muted);

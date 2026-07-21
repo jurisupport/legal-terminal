@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { rateLimitLabel, resetTimeText } from '../src/renderer/src/agent/rateLimitDisplay.ts'
+import { rateLimitLabel, rateLimitTone, resetTimeText } from '../src/renderer/src/agent/rateLimitDisplay.ts'
 
 const resetsAt = new Date(2026, 5, 30, 21, 5).getTime()
 const reset = resetTimeText(resetsAt)
@@ -18,5 +18,8 @@ assert.equal(
   `5시간 한도 잔여 42% · ${reset}`
 )
 assert.equal(resetTimeText(undefined), undefined)
+assert.equal(rateLimitTone({ status: 'allowed', remainingPercent: 93, updatedAt: resetsAt }), '')
+assert.equal(rateLimitTone({ status: 'allowed_warning', updatedAt: resetsAt }), 'warn')
+assert.equal(rateLimitTone({ status: 'rejected', updatedAt: resetsAt }), 'error')
 
 console.log('agent rate limit labels ok')
