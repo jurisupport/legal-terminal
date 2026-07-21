@@ -5,7 +5,7 @@ import { existsSync } from 'fs'
 import { mkdir } from 'fs/promises'
 import { tmpdir } from 'os'
 import { basename, dirname, join, relative } from 'path'
-import { rememberSessionMeta } from '../sessions'
+import { readSessionTokenUsage, rememberSessionMeta } from '../sessions'
 import {
   query,
   type EffortLevel,
@@ -103,6 +103,10 @@ interface AgentSession {
   claudeUsageProbeRunning?: boolean
   claudeUsageProbeLastAt?: number
   claudeUsageSummaryLastContextTokens?: number
+  usageHydration?: Promise<void>
+  claudeTurnUsageBase?: AgentTokenUsage
+  claudeTurnUsage?: Omit<AgentTokenUsage, 'turns' | 'updatedAt'>
+  claudeTurnUsageMessageIds?: Set<string>
   viewers: Map<number, WebContents>
   pendingPermissions: Map<string, PendingPermission>
   pendingDialogs: Map<string, PendingDialog>
@@ -157,6 +161,7 @@ const MCP_STATUS_TIMEOUT_MS = 20_000
 const GIT_WORKTREE_TIMEOUT_MS = 60_000
 const CLAUDE_USAGE_PROBE_COOLDOWN_MS = 60_000
 const CLAUDE_USAGE_SUMMARY_CONTEXT_TOKEN_INTERVAL = 20_000
+const REMOTE_CONTEXT_USAGE_TIMEOUT_MS = 3_000
 const MIN_TEXT_OVERLAP = 4
 const sshBin =
   process.platform === 'win32'
@@ -307,11 +312,11 @@ function remoteClaudeSlashProbeCommand(session: AgentSession): string {
   return `exec $SHELL -ilc ${shq(inner)}`
 }
 
-function remoteClaudeUsageCommand(session: AgentSession): string {
+function remoteClaudeUsageCommand(): string {
   const inner = [
     'PATH="/opt/homebrew/bin:/usr/local/bin:/opt/local/bin:$PATH"',
     unsetClaudeAuthEnvCommand(),
-    `cd ${shq(session.cwd)} || exit`,
+    'cd "${TMPDIR:-/tmp}" || exit',
     'claude_bin=$(command -v claude 2>/dev/null || true)',
     'if [ -z "$claude_bin" ]; then echo "claude command not found on remote PATH" >&2; exit 127; fi',
     `exec "$claude_bin" -p --verbose --output-format stream-json ${shq('/usage')}`
@@ -1157,7 +1162,7 @@ function emptyTokenUsage(): AgentTokenUsage {
     cacheCreationInputTokens: 0,
     cacheReadInputTokens: 0,
     totalTokens: 0,
-    updatedAt: Date.now()
+    updatedAt: 0
   }
 }
 
@@ -1269,6 +1274,48 @@ function usageTokensFromRecord(value: unknown): Omit<AgentTokenUsage, 'turns' | 
   }
 }
 
+function addTokenUsage(
+  base: AgentTokenUsage,
+  usage: Omit<AgentTokenUsage, 'turns' | 'updatedAt'>,
+  turns = base.turns
+): AgentTokenUsage {
+  return {
+    turns,
+    inputTokens: base.inputTokens + usage.inputTokens,
+    outputTokens: base.outputTokens + usage.outputTokens,
+    cacheCreationInputTokens: base.cacheCreationInputTokens + usage.cacheCreationInputTokens,
+    cacheReadInputTokens: base.cacheReadInputTokens + usage.cacheReadInputTokens,
+    totalTokens: base.totalTokens + usage.totalTokens,
+    totalCostUsd: base.totalCostUsd,
+    lastTurnTokens: usage.totalTokens,
+    updatedAt: Date.now()
+  }
+}
+
+function rememberClaudeAssistantUsage(session: AgentSession, message: Record<string, unknown>): void {
+  if (session.provider !== 'claude' || !session.claudeTurnUsageBase) return
+  const body = asRecord(message.message)
+  const usage = usageTokensFromRecord(body?.usage)
+  if (!body || !usage) return
+  const messageId = stringValue(body.id) ?? stringValue(message.uuid)
+  if (!messageId) return
+  if (!session.claudeTurnUsageMessageIds) session.claudeTurnUsageMessageIds = new Set()
+  if (session.claudeTurnUsageMessageIds.has(messageId)) return
+  session.claudeTurnUsageMessageIds.add(messageId)
+  const current = session.claudeTurnUsage
+  session.claudeTurnUsage = current
+    ? {
+        inputTokens: current.inputTokens + usage.inputTokens,
+        outputTokens: current.outputTokens + usage.outputTokens,
+        cacheCreationInputTokens: current.cacheCreationInputTokens + usage.cacheCreationInputTokens,
+        cacheReadInputTokens: current.cacheReadInputTokens + usage.cacheReadInputTokens,
+        totalTokens: current.totalTokens + usage.totalTokens
+      }
+    : usage
+  session.tokenUsage = addTokenUsage(session.claudeTurnUsageBase, session.claudeTurnUsage)
+  emitUsageUpdate(session)
+}
+
 function costUsdFromModelUsage(value: unknown): number | undefined {
   const modelUsage = asRecord(value)
   if (!modelUsage) return undefined
@@ -1281,7 +1328,7 @@ function costUsdFromModelUsage(value: unknown): number | undefined {
 }
 
 function accumulateResultUsage(session: AgentSession, message: Record<string, unknown>): void {
-  const usage = usageTokensFromRecord(message.usage)
+  const usage = usageTokensFromRecord(message.usage) ?? session.claudeTurnUsage
   if (!usage) return
   const cost =
     session.provider === 'codex'
@@ -1293,17 +1340,11 @@ function accumulateResultUsage(session: AgentSession, message: Record<string, un
         ? (session.tokenUsage.totalCostUsd ?? 0) + cost
         : session.tokenUsage.totalCostUsd
       : undefined
-  session.tokenUsage = {
-    turns: session.tokenUsage.turns + 1,
-    inputTokens: session.tokenUsage.inputTokens + usage.inputTokens,
-    outputTokens: session.tokenUsage.outputTokens + usage.outputTokens,
-    cacheCreationInputTokens: session.tokenUsage.cacheCreationInputTokens + usage.cacheCreationInputTokens,
-    cacheReadInputTokens: session.tokenUsage.cacheReadInputTokens + usage.cacheReadInputTokens,
-    totalTokens: session.tokenUsage.totalTokens + usage.totalTokens,
-    totalCostUsd,
-    lastTurnTokens: usage.totalTokens,
-    updatedAt: Date.now()
-  }
+  const base = session.claudeTurnUsageBase ?? session.tokenUsage
+  session.tokenUsage = { ...addTokenUsage(base, usage, base.turns + 1), totalCostUsd }
+  session.claudeTurnUsageBase = undefined
+  session.claudeTurnUsage = undefined
+  session.claudeTurnUsageMessageIds = undefined
   emitUsageUpdate(session)
 }
 
@@ -1475,7 +1516,7 @@ function refreshClaudeUsageSummary(session: AgentSession): boolean {
   try {
     proc =
       session.source === 'ssh' && session.ssh
-        ? spawn(sshBin, [...sshArgs(session.ssh), remoteClaudeUsageCommand(session)], {
+        ? spawn(sshBin, [...sshArgs(session.ssh), remoteClaudeUsageCommand()], {
             windowsHide: true,
             env: cleanEnv()
           })
@@ -1483,7 +1524,7 @@ function refreshClaudeUsageSummary(session: AgentSession): boolean {
             packagedClaudeAgentSdkExecutable() ?? CLAUDE_AGENT_SDK_BINARY_BY_PLATFORM[process.platform] ?? 'claude',
             ['-p', '--verbose', '--output-format', 'stream-json', '/usage'],
             {
-              cwd: session.cwd,
+              cwd: tmpdir(),
               windowsHide: true,
               env: cleanEnv()
             }
@@ -1659,6 +1700,7 @@ function makeDiffProposal(session: AgentSession, toolId: string, input: Record<s
 }
 
 function handleAssistantMessage(session: AgentSession, message: Record<string, unknown>): void {
+  rememberClaudeAssistantUsage(session, message)
   const body = asRecord(message.message)
   const messageId = activeAssistantOutputId(session, stringValue(body?.id) ?? stringValue(message.uuid))
   if (message.error) {
@@ -3246,14 +3288,50 @@ function runRemoteAgentMessage(
     let stdoutBuffer = ''
     let stderrBuffer = ''
     let sawJson = false
+    let contextRequestId: string | undefined
+    let contextTimer: ReturnType<typeof setTimeout> | undefined
 
     const endRemoteInput = (): void => {
+      if (contextTimer) clearTimeout(contextTimer)
+      contextTimer = undefined
       if (proc.stdin.destroyed || proc.stdin.writableEnded) return
       try {
         proc.stdin.end()
       } catch {
         /* The process close handler reports any resulting failure. */
       }
+    }
+
+    const requestContextUsage = (): void => {
+      if (contextRequestId || proc.stdin.destroyed || proc.stdin.writableEnded) {
+        endRemoteInput()
+        return
+      }
+      contextRequestId = randomUUID()
+      try {
+        proc.stdin.write(
+          `${JSON.stringify({
+            type: 'control_request',
+            request_id: contextRequestId,
+            request: { subtype: 'get_context_usage' }
+          })}\n`
+        )
+        contextTimer = setTimeout(endRemoteInput, REMOTE_CONTEXT_USAGE_TIMEOUT_MS)
+      } catch {
+        endRemoteInput()
+      }
+    }
+
+    const handleRemoteUsageMessage = (message: Record<string, unknown> | null): void => {
+      if (message?.type === 'result') {
+        requestContextUsage()
+        return
+      }
+      if (message?.type !== 'control_response' || !contextRequestId) return
+      const response = asRecord(message.response)
+      if (response?.request_id !== contextRequestId) return
+      if (response.subtype === 'success') rememberContextUsage(session, response.response)
+      endRemoteInput()
     }
 
     const stopRemote = (): void => {
@@ -3275,7 +3353,7 @@ function runRemoteAgentMessage(
         if (abortController.signal.aborted || session.running !== abortController) return
         if (line.trim()) sawJson = true
         const message = handleRemoteJsonLine(session, line)
-        if (message?.type === 'result') endRemoteInput()
+        handleRemoteUsageMessage(message)
       }
     })
 
@@ -3297,6 +3375,7 @@ function runRemoteAgentMessage(
     })
 
     proc.on('close', (code, signal) => {
+      if (contextTimer) clearTimeout(contextTimer)
       if (session.remoteProcess === proc) session.remoteProcess = undefined
       abortController.signal.removeEventListener('abort', stopRemote)
       if (abortController.signal.aborted || session.running !== abortController) {
@@ -3766,6 +3845,19 @@ export function createAgentSession(opts: AgentCreateOptions, webContents: WebCon
     rateLimitUsages: new Map()
   }
   sessions.set(opts.id, session)
+  if (provider === 'claude' && opts.resumeSessionId) {
+    session.usageHydration = readSessionTokenUsage(opts.resumeSessionId, opts.ssh)
+      .then((usage) => {
+        if (!usage || sessions.get(session.id) !== session) return
+        session.tokenUsage = addTokenUsage(session.tokenUsage, usage, session.tokenUsage.turns + usage.turns)
+        session.tokenUsage.lastTurnTokens = usage.lastTurnTokens
+        session.tokenUsage.updatedAt = usage.updatedAt
+        emitUsageUpdate(session)
+      })
+      .catch(() => {
+        /* A missing transcript must not block resuming the session. */
+      })
+  }
   attach(session, webContents)
   emit(session, {
     type: 'session:init',
@@ -4317,6 +4409,13 @@ function startAgentTurn(session: AgentSession, input: AgentSendInput): void {
     let contextUsageActive = true
     let contextUsagePending = false
     try {
+      await session.usageHydration
+      if (abortController.signal.aborted || session.running !== abortController) return
+      if (session.provider === 'claude') {
+        session.claudeTurnUsageBase = { ...session.tokenUsage }
+        session.claudeTurnUsage = undefined
+        session.claudeTurnUsageMessageIds = new Set()
+      }
       if (session.provider === 'codex') {
         await runCodexAgentMessage(session, prompt, abortController)
         return

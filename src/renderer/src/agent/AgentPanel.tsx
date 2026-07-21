@@ -761,12 +761,13 @@ function rateLimitUsagesFromEvent(value: unknown): AgentRateLimitUsageView[] | u
 
 function usageTitle(usage: AgentUsageView, provider: AgentProvider): string {
   const tokens = usage.tokens
+  const known = tokens.updatedAt > 0
   const lines = [
-    `세션 토큰: ${exactTokenCount(tokens.totalTokens)} (${tokens.turns}턴)`,
-    `입력: ${exactTokenCount(tokens.inputTokens)}, 출력: ${exactTokenCount(tokens.outputTokens)}`,
-    `캐시 생성: ${exactTokenCount(tokens.cacheCreationInputTokens)}, 캐시 읽기: ${exactTokenCount(tokens.cacheReadInputTokens)}`
+    `세션 토큰: ${exactTokenCount(known ? tokens.totalTokens : undefined)} ${known ? `(${tokens.turns}턴)` : '(집계 대기)'}`,
+    `입력: ${exactTokenCount(known ? tokens.inputTokens : undefined)}, 출력: ${exactTokenCount(known ? tokens.outputTokens : undefined)}`,
+    `캐시 생성: ${exactTokenCount(known ? tokens.cacheCreationInputTokens : undefined)}, 캐시 읽기: ${exactTokenCount(known ? tokens.cacheReadInputTokens : undefined)}`
   ]
-  if (tokens.lastTurnTokens !== undefined) lines.push(`마지막 턴: ${exactTokenCount(tokens.lastTurnTokens)}`)
+  if (known && tokens.lastTurnTokens !== undefined) lines.push(`마지막 턴: ${exactTokenCount(tokens.lastTurnTokens)}`)
   if (provider === 'codex' && tokens.totalCostUsd !== undefined) lines.push(`비용: ${costFormatter.format(tokens.totalCostUsd)}`)
   if (usage.context) {
     lines.push(
@@ -1098,12 +1099,6 @@ function textareaCaretTop(textarea: HTMLTextAreaElement, position: number): numb
   const top = marker.offsetTop
   mirror.remove()
   return top
-}
-
-function caretOnFirstVisualLine(textarea: HTMLTextAreaElement): boolean {
-  if (textarea.selectionStart !== textarea.selectionEnd) return false
-  const lineHeight = textareaLineHeight(textarea)
-  return textareaCaretTop(textarea, textarea.selectionStart) <= textareaCaretTop(textarea, 0) + lineHeight / 2
 }
 
 function caretOnLastVisualLine(textarea: HTMLTextAreaElement): boolean {
@@ -3366,6 +3361,7 @@ export default function AgentPanel({
   const contextLabel = usage.context
     ? `컨텍스트 ${percentText(usage.context.percentage)} · 잔여 ${tokenCount(usage.context.remainingTokens)}`
     : '컨텍스트 대기'
+  const tokensKnown = usage.tokens.updatedAt > 0
   const cacheTokens = cacheTokenTotal(usage.tokens)
   const limitLabels = visibleRateLimits.map((limit) => ({ label: rateLimitLabel(limit), tone: rateLimitTone(limit) }))
   const panelStyle = {
@@ -4283,7 +4279,7 @@ export default function AgentPanel({
               const textarea = e.currentTarget
               const direction = e.key === 'ArrowUp' ? -1 : 1
               if (
-                (direction === -1 && caretOnFirstVisualLine(textarea)) ||
+                (direction === -1 && textarea.selectionStart === 0 && textarea.selectionEnd === 0) ||
                 (direction === 1 && promptHistoryIndexRef.current !== null && caretOnLastVisualLine(textarea))
               ) {
                 if (recallPromptHistory(direction)) e.preventDefault()
@@ -4472,14 +4468,14 @@ export default function AgentPanel({
           aria-live="polite"
         >
           <span>
-            토큰 <strong>{tokenCount(usage.tokens.totalTokens)}</strong>
-            {usage.tokens.lastTurnTokens !== undefined && (
+            토큰 <strong>{tokenCount(tokensKnown ? usage.tokens.totalTokens : undefined)}</strong>
+            {tokensKnown && usage.tokens.lastTurnTokens !== undefined && (
               <span className="agent-usage-muted"> 마지막 {tokenCount(usage.tokens.lastTurnTokens)}</span>
             )}
           </span>
-          <span>입력 {tokenCount(usage.tokens.inputTokens)}</span>
-          <span>출력 {tokenCount(usage.tokens.outputTokens)}</span>
-          {cacheTokens > 0 && <span>캐시 {tokenCount(cacheTokens)}</span>}
+          <span>입력 {tokenCount(tokensKnown ? usage.tokens.inputTokens : undefined)}</span>
+          <span>출력 {tokenCount(tokensKnown ? usage.tokens.outputTokens : undefined)}</span>
+          {tokensKnown && cacheTokens > 0 && <span>캐시 {tokenCount(cacheTokens)}</span>}
           <span>{contextLabel}</span>
           {limitLabels.length > 0 &&
             limitLabels.map(({ label, tone }) => <span key={label} className={tone}>{label}</span>)}

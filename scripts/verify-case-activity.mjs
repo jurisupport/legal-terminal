@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { buildCaseActivity, buildFolderActivity } from '../src/main/caseActivityData.ts'
-import { daysFromTranscriptContent, mergeWorkLog } from '../src/main/workLogData.ts'
+import { cleanUserInstruction, daysFromTranscriptContent, mergeWorkLog } from '../src/main/workLogData.ts'
 
 const now = Date.now()
 const iso = (msAgo) => new Date(now - msAgo).toISOString()
@@ -134,6 +134,7 @@ const meta = (over) => ({
     line({ type: 'user', timestamp: iso(900), isSidechain: true, message: { content: '서브에이전트 지시' } }),
     line({ type: 'user', timestamp: iso(800), isMeta: true, message: { content: '메타' } }),
     line({ type: 'user', timestamp: iso(700), message: { content: '<local-command-caveat>Caveat…' } }),
+    line({ type: 'user', timestamp: iso(600), message: { content: '<command-name>/usage</command-name>\n<command-message>usage</command-message>' } }),
     '{깨진 라인'
   ].join('\n')
   const scan = daysFromTranscriptContent(content)
@@ -143,6 +144,9 @@ const meta = (over) => ({
   assert.equal(scan.days[0].firstText, '소장 초안 작성해줘')
   assert.equal(scan.days[1].count, 1) // 오늘: 사이드체인·메타·caveat 제외하고 1건
 }
+
+assert.equal(cleanUserInstruction('<command-name>/usage</command-name>\n<command-message>usage</command-message>'), undefined)
+assert.equal(cleanUserInstruction('<command-name>/review</command-name>\n<command-args>변경분</command-args>'), '/review 변경분')
 
 // 8b) 병합: 스캔된 세션은 날짜별 행, 스캔 안 된 세션은 인덱스 mtime 날짜에 폴백 행
 {

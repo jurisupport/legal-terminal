@@ -24,6 +24,7 @@ import {
   type FolderActivity
 } from './caseActivityData'
 import {
+  cleanUserInstruction,
   daysFromTranscriptContent,
   mergeWorkLog,
   type DayActivity,
@@ -32,6 +33,7 @@ import {
   type WorkLogScanSource
 } from './workLogData'
 import { allCasePairingRecords, allJsPairings, mergeCasePairingRecords } from './caseStore'
+import { tokenUsageFromTranscript, type TranscriptTokenUsage } from './agent/tokenUsage'
 import {
   CASE_PAIRING_FILE_VERSION,
   MAX_CASE_PAIRING_ENTRIES,
@@ -213,10 +215,16 @@ function isSessionMeta(value: unknown): value is SessionMeta {
   )
 }
 
+function hasNoiseTranscriptTitle(meta: Pick<SessionMeta, 'transcriptTitle'>): boolean {
+  return !!meta.transcriptTitle && !cleanUserInstruction(meta.transcriptTitle)
+}
+
 function parseSessionIndex(text: string): SessionMeta[] | null {
   try {
     const parsed = JSON.parse(text) as SessionIndex
-    return Array.isArray(parsed.entries) ? parsed.entries.filter(isSessionMeta) : []
+    return Array.isArray(parsed.entries)
+      ? parsed.entries.filter(isSessionMeta).filter((entry) => !hasNoiseTranscriptTitle(entry))
+      : []
   } catch {
     return null
   }
@@ -292,7 +300,8 @@ async function readSessionIndex(): Promise<SessionMeta[]> {
 async function writeSessionIndex(entries: SessionMeta[]): Promise<void> {
   const file = sessionIndexPath()
   await mkdir(dirname(file), { recursive: true })
-  const sorted = [...entries]
+  const sorted = entries
+    .filter((entry) => !hasNoiseTranscriptTitle(entry))
     .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
     .slice(0, MAX_SESSION_INDEX_ENTRIES)
   // temp+rename 원자 쓰기 — 앱 인스턴스 두 개(설치본+dev)가 동시에 쓰면
@@ -973,11 +982,12 @@ function parseTranscriptMessages(content: string, sessionId: string): SessionTra
     const role = roleValue === 'user' || roleValue === 'assistant' ? roleValue : undefined
     if (!role || !message) continue
     const text = extractTranscriptText(message.content).trim()
-    if (!text) continue
+    const visibleText = role === 'user' ? cleanUserInstruction(text) : text
+    if (!visibleText) continue
     messages.push({
       id: `${sessionId}-history-${lineIndex}`,
       role,
-      text: clipTranscriptText(text)
+      text: clipTranscriptText(visibleText)
     })
   }
   return messages.slice(-MAX_SESSION_HISTORY_MESSAGES)
@@ -988,13 +998,7 @@ export async function readSessionTranscript(
   ssh?: SshConn
 ): Promise<SessionTranscript | null> {
   if (!sessionId || !safeSessionId(sessionId)) return null
-  const transcript = ssh
-    ? await readRemoteTranscript(ssh, sessionId)
-    : await (async (): Promise<TranscriptRead | null> => {
-        const ref = (await listTranscripts()).find((item) => item.sessionId === sessionId)
-        if (!ref) return null
-        return readTail(ref.file)
-      })()
+  const transcript = await readTranscript(sessionId, ssh)
   if (!transcript) return null
   return {
     sessionId,
@@ -1002,6 +1006,21 @@ export async function readSessionTranscript(
     mtime: transcript.mtime,
     truncated: transcript.truncated
   }
+}
+
+async function readTranscript(sessionId: string, ssh?: SshConn): Promise<TranscriptRead | null> {
+  if (!safeSessionId(sessionId)) return null
+  if (ssh) return readRemoteTranscript(ssh, sessionId)
+  const ref = (await listTranscripts()).find((item) => item.sessionId === sessionId)
+  return ref ? readTail(ref.file) : null
+}
+
+export async function readSessionTokenUsage(
+  sessionId: string,
+  ssh?: SshConn
+): Promise<TranscriptTokenUsage | undefined> {
+  const transcript = await readTranscript(sessionId, ssh)
+  return transcript ? tokenUsageFromTranscript(transcript.content, transcript.mtime) : undefined
 }
 
 const TITLE_MAX_CHARS = 48
@@ -1015,25 +1034,8 @@ function truncateTitle(text: string): string {
 // 첫 사용자 메시지에서 제목 후보 추출. 내부 태그·명령 래퍼·fork 프리앰블은
 // 건너뛰거나(undefined) 정리해서, "<local-command-caveat>…" 같은 원문이 제목이 되지 않게 한다.
 function userTitleCandidate(raw: string): string | undefined {
-  let text = raw
-  // 슬래시 명령 세션: 명령 이름을 그대로 제목으로
-  const command = /<command-name>\s*([^<\n]+?)\s*<\/command-name>/.exec(text)
-  if (command) {
-    const args = /<command-args>\s*([^<\n]*?)\s*<\/command-args>/.exec(text)?.[1]
-    return truncateTitle([command[1], args].filter(Boolean).join(' '))
-  }
-  // 로컬 명령 출력·caveat 안내는 대화 내용이 아니므로 다음 사용자 메시지를 기다린다
-  if (/<local-command-caveat>|<local-command-stdout>|<command-message>/.test(text)) return undefined
-  // fork/전환으로 주입된 transcript 프리앰블도 실제 지시가 아니다
-  if (/원본 대화 transcript입니다|진행하던 대화 transcript입니다/.test(text)) return undefined
-  text = text
-    .replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, ' ')
-    .replace(/<ide_selection>[\s\S]*?<\/ide_selection>/g, ' ')
-    .replace(/<\/?[a-z][a-z0-9_-]*>/gi, ' ')
-    .replace(/\s+/g, ' ')
-    .trim()
-  if (!text) return undefined
-  return truncateTitle(text)
+  const text = cleanUserInstruction(raw)
+  return text ? truncateTitle(text) : undefined
 }
 
 function transcriptEntryUserText(d: Record<string, unknown>): string | undefined {
@@ -1091,6 +1093,7 @@ export async function listSessions(
   )
   const out: SessionListEntry[] = []
   const seen = new Set<string>()
+  const hidden = new Set<string>()
   const push = (entry: SessionListEntry): void => {
     if (seen.has(entry.sessionId) || out.length >= limit) return
     seen.add(entry.sessionId)
@@ -1102,6 +1105,10 @@ export async function listSessions(
       if (out.length >= limit) break
       const p = parseHead(t.head)
       if (p.cwd && pathMatchesAny(p.cwd, cwdAliases)) {
+        if (!p.title) {
+          hidden.add(t.sessionId)
+          continue
+        }
         push(
           decorateSession(
             { sessionId: t.sessionId, title: p.fallbackTitle, aiTitle: p.aiTitle, mtime: t.mtime, cwd: p.cwd },
@@ -1113,7 +1120,11 @@ export async function listSessions(
     }
     for (const meta of indexed) {
       if (out.length >= limit) break
-      if (!sameSource(meta, ssh) || !matchIndexedSession(meta, cwd, context, cwdAliases)) continue
+      if (
+        hidden.has(meta.sessionId) ||
+        !sameSource(meta, ssh) ||
+        !matchIndexedSession(meta, cwd, context, cwdAliases)
+      ) continue
       push(
         decorateSession(
           {
@@ -1140,6 +1151,10 @@ export async function listSessions(
     }
     const p = parseHead(head)
     if (p.cwd && pathMatchesAny(p.cwd, cwdAliases)) {
+      if (!p.title) {
+        hidden.add(t.sessionId)
+        continue
+      }
       push(
         decorateSession(
           { sessionId: t.sessionId, title: p.fallbackTitle, aiTitle: p.aiTitle, mtime: t.mtime, cwd: p.cwd },
@@ -1151,7 +1166,11 @@ export async function listSessions(
   }
   for (const meta of indexed) {
     if (out.length >= limit) break
-    if (!sameSource(meta, ssh) || !matchIndexedSession(meta, cwd, context, cwdAliases)) continue
+    if (
+      hidden.has(meta.sessionId) ||
+      !sameSource(meta, ssh) ||
+      !matchIndexedSession(meta, cwd, context, cwdAliases)
+    ) continue
     push(
       decorateSession(
         {
@@ -1478,7 +1497,7 @@ export async function currentSession(
     for (const t of ts) {
       if (since && t.mtime < since) continue
       const p = parseHead(t.head)
-      if (p.cwd && pathMatchesAny(p.cwd, cwdAliases)) {
+      if (p.title && p.cwd && pathMatchesAny(p.cwd, cwdAliases)) {
         return { sessionId: t.sessionId, title: await resolveSessionTitle(t.sessionId, p, ssh) }
       }
     }
@@ -1494,7 +1513,7 @@ export async function currentSession(
       continue
     }
     const p = parseHead(head)
-    if (p.cwd && pathMatchesAny(p.cwd, cwdAliases)) {
+    if (p.title && p.cwd && pathMatchesAny(p.cwd, cwdAliases)) {
       return { sessionId: t.sessionId, title: await resolveSessionTitle(t.sessionId, p) }
     }
   }
