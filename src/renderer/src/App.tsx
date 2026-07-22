@@ -586,7 +586,7 @@ const isRestorableDocKind = (value: unknown): value is DocTab['kind'] =>
   typeof value === 'string' && RESTORABLE_DOC_KINDS.has(value as DocTab['kind'])
 
 const normalizeDocKind = (kind: DocTab['kind'], path?: string): DocTab['kind'] =>
-  kind === 'markdown' && path && MARKDOWN_EXT_RE.test(path) ? 'mdview' : kind
+  path && docKindForPath(path) === 'mdview' ? 'mdview' : kind
 
 const isWorkspaceMode = (value: unknown): value is Mode =>
   value === 'explorer' || value === 'cases' || value === 'viewer' || value === 'todos'
@@ -908,7 +908,7 @@ const fileNameFromPath = (path: string): string =>
   path.replace(/[\\/]+$/, '').split(/[\\/]/).pop() || path
 
 const MARKDOWN_EXT_RE = /\.(md|markdown)$/i
-const TEXT_EDIT_EXT_RE = /\.txt$/i
+const TEXT_EDIT_EXT_RE = /\.(txt|json|csv|log|ya?ml|html?|xml|js|ts|tsx|css|py|sh|ini|toml)$/i
 const HTML_EXT_RE = /\.html?$/i
 const FILE_EXT_RE = /\.[A-Za-z][A-Za-z0-9]{0,9}$/
 const isPlainTextEditPath = (path?: string): boolean => !!path && TEXT_EDIT_EXT_RE.test(path)
@@ -927,10 +927,9 @@ const docKindForPath = (path: string): DocTab['kind'] => {
   if (/\.(png|jpe?g|gif|webp|bmp|svg|ico|tiff?|avif)$/.test(lower)) return 'image'
   if (/\.(hwp|hwpx)$/.test(lower)) return 'hwp'
   if (lower.endsWith('.docx')) return 'docx'
+  if (lower.endsWith('.hearing.json')) return 'hearing'
   if (/\.(md|markdown)$/.test(lower)) return 'mdview'
   if (TEXT_EDIT_EXT_RE.test(lower)) return 'mdview'
-  if (lower.endsWith('.csv')) return 'csv'
-  if (lower.endsWith('.hearing.json')) return 'hearing'
   return 'file'
 }
 
