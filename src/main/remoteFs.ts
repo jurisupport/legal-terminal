@@ -366,35 +366,47 @@ async function buildConfig(p: SshProfile): Promise<Record<string, unknown>> {
 }
 
 function connect(profileId: string): Promise<{ client: Client; sftp: SFTPWrapper }> {
-  return (async () => {
+  let connection: Promise<{ client: Client; sftp: SFTPWrapper }>
+  connection = (async () => {
     const profile = await getProfile(profileId)
     const cfg = await buildConfig(profile)
 
     return await new Promise<{ client: Client; sftp: SFTPWrapper }>((resolve, reject) => {
       const client = new Client()
       let settled = false
+      const failConnection = (err: Error): void => {
+        if (!settled) {
+          settled = true
+          reject(err)
+        }
+        removeConnection(profileId, connection)
+        client.destroy()
+      }
       client.on('ready', () => {
         client.sftp((err, sftp) => {
           if (err) {
-            settled = true
-            client.end()
-            reject(err)
+            failConnection(err)
             return
           }
           settled = true
           resolve({ client, sftp })
         })
       })
-      client.on('error', (err) => {
-        if (!settled) reject(err)
-        pool.delete(profileId) // 끊기면 다음 호출에서 재연결
-      })
+      client.on('error', failConnection)
       client.on('close', () => {
-        pool.delete(profileId)
+        removeConnection(profileId, connection)
       })
       client.connect(cfg)
     })
   })()
+  return connection
+}
+
+function removeConnection(
+  profileId: string,
+  connection: Promise<{ client: Client; sftp: SFTPWrapper }>
+): void {
+  if (pool.get(profileId) === connection) pool.delete(profileId)
 }
 
 async function getSftp(profileId: string): Promise<SFTPWrapper> {
@@ -407,7 +419,7 @@ async function getConnection(profileId: string): Promise<{ client: Client; sftp:
     try {
       return await existing
     } catch {
-      pool.delete(profileId) // 이전 연결 실패 → 새로 시도
+      removeConnection(profileId, existing)
     }
   }
   const fresh = connect(profileId)
@@ -415,7 +427,7 @@ async function getConnection(profileId: string): Promise<{ client: Client; sftp:
   try {
     return await fresh
   } catch (e) {
-    pool.delete(profileId)
+    removeConnection(profileId, fresh)
     throw e
   }
 }

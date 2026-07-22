@@ -5,6 +5,7 @@ export interface SshConn {
   user: string
   port?: number
   identityFile?: string
+  remoteControl?: boolean
 }
 
 export interface SshProfile extends SshConn {

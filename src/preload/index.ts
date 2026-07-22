@@ -7,6 +7,7 @@ interface SshConn {
   user: string
   port?: number
   identityFile?: string
+  remoteControl?: boolean
 }
 
 interface SshProfile extends SshConn {

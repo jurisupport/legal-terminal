@@ -325,12 +325,15 @@ function remoteClaudeUsageCommand(): string {
 }
 
 function remoteCodexCommand(session: AgentSession): string {
+  const launch = session.ssh?.remoteControl
+    ? 'if "$codex_bin" app-server daemon bootstrap --remote-control >/dev/null 2>&1; then exec "$codex_bin" app-server proxy; fi; exec "$codex_bin" app-server'
+    : 'exec "$codex_bin" app-server'
   const inner = [
     'PATH="/opt/homebrew/bin:/usr/local/bin:/opt/local/bin:$PATH"',
     `cd ${shq(session.cwd)} || exit`,
     'codex_bin=$(command -v codex 2>/dev/null || true)',
     'if [ -z "$codex_bin" ]; then echo "codex command not found on remote PATH" >&2; exit 127; fi',
-    'exec "$codex_bin" app-server'
+    launch
   ].join('; ')
   return `exec $SHELL -ilc ${shq(inner)}`
 }

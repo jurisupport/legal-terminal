@@ -43,6 +43,7 @@ export interface SshConn {
   user: string
   port?: number
   identityFile?: string
+  remoteControl?: boolean
 }
 
 export interface CreatePtyOptions {
@@ -63,6 +64,17 @@ function shq(s: string): string {
   return `'${s.replace(/'/g, "'\\''")}'`
 }
 
+function agentLaunchCommand(opts: CreatePtyOptions): string {
+  const agent = opts.autoLaunchAgent ?? (opts.autoLaunchClaude ? 'claude' : undefined)
+  const remoteControl = agent === 'claude' && opts.ssh?.remoteControl
+  const name = opts.cwd?.replace(/[\\/]+$/, '').split(/[\\/]/).pop() || opts.id
+  if (opts.resumeSessionId) {
+    return `claude${remoteControl ? ` --remote-control ${shq(name)}` : ''} --resume ${shq(opts.resumeSessionId)}`
+  }
+  if (agent === 'claude' && remoteControl) return `claude --remote-control ${shq(name)}`
+  return agent ?? ''
+}
+
 /**
  * ssh 인자 + 원격 시작 명령을 만든다.
  * 비밀번호/키 프롬프트는 터미널(xterm)에 그대로 표시되어 사용자가 응답한다.
@@ -80,12 +92,7 @@ function buildSshArgs(opts: CreatePtyOptions): string[] {
 
   // 원격 시작 명령 (inner): (cd 사건폴더 →) claude 실행 → 끝나면 로그인 셸 유지.
   // cd 실패 시에도(&&) claude는 건너뛰되 셸은 유지(;)되어 사용자가 상황을 본다.
-  const agent = opts.autoLaunchAgent ?? (opts.autoLaunchClaude ? 'claude' : undefined)
-  const launch = opts.resumeSessionId
-    ? `claude --resume ${shq(opts.resumeSessionId)}`
-    : agent
-      ? agent
-      : ''
+  const launch = agentLaunchCommand(opts)
   let inner: string
   if (opts.cwd && opts.cwd.length > 0) {
     inner = launch ? `cd ${shq(opts.cwd)} && ${launch}; ` : `cd ${shq(opts.cwd)}; `
@@ -103,7 +110,7 @@ function buildSshArgs(opts: CreatePtyOptions): string[] {
 }
 
 export function createPty(opts: CreatePtyOptions, webContents: WebContents): void {
-  const { id, cols, rows, autoLaunchAgent, autoLaunchClaude, resumeSessionId, ssh } = opts
+  const { id, cols, rows, ssh } = opts
   const cwd = opts.cwd && opts.cwd.length > 0 ? opts.cwd : os.homedir()
 
   const existing = sessions.get(id)
@@ -166,13 +173,8 @@ export function createPty(opts: CreatePtyOptions, webContents: WebContents): voi
   // ssh는 원격 시작 명령(buildSshArgs)으로 claude를 실행하므로 여기서 따로 주입하지 않는다.
   if (ssh) return
 
-  if (resumeSessionId) {
-    // 과거 세션 이어서 실행
-    proc.write(`claude --resume ${resumeSessionId}\r`)
-  } else {
-    const agent = autoLaunchAgent ?? (autoLaunchClaude ? 'claude' : undefined)
-    if (agent) proc.write(`${agent}\r`)
-  }
+  const launch = agentLaunchCommand(opts)
+  if (launch) proc.write(`${launch}\r`)
 }
 
 export function attachPty(id: string, webContents: WebContents): boolean {

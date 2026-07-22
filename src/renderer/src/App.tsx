@@ -266,7 +266,8 @@ const sshConnFromProfile = (profile: SshProfile): SshConn => ({
   host: profile.host,
   user: profile.user,
   port: profile.port,
-  identityFile: profile.identityFile
+  identityFile: profile.identityFile,
+  remoteControl: profile.remoteControl
 })
 
 interface DocTab {
@@ -4038,7 +4039,12 @@ export default function App(): JSX.Element {
 
   const visibleDocTabs = docTabs.filter(isDocVisibleInActiveCase)
   const visibleTermTabs = termTabs.filter((term) => visibleInActiveCase(caseIdForTerm(term)))
-  const visibleTermIdsKey = visibleTermTabs.map((term) => term.id).join('|')
+  const activeTermIds = new Set<string>(activeTerm ? [activeTerm] : [])
+  for (const key of Object.values(activeWork)) {
+    const parsed = parseWorkKey(key)
+    if (parsed?.kind === 'terminal') activeTermIds.add(parsed.id)
+  }
+  const activeTermIdsKey = [...activeTermIds].sort().join('|')
   const termIdsKeyForMount = termTabs.map((term) => term.id).join('|')
   useEffect(() => {
     const liveIds = new Set(termTabs.map((term) => term.id))
@@ -4049,16 +4055,16 @@ export default function App(): JSX.Element {
         if (liveIds.has(id)) next.add(id)
         else changed = true
       }
-      for (const term of visibleTermTabs) {
-        if (next.has(term.id)) continue
-        next.add(term.id)
+      for (const id of activeTermIds) {
+        if (!liveIds.has(id) || next.has(id)) continue
+        next.add(id)
         changed = true
       }
       return changed ? next : ids
     })
-  }, [termIdsKeyForMount, visibleTermIdsKey]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [activeTermIdsKey, termIdsKeyForMount]) // eslint-disable-line react-hooks/exhaustive-deps
   const shouldMountTermPane = (term: TermTab): boolean =>
-    mountedTermIds.has(term.id) || visibleInActiveCase(caseIdForTerm(term))
+    mountedTermIds.has(term.id) || activeTermIds.has(term.id)
   const activeDocTab = visibleDocTabs.find((t) => t.id === activeDoc)
   const activeTermTab = visibleTermTabs.find((t) => t.id === activeTerm)
   // 활성 터미널이 있으면 그 사건, 없으면(터미널 다 닫힘) 마지막 사건 컨텍스트 유지
@@ -4350,6 +4356,10 @@ export default function App(): JSX.Element {
     if (!raw || typeof raw !== 'object') return null
     const t = raw as Partial<TermTab>
     if (typeof t.cwd !== 'string' || !t.cwd) return null
+    const savedProfile = sshProfiles.find((profile) => profile.id === t.profileId)
+    const ssh = t.ssh
+      ? { ...t.ssh, remoteControl: savedProfile?.remoteControl ?? t.ssh.remoteControl }
+      : undefined
     return {
       id: typeof t.id === 'string' && t.id ? t.id : newId(),
       title: typeof t.title === 'string' && t.title ? t.title : t.cwd.split(/[\\/]/).pop() || '세션',
@@ -4373,7 +4383,7 @@ export default function App(): JSX.Element {
         : undefined,
       autoClaude: t.kind === 'agent' ? false : (t.autoClaude ?? true),
       autoAgent: t.kind === 'agent' ? undefined : isAgentProvider(t.autoAgent) ? t.autoAgent : undefined,
-      agentProvider: t.kind === 'agent' ? resolveAgentProvider(t.agentProvider, t.ssh) : undefined,
+      agentProvider: t.kind === 'agent' ? resolveAgentProvider(t.agentProvider, ssh) : undefined,
       jsId: typeof t.jsId === 'string' ? t.jsId : undefined,
       court: typeof t.court === 'string' ? t.court : undefined,
       caseNumber: typeof t.caseNumber === 'string' ? t.caseNumber : undefined,
@@ -4383,7 +4393,7 @@ export default function App(): JSX.Element {
       renamed: !!t.renamed,
       createdAt: Date.now(),
       resumeSessionId: typeof t.resumeSessionId === 'string' ? t.resumeSessionId : undefined,
-      ssh: t.ssh,
+      ssh,
       sshLabel: typeof t.sshLabel === 'string' ? t.sshLabel : undefined,
       profileId: typeof t.profileId === 'string' ? t.profileId : undefined,
       side: t.side ?? 'right'
@@ -10954,7 +10964,7 @@ function SshProfilesEditor(): JSX.Element {
   const add = (): void => {
     const id =
       typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : `ssh-${Date.now()}`
-    save([...profiles, { id, label: '새 서버', host: '', user: '' }])
+    save([...profiles, { id, label: '새 서버', host: '', user: '', remoteControl: true }])
   }
   const remove = (id: string): void => save(profiles.filter((p) => p.id !== id))
   const testConnection = async (profile: SshProfile): Promise<void> => {
@@ -11051,6 +11061,14 @@ function SshProfilesEditor(): JSX.Element {
                 defaultValue={p.identityFile ?? ''}
                 onBlur={(e) => update(p.id, { identityFile: e.target.value.trim() || undefined })}
               />
+            </label>
+            <label className="wide setting-checkbox">
+              <input
+                type="checkbox"
+                checked={p.remoteControl === true}
+                onChange={(e) => update(p.id, { remoteControl: e.currentTarget.checked })}
+              />
+              <span>외부 원격 제어 사용 (Claude 터미널·Codex Agent)</span>
             </label>
             <label className="wide">
               원격 작성서류 루트 <span className="muted small">(사건 폴더 고를 때 시작 위치)</span>

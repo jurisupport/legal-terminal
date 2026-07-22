@@ -9,6 +9,7 @@ export interface AgentSshConn {
   user: string
   port?: number
   identityFile?: string
+  remoteControl?: boolean
 }
 
 export interface AgentAttachment {

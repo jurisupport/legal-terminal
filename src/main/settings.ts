@@ -17,6 +17,8 @@ export interface SshProfile {
   port?: number
   /** 개인키 파일 경로 (미지정 시 ssh-agent·기본 키 사용) */
   identityFile?: string
+  /** Claude 터미널·Codex Agent를 공급자 공식 원격 제어에 등록 */
+  remoteControl?: boolean
   /** 원격 작성서류 루트 — 사건 폴더 고를 때 시작 위치 */
   draftsRoot?: string
   /** 원격 소송기록 루트 (Phase 2 예정) */
