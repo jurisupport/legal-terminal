@@ -583,7 +583,7 @@ export default function PdfViewer({
   // 드래그 팬 (확대 시 스크롤 이동)
   useEffect(() => {
     const wrap = wrapRef.current
-    if (!wrap) return
+    if (!wrap || !panMode) return
     let dragging = false
     let sx = 0
     let sy = 0
@@ -597,15 +597,13 @@ export default function PdfViewer({
       if (e.button !== 0) return
       const target = e.target instanceof Element ? e.target : null
       if (target?.closest(PDF_PAN_EXCLUDE_SELECTOR)) return
-      // 손 도구가 꺼져 있으면 텍스트 레이어 위 드래그는 텍스트 선택으로 둔다.
-      if (!panMode && target?.closest('.textLayer')) return
       dragging = true
       sx = e.clientX
       sy = e.clientY
       sl = wrap.scrollLeft
       st = wrap.scrollTop
       wrap.classList.add('grabbing')
-      if (panMode) e.preventDefault()
+      e.preventDefault()
     }
     const move = (e: MouseEvent): void => {
       if (!dragging) return
@@ -615,7 +613,7 @@ export default function PdfViewer({
     }
     const onSelectStart = (e: Event): void => {
       const target = e.target instanceof Element ? e.target : null
-      if (panMode && target?.closest('.textLayer')) e.preventDefault()
+      if (target?.closest('.textLayer')) e.preventDefault()
     }
     const onDragStart = (e: DragEvent): void => {
       const target = e.target instanceof Element ? e.target : null

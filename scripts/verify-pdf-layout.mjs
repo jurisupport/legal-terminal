@@ -15,7 +15,7 @@ assert.match(
 )
 
 const blockFor = (selector) => {
-  const match = css.match(new RegExp(`${selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*\\{([^}]+)\\}`))
+  const match = css.match(new RegExp(`^${selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*\\{([^}]+)\\}`, 'm'))
   assert.ok(match, `${selector} rule must exist`)
   return match[1]
 }
@@ -30,6 +30,10 @@ assert.match(viewer, /flex-direction:\s*column/, 'pdf viewer must reserve the re
 const wrap = blockFor('.pdf-canvas-wrap')
 assert.match(wrap, /flex:\s*1/, 'pdf canvas wrapper must take the remaining viewer height')
 assert.match(wrap, /min-height:\s*0/, 'pdf canvas wrapper must report the actual available height')
+assert.match(wrap, /cursor:\s*text/, 'selection mode must show a text cursor')
+
+const textLayer = blockFor('.textLayer')
+assert.match(textLayer, /user-select:\s*text/, 'the PDF text layer must allow native text selection')
 
 assert.match(
   pdfViewer,
@@ -40,6 +44,11 @@ assert.match(
   pdfViewer,
   /disabled=\{numPages === 0 \|\| \(page >= numPages && !onNextDoc\)\}/,
   'the next button must stay enabled at the last page when a next record exists'
+)
+assert.match(
+  pdfViewer,
+  /if \(!wrap \|\| !panMode\) return/,
+  'selection mode must skip pan-only drag handlers entirely'
 )
 
 console.log('pdf layout ok')

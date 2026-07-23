@@ -11,4 +11,10 @@ assert.ok(segments[0].includes('진행중사건'.normalize('NFD')))
 assert.ok(segments[1].includes('서울가정법원_2025느합1050'.normalize('NFC')))
 assert.ok(segments[1].includes('서울가정법원_2025느합1050'.normalize('NFD')))
 
+const decomposed = cloudPathForms(path.normalize('NFD'))
+assert.ok(decomposed.segments[0].includes('진행중사건'.normalize('NFC')))
+assert.ok(decomposed.segments[1].includes('서울가정법원_2025느합1050'.normalize('NFC')))
+
+assert.equal(cloudPathForms('onedrive:').segments.length, 0)
+
 console.log('verify-sync-unicode: OK')

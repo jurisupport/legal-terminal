@@ -1213,9 +1213,9 @@ function QuoteReference({
 }): JSX.Element {
   return (
     <div className="agent-quote-reference">
-      <span className="agent-quote-preview" title={quote.preview}>
+      <button type="button" className="agent-quote-preview" onClick={onOpen} title={quote.preview}>
         {quote.preview}
-      </span>
+      </button>
       <span className="agent-copy-actions">
         <button type="button" title="인용한 답변으로 이동" onClick={onOpen}>
           원문

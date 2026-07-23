@@ -3221,9 +3221,16 @@ body {
 .agent-quote-preview {
   min-width: 0;
   flex: 1;
+  padding: 0;
+  border: 0;
   overflow: hidden;
+  color: inherit;
+  background: transparent;
+  font: inherit;
+  text-align: left;
   text-overflow: ellipsis;
   white-space: nowrap;
+  cursor: pointer;
 }
 .agent-msg-bubble .agent-quote-reference {
   margin-bottom: 6px;
@@ -6080,7 +6087,7 @@ button.agent-attachment-chip {
   justify-content: flex-start;
   padding: 16px;
   scrollbar-gutter: stable;
-  cursor: grab;
+  cursor: text;
   outline: none;
 }
 .pdf-canvas-wrap.pannable {
@@ -6094,6 +6101,7 @@ button.agent-attachment-chip {
   margin: 0;
 }
 .pdf-canvas-wrap.pannable .textLayer {
+  -webkit-user-select: none;
   user-select: none;
   -webkit-user-drag: none;
 }
@@ -6182,6 +6190,7 @@ button.agent-attachment-chip {
   line-height: 1;
   opacity: 1;
   transform-origin: 0 0;
+  -webkit-user-select: text;
   user-select: text;
   z-index: 1;
 }

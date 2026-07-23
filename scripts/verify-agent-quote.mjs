@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { readFile } from 'node:fs/promises'
 import { quoteAgentRequest } from '../src/renderer/src/agent/quote.ts'
 
 assert.equal(
@@ -11,6 +12,13 @@ assert.equal(
     '',
     '이 부분만 고쳐줘'
   ].join('\n')
+)
+
+const panel = await readFile(new URL('../src/renderer/src/agent/AgentPanel.tsx', import.meta.url), 'utf8')
+assert.match(
+  panel,
+  /<button[^>]*className="agent-quote-preview"[^>]*onClick=\{onOpen\}/,
+  'the quoted preview itself must open the original response'
 )
 
 console.log('agent quote ok')

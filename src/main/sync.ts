@@ -121,24 +121,42 @@ export function runRemoteSync(
   const cloudArg = shq(cloudDest)
   const macArg = shellPathArg(opts.macFolder)
   const { root: cloudRoot, segments: cloudSegments } = cloudPathForms(cloudDest)
+  const rootVaultFilter =
+    cloudSegments.length === 0
+      ? ` --exclude ${shq('/개인 중요 보관소/**')} --exclude ${shq('/Personal Vault/**')}`
+      : ''
+  const commonFlags = `${RCLONE_COMMON_FLAGS}${rootVaultFilter}`
   const resolveCloudSource =
     opts.direction === 'pull'
       ? [
           `cloud=${shq(cloudRoot)}`,
           'join_cloud() { case "$1" in *:|*/) printf "%s%s\\n" "$1" "$2" ;; *) printf "%s/%s\\n" "$1" "$2" ;; esac; }',
+          ...(cloudSegments.length
+            ? [
+                'resolve_tmp="${TMPDIR:-/tmp}/legal-terminal-rclone-resolve.$$"',
+                'trap \'rm -f "$resolve_tmp"\' EXIT HUP INT TERM'
+              ]
+            : []),
           ...cloudSegments.flatMap((forms) => [
+            'if ! "$rclone_bin" lsf "$cloud" --max-depth 1 --format p > "$resolve_tmp"; then',
+            '  echo "클라우드 상위 경로를 읽지 못했습니다: $cloud" >&2',
+            '  exit 1',
+            'fi',
             'next=',
-            `for part in ${forms.map(shq).join(' ')}; do`,
-            '  candidate=$(join_cloud "$cloud" "$part")',
-            '  if "$rclone_bin" lsjson "$candidate" --stat --retries=1 --low-level-retries=1 >/dev/null 2>&1; then next="$candidate"; break; fi',
-            'done',
+            'while IFS= read -r entry; do',
+            '  entry=${entry%/}',
+            '  case "$entry" in',
+            `    ${forms.map(shq).join('|')}) next=$(join_cloud "$cloud" "$entry"); break ;;`,
+            '  esac',
+            'done < "$resolve_tmp"',
             'if [ -z "$next" ]; then',
             `  echo ${shq(`클라우드 경로를 찾을 수 없습니다: ${cloudDest}`)} >&2`,
             `  echo ${shq('클라우드 경로 입력을 확인하거나, 먼저 올리기(맥 → 클라우드)로 폴더를 만드세요.')} >&2`,
             '  exit 66',
             'fi',
             'cloud=$next'
-          ])
+          ]),
+          ...(cloudSegments.length ? ['rm -f "$resolve_tmp"'] : [])
         ].join('\n')
       : ''
   const src = opts.direction === 'pull' ? '"$cloud"' : macArg
@@ -157,7 +175,7 @@ export function runRemoteSync(
           // bisync: 양방향 전파(삭제 포함), 충돌 시 최신 파일 승리 + 진 쪽은 .conflict로 보존.
           // --resilient/--recover: 중단된 이전 실행에서 자동 복구. 최초 1회는 --resync 필요.
           `"$rclone_bin" bisync "$mac" "$cloud" --create-empty-src-dirs --conflict-resolve newer ` +
-            `--resilient --recover ${RCLONE_COMMON_FLAGS}${opts.resync ? ' --resync' : ''}${dryRunFlag}`
+            `--resilient --recover ${commonFlags}${opts.resync ? ' --resync' : ''}${dryRunFlag}`
         ].join('\n')
       : mode === 'folders'
       ? [
@@ -169,7 +187,7 @@ export function runRemoteSync(
           'tmp="${TMPDIR:-/tmp}/legal-terminal-rclone-dirs.$$"',
           'trap \'rm -f "$tmp"\' EXIT HUP INT TERM',
           'echo "폴더 목록을 읽는 중..."',
-          'if ! "$rclone_bin" lsf "$src" --dirs-only --recursive --format p > "$tmp"; then',
+          `if ! "$rclone_bin" lsf "$src" --dirs-only --recursive --format p${rootVaultFilter} > "$tmp"; then`,
           '  echo "폴더 목록을 읽지 못했습니다: $src" >&2',
           '  exit 1',
           'fi',
@@ -209,12 +227,12 @@ export function runRemoteSync(
               ? 'dst_dir=$(remote_parent "$dst"); "$rclone_bin" mkdir "$dst_dir" || exit 1'
               : '',
             'echo "파일 1개를 동기화하는 중..."',
-            `"$rclone_bin" copyto "$src" "$dst" --update ${RCLONE_COMMON_FLAGS}${dryRunFlag}`
+            `"$rclone_bin" copyto "$src" "$dst" --update ${commonFlags}${dryRunFlag}`
           ]
             .filter(Boolean)
             .join('\n')
       : `${remoteRcloneBootstrap()}\n${resolveCloudSource}\n` +
-        `"$rclone_bin" copy ${src} ${dst} --update --create-empty-src-dirs ${RCLONE_COMMON_FLAGS}${dryRunFlag}`
+        `"$rclone_bin" copy ${src} ${dst} --update --create-empty-src-dirs ${commonFlags}${dryRunFlag}`
   const args = [...sshBaseArgs(opts.profile), rcloneCmd]
 
   const send = (line: string): void => {
