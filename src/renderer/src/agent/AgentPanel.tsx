@@ -45,7 +45,7 @@ import {
 import { DiffPreview } from './DiffPreview'
 import { MarkdownMessage } from './MarkdownMessage'
 import { ToolRow, toolDisplayName, toolStepDisplay, type ProcessStep } from './ToolRow'
-import { quoteAgentRequest } from './quote'
+import { quoteAgentRequest, restoreTextSelection, selectionTextOffsets } from './quote'
 import { currentAgentModel } from './modelDisplay'
 import {
   invalidateSessionTranscript,
@@ -1193,7 +1193,21 @@ function messageQuote(value: unknown): AgentMessageQuote | undefined {
   const quote = asRecord(value)
   const messageId = stringValue(quote?.messageId)
   const preview = stringValue(quote?.preview)
-  return messageId && preview ? { messageId, preview } : undefined
+  if (!messageId || !preview) return undefined
+  const selectionStart = numberValue(quote?.selectionStart)
+  const selectionEnd = numberValue(quote?.selectionEnd)
+  return {
+    messageId,
+    preview,
+    ...(selectionStart !== undefined &&
+    selectionEnd !== undefined &&
+    Number.isInteger(selectionStart) &&
+    Number.isInteger(selectionEnd) &&
+    selectionStart >= 0 &&
+    selectionEnd > selectionStart
+      ? { selectionStart, selectionEnd }
+      : {})
+  }
 }
 
 function quotePreview(text: string): string {
@@ -1954,8 +1968,16 @@ export default function AgentPanel({
   }, [])
 
   const revealQuotedMessage = useCallback(
-    (messageId: string): void => {
-      document.getElementById(`agent-message-${id}-${messageId}`)?.scrollIntoView({
+    (quote: AgentMessageQuote): void => {
+      const source = document.getElementById(`agent-message-${id}-${quote.messageId}`)
+      const content = source?.querySelector<HTMLElement>('.agent-md-body')
+      const selected =
+        content &&
+        quote.selectionStart !== undefined &&
+        quote.selectionEnd !== undefined
+          ? restoreTextSelection(content, quote.selectionStart, quote.selectionEnd)
+          : undefined
+      ;(selected ?? source)?.scrollIntoView({
         behavior: 'smooth',
         block: 'center'
       })
@@ -2838,7 +2860,16 @@ export default function AgentPanel({
     const result = await window.lt.agent.send(id, {
       text: handoff ? `${handoff.preamble}\n${requestText}` : requestText,
       ...(handoff || quote ? { displayText } : {}),
-      ...(quote ? { quote: { messageId: quote.messageId, preview: quote.preview } } : {}),
+      ...(quote
+        ? {
+            quote: {
+              messageId: quote.messageId,
+              preview: quote.preview,
+              selectionStart: quote.selectionStart,
+              selectionEnd: quote.selectionEnd
+            }
+          }
+        : {}),
       attachments: outgoingAttachments,
       permissionMode: nextMode,
       delivery: nextDelivery
@@ -3515,7 +3546,7 @@ export default function AgentPanel({
                     {item.quote && (
                       <QuoteReference
                         quote={item.quote}
-                        onOpen={() => revealQuotedMessage(item.quote!.messageId)}
+                        onOpen={() => revealQuotedMessage(item.quote!)}
                       />
                     )}
                     <pre className="agent-card-text">{item.text}</pre>
@@ -3586,19 +3617,30 @@ export default function AgentPanel({
                         title="선택한 부분 또는 이 답변 전체를 인용해 지시"
                         onClick={() => {
                           const source = document.getElementById(`agent-message-${id}-${item.id}`)
+                          const content = source?.querySelector<HTMLElement>('.agent-md-body')
                           const selection = window.getSelection()
                           const selected =
-                            source &&
+                            content &&
                             selection &&
                             !selection.isCollapsed &&
-                            selectionIntersectsElement(selection, source)
+                            selectionIntersectsElement(selection, content)
                               ? selection.toString().trim()
                               : ''
                           const text = selected || item.text!
+                          const offsets =
+                            selected && content && selection
+                              ? selectionTextOffsets(selection, content)
+                              : undefined
                           setQuotedMessage({
                             messageId: item.id,
                             preview: quotePreview(text),
-                            text
+                            text,
+                            ...(offsets
+                              ? {
+                                  selectionStart: offsets.start,
+                                  selectionEnd: offsets.end
+                                }
+                              : {})
                           })
                           focusPrompt()
                         }}
@@ -3812,7 +3854,7 @@ export default function AgentPanel({
               {item.quote && (
                 <QuoteReference
                   quote={item.quote}
-                  onOpen={() => revealQuotedMessage(item.quote!.messageId)}
+                  onOpen={() => revealQuotedMessage(item.quote!)}
                 />
               )}
               {item.kind === 'diff' &&
@@ -4227,7 +4269,7 @@ export default function AgentPanel({
           {quotedMessage && (
             <QuoteReference
               quote={quotedMessage}
-              onOpen={() => revealQuotedMessage(quotedMessage.messageId)}
+              onOpen={() => revealQuotedMessage(quotedMessage)}
               onRemove={() => setQuotedMessage(null)}
             />
           )}

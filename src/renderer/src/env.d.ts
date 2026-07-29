@@ -487,6 +487,8 @@ export interface AgentModelListResult extends AgentCommandResult {
 export interface AgentMessageQuote {
   messageId: string
   preview: string
+  selectionStart?: number
+  selectionEnd?: number
 }
 
 export interface AgentReasoningEffortOption {

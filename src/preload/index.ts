@@ -561,6 +561,8 @@ interface AgentModelListResult extends AgentCommandResult {
 interface AgentMessageQuote {
   messageId: string
   preview: string
+  selectionStart?: number
+  selectionEnd?: number
 }
 
 interface AgentReasoningEffortOption {
