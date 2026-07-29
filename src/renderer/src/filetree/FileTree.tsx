@@ -75,7 +75,7 @@ export function sortEntries<T extends Entry>(entries: T[], mode: SortMode): T[] 
 function fileIcon(name: string): string {
   const n = name.toLowerCase()
   if (n.endsWith('.pdf')) return '📄'
-  if (n.endsWith('.md')) return '📝'
+  if (n.endsWith('.md') || n.endsWith('.mdx')) return '📝'
   if (n.endsWith('.csv') || n.endsWith('.xlsx')) return '📊'
   if (n.endsWith('.docx') || n.endsWith('.hwp') || n.endsWith('.hwpx')) return '📃'
   return '📄'

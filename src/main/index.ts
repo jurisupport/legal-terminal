@@ -793,7 +793,7 @@ ipcMain.handle('case:addHistory', (_e, entry: { drafts: string; records?: string
 
 // ── 파일시스템 IPC (탐색기) ──
 const TEXT_EXT = new Set([
-  '.md', '.txt', '.json', '.csv', '.log', '.yml', '.yaml', '.html', '.htm', '.xml',
+  '.md', '.mdx', '.txt', '.json', '.csv', '.log', '.yml', '.yaml', '.html', '.htm', '.xml',
   '.js', '.ts', '.tsx', '.css', '.py', '.sh', '.ini', '.toml'
 ])
 const MAX_TEXT_BYTES = 2 * 1024 * 1024 // 2MB 초과 텍스트는 잘라서 안내
@@ -2493,7 +2493,7 @@ ipcMain.handle('fs:saveAs', async (_e, p: { content: string; defaultPath?: strin
   if (!mainWindow) return { ok: false }
   const r = await dialog.showSaveDialog(mainWindow, {
     defaultPath: p.defaultPath,
-    filters: [{ name: 'Markdown', extensions: ['md'] }]
+    filters: [{ name: 'Markdown', extensions: ['md', 'mdx'] }]
   })
   if (r.canceled || !r.filePath) return { ok: false }
   try {

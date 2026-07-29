@@ -907,7 +907,7 @@ const matchNorm = (value?: string | null): string =>
 const fileNameFromPath = (path: string): string =>
   path.replace(/[\\/]+$/, '').split(/[\\/]/).pop() || path
 
-const MARKDOWN_EXT_RE = /\.(md|markdown)$/i
+const MARKDOWN_EXT_RE = /\.(md|markdown|mdx)$/i
 const TEXT_EDIT_EXT_RE = /\.(txt|json|csv|log|ya?ml|html?|xml|js|ts|tsx|css|py|sh|ini|toml)$/i
 const HTML_EXT_RE = /\.html?$/i
 const FILE_EXT_RE = /\.[A-Za-z][A-Za-z0-9]{0,9}$/
@@ -928,7 +928,7 @@ const docKindForPath = (path: string): DocTab['kind'] => {
   if (/\.(hwp|hwpx)$/.test(lower)) return 'hwp'
   if (lower.endsWith('.docx')) return 'docx'
   if (lower.endsWith('.hearing.json')) return 'hearing'
-  if (/\.(md|markdown)$/.test(lower)) return 'mdview'
+  if (/\.(md|markdown|mdx)$/.test(lower)) return 'mdview'
   if (TEXT_EDIT_EXT_RE.test(lower)) return 'mdview'
   return 'file'
 }
