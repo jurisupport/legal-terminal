@@ -18,7 +18,7 @@
     "verify:case-activity": "node --experimental-strip-types --no-warnings scripts/verify-case-activity.mjs",
     "verify:session-sync": "node --experimental-strip-types --no-warnings scripts/verify-session-sync.mjs",
     "verify:sync-unicode": "node --experimental-strip-types --no-warnings scripts/verify-sync-unicode.mjs",
-    "verify:ssh-pool": "node scripts/verify-ssh-connection-pool.mjs",
+    "verify:ssh-pool": "node --experimental-strip-types --no-warnings scripts/verify-ssh-connection-pool.mjs",
     "verify:case-sync": "node --experimental-strip-types --no-warnings scripts/verify-case-sync.mjs",
     "verify:drag-guard": "node --experimental-strip-types --no-warnings scripts/verify-drag-guard.mjs",
     "verify:agent-rate-limits": "node --experimental-strip-types --no-warnings scripts/verify-agent-rate-limits.mjs",

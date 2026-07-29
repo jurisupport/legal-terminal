@@ -15,6 +15,7 @@ import {
   readRemoteFileCache,
   rememberRemoteFileCache
 } from './remoteFileCache'
+import { SshConnectionPool, type SshConnection } from './sshConnectionPool'
 
 // ── ssh:// URI 스킴 ──
 // 형식: ssh://<profileId>/<원격절대경로>  (profileId는 UUID라 슬래시 없음)
@@ -37,7 +38,8 @@ export function makeRemote(profileId: string, path: string): string {
 }
 
 // ── 연결 풀 (profileId → SFTP) ──
-const pool = new Map<string, Promise<{ client: Client; sftp: SFTPWrapper }>>()
+const MAX_TOTAL_CONNECTIONS = 4
+const connectionPool = new SshConnectionPool(connect, MAX_TOTAL_CONNECTIONS)
 
 const winAgent = '\\\\.\\pipe\\openssh-ssh-agent'
 const DEFAULT_KEYS = ['id_ed25519', 'id_ecdsa', 'id_rsa']
@@ -365,22 +367,23 @@ async function buildConfig(p: SshProfile): Promise<Record<string, unknown>> {
   return cfg
 }
 
-function connect(profileId: string): Promise<{ client: Client; sftp: SFTPWrapper }> {
-  let connection: Promise<{ client: Client; sftp: SFTPWrapper }>
-  connection = (async () => {
+function connect(profileId: string): Promise<SshConnection> {
+  return (async () => {
     const profile = await getProfile(profileId)
     const cfg = await buildConfig(profile)
 
-    return await new Promise<{ client: Client; sftp: SFTPWrapper }>((resolve, reject) => {
+    return await new Promise<SshConnection>((resolve, reject) => {
       const client = new Client()
       let settled = false
+      let connection: SshConnection | undefined
       const failConnection = (err: Error): void => {
         if (!settled) {
           settled = true
           reject(err)
+          client.destroy()
+          return
         }
-        removeConnection(profileId, connection)
-        client.destroy()
+        if (connection) connectionPool.discard(profileId, connection)
       }
       client.on('ready', () => {
         client.sftp((err, sftp) => {
@@ -388,48 +391,32 @@ function connect(profileId: string): Promise<{ client: Client; sftp: SFTPWrapper
             failConnection(err)
             return
           }
+          connection = { client, sftp }
           settled = true
-          resolve({ client, sftp })
+          resolve(connection)
         })
       })
       client.on('error', failConnection)
       client.on('close', () => {
-        removeConnection(profileId, connection)
+        if (!settled) {
+          settled = true
+          reject(new Error('SSH 연결이 준비되기 전에 종료되었습니다.'))
+          client.destroy()
+          return
+        }
+        if (connection) connectionPool.discard(profileId, connection)
       })
       client.connect(cfg)
     })
   })()
-  return connection
-}
-
-function removeConnection(
-  profileId: string,
-  connection: Promise<{ client: Client; sftp: SFTPWrapper }>
-): void {
-  if (pool.get(profileId) === connection) pool.delete(profileId)
 }
 
 async function getSftp(profileId: string): Promise<SFTPWrapper> {
-  return (await getConnection(profileId)).sftp
+  return (await connectionPool.get(profileId)).sftp
 }
 
-async function getConnection(profileId: string): Promise<{ client: Client; sftp: SFTPWrapper }> {
-  const existing = pool.get(profileId)
-  if (existing) {
-    try {
-      return await existing
-    } catch {
-      removeConnection(profileId, existing)
-    }
-  }
-  const fresh = connect(profileId)
-  pool.set(profileId, fresh)
-  try {
-    return await fresh
-  } catch (e) {
-    removeConnection(profileId, fresh)
-    throw e
-  }
+function getConnection(profileId: string): Promise<SshConnection> {
+  return connectionPool.get(profileId)
 }
 
 async function execRemoteCommand(
@@ -516,13 +503,8 @@ async function execRemoteCommand(
 }
 
 export function disposeRemote(profileId?: string): void {
-  const ids = profileId ? [profileId] : [...pool.keys()]
   invalidateRemoteDirCache(profileId)
-  for (const id of ids) {
-    const c = pool.get(id)
-    pool.delete(id)
-    if (c) c.then(({ client }) => client.end()).catch(() => {})
-  }
+  connectionPool.dispose(profileId)
 }
 
 // ── SFTP 작업 ──
