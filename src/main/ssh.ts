@@ -2,6 +2,7 @@ import { execFile } from 'child_process'
 import { existsSync } from 'fs'
 import { join } from 'path'
 import type { SshProfile } from './settings'
+import { buildSshArgs } from './sshOptions'
 import {
   invalidateRemoteDirListCache,
   readRemoteDirListCache,
@@ -108,7 +109,7 @@ function listCloudRemoteDirs(
 ): Promise<RemoteEntry[]> {
   const cloud = oneDriveCloudPath(cwd)
   if (!cloud) return Promise.resolve([])
-  const args = sshArgs(profile, 20)
+  const args = buildSshArgs(profile, { usage: 'oneshot', connectTimeout: 20 })
   const script = [
     remoteRcloneBootstrap(),
     `cloud=${shq(cloud)}`,
@@ -267,16 +268,6 @@ export function clearRemoteDirCache(): void {
   invalidateRemoteDirListCache(REMOTE_DIR_DISK_CACHE_NAMESPACE, () => true)
 }
 
-function sshArgs(profile: SshProfile, connectTimeout = 12): string[] {
-  const args: string[] = []
-  if (profile.port) args.push('-p', String(profile.port))
-  if (profile.identityFile) args.push('-i', profile.identityFile)
-  args.push('-o', 'BatchMode=yes', '-o', `ConnectTimeout=${connectTimeout}`)
-  args.push('-o', 'StrictHostKeyChecking=accept-new')
-  args.push(`${profile.user}@${profile.host}`)
-  return args
-}
-
 export function testSshConnection(
   profile: SshProfile
 ): Promise<{ ok: true; cwd: string } | { ok: false; error: string }> {
@@ -286,7 +277,7 @@ export function testSshConnection(
   return new Promise((resolve) => {
     execFile(
       sshBin,
-      [...sshArgs(profile, 8), 'pwd'],
+      [...buildSshArgs(profile, { usage: 'oneshot', connectTimeout: 8 }), 'pwd'],
       { timeout: 10000, windowsHide: true },
       (err, stdout, stderr) => {
         if (err) {
@@ -303,7 +294,7 @@ function readRemoteDir(
   profile: SshProfile,
   remotePath: string
 ): Promise<{ ok: true; entries: RemoteEntry[]; cwd: string } | { ok: false; error: string }> {
-  const args = sshArgs(profile)
+  const args = buildSshArgs(profile, { usage: 'oneshot' })
   // 숨김 제외, 한 줄 하나. test -d를 써서 루트의 symlink 디렉터리도 탐색 가능하게 보인다.
   // 경로 미지정/빈값이면 홈(~)을 사용
   const target = remotePath && remotePath.trim() ? remotePath : '~'
@@ -433,7 +424,7 @@ export function searchRemoteDirs(
   const maxDepth = Math.min(8, Math.max(1, Math.trunc(opts.maxDepth ?? 5)))
   const limit = Math.min(500, Math.max(1, Math.trunc(opts.limit ?? 150)))
   const shellLimit = limit + 1
-  const args = sshArgs(profile, 20)
+  const args = buildSshArgs(profile, { usage: 'oneshot', connectTimeout: 20 })
   const target = remotePath && remotePath.trim() ? remotePath : '~'
   const queryVariants = remoteSearchQueryVariants(query)
   const queryArgs = [...queryVariants, ...Array(Math.max(0, 4 - queryVariants.length)).fill('')].slice(0, 4)

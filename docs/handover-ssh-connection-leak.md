@@ -1,5 +1,9 @@
 # SSH 연결 누수 핸드오버
 
+> **상태: 해결됨 (v0.1.173, 커밋 `e316b9e`·`504107a`, 2026-07-29).**
+> 이 문서가 다루는 ssh2 풀 누수는 `src/main/sshConnectionPool.ts`로 분리·수정됐고 `scripts/verify-ssh-connection-pool.mjs`로 회귀 검증된다.
+> 2026-08-01 같은 증상이 재발했으나 **원인이 달랐다**(서버측). 남은 구조적 과제와 후속 작업은 [`handover-ssh-connection-budget.md`](./handover-ssh-connection-budget.md)로 이어진다. 이 문서는 배경 파악용으로 읽는다.
+
 ## 목적
 
 원격 파일 패널이 사용하는 ssh2 연결이 앱 실행 기간 동안 회수되지 않고 누적되는 문제를 정리하고, 재발을 막는 연결 수명주기 설계를 후속 작업자에게 전달한다.

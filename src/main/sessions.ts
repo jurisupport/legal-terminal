@@ -4,6 +4,7 @@ import { dirname, join } from 'path'
 import { mkdir, open, readFile, readdir, realpath, rename, stat, unlink, writeFile } from 'fs/promises'
 import { execFile, spawn } from 'child_process'
 import type { SshProfile } from './settings'
+import { buildSshArgs } from './sshOptions'
 import {
   computeSearchText,
   fromRemoteLocalForm,
@@ -418,21 +419,12 @@ function decorateSession(
   }
 }
 
-function sshBaseArgs(ssh: SshConn): string[] {
-  const a: string[] = []
-  if (ssh.port) a.push('-p', String(ssh.port))
-  if (ssh.identityFile) a.push('-i', ssh.identityFile)
-  a.push('-o', 'BatchMode=yes', '-o', 'ConnectTimeout=12', '-o', 'StrictHostKeyChecking=accept-new')
-  a.push(`${ssh.user}@${ssh.host}`)
-  return a
-}
-
 async function remoteRealpath(ssh: SshConn, path: string): Promise<string | undefined> {
   const script = `cd ${shq(path)} 2>/dev/null && pwd -P`
   return new Promise((resolve) => {
     execFile(
       sshBin,
-      [...sshBaseArgs(ssh), script],
+      [...buildSshArgs(ssh, { usage: 'oneshot' }), script],
       { timeout: 8000, windowsHide: true, maxBuffer: 1024 * 1024 },
       (err, stdout) => {
         if (err) {
@@ -578,7 +570,7 @@ function execRemoteJsonExchange(
   return new Promise((resolve) => {
     let proc: ReturnType<typeof spawn>
     try {
-      proc = spawn(sshBin, [...sshBaseArgs(ssh), command], { windowsHide: true })
+      proc = spawn(sshBin, [...buildSshArgs(ssh, { usage: 'oneshot' }), command], { windowsHide: true })
     } catch {
       resolve(null)
       return
@@ -871,7 +863,7 @@ done
   return new Promise((resolve) => {
     execFile(
       sshBin,
-      [...sshBaseArgs(ssh), script],
+      [...buildSshArgs(ssh, { usage: 'oneshot' }), script],
       { timeout: 25000, windowsHide: true, maxBuffer: 64 * 1024 * 1024 },
       (err, stdout) => {
         if (err) {
@@ -922,7 +914,7 @@ printf '\\n'
   return new Promise((resolve) => {
     execFile(
       sshBin,
-      [...sshBaseArgs(ssh), script],
+      [...buildSshArgs(ssh, { usage: 'oneshot' }), script],
       { timeout: 20000, windowsHide: true, maxBuffer: MAX_REMOTE_TRANSCRIPT_BUFFER },
       (err, stdout) => {
         if (err || !stdout.trim()) {
@@ -1374,7 +1366,7 @@ async function scanRemoteWorkLog(ssh: SshConn, days: number): Promise<SessionDay
   const run = new Promise<SessionDayScan[]>((resolve) => {
     execFile(
       sshBin,
-      [...sshBaseArgs(ssh), remoteWorkLogScript(days)],
+      [...buildSshArgs(ssh, { usage: 'oneshot' }), remoteWorkLogScript(days)],
       { timeout: REMOTE_WORK_LOG_TIMEOUT_MS, windowsHide: true, maxBuffer: 64 * 1024 * 1024 },
       (err, stdout) => {
         if (err) {

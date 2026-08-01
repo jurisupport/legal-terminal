@@ -27,6 +27,7 @@ import {
   testSshConnection
 } from './ssh'
 import { remoteRcloneInfo, runRemoteSync, cancelSync, type RemoteSyncOpts } from './sync'
+import { disposeSshControlMasters } from './sshOptions'
 import {
   isRemote,
   parseRemote,
@@ -2587,6 +2588,7 @@ app.on('before-quit', () => {
   disposeAgentSessions()
   killAllPty()
   disposeRemote()
+  disposeSshControlMasters()
 })
 
 app.whenReady().then(() => {

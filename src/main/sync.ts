@@ -1,6 +1,7 @@
 import { spawn, execFile } from 'child_process'
 import type { WebContents } from 'electron'
 import type { SshProfile } from './settings'
+import { buildSshArgs } from './sshOptions'
 
 // 클라우드 경유 모델: 맥미니에서(SSH로) rclone을 실행해 맥 사건폴더 ↔ OneDrive 클라우드 동기화.
 // Windows에는 rclone 불필요. 맥에 rclone + onedrive 리모트(rclone config)가 있어야 한다.
@@ -38,16 +39,6 @@ function remoteRclonePrefix(): string {
   return `${remoteRcloneBootstrap()}\n"$rclone_bin"`
 }
 
-// BatchMode(키/agent 인증) ssh 인자 — 비대화식 원격 명령 실행용
-function sshBaseArgs(profile: SshProfile): string[] {
-  const a: string[] = []
-  if (profile.port) a.push('-p', String(profile.port))
-  if (profile.identityFile) a.push('-i', profile.identityFile)
-  a.push('-o', 'BatchMode=yes', '-o', 'ConnectTimeout=12', '-o', 'StrictHostKeyChecking=accept-new')
-  a.push(`${profile.user}@${profile.host}`)
-  return a
-}
-
 // 맥의 rclone 설치 여부 + 설정된 리모트 목록(rclone listremotes). 키/agent 인증 시에만 성공.
 // SSH 비대화식 명령은 Homebrew PATH를 못 읽는 경우가 있어 흔한 설치 경로를 명시적으로 찾는다.
 export function remoteRcloneInfo(
@@ -56,7 +47,7 @@ export function remoteRcloneInfo(
   return new Promise((resolve) => {
     execFile(
       sshBin,
-      [...sshBaseArgs(profile), `${remoteRclonePrefix()} listremotes`],
+      [...buildSshArgs(profile, { usage: 'oneshot' }), `${remoteRclonePrefix()} listremotes`],
       { timeout: 15000, windowsHide: true },
       (err, stdout, stderr) => {
         if (err) {
@@ -233,7 +224,7 @@ export function runRemoteSync(
             .join('\n')
       : `${remoteRcloneBootstrap()}\n${resolveCloudSource}\n` +
         `"$rclone_bin" copy ${src} ${dst} --update --create-empty-src-dirs ${commonFlags}${dryRunFlag}`
-  const args = [...sshBaseArgs(opts.profile), rcloneCmd]
+  const args = [...buildSshArgs(opts.profile, { usage: 'oneshot' }), rcloneCmd]
 
   const send = (line: string): void => {
     if (!wc.isDestroyed()) wc.send('sync:progress', line)

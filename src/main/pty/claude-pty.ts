@@ -2,6 +2,7 @@ import * as pty from '@lydell/node-pty'
 import type { WebContents } from 'electron'
 import { execFile } from 'child_process'
 import os from 'os'
+import { buildSshArgs as buildCliSshArgs } from '../sshOptions'
 
 interface Session {
   proc: pty.IPty
@@ -80,15 +81,13 @@ function agentLaunchCommand(opts: CreatePtyOptions): string {
  * 비밀번호/키 프롬프트는 터미널(xterm)에 그대로 표시되어 사용자가 응답한다.
  * 원격 명령은 인증 성공 후에만 실행되므로 stdin 주입과 달리 프롬프트와 충돌하지 않는다.
  */
-function buildSshArgs(opts: CreatePtyOptions): string[] {
+function buildPtySshArgs(opts: CreatePtyOptions): string[] {
   const ssh = opts.ssh!
-  const args = ['-tt'] // 원격 PTY 강제 할당 (대화형 claude/셸)
-  if (ssh.port) args.push('-p', String(ssh.port))
-  if (ssh.identityFile) args.push('-i', ssh.identityFile)
-  // 끊김 방지 keepalive, 첫 접속 호스트키 자동 수락
-  args.push('-o', 'ServerAliveInterval=30')
-  args.push('-o', 'StrictHostKeyChecking=accept-new')
-  args.push(`${ssh.user}@${ssh.host}`)
+  const args = buildCliSshArgs(ssh, {
+    usage: 'interactive',
+    tty: true,
+    batchMode: false
+  })
 
   // 원격 시작 명령 (inner): (cd 사건폴더 →) claude 실행 → 끝나면 로그인 셸 유지.
   // cd 실패 시에도(&&) claude는 건너뛰되 셸은 유지(;)되어 사용자가 상황을 본다.
@@ -123,7 +122,7 @@ export function createPty(opts: CreatePtyOptions, webContents: WebContents): voi
   let proc: pty.IPty
   try {
     proc = ssh
-      ? pty.spawn(sshBin, buildSshArgs(opts), {
+      ? pty.spawn(sshBin, buildPtySshArgs(opts), {
           name: 'xterm-256color',
           // 로컬 cwd는 ssh 실행에만 쓰임(원격 경로는 위 명령의 cd가 처리)
           cwd: os.homedir(),

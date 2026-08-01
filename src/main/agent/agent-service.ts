@@ -46,6 +46,7 @@ import type {
 } from './agent-types'
 import { prependAgentContext } from './agentPrompt'
 import { codexTurnRunStatus, codexWorkStepStatus } from './agentProgress'
+import { buildSshArgs as buildAgentSshArgs, type SshUsage } from '../sshOptions'
 
 export { codexTurnRunStatus, codexWorkStepStatus } from './agentProgress'
 
@@ -180,8 +181,10 @@ const CLAUDE_AUTH_ENV_KEYS = new Set([
 ])
 
 interface SshArgsOptions {
+  usage?: SshUsage
   batchMode?: boolean
   tty?: boolean
+  connectTimeout?: number
 }
 
 function sdkPermissionMode(mode: AgentPermissionMode): PermissionMode {
@@ -224,16 +227,11 @@ function sshErrorMessage(error: Error): string {
 }
 
 function sshArgs(ssh: AgentSshConn, opts: SshArgsOptions = {}): string[] {
-  const args: string[] = []
-  if (opts.tty) args.push('-tt')
-  if (ssh.port) args.push('-p', String(ssh.port))
-  if (ssh.identityFile) args.push('-i', ssh.identityFile)
-  if (opts.batchMode !== false) args.push('-o', 'BatchMode=yes')
-  args.push('-o', 'ConnectTimeout=20')
-  args.push('-o', 'ServerAliveInterval=30')
-  args.push('-o', 'StrictHostKeyChecking=accept-new')
-  args.push(`${ssh.user}@${ssh.host}`)
-  return args
+  return buildAgentSshArgs(ssh, {
+    ...opts,
+    usage: opts.usage ?? (opts.tty || opts.batchMode === false ? 'interactive' : 'oneshot'),
+    connectTimeout: opts.connectTimeout ?? 20
+  })
 }
 
 function shellArgFlag(flag: string, value: string | undefined): string {
@@ -2329,7 +2327,7 @@ function startCodexProcess(session: AgentSession): void {
   if (session.codexProcess) return
   const proc =
     session.source === 'ssh' && session.ssh
-      ? spawn(sshBin, [...sshArgs(session.ssh), remoteCodexCommand(session)], {
+      ? spawn(sshBin, [...sshArgs(session.ssh, { usage: 'interactive' }), remoteCodexCommand(session)], {
           windowsHide: true,
           env: cleanEnv()
         })
@@ -3282,7 +3280,7 @@ function runRemoteAgentMessage(
   if (!ssh) throw new Error('원격 Agent 세션에 SSH 연결 정보가 없습니다.')
 
   return new Promise((resolve) => {
-    const proc = spawn(sshBin, [...sshArgs(ssh), remoteClaudeCommand(session)], {
+    const proc = spawn(sshBin, [...sshArgs(ssh, { usage: 'interactive' }), remoteClaudeCommand(session)], {
       windowsHide: true,
       env: cleanEnv()
     })

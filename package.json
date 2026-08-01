@@ -28,6 +28,7 @@
     "verify:agent-account-switch": "node scripts/verify-agent-account-switch.mjs",
     "verify:agent-case-context": "node --experimental-strip-types --no-warnings scripts/verify-agent-case-context.mjs",
     "verify:agent-quote": "node --experimental-strip-types --no-warnings scripts/verify-agent-quote.mjs",
+    "verify:ssh-options": "node --experimental-strip-types --no-warnings scripts/verify-ssh-options.mjs",
     "verify:agent-rate-limit-labels": "node --experimental-strip-types --no-warnings scripts/verify-agent-rate-limit-labels.mjs",
     "verify:terminal-status": "node --experimental-strip-types --no-warnings scripts/verify-terminal-status.mjs",
     "verify:skill-install": "node --experimental-strip-types --no-warnings scripts/verify-skill-install.mjs",
