@@ -1,6 +1,7 @@
 // 도구 실행을 한 줄 행으로 렌더링한다.
 // `⏺ 문서 읽기 (소장.pdf)` 형태 — 클릭하면 도구 원어 이름과 입력/출력 미리보기를 펼친다.
 import { asRecord, numberValue, recordArray, stringValue } from './values'
+import { isSubAgentStep } from './subAgentStatus'
 
 export interface ProcessStep {
   id: string
@@ -46,8 +47,8 @@ const toolNameLabels: Record<string, string> = {
   Glob: '파일 찾기',
   WebSearch: '웹 검색',
   WebFetch: '웹 문서 확인',
-  Task: '보조 작업',
-  Agent: '보조 작업',
+  Task: '서브에이전트',
+  Agent: '서브에이전트',
   TodoWrite: '할 일 정리',
   AskUserQuestion: '질문',
   Skill: '기능 실행',
@@ -172,6 +173,7 @@ export function ToolRow({
   const status = step.status ?? 'running'
   const elapsed = stepElapsedLabel(step)
   const hasDetails = Boolean(step.input || step.output || step.text)
+  const subAgent = isSubAgentStep(step)
   return (
     <div className={`agent-tool-row ${status}`}>
       <button
@@ -186,6 +188,8 @@ export function ToolRow({
         <span className="agent-tool-name">{name}</span>
         {arg && <span className="agent-tool-arg">({arg})</span>}
         <span className="agent-tool-meta">
+          {subAgent && status === 'running' && <span className="agent-tool-flag">실행 중</span>}
+          {subAgent && status === 'done' && <span className="agent-tool-flag">완료</span>}
           {status === 'error' && <span className="agent-tool-flag error">실패</span>}
           {(status === 'cancelled' || status === 'canceled') && (
             <span className="agent-tool-flag">중지됨</span>

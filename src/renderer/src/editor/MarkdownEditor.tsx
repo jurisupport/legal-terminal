@@ -1354,11 +1354,13 @@ export default function MarkdownEditor({
   const onEditorKeyDown = (e: KeyboardEvent<HTMLDivElement>): void => {
     if (e.defaultPrevented || !(e.ctrlKey || e.metaKey) || e.altKey) return
     const key = e.key.toLocaleLowerCase()
-    if (key !== 's' && key !== 'f') return
-    if (key === 'f' && e.shiftKey) return
+    if (key !== 's' && key !== 'f' && key !== 'p') return
+    if ((key === 'f' || key === 'p') && e.shiftKey) return
+    if (key === 'p' && plainText) return
     e.preventDefault()
     e.stopPropagation()
     if (key === 'f') openFind()
+    else if (key === 'p') exportPdfNow()
     else if (e.shiftKey) void saveAsNow()
     else void saveNow()
   }
@@ -1431,7 +1433,7 @@ export default function MarkdownEditor({
   }
 
   return (
-    <div className="text-doc" onKeyDown={onEditorKeyDown}>
+    <div className="text-doc" onKeyDownCapture={onEditorKeyDown}>
       <div className="text-toolbar">
         {!plainText && (
           <>
@@ -1495,7 +1497,7 @@ export default function MarkdownEditor({
             </select>
             <button
               className="tb-btn"
-              title={exportPdfTitle}
+              title={`${exportPdfTitle} (${platform === 'darwin' ? '⌘P' : 'Ctrl+P'})`}
               onClick={exportPdfNow}
             >
               PDF

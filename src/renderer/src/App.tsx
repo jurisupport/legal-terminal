@@ -113,6 +113,16 @@ interface ActivityItem {
   label: string
   Icon: (props: { size?: number }) => JSX.Element
 }
+
+interface SlashCommand {
+  id: string
+  label: string
+  detail: string
+  keywords?: string
+  shortcut?: string
+  run: () => void
+}
+
 const ACTIVITY: ActivityItem[] = [
   { id: 'cases', label: '사건', Icon: IconCases },
   { id: 'explorer', label: '탐색기', Icon: IconExplorer },
@@ -606,6 +616,9 @@ const shouldFocusAgentPrompt = (target: HTMLElement): boolean =>
   !target.closest(
     'input, textarea, button, select, a, [contenteditable="true"], [role="button"], [role="textbox"], .agent-md-wrap, .agent-card-text, .agent-card-input, .agent-process-step-text'
   )
+const isTextEntryTarget = (target: EventTarget | null): boolean =>
+  target instanceof Element &&
+  !!target.closest('input, textarea, select, [contenteditable="true"], [role="textbox"], .cm-editor, .xterm')
 
 const formatWorkspaceSavedAt = (savedAt: string): string => {
   const date = new Date(savedAt)
@@ -1526,6 +1539,7 @@ export default function App(): JSX.Element {
   const [bridgeStatus, setBridgeStatus] = useState<string>('')
   const [platform, setPlatform] = useState<string>('')
   const [selectionCharCount, setSelectionCharCount] = useState(0)
+  const [slashCommandsOpen, setSlashCommandsOpen] = useState(false)
 
   const [docTabs, setDocTabs] = useState<DocTab[]>(() =>
     docOnly ? [] : [{ id: 'doc-welcome', title: '시작하기.md', kind: 'welcome', side: 'left' }]
@@ -2169,6 +2183,21 @@ export default function App(): JSX.Element {
   // 단축키: Ctrl/Cmd+Shift+E 탐색기 토글 / Ctrl/Cmd+T 새 Agent / Ctrl/Cmd+Shift+T 새 터미널 / Ctrl/Cmd+W 탭 닫기 / Ctrl/Cmd+Shift+W 사건탭 닫기(Windows: Ctrl+Alt+W도 지원) / Ctrl/Cmd+N 새 문서 / Ctrl/Cmd+Shift+N 새 사건
   useEffect(() => {
     const onKey = (e: KeyboardEvent): void => {
+      if (
+        !slashCommandsOpen &&
+        e.key === '/' &&
+        !e.metaKey &&
+        !e.ctrlKey &&
+        !e.altKey &&
+        !e.isComposing &&
+        !e.repeat &&
+        !isTextEntryTarget(e.target)
+      ) {
+        e.preventDefault()
+        e.stopPropagation()
+        setSlashCommandsOpen(true)
+        return
+      }
       const activeEl = document.activeElement as HTMLElement | null
       const k = e.key.toLowerCase()
       const isKey = (key: string, code?: string): boolean => k === key || (!!code && e.code === code)
@@ -2283,7 +2312,7 @@ export default function App(): JSX.Element {
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [activeDoc, activeTerm, activeWork, termTabs, docTabs, platform, caseTabs, activeCaseTabId, mode]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [activeDoc, activeTerm, activeWork, termTabs, docTabs, platform, caseTabs, activeCaseTabId, mode, slashCommandsOpen]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const openSettings = (): void => {
     const existing = docTabs.find((t) => t.kind === 'settings')
@@ -7189,6 +7218,142 @@ export default function App(): JSX.Element {
     ...(paneWidths.left ? { '--left-pane-width': `${paneWidths.left}px` } : {}),
     '--evidence-pane-width': `${paneWidths.evidence}px`
   } as React.CSSProperties
+  const primaryShortcut = platform === 'darwin' ? '⌘' : 'Ctrl+'
+  const slashCommands: SlashCommand[] = [
+    ...(!docOnly && !termOnly
+      ? [
+          {
+            id: 'new-case',
+            label: '새 사건',
+            detail: '사건 목록, 폴더 또는 저장된 작업환경에서 시작',
+            keywords: '사건 추가 열기 workspace',
+            shortcut: `${primaryShortcut}⇧N`,
+            run: openNewCaseLauncher
+          },
+          {
+            id: 'case-tabs',
+            label: '열린 사건탭 목록',
+            detail: '현재 열려 있는 사건 작업공간 보기',
+            keywords: '사건 탭 전환',
+            shortcut: `${primaryShortcut}0`,
+            run: () => setCaseTabsOpen(true)
+          },
+          {
+            id: 'cases',
+            label: '사건 목록',
+            detail: 'JuriSupport 사건 대시보드 열기',
+            keywords: 'dashboard jurisupport',
+            run: () => {
+              setMode('cases')
+              setExplorerVisible(true)
+            }
+          },
+          {
+            id: 'explorer',
+            label: '탐색기',
+            detail: '작성서류와 소송기록 탐색기 열기',
+            keywords: '파일 폴더 explorer',
+            shortcut: `${primaryShortcut}⇧E`,
+            run: () => {
+              setMode('explorer')
+              setExplorerVisible(true)
+            }
+          },
+          {
+            id: 'viewer',
+            label: '기록뷰어',
+            detail: '소송기록과 서증 보기',
+            keywords: '기록 pdf evidence',
+            run: () => {
+              setMode('viewer')
+              setExplorerVisible(true)
+            }
+          },
+          {
+            id: 'todos',
+            label: '할 일',
+            detail: '전체 할 일 대시보드 열기',
+            keywords: '할일 todo task',
+            run: () => {
+              setMode('todos')
+              setExplorerVisible(true)
+            }
+          }
+        ]
+      : []),
+    ...(!termOnly
+      ? [
+          {
+            id: 'new-document',
+            label: '새 문서',
+            detail: '현재 작업공간에 새 문서 만들기',
+            keywords: '파일 작성 markdown',
+            shortcut: `${primaryShortcut}N`,
+            run: () => addDoc('left')
+          },
+          ...(markdownSaveHandlersRef.current.has(activeDoc)
+            ? [
+                {
+                  id: 'save-document',
+                  label: '현재 문서 저장',
+                  detail: activeDocTab?.title ?? '열린 문서 저장',
+                  keywords: 'save 파일',
+                  shortcut: `${primaryShortcut}S`,
+                  run: () => void markdownSaveHandlersRef.current.get(activeDoc)?.()
+                }
+              ]
+            : [])
+        ]
+      : []),
+    ...(!docOnly
+      ? [
+          {
+            id: 'new-agent',
+            label: '새 Agent',
+            detail: '현재 사건에서 새 AI 작업 시작',
+            keywords: '에이전트 claude codex ai',
+            shortcut: `${primaryShortcut}T`,
+            run: () => addAgentSame(termSide(activeTermTab), activeTerm)
+          },
+          {
+            id: 'new-terminal',
+            label: '새 터미널',
+            detail: '현재 사건에서 셸 터미널 열기',
+            keywords: 'shell console',
+            shortcut: `${primaryShortcut}⇧T`,
+            run: () => addTermSame(termSide(activeTermTab), activeTerm)
+          }
+        ]
+      : []),
+    ...(!docOnly && !termOnly
+      ? [
+          {
+            id: 'save-workspace',
+            label: '작업환경 저장',
+            detail: '열린 사건, 문서와 작업 탭 저장',
+            keywords: 'workspace snapshot',
+            run: () => void saveWorkspace(false)
+          },
+          {
+            id: 'restore-workspace',
+            label: '작업환경 가져오기',
+            detail: '저장된 작업환경 복원',
+            keywords: 'workspace restore 불러오기',
+            run: () => void restoreWorkspace(false)
+          },
+          {
+            id: 'settings',
+            label: '설정',
+            detail: '앱 설정 열기',
+            keywords: 'preferences 환경',
+            run: openSettings
+          }
+        ]
+      : [])
+  ]
+  const slashCommandPalette = slashCommandsOpen ? (
+    <SlashCommandPalette commands={slashCommands} onClose={() => setSlashCommandsOpen(false)} />
+  ) : null
 
   // 탭을 창 밖으로 찢어낸 '문서 전용 창': 터미널·탐색기·액티비티바 없이 문서만.
   if (docOnly) {
@@ -7215,6 +7380,7 @@ export default function App(): JSX.Element {
         </div>
         <SelectionAsk onAsk={askClaude} />
         <SelectionMenu onAsk={askClaude} />
+        {slashCommandPalette}
         {closeWindowDialog}
       </div>
     )
@@ -7228,6 +7394,7 @@ export default function App(): JSX.Element {
           <span className="status-left">legal-terminal · 터미널</span>
           <span className="status-right">{statusInfo}</span>
         </div>
+        {slashCommandPalette}
         {closeWindowDialog}
       </div>
     )
@@ -7501,6 +7668,7 @@ export default function App(): JSX.Element {
 
       <SelectionAsk onAsk={askClaude} />
       <SelectionMenu onAsk={askClaude} />
+      {slashCommandPalette}
       {closeWindowDialog}
 
       {newCaseOpen && (
@@ -7707,6 +7875,106 @@ export default function App(): JSX.Element {
           ))}
         </div>
       )}
+    </div>
+  )
+}
+
+function SlashCommandPalette({
+  commands,
+  onClose
+}: {
+  commands: SlashCommand[]
+  onClose: () => void
+}): JSX.Element {
+  const [query, setQuery] = useState('')
+  const [selected, setSelected] = useState(0)
+  const selectedRef = useRef<HTMLButtonElement>(null)
+  const visible = commands.filter((command) =>
+    matchesSearch([command.label, command.detail, command.keywords], query)
+  )
+  const run = (command?: SlashCommand): void => {
+    if (!command) return
+    onClose()
+    command.run()
+  }
+
+  useEffect(() => selectedRef.current?.scrollIntoView({ block: 'nearest' }), [selected])
+
+  const onKeyDown = (event: ReactKeyboardEvent<HTMLInputElement>): void => {
+    if (event.key === 'Escape') {
+      event.preventDefault()
+      event.stopPropagation()
+      onClose()
+      return
+    }
+    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+      event.preventDefault()
+      event.stopPropagation()
+      if (visible.length > 0) {
+        setSelected((current) =>
+          (current + (event.key === 'ArrowDown' ? 1 : -1) + visible.length) % visible.length
+        )
+      }
+      return
+    }
+    if (event.key === 'Enter') {
+      event.preventDefault()
+      event.stopPropagation()
+      run(visible[selected])
+    }
+  }
+
+  return (
+    <div className="modal-overlay slash-palette-overlay" onMouseDown={onClose}>
+      <div
+        className="modal slash-palette"
+        role="dialog"
+        aria-modal="true"
+        aria-label="명령 팔레트"
+        onMouseDown={(event) => event.stopPropagation()}
+      >
+        <div className="slash-palette-search">
+          <span aria-hidden="true">/</span>
+          <input
+            autoFocus
+            role="combobox"
+            value={query}
+            placeholder="명령 검색…"
+            aria-label="명령 검색"
+            aria-autocomplete="list"
+            aria-expanded="true"
+            aria-controls="slash-command-list"
+            aria-activedescendant={visible[selected] ? `slash-command-${visible[selected].id}` : undefined}
+            onChange={(event) => {
+              setQuery(event.target.value)
+              setSelected(0)
+            }}
+            onKeyDown={onKeyDown}
+          />
+        </div>
+        <div className="slash-palette-list" id="slash-command-list" role="listbox">
+          {visible.map((command, index) => (
+            <button
+              key={command.id}
+              id={`slash-command-${command.id}`}
+              ref={index === selected ? selectedRef : undefined}
+              className={`slash-palette-row ${index === selected ? 'active' : ''}`}
+              type="button"
+              role="option"
+              aria-selected={index === selected}
+              onMouseMove={() => setSelected(index)}
+              onClick={() => run(command)}
+            >
+              <span className="slash-palette-row-main">
+                <span className="slash-palette-label">{command.label}</span>
+                <span className="slash-palette-detail">{command.detail}</span>
+              </span>
+              {command.shortcut && <kbd>{command.shortcut}</kbd>}
+            </button>
+          ))}
+          {visible.length === 0 && <div className="slash-palette-empty">일치하는 명령이 없습니다.</div>}
+        </div>
+      </div>
     </div>
   )
 }

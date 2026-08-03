@@ -45,6 +45,7 @@ import {
 import { DiffPreview } from './DiffPreview'
 import { MarkdownMessage } from './MarkdownMessage'
 import { ToolRow, toolDisplayName, toolStepDisplay, type ProcessStep } from './ToolRow'
+import { activeSubAgentCount } from './subAgentStatus'
 import { quoteAgentRequest, restoreTextSelection, selectionTextOffsets } from './quote'
 import { currentAgentModel } from './modelDisplay'
 import {
@@ -2361,6 +2362,8 @@ export default function AgentPanel({
       ).length,
     [items]
   )
+  const activeSubAgents = useMemo(() => activeSubAgentCount(items), [items])
+  const subAgentStatusLabel = activeSubAgents > 0 ? `서브에이전트 ${activeSubAgents}개 실행 중` : ''
   const baseStatusLabel = agentStatusLabels[status]
   const currentModel = currentAgentModel(modelOptions, selectedModel, selectedReasoningEffort)
   const modelButtonLabel = modelLoading && modelOptions.length === 0
@@ -2368,7 +2371,11 @@ export default function AgentPanel({
     : currentModel.buttonLabel
   const escInterruptHint = `Esc ${Math.round(ESC_INTERRUPT_ARM_MS / 1000)}초 안에 한 번 더 누르면 중지`
   const statusLabel = escInterruptArmed ? `${baseStatusLabel}, ${escInterruptHint}` : baseStatusLabel
-  const statusAccessibleLabel = queuedCount > 0 ? `${statusLabel}, 대기 ${queuedCount}` : statusLabel
+  const statusAccessibleLabel = [
+    statusLabel,
+    subAgentStatusLabel || undefined,
+    queuedCount > 0 ? `대기 ${queuedCount}` : undefined
+  ].filter(Boolean).join(', ')
   const needsAuth = useMemo(
     () => usesAgentAuth && items.some((item) => isAuthFailureText(item.text)),
     [items, usesAgentAuth]
@@ -2421,7 +2428,6 @@ export default function AgentPanel({
     }
     return undefined
   }, [items])
-
   const waitingPermission = useMemo(() => {
     for (let index = items.length - 1; index >= 0; index -= 1) {
       const item = items[index]
@@ -4236,9 +4242,12 @@ export default function AgentPanel({
               {authActive ? `${agentLabel} 로그인 진행 중` : baseStatusLabel}
               {queuesNewInput && elapsedSeconds > 0 && ` · ${formatElapsedSeconds(elapsedSeconds)}`}
             </span>
-            {!authActive && runningToolLabel && (
-              <span className="agent-status-tool" title={runningToolLabel}>
-                {runningToolLabel}
+            {!authActive && (activeSubAgents > 0 || runningToolLabel) && (
+              <span
+                className="agent-status-tool"
+                title={subAgentStatusLabel || runningToolLabel}
+              >
+                {subAgentStatusLabel || runningToolLabel}
               </span>
             )}
             {queuedCount > 0 && <span className="agent-status-queue">대기 {queuedCount}</span>}

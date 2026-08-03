@@ -34,6 +34,7 @@
     "verify:skill-install": "node --experimental-strip-types --no-warnings scripts/verify-skill-install.mjs",
     "verify:hearing-ime": "node --experimental-strip-types --no-warnings scripts/verify-hearing-ime.mjs",
     "verify:hearing-tab": "electron-vite build && node scripts/verify-hearing-tab.mjs",
+    "verify:slash-commands": "electron-vite build && node scripts/verify-slash-commands.mjs",
     "verify:md-compat": "node --experimental-strip-types --no-warnings scripts/verify-md-compat.mjs",
     "verify:record-outline": "node --experimental-strip-types --no-warnings scripts/verify-record-outline.mjs",
     "verify:pdf-layout": "node scripts/verify-pdf-layout.mjs",
