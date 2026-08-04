@@ -29,7 +29,7 @@ const controlTargets = new Map<string, string>()
 function controlSocketPath(profile: SshProfileLike): string {
   const salt = `${profile.user}@${profile.host}:${profile.port ?? 22}\0${profile.identityFile ?? ''}`
   const digest = createHash('sha256').update(salt).digest('hex')
-  return join(tmpdir(), `legal-terminal-ssh-${digest.slice(0, 16)}.sock`)
+  return join(tmpdir(), `lt-${digest.slice(0, 16)}.sock`)
 }
 
 function withControlMasterArgs(profile: SshProfileLike, platform: NodeJS.Platform): string[] {

@@ -41,7 +41,11 @@ assert.ok(controlPathArg)
 if (controlPathArg) {
   assert.equal(controlPathArg.startsWith('ControlPath='), true)
   const controlPath = controlPathArg.slice('ControlPath='.length)
-  assert.ok(Buffer.byteLength(controlPath) <= 100, `controlPath too long: ${controlPath}`)
+  const openSshTemporaryPath = `${controlPath}.${'x'.repeat(16)}`
+  assert.ok(
+    Buffer.byteLength(openSshTemporaryPath) <= 103,
+    `OpenSSH temporary control path too long: ${openSshTemporaryPath}`
+  )
   assert.ok(existsSync(dirname(controlPath)), `controlPath parent does not exist: ${dirname(controlPath)}`)
 }
 
