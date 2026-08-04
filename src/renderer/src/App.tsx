@@ -596,7 +596,7 @@ const isRestorableDocKind = (value: unknown): value is DocTab['kind'] =>
   typeof value === 'string' && RESTORABLE_DOC_KINDS.has(value as DocTab['kind'])
 
 const normalizeDocKind = (kind: DocTab['kind'], path?: string): DocTab['kind'] =>
-  path && docKindForPath(path) === 'mdview' ? 'mdview' : kind
+  path && isHtmlPath(path) ? 'file' : path && docKindForPath(path) === 'mdview' ? 'mdview' : kind
 
 const isWorkspaceMode = (value: unknown): value is Mode =>
   value === 'explorer' || value === 'cases' || value === 'viewer' || value === 'todos'
@@ -942,6 +942,7 @@ const docKindForPath = (path: string): DocTab['kind'] => {
   if (lower.endsWith('.docx')) return 'docx'
   if (lower.endsWith('.hearing.json')) return 'hearing'
   if (/\.(md|markdown|mdx)$/.test(lower)) return 'mdview'
+  if (HTML_EXT_RE.test(lower)) return 'file'
   if (TEXT_EDIT_EXT_RE.test(lower)) return 'mdview'
   return 'file'
 }
