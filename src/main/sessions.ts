@@ -120,6 +120,7 @@ export interface SessionTranscriptMessage {
 export interface SessionTranscript {
   sessionId: string
   messages: SessionTranscriptMessage[]
+  model?: string
   mtime: number
   truncated?: boolean
 }
@@ -956,8 +957,12 @@ function extractTranscriptText(content: unknown): string {
     .join('\n')
 }
 
-function parseTranscriptMessages(content: string, sessionId: string): SessionTranscriptMessage[] {
+function parseTranscriptMessages(
+  content: string,
+  sessionId: string
+): { messages: SessionTranscriptMessage[]; model?: string } {
   const messages: SessionTranscriptMessage[] = []
+  let model: string | undefined
   let lineIndex = 0
   for (const line of content.split('\n')) {
     lineIndex += 1
@@ -973,6 +978,7 @@ function parseTranscriptMessages(content: string, sessionId: string): SessionTra
     const roleValue = typeof message?.role === 'string' ? message.role : entry.type
     const role = roleValue === 'user' || roleValue === 'assistant' ? roleValue : undefined
     if (!role || !message) continue
+    if (role === 'assistant') model = typeof message.model === 'string' ? message.model : model
     const text = extractTranscriptText(message.content).trim()
     const visibleText = role === 'user' ? cleanUserInstruction(text) : text
     if (!visibleText) continue
@@ -982,7 +988,7 @@ function parseTranscriptMessages(content: string, sessionId: string): SessionTra
       text: clipTranscriptText(visibleText)
     })
   }
-  return messages.slice(-MAX_SESSION_HISTORY_MESSAGES)
+  return { messages: messages.slice(-MAX_SESSION_HISTORY_MESSAGES), model }
 }
 
 export async function readSessionTranscript(
@@ -994,7 +1000,7 @@ export async function readSessionTranscript(
   if (!transcript) return null
   return {
     sessionId,
-    messages: parseTranscriptMessages(transcript.content, sessionId),
+    ...parseTranscriptMessages(transcript.content, sessionId),
     mtime: transcript.mtime,
     truncated: transcript.truncated
   }

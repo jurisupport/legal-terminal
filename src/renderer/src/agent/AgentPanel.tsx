@@ -1875,6 +1875,7 @@ export default function AgentPanel({
   const [modelLoading, setModelLoading] = useState(false)
   const [selectedModel, setSelectedModel] = useState<string | undefined>()
   const [selectedReasoningEffort, setSelectedReasoningEffort] = useState<string | undefined>()
+  const [resumedModel, setResumedModel] = useState<string | null>()
   const [showNewOutputNotice, setShowNewOutputNotice] = useState(false)
   const [revertingDiffIds, setRevertingDiffIds] = useState<Set<string>>(new Set())
   const [usage, setUsage] = useState<AgentUsageView>(() => emptyAgentUsageView())
@@ -1956,6 +1957,7 @@ export default function AgentPanel({
     setModelPickerOpen(false)
     setSelectedModel(undefined)
     setSelectedReasoningEffort(undefined)
+    setResumedModel(undefined)
     setUsage(emptyAgentUsageView())
     setError('')
   }, [provider, ssh, usesAgentAuth])
@@ -2242,12 +2244,15 @@ export default function AgentPanel({
     const historyKey = `${transcriptSourceKey(ssh)}:${resumeSessionId}`
     if (loadedHistoryKeyRef.current === historyKey) return
     loadedHistoryKeyRef.current = historyKey
+    setResumedModel(undefined)
     let alive = true
     void loadSessionTranscript(resumeSessionId, ssh)
       .then((transcript) => {
         // 이어 열린 순간부터 대화가 늘어나므로, 프리로드본은 여기서 한 번 쓰고 버린다.
         invalidateSessionTranscript(resumeSessionId, ssh)
-        if (!alive || !transcript || transcript.messages.length === 0) return
+        if (!alive) return
+        setResumedModel(transcript?.model ?? null)
+        if (!transcript || transcript.messages.length === 0) return
         const historyItems = transcriptToTimeline(transcript, agentLabel)
         rememberPrompts(
           transcript.messages
@@ -2262,6 +2267,7 @@ export default function AgentPanel({
         })
       })
       .catch(() => {
+        if (alive) setResumedModel(null)
         /* Resume context still works even when the transcript cannot be displayed. */
       })
     return () => {
@@ -2378,8 +2384,11 @@ export default function AgentPanel({
   const baseStatusLabel = agentStatusLabels[status]
   const currentModel = currentAgentModel(modelOptions, selectedModel, selectedReasoningEffort)
   const newSessionModel = currentAgentModel(modelOptions, defaultModel)
+  const resumedModelDisplay = resumedModel ? currentAgentModel(modelOptions, resumedModel) : undefined
   const accountDefaultOption = modelOptions.find((model) => model.isDefault)
-  const resumedModelLabel = resumeSessionId && !selectedModel ? '기존 세션 모델 유지' : undefined
+  const resumedModelLabel = resumeSessionId && !selectedModel
+    ? (resumedModelDisplay?.modelLabel ?? (resumedModel === null ? '모델 정보 없음' : '모델 확인 중'))
+    : undefined
   const accountDefaultSelected =
     (!resumeSessionId && !selectedModel) ||
     Boolean(selectedModel && selectedModel === accountDefaultOption?.model)

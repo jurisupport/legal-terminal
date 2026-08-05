@@ -361,6 +361,7 @@ interface SessionTranscriptMessage {
 interface SessionTranscript {
   sessionId: string
   messages: SessionTranscriptMessage[]
+  model?: string
   mtime: number
   truncated?: boolean
 }
