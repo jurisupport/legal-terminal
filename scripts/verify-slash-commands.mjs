@@ -24,6 +24,19 @@ const app = await _electron.launch({
 
 try {
   const page = await app.firstWindow()
+  await app.evaluate(({ ipcMain }) => {
+    globalThis.__workspaceTransferCalls = { exports: 0, imports: 0 }
+    ipcMain.removeHandler('workspace:exportFile')
+    ipcMain.handle('workspace:exportFile', () => {
+      globalThis.__workspaceTransferCalls.exports += 1
+      return { ok: true, path: '/tmp/legal-terminal-workspace.json' }
+    })
+    ipcMain.removeHandler('workspace:importFile')
+    ipcMain.handle('workspace:importFile', () => {
+      globalThis.__workspaceTransferCalls.imports += 1
+      return { ok: true, canceled: true, snapshot: null }
+    })
+  })
   await page.locator('.welcome').waitFor()
   await page.locator('.welcome').click()
   await page.keyboard.press('/')
@@ -48,14 +61,28 @@ try {
   assert.equal(await officeName.inputValue(), '법무법인/')
   assert.equal(await palette.count(), 0)
 
-  await page.locator('.activity-item[title*="저장된 작업환경 가져오기"]').click()
+  let exportMessage = ''
+  page.once('dialog', (dialog) => {
+    exportMessage = dialog.message()
+    void dialog.accept()
+  })
+  await page.locator('.activity-item[title*="JSON 파일로 내보내기"]').click()
+  assert.match(exportMessage, /내보낸 파일 위치:\n\/tmp\/legal-terminal-workspace\.json/)
+
+  await page.locator('.activity-item[title="저장된 작업환경 불러오기"]').click()
   const workspaceSearch = page.locator('.workspace-search')
   await workspaceSearch.waitFor()
   assert.equal(await workspaceSearch.evaluate((input) => document.activeElement === input), true)
   await page.keyboard.type('사건')
   assert.equal(await workspaceSearch.inputValue(), '사건')
+  await page.screenshot({ path: path.join(os.tmpdir(), 'legal-terminal-workspace-transfer.png') })
+  await page.locator('.workspace-picker button', { hasText: 'JSON 파일 선택' }).click()
+  assert.deepEqual(await app.evaluate(() => globalThis.__workspaceTransferCalls), {
+    exports: 1,
+    imports: 1
+  })
 
-  console.log('command and workspace searches accept keyboard input')
+  console.log('workspace export path and JSON file import are directly accessible')
 } finally {
   await app.evaluate(({ app }) => app.exit(0)).catch(() => {})
   await app.close().catch(() => {})

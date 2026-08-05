@@ -741,11 +741,13 @@ ipcMain.handle('workspace:exportFile', async (e, snapshot: WorkspaceSnapshot) =>
   const r = win
     ? await dialog.showSaveDialog(win, {
         title: '작업환경 내보내기',
+        buttonLabel: '내보내기',
         defaultPath: 'legal-terminal-workspace.json',
         filters: [{ name: 'JSON', extensions: ['json'] }]
       })
     : await dialog.showSaveDialog({
         title: '작업환경 내보내기',
+        buttonLabel: '내보내기',
         defaultPath: 'legal-terminal-workspace.json',
         filters: [{ name: 'JSON', extensions: ['json'] }]
       })
@@ -757,11 +759,13 @@ ipcMain.handle('workspace:importFile', async (e) => {
   const r = win
     ? await dialog.showOpenDialog(win, {
         title: '작업환경 가져오기',
+        buttonLabel: '불러오기',
         properties: ['openFile'],
         filters: [{ name: 'JSON', extensions: ['json'] }]
       })
     : await dialog.showOpenDialog({
         title: '작업환경 가져오기',
+        buttonLabel: '불러오기',
         properties: ['openFile'],
         filters: [{ name: 'JSON', extensions: ['json'] }]
       })

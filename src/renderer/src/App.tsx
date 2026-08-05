@@ -4590,9 +4590,9 @@ export default function App(): JSX.Element {
       return
     }
     window.alert(
-      `작업환경 저장 완료\n문서 ${snapshot.docs.length}개, 터미널 ${snapshot.terminals.length}개` +
+      `${exportFile ? '작업환경 내보내기' : '작업환경 저장'} 완료\n문서 ${snapshot.docs.length}개, 터미널 ${snapshot.terminals.length}개` +
         (skippedDocs > 0 ? `\n임시/미저장 문서 ${skippedDocs}개는 제외했습니다.` : '') +
-        (result.path ? `\n${result.path}` : '')
+        (result.path ? `\n\n${exportFile ? '내보낸 파일 위치' : '저장 위치'}:\n${result.path}` : '')
     )
   }
 
@@ -4639,7 +4639,9 @@ export default function App(): JSX.Element {
       await openSavedWorkspacePicker()
       return
     }
-    applyWorkspaceLoadResult(await window.lt.workspace.importFile())
+    const result = await window.lt.workspace.importFile()
+    if (result.ok && result.snapshot) setWorkspacePick(null)
+    applyWorkspaceLoadResult(result)
   }
 
   const openCaseListFromLauncher = (): void => {
@@ -7589,14 +7591,21 @@ export default function App(): JSX.Element {
           </button>
           <button
             className="activity-item"
-            title="작업환경 저장 (Shift: 파일로 내보내기)"
+            title="현재 작업환경 저장"
             onClick={(e) => void saveWorkspace(e.shiftKey)}
           >
             <IconSave />
           </button>
           <button
             className="activity-item"
-            title="저장된 작업환경 가져오기 (Shift: JSON 파일에서 가져오기)"
+            title="작업환경 JSON 파일로 내보내기 (저장 위치 선택)"
+            onClick={() => void saveWorkspace(true)}
+          >
+            <IconSaveAs />
+          </button>
+          <button
+            className="activity-item"
+            title="저장된 작업환경 불러오기"
             onClick={(e) => void restoreWorkspace(e.shiftKey)}
           >
             <IconSync />
@@ -7694,6 +7703,7 @@ export default function App(): JSX.Element {
           entries={workspacePick.entries}
           error={workspacePick.error}
           onLoad={(entry) => void loadSavedWorkspaceEntry(entry)}
+          onImportFile={() => void restoreWorkspace(true)}
           onRefresh={() => void openSavedWorkspacePicker()}
           onClose={() => setWorkspacePick(null)}
         />
@@ -11574,6 +11584,7 @@ function WorkspacePicker({
   entries,
   error,
   onLoad,
+  onImportFile,
   onRefresh,
   onClose
 }: {
@@ -11581,6 +11592,7 @@ function WorkspacePicker({
   entries: WorkspaceEntry[]
   error?: string
   onLoad: (entry: WorkspaceEntry) => void
+  onImportFile: () => void
   onRefresh: () => void
   onClose: () => void
 }): JSX.Element {
@@ -11647,6 +11659,14 @@ function WorkspacePicker({
             ))}
         </div>
         <div className="modal-actions">
+          <button
+            className="header-btn"
+            type="button"
+            title="다른 컴퓨터에서 내보낸 JSON 작업환경 파일 불러오기"
+            onClick={onImportFile}
+          >
+            JSON 파일 선택…
+          </button>
           <button className="header-btn" type="button" onClick={onRefresh}>
             새로고침
           </button>
