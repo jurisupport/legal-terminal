@@ -199,6 +199,10 @@ function claudeEffort(value: string | undefined): EffortLevel | undefined {
     : undefined
 }
 
+function claudeModel(session: AgentSession): string | undefined {
+  return session.model?.trim() || (session.resumeSessionId ? undefined : 'default')
+}
+
 function cliPermissionMode(mode: AgentPermissionMode): string {
   if (mode === 'ask') return 'default'
   if (mode === 'acceptEdits') return 'acceptEdits'
@@ -272,7 +276,7 @@ function remoteClaudeCommand(session: AgentSession): string {
     `--permission-mode ${shq(mode)}`,
     session.permissionMode === 'bypassPermissions' ? '--allow-dangerously-skip-permissions' : '',
     shellArgFlag('--resume', session.resumeSessionId).trim(),
-    shellArgFlag('--model', session.model).trim(),
+    shellArgFlag('--model', claudeModel(session)).trim(),
     shellArgFlag('--effort', claudeEffort(session.reasoningEffort)).trim(),
     shellListFlag('--tools', session.tools).trim(),
     shellListFlag('--allowedTools', session.allowedTools).trim(),
@@ -296,7 +300,7 @@ function remoteClaudeSlashProbeCommand(session: AgentSession): string {
   const flags = [
     '--verbose --output-format stream-json --input-format stream-json',
     '--permission-mode dontAsk',
-    shellArgFlag('--model', session.model).trim(),
+    shellArgFlag('--model', claudeModel(session)).trim(),
     shellArgFlag('--effort', claudeEffort(session.reasoningEffort)).trim()
   ].filter(Boolean).join(' ')
   const inner = [
@@ -2979,6 +2983,7 @@ function remotePromptLine(prompt: string): string {
 
 function spawnClaudeInitProbe(session: AgentSession): ChildProcessWithoutNullStreams {
   const effort = claudeEffort(session.reasoningEffort)
+  const model = claudeModel(session)
   if (session.source === 'ssh' && session.ssh) {
     return spawn(sshBin, [...sshArgs(session.ssh), remoteClaudeSlashProbeCommand(session)], {
       windowsHide: true,
@@ -2995,7 +3000,7 @@ function spawnClaudeInitProbe(session: AgentSession): ChildProcessWithoutNullStr
       'stream-json',
       '--permission-mode',
       'dontAsk',
-      ...(session.model ? ['--model', session.model] : []),
+      ...(model ? ['--model', model] : []),
       ...(effort ? ['--effort', effort] : [])
     ],
     {
@@ -3931,6 +3936,7 @@ function claudeModelOption(value: unknown): AgentModelOption | undefined {
   const record = asRecord(value)
   const model = stringValue(record?.value)
   if (!record || !model) return undefined
+  const description = stringValue(record.description)
   const efforts = stringArrayValue(record.supportedEffortLevels)
     .filter((effort) => claudeEffort(effort))
     .map((reasoningEffort) => ({ reasoningEffort }))
@@ -3938,8 +3944,9 @@ function claudeModelOption(value: unknown): AgentModelOption | undefined {
     id: model,
     model,
     displayName: stringValue(record.displayName) ?? model,
-    resolvedModel: stringValue(record.resolvedModel),
-    description: stringValue(record.description),
+    resolvedModel:
+      stringValue(record.resolvedModel) ?? (model === 'default' ? description?.split(/\s+(?:with\b|·)/, 1)[0] : undefined),
+    description,
     isDefault: model === 'default',
     ...(efforts.length > 0 ? { supportedReasoningEfforts: efforts } : {})
   }
@@ -4431,7 +4438,7 @@ function startAgentTurn(session: AgentSession, input: AgentSendInput): void {
           abortController,
           cwd: session.cwd,
           resume: session.resumeSessionId,
-          model: session.model,
+          model: claudeModel(session),
           effort: claudeEffort(session.reasoningEffort),
           tools: session.tools,
           allowedTools: session.allowedTools,
@@ -4580,7 +4587,7 @@ export function inspectAgentMcpStatus(sessionId: string): AgentCommandResult {
         options: {
           abortController,
           cwd: session.cwd,
-          model: session.model,
+          model: claudeModel(session),
           effort: claudeEffort(session.reasoningEffort),
           tools: [],
           pathToClaudeCodeExecutable: packagedClaudeAgentSdkExecutable(),

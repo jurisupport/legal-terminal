@@ -1856,6 +1856,7 @@ export default function AgentPanel({
   const [authInput, setAuthInput] = useState('')
   const [modeMenuOpen, setModeMenuOpen] = useState(false)
   const [settingsLoaded, setSettingsLoaded] = useState(false)
+  const [defaultModels, setDefaultModels] = useState<Partial<Record<AgentProvider, string>>>({})
   const [expandedProcessIds, setExpandedProcessIds] = useState<Set<string>>(new Set())
   const [agentFontSize, setAgentFontSize] = useState(DEFAULT_AGENT_FONT_SIZE)
   const [copyFeedback, setCopyFeedback] = useState('')
@@ -1886,6 +1887,7 @@ export default function AgentPanel({
   const mentionIndexCacheRef = useRef<{ root: string; entries: MentionEntry[] } | null>(null)
   const mentionMenuRef = useRef<HTMLDivElement>(null)
   const agentLabel = agentProviderLabels[provider]
+  const defaultModel = defaultModels[provider]
   const createdRef = useRef(false)
   const scrollRef = useRef<HTMLDivElement>(null)
   const shouldFollowTimelineRef = useRef(true)
@@ -2204,6 +2206,7 @@ export default function AgentPanel({
         cwd,
         title,
         provider,
+        model: resumeSessionId ? undefined : defaultModel,
         resumeSessionId,
         permissionMode: mode,
         source: ssh ? 'ssh' : 'local',
@@ -2222,7 +2225,7 @@ export default function AgentPanel({
         if (!sendResult.ok) setError(sendResult.error ?? 'Fork 맥락을 가져올 수 없습니다.')
       })
       .catch((e) => setError(String(e instanceof Error ? e.message : e)))
-  }, [caseContext, cwd, forkFromSessionId, id, mode, provider, resumeSessionId, settingsLoaded, ssh, title])
+  }, [caseContext, cwd, defaultModel, forkFromSessionId, id, mode, provider, resumeSessionId, settingsLoaded, ssh, title])
 
   // 프로바이더 전환으로 넘어온 대화 맥락을 보류해뒀다가 첫 지시에 합쳐 보낸다.
   useEffect(() => {
@@ -2283,6 +2286,14 @@ export default function AgentPanel({
       if (!alive) return
       setAgentFontSize(clampAgentFontSize(settings.agentFontSize))
       setMode(resolveAgentPermissionMode(settings.agentDefaultPermissionMode))
+      setDefaultModels({
+        ...(typeof settings.agentDefaultModels?.claude === 'string'
+          ? { claude: settings.agentDefaultModels.claude }
+          : {}),
+        ...(typeof settings.agentDefaultModels?.codex === 'string'
+          ? { codex: settings.agentDefaultModels.codex }
+          : {})
+      })
       setSettingsLoaded(true)
     }
     window.lt.settings
@@ -2366,9 +2377,15 @@ export default function AgentPanel({
   const subAgentStatusLabel = activeSubAgents > 0 ? `서브에이전트 ${activeSubAgents}개 실행 중` : ''
   const baseStatusLabel = agentStatusLabels[status]
   const currentModel = currentAgentModel(modelOptions, selectedModel, selectedReasoningEffort)
+  const newSessionModel = currentAgentModel(modelOptions, defaultModel)
+  const accountDefaultOption = modelOptions.find((model) => model.isDefault)
+  const resumedModelLabel = resumeSessionId && !selectedModel ? '기존 세션 모델 유지' : undefined
+  const accountDefaultSelected =
+    (!resumeSessionId && !selectedModel) ||
+    Boolean(selectedModel && selectedModel === accountDefaultOption?.model)
   const modelButtonLabel = modelLoading && modelOptions.length === 0
     ? '모델 확인 중'
-    : currentModel.buttonLabel
+    : resumedModelLabel ?? currentModel.buttonLabel
   const escInterruptHint = `Esc ${Math.round(ESC_INTERRUPT_ARM_MS / 1000)}초 안에 한 번 더 누르면 중지`
   const statusLabel = escInterruptArmed ? `${baseStatusLabel}, ${escInterruptHint}` : baseStatusLabel
   const statusAccessibleLabel = [
@@ -3163,19 +3180,32 @@ export default function AgentPanel({
   }
 
   const chooseModel = async (model?: string, reasoningEffort?: string): Promise<void> => {
-    const result = await window.lt.agent.setModel(id, model, reasoningEffort)
+    const sessionModel = !model && resumeSessionId
+      ? (accountDefaultOption?.model ?? (provider === 'claude' ? 'default' : undefined))
+      : model
+    const result = await window.lt.agent.setModel(id, sessionModel, reasoningEffort)
     if (!result.ok) {
       setError(result.error ?? `${agentLabel} 모델을 선택할 수 없습니다.`)
       return
     }
-    setSelectedModel(model)
+    setSelectedModel(sessionModel)
     setSelectedReasoningEffort(reasoningEffort)
+    const nextDefaultModels = { ...defaultModels }
+    if (model) nextDefaultModels[provider] = model
+    else delete nextDefaultModels[provider]
+    try {
+      const settings = await window.lt.settings.set({ agentDefaultModels: nextDefaultModels })
+      window.dispatchEvent(new CustomEvent<AppSettings>(SETTINGS_UPDATED_EVENT, { detail: settings }))
+    } catch {
+      setError('현재 세션 모델은 변경됐지만 새 세션 기본값을 저장하지 못했습니다.')
+      return
+    }
     setModelPickerOpen(false)
     setError('')
     showTransientFeedback(
       model
-        ? `${agentLabel} 모델: ${model}${reasoningEffort ? ` / ${reasoningEffort}` : ''}`
-        : `${agentLabel} 모델: 기본값`
+        ? `${agentLabel} 현재 모델: ${model}${reasoningEffort ? ` / ${reasoningEffort}` : ''} · 새 세션 기본 모델 저장됨`
+        : `${agentLabel} 현재 모델 및 새 세션 기본 모델: 계정 기본값`
     )
   }
 
@@ -4050,8 +4080,9 @@ export default function AgentPanel({
             <button type="button" onClick={() => setModelPickerOpen(false)}>닫기</button>
           </div>
           <div className="agent-model-current">
-            현재 {currentModel.modelLabel}
-            {currentModel.effort ? ` · 추론 정도 ${currentModel.effort}` : ''}
+            현재 세션: {resumedModelLabel ?? currentModel.modelLabel}
+            {!resumedModelLabel && currentModel.effort ? ` · 추론 정도 ${currentModel.effort}` : ''}
+            {' · '}새 세션 기본값: {newSessionModel.modelLabel}
           </div>
           {modelLoading ? (
             <div className="agent-model-loading">모델 목록 로드 중</div>
@@ -4059,13 +4090,13 @@ export default function AgentPanel({
             <div className="agent-model-list">
               <button
                 type="button"
-                className={`agent-model-default ${!selectedModel ? 'selected' : ''}`}
+                className={`agent-model-default ${accountDefaultSelected ? 'selected' : ''}`}
                 onClick={() => void chooseModel(undefined, undefined)}
               >
-                <span>기본값</span>
-                <small>{agentLabel} 설정과 계정에 맞는 기본 모델</small>
+                <span>계정 기본값</span>
+                <small>{agentLabel} 계정이 지정한 기본 모델을 현재 및 새 세션에 적용</small>
               </button>
-              {modelOptions.map((model) => {
+              {modelOptions.filter((model) => !model.isDefault).map((model) => {
                 const efforts = model.supportedReasoningEfforts ?? []
                 return (
                   <div

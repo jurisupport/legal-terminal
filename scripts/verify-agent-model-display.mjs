@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { readFile } from 'node:fs/promises'
 import { currentAgentModel } from '../src/renderer/src/agent/modelDisplay.ts'
 
 const options = [
@@ -27,5 +28,20 @@ assert.equal(
   ).buttonLabel,
   'Sonnet · 기본값'
 )
+
+const service = await readFile(new URL('../src/main/agent/agent-service.ts', import.meta.url), 'utf8')
+const panel = await readFile(new URL('../src/renderer/src/agent/AgentPanel.tsx', import.meta.url), 'utf8')
+const settings = await readFile(new URL('../src/main/settings.ts', import.meta.url), 'utf8')
+assert.match(service, /function claudeModel\(session: AgentSession\): string \| undefined \{\s*return session\.model\?\.trim\(\) \|\| \(session\.resumeSessionId \? undefined : 'default'\)\s*\}/)
+assert.equal(service.match(/shellArgFlag\('--model', claudeModel\(session\)\)/g)?.length, 2)
+assert.equal(service.match(/model: claudeModel\(session\)/g)?.length, 2)
+assert.match(service, /description\?\.split\(\/\\s\+\(\?:with\\b\|·\)\/, 1\)\[0\]/)
+assert.match(settings, /agentDefaultModels\?: Partial<Record<AgentProvider, string>>/)
+assert.match(panel, /const defaultModel = defaultModels\[provider\]/)
+assert.match(panel, /\.create\(\{[\s\S]*?model: resumeSessionId \? undefined : defaultModel,/)
+assert.match(panel, /agentDefaultModels: nextDefaultModels/)
+assert.match(panel, /\uc0c8 \uc138\uc158 \uae30\ubcf8\uac12:/)
+assert.match(panel, /resumeSessionId && !selectedModel \? '\uae30존 \uc138\uc158 \ubaa8\ub378 \uc720지'/)
+assert.match(panel, /const sessionModel = !model && resumeSessionId/)
 
 console.log('agent model display verification passed')

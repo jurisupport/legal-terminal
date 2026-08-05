@@ -76,6 +76,8 @@ export interface Settings {
   agentDefaultPermissionMode?: AgentPermissionMode
   /** 새 Agent Panel 기본 AI */
   agentDefaultProvider?: AgentProvider
+  /** AI별 새 Agent 세션 기본 모델 */
+  agentDefaultModels?: Partial<Record<AgentProvider, string>>
   /** 파일 탐색기 정렬 방식 */
   explorerSortMode?: string
   /** 원격 폴더 선택기 정렬 방식 */

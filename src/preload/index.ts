@@ -395,6 +395,7 @@ interface AppSettings {
   agentFontSize?: number
   agentDefaultPermissionMode?: AgentPermissionMode
   agentDefaultProvider?: AgentProvider
+  agentDefaultModels?: Partial<Record<AgentProvider, string>>
   explorerSortMode?: string
   remotePickerSortMode?: string
   remoteDirectoryCache?: boolean
