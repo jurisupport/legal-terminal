@@ -4084,14 +4084,19 @@ body {
   cursor: pointer;
 }
 .hearing-message-bubble {
+  width: 100%;
+  min-height: 34px;
   padding: 7px 9px;
   border: 1px solid rgba(255, 255, 255, 0.08);
   border-radius: 6px;
   color: #e2e2e2;
   background: #242424;
+  font: inherit;
   line-height: 1.48;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+  resize: vertical;
+  field-sizing: content;
 }
 .hearing-message.speaker-court .hearing-message-bubble {
   border-color: rgba(215, 186, 125, 0.32);

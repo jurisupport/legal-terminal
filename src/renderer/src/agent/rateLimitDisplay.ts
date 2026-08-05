@@ -24,6 +24,7 @@ export function percentText(value: number | undefined): string {
 export function rateLimitTypeLabel(value: string | undefined): string {
   if (value === 'five_hour') return '5시간 한도'
   if (value === 'seven_day') return '7일 한도'
+  if (value === 'seven_day_fable') return '7일 Fable'
   if (value === 'seven_day_opus') return '7일 Opus'
   if (value === 'seven_day_sonnet') return '7일 Sonnet'
   if (value === 'overage') return '초과 사용'

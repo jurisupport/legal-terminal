@@ -136,13 +136,35 @@ try {
   await shellPanel.waitFor({ state: 'visible', timeout: 2_000 })
   assert.ok(Date.now() - shellStart < 2_500, '기일 기록 꾸러미는 웹 상세 조회 전에 열려야 한다')
 
+  await shellPanel.locator('.hearing-template-btn', { hasText: '형사' }).click()
+  assert.match(
+    await shellPanel.locator('select[title="화자 선택"]').textContent(),
+    /검사/,
+    '형사 템플릿을 선택하면 형사 화자가 표시되어야 한다'
+  )
+  await page.locator('.activity-item[title="설정"]').click()
+  await page
+    .locator('[data-work-side="left"] button[title="문서를 오른쪽으로 이동"]')
+    .click()
+  await page.locator('[data-work-side="right"] .tab', { hasText: '기일기록' }).click()
+  assert.match(
+    await shellPanel.locator('select[title="화자 선택"]').textContent(),
+    /검사/,
+    '입력 전에 고른 템플릿은 다른 탭을 다녀와도 유지되어야 한다'
+  )
+  console.log('empty hearing template selection survives tab changes')
+
   const urgentMemo = '재판부가 석명을 요구함'
   await shellPanel.locator('.hearing-composer textarea').fill(urgentMemo)
   await shellPanel.locator('.hearing-composer .hearing-primary-btn', { hasText: '입력' }).click()
-  await shellPanel.locator('.hearing-message-bubble', { hasText: urgentMemo }).waitFor()
+  const entryTexts = shellPanel.locator('textarea[aria-label="진행 메모 수정"]')
+  await entryTexts.last().waitFor()
+  assert.equal(await entryTexts.last().inputValue(), urgentMemo)
   await page.waitForTimeout(4_500)
-  await shellPanel.locator('.hearing-message-bubble', { hasText: urgentMemo }).waitFor()
-  await shellPanel.locator('.hearing-message-bubble', { hasText: '기존 기록' }).waitFor()
+  assert.equal(await entryTexts.last().inputValue(), urgentMemo)
+  const savedEntryText = entryTexts.first()
+  await savedEntryText.waitFor()
+  assert.equal(await savedEntryText.inputValue(), '기존 기록')
   const writes = await app.evaluate(() => globalThis.__hearingWrites ?? [])
   assert.ok(
     writes.some((write) => String(write.content).includes(urgentMemo)),
@@ -150,7 +172,7 @@ try {
   )
   console.log('hearing shell opens before web detail and preserves urgent input')
 
-  const savedEntry = shellPanel.locator('.hearing-message', { hasText: '기존 기록' })
+  const savedEntry = savedEntryText.locator('..')
   await savedEntry.locator('select[aria-label="발화자 수정"]').selectOption('plaintiff')
   await page.waitForTimeout(1_100)
   await savedEntry.waitFor({ state: 'visible' })
@@ -163,6 +185,17 @@ try {
   assert.equal(savedSpeaker, 'plaintiff', '수정한 발화자는 기일기록에 저장되어야 한다')
   console.log('saved hearing entry speaker can be changed')
 
+  const revisedSavedMemo = '수정한 기존 기록'
+  await savedEntryText.fill(revisedSavedMemo)
+  await page.waitForTimeout(1_100)
+  const textWrites = await app.evaluate(() => globalThis.__hearingWrites ?? [])
+  const savedText = textWrites
+    .map((write) => JSON.parse(write.content))
+    .flatMap((record) => record.entries)
+    .findLast((entry) => entry.id === 'saved-entry')?.text
+  assert.equal(savedText, revisedSavedMemo, '수정한 진행 메모 본문은 기일기록에 저장되어야 한다')
+  console.log('saved hearing entry text can be changed')
+
   const composer = shellPanel.locator('.hearing-composer textarea')
   const submit = shellPanel.locator('.hearing-composer .hearing-primary-btn', { hasText: '입력' })
   for (let index = 1; index <= 16; index += 1) {
@@ -172,7 +205,7 @@ try {
   const latestMessage = shellPanel.locator('.hearing-message').last()
   await latestMessage.waitFor()
   await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))))
-  const scrollMetrics = await shellPanel.locator('.hearing-body').evaluate((body) => {
+  const latestScrollMetrics = () => shellPanel.locator('.hearing-body').evaluate((body) => {
     const message = body.querySelector('.hearing-message:last-child')
     if (!message) return null
     const bodyRect = body.getBoundingClientRect()
@@ -185,6 +218,7 @@ try {
       messageBottom: messageRect.bottom
     }
   })
+  const scrollMetrics = await latestScrollMetrics()
   assert.ok(
     scrollMetrics &&
       scrollMetrics.scrollTop > 0 &&
@@ -193,6 +227,20 @@ try {
     `새 발언이 쌓이면 기일기록 스크롤이 마지막 발언을 따라가야 한다: ${JSON.stringify(scrollMetrics)}`
   )
   console.log('hearing record follows the latest statement')
+
+  await shellPanel.locator('.hearing-body').evaluate((body) => body.scrollTo(0, 0))
+  await page.locator('[data-work-side="right"] .tab', { hasText: '설정' }).click()
+  await page.locator('[data-work-side="right"] .tab', { hasText: '기일기록' }).click()
+  await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))))
+  const restoredScrollMetrics = await latestScrollMetrics()
+  assert.ok(
+    restoredScrollMetrics &&
+      restoredScrollMetrics.scrollTop > 0 &&
+      restoredScrollMetrics.messageBottom <= restoredScrollMetrics.bodyBottom + 1 &&
+      restoredScrollMetrics.messageTop >= restoredScrollMetrics.bodyTop - 1,
+    `기일기록 탭에 돌아오면 마지막 발언이 보여야 한다: ${JSON.stringify(restoredScrollMetrics)}`
+  )
+  console.log('hearing record returns to the latest statement after tab changes')
 
   await page.locator('.activity-item[title*="새 사건 추가"]').click()
   await page.locator('.new-case-recent-row', { hasText: recent.name }).click()

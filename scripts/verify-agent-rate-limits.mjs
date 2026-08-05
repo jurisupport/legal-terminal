@@ -1,8 +1,11 @@
 import assert from 'node:assert/strict'
 import {
+  claudeUsageRateLimitType,
   shouldRefreshClaudeUsageSummaryForContextUsage,
   shouldRefreshClaudeUsageSummaryForRateLimit
 } from '../src/main/agent/agent-service.ts'
+
+assert.equal(claudeUsageRateLimitType('Week (Fable)'), 'seven_day_fable')
 
 assert.equal(
   shouldRefreshClaudeUsageSummaryForRateLimit(

@@ -1171,7 +1171,7 @@ function emptyTokenUsage(): AgentTokenUsage {
   }
 }
 
-const RATE_LIMIT_TYPE_ORDER = ['five_hour', 'seven_day', 'seven_day_opus', 'seven_day_sonnet', 'overage']
+const RATE_LIMIT_TYPE_ORDER = ['five_hour', 'seven_day', 'seven_day_fable', 'seven_day_opus', 'seven_day_sonnet', 'overage']
 
 function rateLimitTypeOrder(value: string | undefined): number {
   const index = value ? RATE_LIMIT_TYPE_ORDER.indexOf(value) : -1
@@ -1455,10 +1455,11 @@ function parseClaudeUsageResetTime(value: string | undefined): number | undefine
   return reset.getTime()
 }
 
-function claudeUsageRateLimitType(label: string): string | undefined {
+export function claudeUsageRateLimitType(label: string): string | undefined {
   const normalized = label.toLowerCase()
   if (normalized === 'session') return 'five_hour'
   if (normalized === 'week (all models)') return 'seven_day'
+  if (normalized.includes('fable')) return 'seven_day_fable'
   if (normalized.includes('sonnet')) return 'seven_day_sonnet'
   if (normalized.includes('opus')) return 'seven_day_opus'
   return undefined

@@ -596,7 +596,7 @@ const isRestorableDocKind = (value: unknown): value is DocTab['kind'] =>
   typeof value === 'string' && RESTORABLE_DOC_KINDS.has(value as DocTab['kind'])
 
 const normalizeDocKind = (kind: DocTab['kind'], path?: string): DocTab['kind'] =>
-  path && isHtmlPath(path) ? 'file' : path && docKindForPath(path) === 'mdview' ? 'mdview' : kind
+  path && docKindForPath(path) === 'mdview' ? 'mdview' : kind
 
 const isWorkspaceMode = (value: unknown): value is Mode =>
   value === 'explorer' || value === 'cases' || value === 'viewer' || value === 'todos'
@@ -6845,7 +6845,11 @@ export default function App(): JSX.Element {
     const activeDocForPane =
       activeParsed?.kind === 'doc' ? docs.find((t) => t.id === activeParsed.id) : undefined
     const mountedDocs = docs.filter(
-      (t) => t.id === activeDocForPane?.id || t.kind === 'mdview' || t.kind === 'markdown'
+      (t) =>
+        t.id === activeDocForPane?.id ||
+        t.kind === 'mdview' ||
+        t.kind === 'markdown' ||
+        t.kind === 'hearing'
     )
     const visibleTermId = activeParsed?.kind === 'terminal' ? activeParsed.id : ''
     const hasTerms = terms.length > 0
@@ -11603,6 +11607,7 @@ function WorkspacePicker({
       <div className="modal workspace-picker" onMouseDown={(e) => e.stopPropagation()}>
         <div className="modal-title">저장된 작업환경 가져오기</div>
         <input
+          autoFocus
           className="workspace-search"
           value={query}
           onChange={(e) => setQuery(e.target.value)}

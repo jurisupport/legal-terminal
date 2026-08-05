@@ -690,7 +690,9 @@ export default function HearingRecordPanel({
   }, [initialCase, initialHearing, initialPath])
 
   useEffect(() => {
-    if (visible) focusInput()
+    if (!visible) return
+    focusInput()
+    window.requestAnimationFrame(() => latestEntryRef.current?.scrollIntoView({ block: 'nearest' }))
   }, [focusInput, visible])
 
   useEffect(() => {
@@ -848,11 +850,11 @@ export default function HearingRecordPanel({
     focusInput()
   }
 
-  const updateEntrySpeaker = (entryId: string, speakerId: string): void => {
+  const updateEntry = (entryId: string, patch: Partial<HearingEntry>): void => {
     touch((current) => ({
       ...current,
       entries: current.entries.map((entry) =>
-        entry.id === entryId ? { ...entry, speakerId } : entry
+        entry.id === entryId ? { ...entry, ...patch } : entry
       )
     }))
   }
@@ -1349,7 +1351,9 @@ export default function HearingRecordPanel({
                       <select
                         aria-label="발화자 수정"
                         value={speaker?.id ?? ''}
-                        onChange={(event) => updateEntrySpeaker(entry.id, event.currentTarget.value)}
+                        onChange={(event) =>
+                          updateEntry(entry.id, { speakerId: event.currentTarget.value })
+                        }
                         disabled={speakers.length === 0}
                       >
                         {!speaker && <option value="">사전준비</option>}
@@ -1360,7 +1364,17 @@ export default function HearingRecordPanel({
                         ))}
                       </select>
                     </div>
-                    <div className="hearing-message-bubble">{entry.text}</div>
+                    <textarea
+                      className="hearing-message-bubble"
+                      aria-label="진행 메모 수정"
+                      value={entry.text}
+                      onChange={(event) =>
+                        updateEntry(entry.id, {
+                          text: event.currentTarget.value,
+                          important: event.currentTarget.value.startsWith('*')
+                        })
+                      }
+                    />
                   </div>
                 )
               })

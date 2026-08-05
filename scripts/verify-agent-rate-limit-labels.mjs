@@ -17,6 +17,10 @@ assert.equal(
   }),
   `5시간 한도 잔여 42% · ${reset}`
 )
+assert.equal(
+  rateLimitLabel({ rateLimitType: 'seven_day_fable', remainingPercent: 8, resetsAt, updatedAt: resetsAt }),
+  `7일 Fable 잔여 8% · ${reset}`
+)
 assert.equal(resetTimeText(undefined), undefined)
 assert.equal(rateLimitTone({ status: 'allowed', remainingPercent: 93, updatedAt: resetsAt }), '')
 assert.equal(rateLimitTone({ status: 'allowed_warning', updatedAt: resetsAt }), 'warn')

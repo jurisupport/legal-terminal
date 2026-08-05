@@ -48,7 +48,14 @@ try {
   assert.equal(await officeName.inputValue(), '법무법인/')
   assert.equal(await palette.count(), 0)
 
-  console.log('slash command palette opens, filters, runs, and leaves text inputs alone')
+  await page.locator('.activity-item[title*="저장된 작업환경 가져오기"]').click()
+  const workspaceSearch = page.locator('.workspace-search')
+  await workspaceSearch.waitFor()
+  assert.equal(await workspaceSearch.evaluate((input) => document.activeElement === input), true)
+  await page.keyboard.type('사건')
+  assert.equal(await workspaceSearch.inputValue(), '사건')
+
+  console.log('command and workspace searches accept keyboard input')
 } finally {
   await app.evaluate(({ app }) => app.exit(0)).catch(() => {})
   await app.close().catch(() => {})
