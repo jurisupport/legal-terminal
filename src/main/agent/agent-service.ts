@@ -1848,15 +1848,6 @@ function handleAssistantMessage(session: AgentSession, message: Record<string, u
     const name = stringValue(block.name) ?? 'tool'
     const input = asRecord(block.input) ?? {}
     if (isAskUserQuestionTool(name)) {
-      if (session.source === 'ssh') {
-        makeQuestionDialog(session, {
-          dialogId: toolId,
-          dialogKind: name,
-          payload: input,
-          toolUseId: toolId,
-          blocking: false
-        })
-      }
       continue
     }
     if (session.startedTools.has(toolId)) continue
@@ -1950,15 +1941,6 @@ function handleStreamEvent(session: AgentSession, message: Record<string, unknow
       const name = stringValue(block.name) ?? 'tool'
       const input = asRecord(block.input) ?? {}
       if (isAskUserQuestionTool(name)) {
-        if (session.source === 'ssh') {
-          makeQuestionDialog(session, {
-            dialogId: toolId,
-            dialogKind: name,
-            payload: input,
-            toolUseId: toolId,
-            blocking: false
-          })
-        }
         return
       }
       if (session.startedTools.has(toolId)) return
@@ -3385,6 +3367,21 @@ function handleRemoteControlRequest(session: AgentSession, messageValue: unknown
   const request = asRecord(record.request)
   if (!requestId || !request) return true
   if (request.subtype === 'can_use_tool') return handleRemotePermissionRequest(session, requestId, request)
+  if (request.subtype === 'request_user_dialog') {
+    const dialogKind = stringValue(request.dialog_kind)
+    const payload = asRecord(request.payload)
+    const signal = session.running?.signal
+    if (!dialogKind || !payload || !signal) {
+      writeRemoteControlResponse(session, requestId, { behavior: 'cancelled' })
+      return true
+    }
+    void requestUserDialog(
+      session,
+      { dialogKind, payload, toolUseID: stringValue(request.tool_use_id) },
+      signal
+    ).then((result) => writeRemoteControlResponse(session, requestId, result))
+    return true
+  }
   const errorMessage = `지원하지 않는 원격 control request: ${String(request.subtype ?? 'unknown')}`
   writeRemoteControlError(session, requestId, errorMessage)
   emit(session, {
