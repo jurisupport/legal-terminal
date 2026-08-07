@@ -7,6 +7,16 @@ const root = dirname(dirname(fileURLToPath(import.meta.url)))
 const app = readFileSync(join(root, 'src/renderer/src/App.tsx'), 'utf8')
 const css = readFileSync(join(root, 'src/renderer/src/styles.css'), 'utf8')
 const pdfViewer = readFileSync(join(root, 'src/renderer/src/viewer/PdfViewer.tsx'), 'utf8')
+const activateDocTab = app.slice(
+  app.indexOf('const activateDocTab ='),
+  app.indexOf('const openAgentDiff =')
+)
+
+assert.doesNotMatch(
+  activateDocTab,
+  /setActiveCaseTabId/,
+  'clicking an already visible PDF must not switch its case workspace'
+)
 
 assert.match(
   app,

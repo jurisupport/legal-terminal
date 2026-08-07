@@ -1,6 +1,6 @@
 {
   "name": "legal-terminal",
-  "version": "0.1.181",
+  "version": "0.1.182",
   "description": "대한민국 송무 변호사를 위한 AI 통합 작업환경 — Claude Code + 준비서면 에디터 + 전자소송기록 뷰어 + 사건 대시보드 + 원격(SSH) 작업",
   "main": "./out/main/index.js",
   "author": "lawpid",
@@ -21,6 +21,7 @@
     "verify:ssh-pool": "node --experimental-strip-types --no-warnings scripts/verify-ssh-connection-pool.mjs",
     "verify:case-sync": "node --experimental-strip-types --no-warnings scripts/verify-case-sync.mjs",
     "verify:drag-guard": "node --experimental-strip-types --no-warnings scripts/verify-drag-guard.mjs",
+    "verify:multi-download": "node scripts/verify-multi-download.mjs",
     "verify:agent-rate-limits": "node --experimental-strip-types --no-warnings scripts/verify-agent-rate-limits.mjs",
     "verify:agent-token-usage": "node --experimental-strip-types --no-warnings scripts/verify-agent-token-usage.mjs",
     "verify:agent-progress": "node --experimental-strip-types --no-warnings scripts/verify-agent-progress.mjs",
@@ -28,6 +29,7 @@
     "verify:agent-account-switch": "node scripts/verify-agent-account-switch.mjs",
     "verify:agent-case-context": "node --experimental-strip-types --no-warnings scripts/verify-agent-case-context.mjs",
     "verify:agent-quote": "node --experimental-strip-types --no-warnings scripts/verify-agent-quote.mjs",
+    "verify:agent-slash-autocomplete": "node --experimental-strip-types --no-warnings scripts/verify-agent-slash-autocomplete.mjs",
     "verify:ssh-options": "node --experimental-strip-types --no-warnings scripts/verify-ssh-options.mjs",
     "verify:agent-rate-limit-labels": "node --experimental-strip-types --no-warnings scripts/verify-agent-rate-limit-labels.mjs",
     "verify:terminal-status": "node --experimental-strip-types --no-warnings scripts/verify-terminal-status.mjs",

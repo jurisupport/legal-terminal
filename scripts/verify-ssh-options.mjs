@@ -19,6 +19,12 @@ const profile = { user: 'svc', host: 'macmini.example.local', port: 680, identit
 
 const oneshot = buildSshArgs(profile, { usage: 'oneshot' })
 const interactive = buildSshArgs(profile, { usage: 'interactive', tty: true, batchMode: false })
+const sharedInteractive = buildSshArgs(profile, {
+  usage: 'interactive',
+  tty: true,
+  batchMode: false,
+  controlMaster: true
+})
 
 assert.equal(oneshot.includes('-tt'), false)
 assert.equal(interactive.includes('-tt'), true)
@@ -35,6 +41,9 @@ assert.ok(interactive.includes('StrictHostKeyChecking=accept-new'))
 assert.ok(!interactive.includes('ControlMaster=auto'))
 assert.ok(!interactive.includes('ControlPersist=60'))
 assert.equal(getOption(interactive, 'ControlPath='), undefined)
+assert.ok(sharedInteractive.includes('ControlMaster=auto'))
+assert.ok(sharedInteractive.includes('ControlPersist=60'))
+assert.equal(getOption(sharedInteractive, 'ControlPath='), `ControlPath=${getControlPathForProfile(profile)}`)
 
 const controlPathArg = getOption(oneshot, 'ControlPath=')
 assert.ok(controlPathArg)

@@ -17,6 +17,7 @@ export interface SshArgsOptions {
   usage: SshUsage
   tty?: boolean
   batchMode?: boolean
+  controlMaster?: boolean
   connectTimeout?: number
   platform?: NodeJS.Platform
 }
@@ -59,7 +60,7 @@ export function buildSshArgs(profile: SshProfileLike, options: SshArgsOptions): 
   args.push('-o', `ServerAliveInterval=${SERVER_ALIVE_INTERVAL}`)
   args.push('-o', `ServerAliveCountMax=${SERVER_ALIVE_COUNT_MAX}`)
   args.push('-o', 'StrictHostKeyChecking=accept-new')
-  if (options.usage === 'oneshot') args.push(...withControlMasterArgs(profile, platform))
+  if (options.usage === 'oneshot' || options.controlMaster) args.push(...withControlMasterArgs(profile, platform))
   args.push(`${profile.user}@${profile.host}`)
   return args
 }

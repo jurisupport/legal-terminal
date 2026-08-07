@@ -14,5 +14,10 @@ assert.match(login, /call \$\{codexBin} logout/)
 assert.match(login, /codexProcess\?\.kill\(\)/)
 const remoteClaude = service.match(/function remoteClaudeAuthCommand[\s\S]*?\n}\n\nfunction remoteClaudeAuthStatusCommand/)?.[0] ?? ''
 assert.match(remoteClaude, /auth logout >\/dev\/null 2>&1 \|\| true/)
+assert.match(remoteClaude, /__LT_CLAUDE_AUTH_PID__/)
+assert.match(login, /controlMaster: true/)
+assert.match(service, /-O',\s*'forward'/)
+assert.match(service, /-O',\s*'cancel'/)
+assert.match(service, /remoteClaudeAuthPortCommand/)
 
 console.log('authenticated agents can start account switching')

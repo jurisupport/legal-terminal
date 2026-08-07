@@ -48,6 +48,7 @@ import { ToolRow, toolDisplayName, toolStepDisplay, type ProcessStep } from './T
 import { activeSubAgentCount } from './subAgentStatus'
 import { quoteAgentRequest, restoreTextSelection, selectionTextOffsets } from './quote'
 import { currentAgentModel } from './modelDisplay'
+import { replaceSlashToken, slashTokenAt } from './slashAutocomplete'
 import {
   invalidateSessionTranscript,
   loadSessionTranscript,
@@ -1849,6 +1850,7 @@ export default function AgentPanel({
   const [status, setStatus] = useState<AgentPanelStatus>('idle')
   const [error, setError] = useState('')
   const [slashIndex, setSlashIndex] = useState(0)
+  const [slashCaret, setSlashCaret] = useState(() => initialDraft?.input?.length ?? 0)
   const [runtimeSlashCommands, setRuntimeSlashCommands] = useState<SlashCommand[]>([])
   const [authActive, setAuthActive] = useState(false)
   const [authStatus, setAuthStatus] = useState<AgentAuthStatus>(usesAgentAuth ? 'checking' : 'unavailable')
@@ -1963,6 +1965,7 @@ export default function AgentPanel({
   }, [provider, ssh, usesAgentAuth])
 
   const focusPrompt = useCallback((position?: number): void => {
+    if (position !== undefined) setSlashCaret(position)
     window.requestAnimationFrame(() => {
       const textarea = textareaRef.current
       if (!textarea) return
@@ -2465,11 +2468,9 @@ export default function AgentPanel({
   const stopButtonTitle = escInterruptArmed
     ? `Esc ${Math.round(ESC_INTERRUPT_ARM_MS / 1000)}초 안에 한 번 더 누르면 중지됩니다`
     : '작업 중지'
-  const slashToken = useMemo(() => {
-    const trimmed = input.trimStart()
-    if (!/^\/[^\s]*$/.test(trimmed)) return ''
-    return trimmed.toLowerCase()
-  }, [input])
+  const slashState = useMemo(() => slashTokenAt(input, slashCaret), [input, slashCaret])
+  const slashToken = slashState?.token ?? ''
+  const slashAtInputStart = Boolean(slashState && !input.slice(0, slashState.start).trim())
   const allSlashCommands = useMemo(
     () =>
       mergeSlashCommands(
@@ -2586,6 +2587,7 @@ export default function AgentPanel({
 
   const updateMentionFromTextarea = useCallback((textarea: HTMLTextAreaElement): void => {
     const caret = textarea.selectionStart ?? textarea.value.length
+    setSlashCaret(caret)
     const token = mentionTokenAt(textarea.value, caret)
     setMentionState((current) => {
       if (!token) return current === null ? current : null
@@ -2596,15 +2598,17 @@ export default function AgentPanel({
 
   const applySlashCommand = (command: SlashCommand): void => {
     resetPromptHistoryCursor()
-    if (command.mode) setMode(command.mode)
-    const nextInput = `${command.name} `
-    setInput(nextInput)
+    if (command.mode && slashAtInputStart) setMode(command.mode)
+    const next = slashState
+      ? replaceSlashToken(input, slashState, command.name)
+      : { text: `${command.name} `, caret: command.name.length + 1 }
+    setInput(next.text)
     setError(
-      isTerminalOnlySlashCommand(command, provider)
+      slashAtInputStart && isTerminalOnlySlashCommand(command, provider)
         ? `${command.name}은 터미널 TUI 전용 명령입니다. 조작하려면 상단 터미널 버튼으로 터미널 모드에서 실행해 주세요.`
         : ''
     )
-    focusPrompt(nextInput.length)
+    focusPrompt(next.caret)
   }
 
   const attachmentForPath = useCallback(
@@ -4360,7 +4364,12 @@ export default function AgentPanel({
               setSlashIndex((current) => (current + direction + slashMatches.length) % slashMatches.length)
               return
             }
-            if (showSlashMenu && (e.key === 'Tab' || (e.key === 'Enter' && slashToken !== slashMatches[slashIndex]?.name))) {
+            if (
+              showSlashMenu &&
+              (e.key === 'Tab' ||
+                (e.key === 'Enter' &&
+                  (!slashAtInputStart || slashToken !== slashMatches[slashIndex]?.name)))
+            ) {
               e.preventDefault()
               const command = slashMatches[slashIndex]
               if (command) applySlashCommand(command)

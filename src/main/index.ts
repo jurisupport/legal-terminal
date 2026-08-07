@@ -1993,6 +1993,14 @@ async function downloadRemoteToLocalWithProgress(
   onProgress: (update: DownloadProgressUpdate) => void
 ): Promise<number> {
   const plan = await collectRemoteDownloadPlan(srcUri, destPath)
+  return downloadRemotePlanWithProgress(plan, destPath, onProgress)
+}
+
+async function downloadRemotePlanWithProgress(
+  plan: RemoteDownloadPlan,
+  destPath: string,
+  onProgress: (update: DownloadProgressUpdate) => void
+): Promise<number> {
   const totalFiles = plan.files.length
   onProgress({ phase: 'downloading', totalFiles, completedFiles: 0, destPath })
 
@@ -2345,8 +2353,60 @@ ipcMain.handle('fs:copyInto', async (_e, p: { destDir: string; srcPaths: string[
   return { copied }
 })
 
-ipcMain.handle('fs:download', async (event, source: string) => {
+ipcMain.handle('fs:download', async (event, input: string | string[]) => {
   if (!mainWindow) return { ok: false, error: '메인 창을 찾을 수 없습니다.' }
+  const sources = [
+    ...new Set(
+      (Array.isArray(input) ? input : [input]).filter(
+        (source): source is string => typeof source === 'string' && source.length > 0
+      )
+    )
+  ]
+  if (sources.length === 0) return { ok: false, error: '다운로드할 항목이 없습니다.' }
+  if (sources.length > 1) {
+    if (!sources.every(isRemote)) {
+      return { ok: false, error: '여러 항목 다운로드는 원격 파일과 폴더만 지원합니다.' }
+    }
+    const progressBase: DownloadProgressBase = {
+      id: createDownloadId(),
+      source: sources[0],
+      name: `선택한 ${sources.length}개 항목`,
+      isDir: true
+    }
+    try {
+      const defaultDownloadDir = await getDownloadDefaultDir()
+      const result = await dialog.showOpenDialog(mainWindow, {
+        title: '선택한 항목 다운로드 위치',
+        defaultPath: defaultDownloadDir,
+        properties: ['openDirectory', 'createDirectory']
+      })
+      if (result.canceled || result.filePaths.length === 0) return { ok: true, canceled: true }
+      const destDir = result.filePaths[0]
+      rememberDownloadDir(destDir)
+      sendDownloadProgress(event.sender, progressBase, { phase: 'preparing', destPath: destDir })
+      const plans = await Promise.all(
+        sources.map((source) => collectRemoteDownloadPlan(source, join(destDir, remoteBasename(source))))
+      )
+      const plan: RemoteDownloadPlan = {
+        dirs: [...new Set(plans.flatMap((item) => item.dirs))],
+        files: plans.flatMap((item) => item.files)
+      }
+      const count = await downloadRemotePlanWithProgress(plan, destDir, (update) =>
+        sendDownloadProgress(event.sender, progressBase, update)
+      )
+      sendDownloadProgress(event.sender, progressBase, {
+        phase: 'done',
+        totalFiles: count,
+        completedFiles: count,
+        destPath: destDir
+      })
+      return { ok: true, path: destDir, count }
+    } catch (error) {
+      sendDownloadProgress(event.sender, progressBase, { phase: 'error', error: String(error) })
+      return { ok: false, error: String(error) }
+    }
+  }
+  const source = sources[0]
   if (!isRemote(source)) {
     // 로컬 파일(자동 다운로드된 소송기록 캐시 등)은 '원하는 위치에 사본 저장'으로 동작한다.
     try {

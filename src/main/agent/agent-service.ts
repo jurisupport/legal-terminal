@@ -46,7 +46,11 @@ import type {
 } from './agent-types'
 import { prependAgentContext } from './agentPrompt'
 import { codexTurnRunStatus, codexWorkStepStatus } from './agentProgress'
-import { buildSshArgs as buildAgentSshArgs, type SshUsage } from '../sshOptions'
+import {
+  buildSshArgs as buildAgentSshArgs,
+  getControlPathForProfile,
+  type SshUsage
+} from '../sshOptions'
 
 export { codexTurnRunStatus, codexWorkStepStatus } from './agentProgress'
 
@@ -122,6 +126,10 @@ interface AgentSession {
   running?: AbortController
   remoteProcess?: ChildProcessWithoutNullStreams
   authProcess?: ChildProcessWithoutNullStreams
+  authCallbackForward?: string
+  authCallbackPreparing?: boolean
+  authRemotePid?: number
+  authStdoutBuffer?: string
   codexProcess?: ChildProcessWithoutNullStreams
   codexInitialized?: boolean
   codexThreadId?: string
@@ -184,6 +192,7 @@ interface SshArgsOptions {
   usage?: SshUsage
   batchMode?: boolean
   tty?: boolean
+  controlMaster?: boolean
   connectTimeout?: number
 }
 
@@ -368,9 +377,21 @@ function remoteClaudeAuthCommand(): string {
     'claude_bin=$(command -v claude 2>/dev/null || true)',
     'if [ -z "$claude_bin" ]; then echo "claude command not found on remote PATH" >&2; exit 127; fi',
     '"$claude_bin" auth logout >/dev/null 2>&1 || true',
+    'printf "__LT_CLAUDE_AUTH_PID__=%s\\n" "$$"',
     'exec "$claude_bin" auth login --claudeai'
   ].join('; ')
   return `exec $SHELL -ilc ${shq(inner)}`
+}
+
+function remoteClaudeAuthPortCommand(pid: number): string {
+  return [
+    `pid=${pid}`,
+    'if command -v lsof >/dev/null 2>&1; then',
+    `  lsof -nP -a -p "$pid" -iTCP -sTCP:LISTEN -Fn 2>/dev/null | sed -n 's/^n.*:\\([0-9][0-9]*\\)$/\\1/p' | head -n 1`,
+    'elif command -v ss >/dev/null 2>&1; then',
+    `  ss -ltnpH 2>/dev/null | awk -v pid="$pid" 'index($0, "pid=" pid ",") { count = split($4, parts, ":"); print parts[count]; exit }'`,
+    'fi'
+  ].join('\n')
 }
 
 function remoteClaudeAuthStatusCommand(): string {
@@ -429,8 +450,105 @@ function extractAuthCodes(value: string): string[] {
   return [...new Set(codes)]
 }
 
-function emitAuthOutput(session: AgentSession, chunk: Buffer | string): void {
-  const text = cleanProcessText(Buffer.isBuffer(chunk) ? chunk.toString('utf8') : chunk)
+function emitAuthUrls(session: AgentSession, urls: string[]): void {
+  if (!session.authProcess || urls.length === 0) return
+  emit(session, { type: 'auth:output', sessionId: session.id, text: '', urls })
+}
+
+function stopClaudeAuthCallbackForward(session: AgentSession): void {
+  const forward = session.authCallbackForward
+  session.authCallbackForward = undefined
+  session.authCallbackPreparing = false
+  if (!forward || !session.ssh || process.platform === 'win32') return
+  execFile(
+    sshBin,
+    [
+      '-S',
+      getControlPathForProfile(session.ssh),
+      '-O',
+      'cancel',
+      '-L',
+      forward,
+      `${session.ssh.user}@${session.ssh.host}`
+    ],
+    { windowsHide: true, timeout: 3_000, env: cleanEnv() },
+    () => {}
+  )
+}
+
+function openClaudeAuthUrls(session: AgentSession, urls: string[]): void {
+  if (
+    session.provider !== 'claude' ||
+    session.source !== 'ssh' ||
+    !session.ssh ||
+    !session.authRemotePid ||
+    process.platform === 'win32'
+  ) {
+    emitAuthUrls(session, urls)
+    return
+  }
+  if (session.authCallbackPreparing) return
+  session.authCallbackPreparing = true
+  const authProcess = session.authProcess
+  execFile(
+    sshBin,
+    [...sshArgs(session.ssh), remoteClaudeAuthPortCommand(session.authRemotePid)],
+    { windowsHide: true, timeout: 5_000, env: cleanEnv(), encoding: 'utf8' },
+    (portError, stdout) => {
+      if (!authProcess || session.authProcess !== authProcess) {
+        session.authCallbackPreparing = false
+        return
+      }
+      const port = Number(String(stdout).trim())
+      if (portError || !Number.isInteger(port) || port < 1 || port > 65_535) {
+        session.authCallbackPreparing = false
+        emitAuthUrls(session, urls)
+        return
+      }
+      const forward = `${port}:127.0.0.1:${port}`
+      execFile(
+        sshBin,
+        [
+          '-S',
+          getControlPathForProfile(session.ssh!),
+          '-O',
+          'forward',
+          '-L',
+          forward,
+          `${session.ssh!.user}@${session.ssh!.host}`
+        ],
+        { windowsHide: true, timeout: 5_000, env: cleanEnv() },
+        (forwardError) => {
+          session.authCallbackPreparing = false
+          if (!forwardError) session.authCallbackForward = forward
+          if (session.authProcess !== authProcess) {
+            stopClaudeAuthCallbackForward(session)
+            return
+          }
+          emitAuthUrls(session, urls)
+        }
+      )
+    }
+  )
+}
+
+function remoteClaudeAuthOutput(session: AgentSession, text: string): string {
+  if (session.authRemotePid || session.provider !== 'claude' || session.source !== 'ssh') return text
+  const combined = `${session.authStdoutBuffer ?? ''}${text}`
+  const match = combined.match(/(^|\n)__LT_CLAUDE_AUTH_PID__=(\d+)\n/)
+  if (!match || match.index === undefined) {
+    session.authStdoutBuffer = combined
+    return ''
+  }
+  session.authStdoutBuffer = undefined
+  session.authRemotePid = Number(match[2])
+  const markerStart = match.index + match[1].length
+  return combined.slice(0, markerStart) + combined.slice(match.index + match[0].length)
+}
+
+function emitAuthOutput(session: AgentSession, chunk: Buffer | string, parseRemotePid = false): void {
+  let text = cleanProcessText(Buffer.isBuffer(chunk) ? chunk.toString('utf8') : chunk)
+  if (parseRemotePid) text = remoteClaudeAuthOutput(session, text)
   if (!text.trim()) return
   const urls = extractUrls(text)
   const codes = extractAuthCodes(text)
@@ -438,9 +556,10 @@ function emitAuthOutput(session: AgentSession, chunk: Buffer | string): void {
     type: 'auth:output',
     sessionId: session.id,
     text,
-    urls: urls.length ? urls : undefined,
+    urls: urls.length && session.provider !== 'claude' ? urls : undefined,
     codes: codes.length ? codes : undefined
   })
+  if (urls.length && session.provider === 'claude') openClaudeAuthUrls(session, urls)
 }
 
 function emitAuthStatus(session: AgentSession, state: AgentAuthStatus, message?: string): void {
@@ -3466,20 +3585,29 @@ export function startAgentAuthLogin(sessionId: string): AgentCommandResult {
                 env: cleanEnv()
               })
     } else {
-      proc = spawn(sshBin, [...sshArgs(session.ssh!, { batchMode: false, tty: true }), remoteClaudeAuthCommand()], {
-        windowsHide: true,
-        env: cleanEnv()
-      })
+      proc = spawn(
+        sshBin,
+        [
+          ...sshArgs(session.ssh!, { batchMode: false, tty: true, controlMaster: true }),
+          remoteClaudeAuthCommand()
+        ],
+        {
+          windowsHide: true,
+          env: cleanEnv()
+        }
+      )
     }
   } catch (error) {
     return { ok: false, error: error instanceof Error ? sshErrorMessage(error) : String(error) }
   }
 
   session.authProcess = proc
+  session.authRemotePid = undefined
+  session.authStdoutBuffer = undefined
   emit(session, { type: 'auth:started', sessionId: session.id, source: session.source })
   emit(session, { type: 'status', sessionId: session.id, status: 'waiting_user' })
 
-  proc.stdout.on('data', (chunk: Buffer) => emitAuthOutput(session, chunk))
+  proc.stdout.on('data', (chunk: Buffer) => emitAuthOutput(session, chunk, true))
   proc.stderr.on('data', (chunk: Buffer) => emitAuthOutput(session, chunk))
   proc.stdin.on('error', () => {
     /* SSH or the auth CLI may close stdin after browser-based auth completes. */
@@ -3487,6 +3615,7 @@ export function startAgentAuthLogin(sessionId: string): AgentCommandResult {
   proc.on('error', (error) => {
     if (session.authProcess !== proc) return
     if (session.authProcess === proc) session.authProcess = undefined
+    stopClaudeAuthCallbackForward(session)
     const message = sshErrorMessage(error)
     emit(session, {
       type: 'auth:done',
@@ -3501,6 +3630,7 @@ export function startAgentAuthLogin(sessionId: string): AgentCommandResult {
   proc.on('close', (code) => {
     if (session.authProcess !== proc) return
     if (session.authProcess === proc) session.authProcess = undefined
+    stopClaudeAuthCallbackForward(session)
     const ok = code === 0
     emit(session, {
       type: 'auth:done',
@@ -4736,6 +4866,7 @@ export function interruptAgentSession(sessionId: string): AgentCommandResult {
   session.remoteProcess = undefined
   session.authProcess?.kill()
   session.authProcess = undefined
+  stopClaudeAuthCallbackForward(session)
   session.codexProcess?.kill()
   session.codexProcess = undefined
   session.codexActiveWork?.clear()
@@ -4764,6 +4895,7 @@ export function closeAgentSession(sessionId: string, webContents?: WebContents):
   session.remoteProcess = undefined
   session.authProcess?.kill()
   session.authProcess = undefined
+  stopClaudeAuthCallbackForward(session)
   session.codexProcess?.kill()
   session.codexProcess = undefined
   session.turnAssistantMessageId = undefined

@@ -1893,7 +1893,6 @@ export default function App(): JSX.Element {
   const activateDocTab = (id: string): void => {
     const tab = docTabs.find((t) => t.id === id)
     const caseTabIdValue = tab?.caseTabId ?? activeCaseTabId
-    if (tab?.caseTabId) setActiveCaseTabId(tab.caseTabId)
     clearCaseDocumentUpdates(caseTabIdValue)
     setActiveDoc(id)
     const side = docSide(tab)
@@ -4750,10 +4749,11 @@ export default function App(): JSX.Element {
   const onDropFiles = (files: FileList): void => {
     if (activeDraftsFolder) copyFilesTo(activeDraftsFolder, files)
   }
-  const downloadEntry = (path: string, _name: string, _isDir: boolean): void => {
-    if (!isRemotePath(path)) return
+  const downloadEntries = (paths: string[]): void => {
+    const remotePaths = paths.filter(isRemotePath)
+    if (!remotePaths.length) return
     window.lt.fs
-      .download(path)
+      .download(remotePaths)
       .then((r) => {
         if (!r.canceled && !r.ok) window.alert('다운로드 실패: ' + (r.error ?? '알 수 없는 오류'))
       })
@@ -6526,7 +6526,7 @@ export default function App(): JSX.Element {
       onRename={renameEntry}
       onDelete={deleteEntry}
       onPasteTo={pasteFilesTo}
-      onDownload={downloadEntry}
+      onDownload={downloadEntries}
       onSyncFile={sshProfiles.length > 0 ? openFileSync : undefined}
       onOpenWorkspaceFromFolder={openFolderInNewWorkspace}
       onGoParentFolder={goParentDraftsFolder}
@@ -8464,7 +8464,7 @@ function DocsPanel({
   onRename: (path: string, name: string) => void
   onDelete: (path: string, name: string, isDir: boolean) => void | Promise<void>
   onPasteTo: (dir: string) => void
-  onDownload: (path: string, name: string, isDir: boolean) => void
+  onDownload: (paths: string[]) => void
   onSyncFile?: (path: string, name: string) => void
   onOpenWorkspaceFromFolder: (path: string, name: string) => void
   onGoParentFolder: () => void

@@ -797,7 +797,7 @@ export interface LtApi {
     clipboardFiles: () => Promise<{ paths: string[]; formats: string[] }>
     saveClipboardImage: (data: Uint8Array, mimeType?: string) => Promise<{ path: string }>
     download: (
-      source: string
+      source: string | string[]
     ) => Promise<{ ok: boolean; path?: string; count?: number; canceled?: boolean; error?: string }>
     onDownloadProgress: (cb: (progress: FsDownloadProgress) => void) => () => void
     watch: (dir: string, cb: (event: FsWatchEvent) => void) => () => void

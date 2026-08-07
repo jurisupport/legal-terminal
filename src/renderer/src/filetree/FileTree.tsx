@@ -173,7 +173,7 @@ export default function FileTree({
   onRename?: (path: string, name: string) => void
   onDelete?: (path: string, name: string, isDir: boolean) => void | Promise<void>
   onPasteTo?: (dir: string) => void
-  onDownload?: (path: string, name: string, isDir: boolean) => void
+  onDownload?: (paths: string[]) => void
   onSyncFile?: (path: string, name: string) => void
   onOpenWorkspaceFromFolder?: (path: string, name: string) => void
   pendingCreate?: PendingCreateRequest | null
@@ -551,6 +551,7 @@ export default function FileTree({
   }
   const menuEntries = menu?.entries ?? (menu?.entry ? [menu.entry] : [])
   const singleMenuEntry = menuEntries.length === 1 ? menuEntries[0] : null
+  const downloadableEntries = menuEntries.filter((entry) => isRemotePath(entry.path))
 
   return (
     <ul
@@ -745,19 +746,21 @@ export default function FileTree({
             </li>
           )}
           {onDownload &&
-            ((singleMenuEntry && isRemotePath(singleMenuEntry.path)) || (!menu.entry && isRemotePath(root))) && (
+            ((downloadableEntries.length === menuEntries.length && menuEntries.length > 0) ||
+              (!menu.entry && isRemotePath(root))) && (
             <li
               className="ctx-item"
               onClick={() => {
-                const entry = singleMenuEntry
-                const path = entry?.path ?? root
-                const name = entry?.name ?? '현재 폴더'
-                const isDir = entry?.isDir ?? true
+                const paths = downloadableEntries.length
+                  ? downloadableEntries.map((entry) => entry.path)
+                  : [root]
                 setMenu(null)
-                onDownload(path, name, isDir)
+                onDownload(paths)
               }}
             >
-              다운로드
+              {downloadableEntries.length > 1
+                ? `다운로드 (${downloadableEntries.length}개)`
+                : '다운로드'}
             </li>
           )}
           {singleMenuEntry && !singleMenuEntry.isDir && onSyncFile && (

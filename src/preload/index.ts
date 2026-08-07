@@ -754,7 +754,7 @@ const api = {
     saveClipboardImage: (data: Uint8Array, mimeType?: string): Promise<{ path: string }> =>
       ipcRenderer.invoke('fs:saveClipboardImage', { data, mimeType }),
     download: (
-      source: string
+      source: string | string[]
     ): Promise<{ ok: boolean; path?: string; count?: number; canceled?: boolean; error?: string }> =>
       ipcRenderer.invoke('fs:download', source),
     onDownloadProgress: (cb: (progress: FsDownloadProgress) => void): (() => void) => {
