@@ -3,8 +3,9 @@ import { replaceSlashToken, slashTokenAt } from '../src/renderer/src/agent/slash
 
 assert.deepEqual(slashTokenAt('/rev', 4), { token: '/rev', start: 0, end: 4 })
 assert.deepEqual(slashTokenAt('검토 /rev', 7), { token: '/rev', start: 3, end: 7 })
+assert.deepEqual(slashTokenAt('검토/', 3), { token: '/', start: 2, end: 3 })
 assert.deepEqual(slashTokenAt('검토 /review 계속', 6), { token: '/re', start: 3, end: 10 })
-assert.equal(slashTokenAt('경로/foo', 6), null)
+assert.deepEqual(slashTokenAt('경로/foo', 6), { token: '/foo', start: 2, end: 6 })
 
 assert.deepEqual(
   replaceSlashToken('검토 /rev 계속', { token: '/rev', start: 3, end: 7 }, '/review'),

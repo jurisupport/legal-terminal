@@ -6,7 +6,7 @@ export interface SlashToken {
 
 export function slashTokenAt(text: string, caret: number): SlashToken | null {
   const position = Math.max(0, Math.min(caret, text.length))
-  const match = text.slice(0, position).match(/(?:^|\s)(\/[^\s/]*)$/)
+  const match = text.slice(0, position).match(/(\/[^\s/]*)$/)
   if (!match) return null
   const token = match[1]
   const rest = text.slice(position).match(/^[^\s]*/)?.[0] ?? ''
