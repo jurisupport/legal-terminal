@@ -14,4 +14,11 @@ assert.match(checking, /enqueueAgentMessage\(session, input,/)
 assert.match(checking, /return \{ ok: true \}/)
 assert.doesNotMatch(send, /로그인 상태를 확인 중입니다/)
 
-console.log('messages wait for the initial agent auth check')
+const interruptStart = service.indexOf('export function interruptAgentSession')
+const interruptEnd = service.indexOf('export function closeAgentSession', interruptStart)
+const interrupt = service.slice(interruptStart, interruptEnd)
+assert.match(interrupt, /const authProcess = session\.authProcess/)
+assert.match(interrupt, /if \(authProcess\) \{[\s\S]*?type: 'auth:done'/)
+assert.match(interrupt, /if \(authProcess\) refreshAgentAuthStatus\(session\)/)
+
+console.log('messages wait for auth checks and interrupted login releases the prompt')

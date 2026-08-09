@@ -4860,6 +4860,7 @@ export function answerAgentDialog(answer: AgentDialogAnswer): AgentCommandResult
 export function interruptAgentSession(sessionId: string): AgentCommandResult {
   const session = sessions.get(sessionId)
   if (!session) return { ok: false, error: 'Agent 세션을 찾을 수 없습니다.' }
+  const authProcess = session.authProcess
   clearAgentQueue(session)
   emitInterrupted(session)
   rejectPendingPermissions(session, '사용자가 Agent 작업을 중지했습니다.')
@@ -4867,8 +4868,17 @@ export function interruptAgentSession(sessionId: string): AgentCommandResult {
   session.running?.abort()
   session.remoteProcess?.kill()
   session.remoteProcess = undefined
-  session.authProcess?.kill()
+  authProcess?.kill()
   session.authProcess = undefined
+  if (authProcess) {
+    emit(session, {
+      type: 'auth:done',
+      sessionId,
+      ok: false,
+      exitCode: null,
+      message: `${session.provider === 'codex' ? 'Codex' : 'Claude'} 로그인이 중지되었습니다.`
+    })
+  }
   stopClaudeAuthCallbackForward(session)
   session.codexProcess?.kill()
   session.codexProcess = undefined
@@ -4877,6 +4887,7 @@ export function interruptAgentSession(sessionId: string): AgentCommandResult {
   session.turnAssistantMessageId = undefined
   session.activeAssistantMessageId = undefined
   emit(session, { type: 'status', sessionId, status: 'idle' })
+  if (authProcess) refreshAgentAuthStatus(session)
   return { ok: true }
 }
 
