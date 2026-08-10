@@ -1,5 +1,9 @@
 import assert from 'node:assert/strict'
+import { EditorState } from '@codemirror/state'
+import { markdown as markdownLanguage } from '@codemirror/lang-markdown'
+import { GFM } from '@lezer/markdown'
 import {
+  completeMarkdownSyntaxTree,
   LOOSE_OPEN_STRONG_RE,
   LOOSE_STRONG_RE,
   parseInlineMarkdown,
@@ -28,5 +32,22 @@ assert.equal(
   LOOSE_OPEN_STRONG_RE.exec('<br>**1. 수집 시점·맥락별 항목<br>')?.[2],
   '**1. 수집 시점·맥락별 항목'
 )
+
+const longMarkdown = `${Array.from({ length: 2500 }, (_, index) => `line ${index}`).join('\n')}
+
+| A | B |
+|---|---|
+| x | y |`
+const longState = EditorState.create({
+  doc: longMarkdown,
+  extensions: [markdownLanguage({ extensions: GFM })]
+})
+let foundTrailingTable = false
+completeMarkdownSyntaxTree(longState).iterate({
+  enter: (node) => {
+    if (node.name === 'Table') foundTrailingTable = true
+  }
+})
+assert.equal(foundTrailingTable, true)
 
 console.log('md compat ok')

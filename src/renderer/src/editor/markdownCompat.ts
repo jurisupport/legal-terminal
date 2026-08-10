@@ -1,4 +1,6 @@
 import { Marked, type Tokens } from 'marked'
+import { ensureSyntaxTree, syntaxTree } from '@codemirror/language'
+import type { EditorState } from '@codemirror/state'
 
 export const LOOSE_STRONG_RE = /(^|[^\\*])(\*\*(?=\S)((?:(?!\*\*)[^\n])*?\S)\*\*)(?=[\p{L}\p{N}_])/gu
 export const LOOSE_OPEN_STRONG_RE =
@@ -73,4 +75,8 @@ export function parseMarkdown(md: string): string {
 
 export function parseInlineMarkdown(md: string): string {
   return markdown.parseInline(md) as string
+}
+
+export function completeMarkdownSyntaxTree(state: EditorState) {
+  return ensureSyntaxTree(state, state.doc.length) ?? syntaxTree(state)
 }

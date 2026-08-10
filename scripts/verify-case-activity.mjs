@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import { buildCaseActivity, buildFolderActivity } from '../src/main/caseActivityData.ts'
 import { cleanUserInstruction, daysFromTranscriptContent, mergeWorkLog } from '../src/main/workLogData.ts'
 
@@ -240,6 +241,18 @@ function dateKey(ts) {
   })
   assert.deepEqual(out.c1.sessions.map((s) => s.sessionId), ['scan1'])
   assert.deepEqual(out.c2.sessions.map((s) => s.sessionId), ['scan2'])
+}
+
+// 11) 작업일지의 원격 세션은 로컬 사건 폴더가 아니라 기록된 SSH 프로필·cwd로 복원
+{
+  const app = readFileSync(new URL('../src/renderer/src/App.tsx', import.meta.url), 'utf8')
+  const start = app.indexOf('const resumeCaseSession')
+  const end = app.indexOf('const openHearingRecordForCase', start)
+  const resume = app.slice(start, end)
+  assert.match(resume, /if \(s\.profileId\)/)
+  assert.match(resume, /if \(!s\.cwd\)[\s\S]*return/)
+  assert.match(resume, /openCaseRemote\(c, profile, s\.cwd\)/)
+  assert.match(resume, /openPastSession\([\s\S]*opened\.source[\s\S]*return/)
 }
 
 console.log('case activity ok')

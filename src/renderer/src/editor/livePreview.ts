@@ -1,8 +1,12 @@
-import { syntaxTree } from '@codemirror/language'
 import { Decoration, type DecorationSet, EditorView, WidgetType } from '@codemirror/view'
 import { StateField, type EditorState, type Range } from '@codemirror/state'
 import DOMPurify from 'dompurify'
-import { LOOSE_OPEN_STRONG_RE, LOOSE_STRONG_RE, parseInlineMarkdown } from './markdownCompat'
+import {
+  completeMarkdownSyntaxTree,
+  LOOSE_OPEN_STRONG_RE,
+  LOOSE_STRONG_RE,
+  parseInlineMarkdown
+} from './markdownCompat'
 
 const strong = Decoration.mark({ class: 'cm-md-strong' })
 const emphasis = Decoration.mark({ class: 'cm-md-em' })
@@ -627,7 +631,7 @@ function build(state: EditorState): DecorationSet {
   try {
     addAlignDecorations(state, active, deco)
 
-    syntaxTree(state).iterate({
+    completeMarkdownSyntaxTree(state).iterate({
       enter: (node) => {
         const name = node.name
         const lineNo = state.doc.lineAt(node.from).number

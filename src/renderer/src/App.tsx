@@ -64,6 +64,14 @@ import HearingRecordPanel, {
 } from './hearing/HearingRecordPanel'
 import { cancelIfTerminalPointerDrag } from './dragGuard'
 import { closeTab } from './tabSelection'
+import {
+  pathBelongsToCaseFolder,
+  rankCaseFolders,
+  rebaseCaseFolderToRoot,
+  trustedCaseFolder,
+  type CaseFolderInfo,
+  type FolderMatchSuggestion
+} from './caseFolderMatch'
 import type {
   AppSettings,
   AgentAttachment,
@@ -371,13 +379,6 @@ interface TermTab {
 type WorkTabKind = 'doc' | 'terminal'
 type WorkTabKey = `${WorkTabKind}:${string}`
 type TermRunStatus = 'working' | 'done' | 'question'
-
-interface FolderMatchSuggestion {
-  path: string
-  name: string
-  reason: string
-  score: number
-}
 
 const docSide = (tab?: DocTab): DockSide => tab?.side ?? 'left'
 const termSide = (tab?: TermTab): DockSide => tab?.side ?? 'right'
@@ -916,6 +917,12 @@ const matchNorm = (value?: string | null): string =>
     .normalize('NFKC')
     .toLowerCase()
     .replace(/[\s_\-.,()[\]{}·]+/g, '')
+
+const caseFolderInfo = (c: Pick<JsCase, 'caseNumber' | 'caseName' | 'parties'>): CaseFolderInfo => ({
+  caseNumber: c.caseNumber,
+  caseName: c.caseName,
+  partyNames: c.parties.map((party) => party.party.name).filter(Boolean)
+})
 
 const fileNameFromPath = (path: string): string =>
   path.replace(/[\\/]+$/, '').split(/[\\/]/).pop() || path
@@ -2885,7 +2892,7 @@ export default function App(): JSX.Element {
     meta?: CaseMeta,
     records?: string,
     suggestions?: FolderMatchSuggestion[]
-  ): { id: string; title: string } => {
+  ): { id: string; title: string; source: CurrentCase } => {
     const title = name || remotePath.replace(/\/+$/, '').split('/').pop() || profile.label
     const draftsUri = remoteUri(profile.id, remotePath)
     const source: CurrentCase = {
@@ -2902,7 +2909,7 @@ export default function App(): JSX.Element {
     }
     const tab = openCaseContext(source)
     if (records) window.lt.case.setPairing(draftsUri, records)
-    return { id: tab.id, title }
+    return { id: tab.id, title, source }
   }
 
   const attachRemoteRecords = (
@@ -5240,6 +5247,17 @@ export default function App(): JSX.Element {
     return lines.join('\n')
   }
 
+  const confirmCaseFileScope = (term: TermTab | undefined, path: string, label?: string): boolean => {
+    if (!term?.jsId) return true
+    if (
+      pathBelongsToCaseFolder(path, term.cwd) ||
+      (!!term.recordsFolder && pathBelongsToCaseFolder(path, term.recordsFolder))
+    ) return true
+    return window.confirm(
+      `「${label || fileNameFromPath(path)}」은 현재 사건의 작성서류·소송기록 폴더 밖에 있습니다. 다른 사건 자료일 수 있습니다. 그래도 이 Agent에 첨부할까요?`
+    )
+  }
+
   const claudeSelectionContextDir = (docPath?: string): string | undefined => {
     const target = activeTermTab ?? sessionCaseSource
     if (target?.ssh && target.profileId) return remoteUri(target.profileId, target.cwd)
@@ -5291,6 +5309,7 @@ export default function App(): JSX.Element {
   // 파일 1개를 "물어보기" 형태로 전송 (경로 포함 → claude가 실제 파일을 읽음).
   const askAboutFile = (termId: string, path: string, label: string): void => {
     const term = termTabs.find((t) => t.id === termId)
+    if (!confirmCaseFileScope(term, path, label)) return
     void buildFreshFilePrompt(path, label, term).then((prompt) => {
       if (isAgentTab(term)) void window.lt.agent.send(termId, { text: `${prompt}위 파일에 대해 ` })
       else pasteToTerm(termId, `${prompt}위 파일에 대해 `)
@@ -5342,6 +5361,7 @@ export default function App(): JSX.Element {
       const t = text.trim()
       const promptTarget =
         resolveClaudeAgentTargetTab(visibleTermTabs, activeTerm, activeWork) ?? activeTermTab ?? sessionCaseSource
+      if (docPath && !confirmCaseFileScope(promptTarget, docPath, sourceLabel)) return
       const selectionSource =
         t && opts?.selectionSource
           ? {
@@ -5990,42 +6010,25 @@ export default function App(): JSX.Element {
   const matchCaseFolders = async (root: string, c: JsCase): Promise<FolderMatchSuggestion[]> => {
     try {
       const list = await window.lt.fs.list(root)
-      const dirs = list.filter((e) => e.isDir)
-      const candidates = new Map<string, FolderMatchSuggestion>()
-      const put = (path: string, name: string, reason: string, score: number): void => {
-        const prev = candidates.get(path)
-        if (!prev || score > prev.score) candidates.set(path, { path, name, reason, score })
-      }
-      if (c.caseNumber) {
-        const no = matchNorm(c.caseNumber)
-        for (const d of dirs) {
-          const dn = matchNorm(d.name)
-          if (dn.includes(no)) put(d.path, d.name, '사건번호 일치', dn === no ? 120 : 100)
-        }
-      }
-      const caseNameKey = matchNorm(c.caseName)
-      if (caseNameKey.length >= 2) {
-        for (const d of dirs) {
-          if (matchNorm(d.name).includes(caseNameKey)) put(d.path, d.name, '사건명 일치', 80)
-        }
-      }
-      const partyKeys = c.parties
-        .map((p) => p.party.name)
-        .filter(Boolean)
-        .map((s) => matchNorm(s as string))
-        .filter((s) => s.length >= 2)
-      for (const d of dirs) {
-        const dn = matchNorm(d.name)
-        if (partyKeys.some((k) => dn.includes(k))) put(d.path, d.name, '당사자명 일치', 60)
-      }
-      return [...candidates.values()].sort((a, b) => b.score - a.score || a.name.localeCompare(b.name))
+      return rankCaseFolders(
+        list.filter((entry) => entry.isDir),
+        caseFolderInfo(c)
+      )
     } catch {
       return []
     }
   }
 
   const matchCaseFolder = async (root: string, c: JsCase): Promise<string | undefined> =>
-    (await matchCaseFolders(root, c))[0]?.path
+    trustedCaseFolder(await matchCaseFolders(root, c), caseFolderInfo(c))
+
+  const canonicalLocalDrafts = async (folder: string): Promise<string> => {
+    if (!draftsRoot) return folder
+    const candidate = rebaseCaseFolderToRoot(folder, draftsRoot)
+    if (candidate === folder) return folder
+    const result = await window.lt.fs.stat(candidate).catch(() => null)
+    return result?.ok && result.isDir ? candidate : folder
+  }
 
   // 좌클릭: 사건 작업환경 열기 (폴더 매칭 → 없으면 직접 지정 → 사건 컨텍스트 연결)
   const openCaseWorkspace = async (
@@ -6037,10 +6040,13 @@ export default function App(): JSX.Element {
     setMode('explorer')
     if (!detailLoaded) c = await loadCaseDetail(c)
     const saved = c.id ? await window.lt.case.getJsPairing(c.id) : undefined
-    let drafts = saved?.drafts
+    let drafts = saved?.drafts ? await canonicalLocalDrafts(saved.drafts) : undefined
     let records = saved?.records
     let recordSuggestions: FolderMatchSuggestion[] = []
-    if (!drafts && draftsRoot) drafts = await matchCaseFolder(draftsRoot, c)
+    if (draftsRoot) {
+      const matched = await matchCaseFolder(draftsRoot, c)
+      if (!drafts || (matched && !pathBelongsToCaseFolder(drafts, matched))) drafts = matched ?? drafts
+    }
     if (!records && recordsRoot) {
       const resolved = resolveFolderMatch(await matchCaseFolders(recordsRoot, c))
       records = resolved.records
@@ -6053,7 +6059,7 @@ export default function App(): JSX.Element {
         defaultPath: draftsRoot
       })
       if (!picked) return null
-      drafts = picked.path
+      drafts = await canonicalLocalDrafts(picked.path)
     }
     if (c.id) await window.lt.case.setJsPairing(c.id, drafts, records)
     const suggested = records ? undefined : recordSuggestions[0]?.path
@@ -6089,7 +6095,7 @@ export default function App(): JSX.Element {
       name,
       meta
     }
-    const existing = termTabs.find((t) => t.cwd === drafts || (t.jsId && t.jsId === c.id))
+    const existing = termTabs.find((t) => !t.ssh && t.cwd === drafts)
     let term: TermTab | undefined
     let termId: string | undefined
     if (existing) {
@@ -6125,6 +6131,21 @@ export default function App(): JSX.Element {
 
   // 대시보드 작업 이력에서 과거 세션 이어하기: 사건 작업환경을 연 뒤 그 세션을 복원한다.
   const resumeCaseSession = async (c: JsCase, s: CaseSessionSummary): Promise<void> => {
+    if (s.profileId) {
+      if (!s.cwd) {
+        window.alert('원격 세션의 작업 폴더 정보가 없어 이어서 열 수 없습니다.')
+        return
+      }
+      const profile = sshProfiles.find((p) => p.id === s.profileId)
+      if (!profile) {
+        window.alert('이 세션에 연결된 SSH 프로필을 찾을 수 없습니다. 설정에서 SSH 프로필을 확인하세요.')
+        return
+      }
+      const opened = await openCaseRemote(c, profile, s.cwd)
+      if (!opened) return
+      openPastSession(s.sessionId, s.cwd, s.title, undefined, undefined, opened.source)
+      return
+    }
     const opened = await openCaseWorkspace(c)
     if (!opened) return
     openPastSession(s.sessionId, s.cwd ?? opened.drafts, s.title, opened.term, undefined, opened)
@@ -6209,7 +6230,11 @@ export default function App(): JSX.Element {
     meta: CaseMeta
     caseData: JsCase
   } | null>(null)
-  const openCaseRemote = async (c: JsCase, profile: SshProfile): Promise<void> => {
+  const openCaseRemote = async (
+    c: JsCase,
+    profile: SshProfile,
+    remotePath?: string
+  ): Promise<{ id: string; title: string; source: CurrentCase } | undefined> => {
     // 사건 선택 즉시 탐색기로 전환 — 상세 조회·원격 폴더 매칭(SSH)이 끝날 때까지 대시보드에 머물지 않는다
     setMode('explorer')
     c = await loadCaseDetail(c)
@@ -6236,13 +6261,18 @@ export default function App(): JSX.Element {
       partyNames: partyNames || undefined,
       memo: c.memo?.trim() || undefined
     }
+    if (remotePath) {
+      const opened = openRemoteCaseContext(profile, remotePath, name, meta)
+      resolveRemoteRecordsLater(opened.id, profile, remotePath, opened.title, c)
+      return opened
+    }
     const saved = c.id ? await window.lt.case.getJsPairing(remoteJsPairingKey(profile.id, c.id)) : undefined
     const savedRemote = saved?.drafts ? parseRemoteUri(saved.drafts) : null
     const savedRecords = saved?.records
     if (savedRemote?.profileId === profile.id) {
       const opened = openRemoteCaseContext(profile, savedRemote.path, name, meta, savedRecords)
       if (!savedRecords) resolveRemoteRecordsLater(opened.id, profile, savedRemote.path, opened.title, c)
-      return
+      return opened
     }
     // 원격 작성서류 루트에서 폴더명(사건번호/당사자) 자동 매칭
     let matchedUri: string | undefined
@@ -6255,6 +6285,7 @@ export default function App(): JSX.Element {
       if (c.id) await window.lt.case.setJsPairing(remoteJsPairingKey(profile.id, c.id), matchedUri)
       // 소송기록 매칭은 사건 컨텍스트를 먼저 띄운 뒤 비동기로 붙인다.
       resolveRemoteRecordsLater(opened.id, profile, remotePath, opened.title, c)
+      return opened
     } else {
       // 작성서류 매칭 실패 → 폴더 선택기로 직접 지정 (소송기록은 picker onPick에서 resolve)
       setRemoteCasePick({ profile, name, meta, caseData: c })
@@ -9550,7 +9581,7 @@ function SessionList({
                 {group !== prevGroup && <li className="sl-daysep">{group}</li>}
                 <li
                   className="sl-row past"
-                  onClick={() => onResume(p.sessionId, filterCwd, p.title, filterSource)}
+                  onClick={() => onResume(p.sessionId, p.cwd ?? filterCwd, p.title, filterSource)}
                   title={`${p.sessionId}\n${p.cwd ?? filterCwd}\nclaude --resume 로 이어서 열기`}
                 >
                   <span className="sl-name">{name}</span>
