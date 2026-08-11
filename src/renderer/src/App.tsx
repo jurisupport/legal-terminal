@@ -3194,7 +3194,8 @@ export default function App(): JSX.Element {
     title?: string,
     source?: TermTab,
     side: DockSide = termSide(source),
-    fallbackCase?: OpenedCase // 대시보드에서 방금 연 사건 — currentCase state가 아직 갱신 전일 수 있다
+    fallbackCase?: OpenedCase, // 대시보드에서 방금 연 사건 — currentCase state가 아직 갱신 전일 수 있다
+    forceNew = false
   ): void => {
     const matchesCwd = (c?: CurrentCase | null): boolean =>
       !!c && (c.drafts === cwd || c.remotePath === cwd)
@@ -3207,6 +3208,19 @@ export default function App(): JSX.Element {
     const ssh = source?.ssh ?? base?.ssh
     const sshLabel = source?.sshLabel ?? base?.sshLabel
     const profileId = source?.profileId ?? base?.profileId
+    const existing = !forceNew
+      ? termTabs.find(
+          (t) =>
+            isAgentTab(t) &&
+            t.resumeSessionId === sessionId &&
+            t.cwd === cwd &&
+            t.profileId === profileId
+        )
+      : undefined
+    if (existing) {
+      selectTerm(existing.id)
+      return
+    }
     const tab: TermTab = {
       id: newId(),
       title: title ? title : base?.name ?? cwd.split(/[\\/]/).pop() ?? '세션',
@@ -6129,26 +6143,72 @@ export default function App(): JSX.Element {
     await pickRecords({ term: opened.term, termId: opened.termId, source: opened })
   }
 
+  const findSshProfile = async (profileId: string): Promise<SshProfile | undefined> => {
+    const cached = sshProfiles.find((profile) => profile.id === profileId)
+    if (cached) return cached
+    try {
+      const profiles = (await window.lt.settings.get()).sshProfiles ?? []
+      setSshProfiles(profiles)
+      return profiles.find((profile) => profile.id === profileId)
+    } catch {
+      return undefined
+    }
+  }
+
   // 대시보드 작업 이력에서 과거 세션 이어하기: 사건 작업환경을 연 뒤 그 세션을 복원한다.
-  const resumeCaseSession = async (c: JsCase, s: CaseSessionSummary): Promise<void> => {
+  const resumeCaseSession = async (
+    c: JsCase,
+    s: CaseSessionSummary,
+    forceNew = false
+  ): Promise<void> => {
     if (s.profileId) {
       if (!s.cwd) {
         window.alert('원격 세션의 작업 폴더 정보가 없어 이어서 열 수 없습니다.')
         return
       }
-      const profile = sshProfiles.find((p) => p.id === s.profileId)
+      const profile = await findSshProfile(s.profileId)
       if (!profile) {
         window.alert('이 세션에 연결된 SSH 프로필을 찾을 수 없습니다. 설정에서 SSH 프로필을 확인하세요.')
         return
       }
       const opened = await openCaseRemote(c, profile, s.cwd)
       if (!opened) return
-      openPastSession(s.sessionId, s.cwd, s.title, undefined, undefined, opened.source)
+      openPastSession(s.sessionId, s.cwd, s.title, undefined, undefined, opened.source, forceNew)
       return
     }
     const opened = await openCaseWorkspace(c)
     if (!opened) return
-    openPastSession(s.sessionId, s.cwd ?? opened.drafts, s.title, opened.term, undefined, opened)
+    openPastSession(
+      s.sessionId,
+      s.cwd ?? opened.drafts,
+      s.title,
+      opened.term,
+      undefined,
+      opened,
+      forceNew
+    )
+  }
+
+  const resumePathSession = async (
+    sessionId: string,
+    cwd: string,
+    title?: string,
+    profileId?: string,
+    forceNew = false
+  ): Promise<void> => {
+    setMode('explorer')
+    if (!profileId) {
+      openPastSession(sessionId, cwd, title, undefined, undefined, undefined, forceNew)
+      return
+    }
+    const profile = await findSshProfile(profileId)
+    if (!profile) {
+      window.alert('이 세션에 연결된 SSH 프로필을 찾을 수 없습니다. 설정에서 SSH 프로필을 확인하세요.')
+      return
+    }
+    const opened = openRemoteCaseContext(profile, cwd, title)
+    resolveRemoteRecordsLater(opened.id, profile, cwd, opened.title)
+    openPastSession(sessionId, cwd, title, undefined, undefined, opened.source, forceNew)
   }
 
   const openHearingRecordForCase = async (c: JsCase): Promise<void> => {
@@ -6800,12 +6860,10 @@ export default function App(): JSX.Element {
             onPickRecords={pickRecordsForCase}
             onBrief={briefCaseToClaude}
             onHearingRecord={(c) => void openHearingRecordForCase(c)}
-            onResumeSession={(c, s) => void resumeCaseSession(c, s)}
-            onResumePath={(sessionId, cwd, title) => {
-              // 대시보드에서 폴더 세션을 이어 열 때도 탐색기 화면으로 전환
-              setMode('explorer')
-              openPastSession(sessionId, cwd, title)
-            }}
+            onResumeSession={(c, s, newTab) => void resumeCaseSession(c, s, newTab)}
+            onResumePath={(sessionId, cwd, title, profileId, newTab) =>
+              void resumePathSession(sessionId, cwd, title, profileId, newTab)
+            }
             onChanged={() => setJsNonce((n) => n + 1)}
           />
         </div>

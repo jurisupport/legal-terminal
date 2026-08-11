@@ -246,6 +246,14 @@ function dateKey(ts) {
 // 11) 작업일지의 원격 세션은 로컬 사건 폴더가 아니라 기록된 SSH 프로필·cwd로 복원
 {
   const app = readFileSync(new URL('../src/renderer/src/App.tsx', import.meta.url), 'utf8')
+  const dashboard = readFileSync(
+    new URL('../src/renderer/src/dashboard/CasesDashboard.tsx', import.meta.url),
+    'utf8'
+  )
+  const workLog = readFileSync(
+    new URL('../src/renderer/src/dashboard/WorkLogView.tsx', import.meta.url),
+    'utf8'
+  )
   const start = app.indexOf('const resumeCaseSession')
   const end = app.indexOf('const openHearingRecordForCase', start)
   const resume = app.slice(start, end)
@@ -253,6 +261,18 @@ function dateKey(ts) {
   assert.match(resume, /if \(!s\.cwd\)[\s\S]*return/)
   assert.match(resume, /openCaseRemote\(c, profile, s\.cwd\)/)
   assert.match(resume, /openPastSession\([\s\S]*opened\.source[\s\S]*return/)
+  assert.doesNotMatch(dashboard, /onResumePath && e\.cwd && !e\.profileId/)
+  assert.match(dashboard, /onResumePath\(e\.sessionId, e\.cwd, e\.title, e\.profileId, options\?\.newTab\)/)
+  assert.match(workLog, /event\.ctrlKey \|\| event\.metaKey/)
+  assert.match(workLog, /onContextMenu=/)
+  assert.match(workLog, /새 탭으로 열기/)
+
+  const openStart = app.indexOf('const openPastSession')
+  const openEnd = app.indexOf('const addTermSame', openStart)
+  const open = app.slice(openStart, openEnd)
+  assert.match(open, /forceNew = false/)
+  assert.match(open, /const existing = !forceNew/)
+  assert.match(open, /t\.resumeSessionId === sessionId/)
 }
 
 console.log('case activity ok')

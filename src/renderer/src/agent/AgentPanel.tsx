@@ -4329,8 +4329,7 @@ export default function AgentPanel({
           <textarea
           ref={textareaRef}
           value={input}
-          disabled={authActive}
-          placeholder={authActive ? `${agentLabel} 로그인 진행 중` : `${agentLabel}에게 요청 · @로 파일 첨부, /로 명령`}
+          placeholder={authActive ? `${agentLabel} 로그인 진행 중 · 입력은 미리 작성할 수 있습니다` : `${agentLabel}에게 요청 · @로 파일 첨부, /로 명령`}
           onChange={(e) => {
             setInput(e.target.value)
             updateMentionFromTextarea(e.currentTarget)

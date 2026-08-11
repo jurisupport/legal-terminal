@@ -83,8 +83,14 @@ export default function CasesDashboard({
   onPickRecords?: (c: JsCase) => void | Promise<void>
   onBrief: (c: JsCase) => void
   onHearingRecord?: (c: JsCase) => void
-  onResumeSession?: (c: JsCase, s: CaseSessionSummary) => void
-  onResumePath?: (sessionId: string, cwd: string, title?: string) => void
+  onResumeSession?: (c: JsCase, s: CaseSessionSummary, newTab?: boolean) => void
+  onResumePath?: (
+    sessionId: string,
+    cwd: string,
+    title?: string,
+    profileId?: string,
+    newTab?: boolean
+  ) => void
   onChanged?: () => void
 }): JSX.Element {
   const [tokenReady, setTokenReady] = useState<boolean | null>(null)
@@ -219,23 +225,28 @@ export default function CasesDashboard({
 
   // 작업일지 행 클릭 → 사건번호(없으면 사건명)로 사건을 찾아 이어하기, 사건이 없으면 폴더째 이어하기
   const norm = (v?: string | null): string => (v ?? '').normalize('NFKC').toLowerCase().replace(/\s+/g, '')
-  const resumeFromWorkLog = (e: WorkLogItem): void => {
+  const resumeFromWorkLog = (e: WorkLogItem, options?: { newTab?: boolean }): void => {
     const target = (cases ?? []).find(
       (c) =>
         (e.caseNumber && norm(c.caseNumber) === norm(e.caseNumber)) ||
         (!e.caseNumber && e.caseName && norm(c.caseName) === norm(e.caseName))
     )
     if (target && onResumeSession) {
-      onResumeSession(target, {
-        sessionId: e.sessionId,
-        title: e.title,
-        mtime: e.lastTs,
-        cwd: e.cwd,
-        profileId: e.profileId,
-        sshLabel: e.sshLabel,
-        workSummary: e.workSummary
-      })
-    } else if (onResumePath && e.cwd && !e.profileId) onResumePath(e.sessionId, e.cwd, e.title)
+      onResumeSession(
+        target,
+        {
+          sessionId: e.sessionId,
+          title: e.title,
+          mtime: e.lastTs,
+          cwd: e.cwd,
+          profileId: e.profileId,
+          sshLabel: e.sshLabel,
+          workSummary: e.workSummary
+        },
+        options?.newTab
+      )
+    } else if (onResumePath && e.cwd)
+      onResumePath(e.sessionId, e.cwd, e.title, e.profileId, options?.newTab)
   }
 
   // ── 토큰 미설정: 연결 + 가입 유도 ──

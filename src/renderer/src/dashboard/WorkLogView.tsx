@@ -34,12 +34,13 @@ function caseLabel(e: WorkLogItem): string {
 export default function WorkLogView({
   onResume
 }: {
-  onResume?: (e: WorkLogItem) => void
+  onResume?: (e: WorkLogItem, options?: { newTab?: boolean }) => void
 }): JSX.Element {
   const [daysData, setDaysData] = useState<WorkLogDay[] | null>(null)
   const [failed, setFailed] = useState(false)
   const [windowDays, setWindowDays] = useState(WORK_LOG_DAYS)
   const [extending, setExtending] = useState(false)
+  const [menu, setMenu] = useState<{ x: number; y: number; item: WorkLogItem } | null>(null)
 
   useEffect(() => {
     let alive = true
@@ -60,6 +61,17 @@ export default function WorkLogView({
     }
   }, [windowDays])
 
+  useEffect(() => {
+    if (!menu) return
+    const close = (): void => setMenu(null)
+    document.addEventListener('mousedown', close)
+    window.addEventListener('scroll', close, true)
+    return () => {
+      document.removeEventListener('mousedown', close)
+      window.removeEventListener('scroll', close, true)
+    }
+  }, [menu])
+
   return (
     <div className="worklog">
       {failed && <p className="muted pad">작업일지를 불러오지 못했습니다.</p>}
@@ -77,8 +89,14 @@ export default function WorkLogView({
             <div
               key={`${e.sessionId}-${day.date}`}
               className={`wl-row${onResume ? ' clickable' : ''}`}
-              title={onResume ? '클릭 → 이 세션 이어서 열기' : undefined}
-              onClick={() => onResume?.(e)}
+              title={onResume ? '클릭 → 열기 · Control/Command 클릭 또는 우클릭 → 새 탭' : undefined}
+              onClick={(event) => onResume?.(e, { newTab: event.ctrlKey || event.metaKey })}
+              onContextMenu={(event) => {
+                if (!onResume) return
+                event.preventDefault()
+                event.stopPropagation()
+                setMenu({ x: event.clientX, y: event.clientY, item: e })
+              }}
             >
               <span className="wl-time">{timeLabel(e.lastTs)}</span>
               <div className="wl-main">
@@ -107,6 +125,26 @@ export default function WorkLogView({
         >
           {extending ? '불러오는 중…' : '이전 30일 더 보기'}
         </button>
+      )}
+      {menu && (
+        <ul
+          className="ctx-menu"
+          style={{
+            left: Math.min(menu.x, window.innerWidth - 220),
+            top: Math.min(menu.y, window.innerHeight - 60)
+          }}
+          onMouseDown={(event) => event.stopPropagation()}
+        >
+          <li
+            className="ctx-item"
+            onClick={() => {
+              onResume?.(menu.item, { newTab: true })
+              setMenu(null)
+            }}
+          >
+            새 탭으로 열기
+          </li>
+        </ul>
       )}
     </div>
   )
