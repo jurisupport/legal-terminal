@@ -65,6 +65,13 @@ import HearingRecordPanel, {
 import { cancelIfTerminalPointerDrag } from './dragGuard'
 import { closeTab } from './tabSelection'
 import {
+  normalizeRemoteQuickStartPaths,
+  remoteQuickStartInputToPaths,
+  remoteQuickStartInputValue,
+  remoteStartPointKey,
+  toggleRemoteQuickStartPath
+} from './remoteQuickStart'
+import {
   pathBelongsToCaseFolder,
   rankCaseFolders,
   rebaseCaseFolderToRoot,
@@ -644,28 +651,6 @@ const parentLocalPath = (path: string): string | undefined => {
   if (/^[A-Za-z]:$/.test(parent)) return `${parent}${clean[slash]}`
   return parent
 }
-
-const remoteStartPointKey = (path: string): string => path.trim().replace(/\/+$/, '') || '/'
-
-const normalizeRemoteQuickStartPaths = (paths: Array<string | undefined> = []): string[] => {
-  const seen = new Set<string>()
-  const out: string[] = []
-  for (const path of paths) {
-    const trimmed = path?.trim()
-    if (!trimmed) continue
-    const key = remoteStartPointKey(trimmed)
-    if (seen.has(key)) continue
-    seen.add(key)
-    out.push(trimmed)
-  }
-  return out
-}
-
-const remoteQuickStartInputValue = (paths?: string[]): string =>
-  normalizeRemoteQuickStartPaths(paths).join('\n')
-
-const remoteQuickStartInputToPaths = (value: string): string[] =>
-  normalizeRemoteQuickStartPaths(value.split(/\r?\n/))
 
 const joinStatus = (parts: (string | undefined | false)[]): string =>
   parts.filter((part): part is string => !!part).join(' · ')
@@ -12040,8 +12025,9 @@ function RemoteFolderPicker({
   const canSyncOneDrive = looksLikeOneDrivePath(syncPath)
   const syncFolderLabel = title.includes('소송기록') ? '소송기록 폴더' : '사건폴더'
   const quickStartPoints = profileRemoteStartPoints({ ...profile, quickStartPaths })
-  const canAddCurrentQuickStart =
-    !!cwd.trim() && !quickStartPoints.some((p) => remoteStartPointKey(p.path) === remoteStartPointKey(cwd))
+  const currentQuickStartSaved = quickStartPaths.some(
+    (path) => remoteStartPointKey(path) === remoteStartPointKey(cwd)
+  )
   const visibleDirs = folderSearchResults ? sortEntries(folderSearchResults, sortMode) : dirs
   const folderQueryText = folderQuery.trim()
   const canCreateFolder = !loading && !err && !!cwd.trim() && !!newFolderName.trim() && !creatingFolder
@@ -12123,9 +12109,8 @@ function RemoteFolderPicker({
         setCreateFolderErr(e instanceof Error ? e.message : String(e))
       })
   }
-  const addCurrentQuickStart = (): void => {
+  const saveQuickStartPaths = (nextPaths: string[]): void => {
     const previousPaths = quickStartPaths
-    const nextPaths = normalizeRemoteQuickStartPaths([...quickStartPaths, cwd])
     setQuickStartPaths(nextPaths)
     void window.lt.settings
       .get()
@@ -12142,6 +12127,10 @@ function RemoteFolderPicker({
       })
       .then(emitSettingsUpdated)
       .catch(() => setQuickStartPaths(previousPaths))
+  }
+
+  const toggleCurrentQuickStart = (): void => {
+    saveQuickStartPaths(toggleRemoteQuickStartPath(quickStartPaths, cwd))
   }
 
   return (
@@ -12220,14 +12209,19 @@ function RemoteFolderPicker({
                 {p.label}
               </button>
             ))}
-            {canAddCurrentQuickStart && (
+            {!!cwd.trim() && (
               <button
                 className="remote-chip"
                 type="button"
-                title="현재 폴더를 이 SSH 프로필 빠른 시작에 저장"
-                onClick={addCurrentQuickStart}
+                aria-pressed={currentQuickStartSaved}
+                title={
+                  currentQuickStartSaved
+                    ? '현재 폴더를 이 SSH 프로필 빠른 시작에서 삭제'
+                    : '현재 폴더를 이 SSH 프로필 빠른 시작에 저장'
+                }
+                onClick={toggleCurrentQuickStart}
               >
-                + 현재 위치
+                {currentQuickStartSaved ? '− 현재 위치' : '+ 현재 위치'}
               </button>
             )}
           </div>
