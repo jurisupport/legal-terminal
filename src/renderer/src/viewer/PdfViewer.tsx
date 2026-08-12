@@ -558,7 +558,7 @@ export default function PdfViewer({
 
       e.preventDefault()
       if (pageTurnLocked) {
-        if (Math.abs(delta.y) > 0.5) lockPageTurn()
+        pageTurnDelta = 0
         return
       }
       if (Math.abs(delta.y) <= 0.5) return

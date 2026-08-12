@@ -61,4 +61,14 @@ assert.match(
   'selection mode must skip pan-only drag handlers entirely'
 )
 
+const lockedWheel = pdfViewer.slice(
+  pdfViewer.indexOf('if (pageTurnLocked) {'),
+  pdfViewer.indexOf('if (Math.abs(delta.y) <= 0.5) return')
+)
+assert.doesNotMatch(
+  lockedWheel,
+  /lockPageTurn\(\)/,
+  'trackpad momentum must not keep extending the wheel page-turn lock'
+)
+
 console.log('pdf layout ok')
