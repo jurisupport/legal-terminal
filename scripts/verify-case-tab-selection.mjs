@@ -1,5 +1,13 @@
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import { closeTab } from '../src/renderer/src/tabSelection.ts'
+
+const app = readFileSync(new URL('../src/renderer/src/App.tsx', import.meta.url), 'utf8')
+assert.match(
+  app,
+  /caseTabIdOverride \?\? currentCaseTabIdForNewTab\(\) \?\? inferCaseTabIdForPath\(path, caseTabs\)/,
+  'opening a file must stay in the current case before considering a nested case path'
+)
 
 const oldCaseAgent = { id: 'old-case-agent' }
 const newCaseAgent = { id: 'new-case-agent' }

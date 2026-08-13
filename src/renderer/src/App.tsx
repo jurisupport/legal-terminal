@@ -2363,7 +2363,7 @@ export default function App(): JSX.Element {
     side: DockSide = 'left',
     caseTabIdOverride?: string
   ): string => {
-    const caseTabIdValue = caseTabIdOverride ?? inferCaseTabIdForPath(path, caseTabs) ?? currentCaseTabIdForNewTab()
+    const caseTabIdValue = caseTabIdOverride ?? currentCaseTabIdForNewTab() ?? inferCaseTabIdForPath(path, caseTabs)
     const existing = docTabs.find((t) => t.path === path && caseIdForDoc(t) === caseTabIdValue)
     if (caseTabIdValue) {
       const caseTab = caseTabs.find((tab) => tab.id === caseTabIdValue)
