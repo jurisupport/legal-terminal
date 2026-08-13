@@ -3053,14 +3053,14 @@ export default function App(): JSX.Element {
       window.alert('먼저 설정에서 SSH 접속 프로필을 추가하세요.')
       return
     }
-    const cur = termTabs.find((t) => t.id === activeTerm)
-    if (cur?.ssh && cur.profileId) {
-      // 활성 사건이 원격 → 그 맥 폴더를 그대로 사용
-      const profile = syncProfileForRemote(cur.profileId)
-      setSyncInit({ profile, macFolder: cur.cwd })
+    const remote = parseRemoteUri(activeDraftsFolder ?? '')
+    if (remote) {
+      // 활성 터미널이 없어도 탐색기에 지정된 원격 경로를 그대로 사용
+      const profile = syncProfileForRemote(remote.profileId)
+      setSyncInit({ profile, macFolder: remote.path })
     } else {
       // 활성 사건이 로컬 → 첫 프로필의 원격 작성서류 루트 하위 동일 폴더명으로 추정
-      const localPath = cur?.cwd ?? currentCase?.drafts ?? ''
+      const localPath = activeDraftsFolder ?? ''
       const profile = sshProfiles[0]
       setSyncInit({
         profile,

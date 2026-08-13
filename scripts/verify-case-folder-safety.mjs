@@ -70,5 +70,17 @@ assert.match(
   /matched && !pathBelongsToCaseFolder\(drafts, matched\)/,
   'a trusted exact case match must replace a stale pairing to another case folder'
 )
+const openSync = app.match(/const openSync = \(\): void => \{([\s\S]*?)\n  \}\n\n  const openFileSync/)?.[1]
+assert.ok(openSync, 'openSync implementation must exist')
+assert.match(
+  openSync,
+  /parseRemoteUri\(activeDraftsFolder \?\? ''\)/,
+  'sync must preserve the remote folder shown in the explorer when no terminal is active'
+)
+assert.doesNotMatch(
+  openSync,
+  /cur\?\.ssh/,
+  'sync must not decide whether a folder is remote from terminal presence alone'
+)
 
 console.log('case folder and session safety ok')
