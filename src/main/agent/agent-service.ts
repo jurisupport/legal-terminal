@@ -130,6 +130,7 @@ interface AgentSession {
   authCallbackPreparing?: boolean
   authRemotePid?: number
   authStdoutBuffer?: string
+  authUrlBuffers?: { stdout: string; stderr: string }
   codexProcess?: ChildProcessWithoutNullStreams
   codexInitialized?: boolean
   codexThreadId?: string
@@ -439,6 +440,24 @@ function extractUrls(value: string): string[] {
   return [...new Set(matches.map((url) => url.replace(/[),.;\]]+$/g, '')))]
 }
 
+function completeAuthOutputLines({ buffer = '', chunk = '' } = {}) {
+  const combined = buffer + chunk
+  const lineBreak = combined.lastIndexOf('\n')
+  return lineBreak < 0
+    ? ['', combined]
+    : [combined.slice(0, lineBreak + 1), combined.slice(lineBreak + 1)]
+}
+
+function isCompleteClaudeAuthUrl(value = '') {
+  try {
+    const url = new URL(value)
+    return ['client_id', 'response_type', 'redirect_uri', 'scope', 'code_challenge', 'code_challenge_method', 'state']
+      .every((key) => Boolean(url.searchParams.get(key)))
+  } catch {
+    return false
+  }
+}
+
 function extractAuthCodes(value: string): string[] {
   const codes: string[] = []
   for (const match of value.matchAll(/(?:code|코드)[^\n:：]*[:：]\s*([A-Z0-9][A-Z0-9-]{5,})/gi)) {
@@ -546,19 +565,30 @@ function remoteClaudeAuthOutput(session: AgentSession, text: string): string {
   return combined.slice(0, markerStart) + combined.slice(match.index + match[0].length)
 }
 
-function emitAuthOutput(session: AgentSession, chunk: Buffer | string, parseRemotePid = false): void {
+function emitAuthOutput(session: AgentSession, chunk: Buffer | string, stream: 'stdout' | 'stderr'): void {
   let text = cleanProcessText(Buffer.isBuffer(chunk) ? chunk.toString('utf8') : chunk)
-  if (parseRemotePid) text = remoteClaudeAuthOutput(session, text)
-  if (!text.trim()) return
-  const urls = extractUrls(text)
+  if (stream === 'stdout') text = remoteClaudeAuthOutput(session, text)
+  let urlText = text
+  if (session.provider === 'claude') {
+    const buffers = session.authUrlBuffers ?? { stdout: '', stderr: '' }
+    session.authUrlBuffers = buffers
+    const [completeText, remainder] = completeAuthOutputLines({ buffer: buffers[stream], chunk: text })
+    buffers[stream] = remainder
+    urlText = completeText
+  }
+  const urls = session.provider === 'claude'
+    ? extractUrls(urlText).filter(isCompleteClaudeAuthUrl)
+    : extractUrls(urlText)
   const codes = extractAuthCodes(text)
-  emit(session, {
-    type: 'auth:output',
-    sessionId: session.id,
-    text,
-    urls: urls.length && session.provider !== 'claude' ? urls : undefined,
-    codes: codes.length ? codes : undefined
-  })
+  if (text.trim()) {
+    emit(session, {
+      type: 'auth:output',
+      sessionId: session.id,
+      text,
+      urls: urls.length && session.provider !== 'claude' ? urls : undefined,
+      codes: codes.length ? codes : undefined
+    })
+  }
   if (urls.length && session.provider === 'claude') openClaudeAuthUrls(session, urls)
 }
 
@@ -3606,11 +3636,12 @@ export function startAgentAuthLogin(sessionId: string): AgentCommandResult {
   session.authProcess = proc
   session.authRemotePid = undefined
   session.authStdoutBuffer = undefined
+  session.authUrlBuffers = { stdout: '', stderr: '' }
   emit(session, { type: 'auth:started', sessionId: session.id, source: session.source })
   emit(session, { type: 'status', sessionId: session.id, status: 'waiting_user' })
 
-  proc.stdout.on('data', (chunk: Buffer) => emitAuthOutput(session, chunk, true))
-  proc.stderr.on('data', (chunk: Buffer) => emitAuthOutput(session, chunk))
+  proc.stdout.on('data', (chunk: Buffer) => emitAuthOutput(session, chunk, 'stdout'))
+  proc.stderr.on('data', (chunk: Buffer) => emitAuthOutput(session, chunk, 'stderr'))
   proc.stdin.on('error', () => {
     /* SSH or the auth CLI may close stdin after browser-based auth completes. */
   })

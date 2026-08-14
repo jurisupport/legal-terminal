@@ -20,4 +20,24 @@ assert.match(service, /-O',\s*'forward'/)
 assert.match(service, /-O',\s*'cancel'/)
 assert.match(service, /remoteClaudeAuthPortCommand/)
 
+const completeLinesSource = service.match(/function completeAuthOutputLines[\s\S]*?\n}/)?.[0] ?? ''
+assert.ok(completeLinesSource)
+const completeAuthOutputLines = Function(`return (${completeLinesSource})`)()
+const partialUrl = 'https://claude.ai/oauth/authorize?code=true&client_id=test&response_type=code&redirect_uri=https%3A%2F%2Fplatform.claude.co'
+let [complete, remainder] = completeAuthOutputLines({ chunk: partialUrl })
+assert.equal(complete, '')
+const urlTail = 'm&scope=user%3Aprofile&code_challenge=test&code_challenge_method=S256&state=test'
+;[complete, remainder] = completeAuthOutputLines({
+  buffer: remainder,
+  chunk: `${urlTail}\n`
+})
+assert.match(complete, /platform\.claude\.com&scope=/)
+assert.equal(remainder, '')
+assert.match(service, /filter\(isCompleteClaudeAuthUrl\)/)
+const completeUrlSource = service.match(/function isCompleteClaudeAuthUrl[\s\S]*?\n}/)?.[0] ?? ''
+assert.ok(completeUrlSource)
+const isCompleteClaudeAuthUrl = Function(`return (${completeUrlSource})`)()
+assert.equal(isCompleteClaudeAuthUrl(partialUrl), false)
+assert.equal(isCompleteClaudeAuthUrl(partialUrl + urlTail), true)
+
 console.log('authenticated agents can start account switching')
