@@ -18,6 +18,7 @@ const CLOUD_DIR_MERGE_TIMEOUT_MS = 2_500
 const REMOTE_DIR_CACHE_TTL_MS = 10 * 60_000
 const REMOTE_DIR_CACHE_MAX = 500
 const REMOTE_DIR_DISK_CACHE_NAMESPACE = 'ssh-picker'
+const REMOTE_UTF8_LOCALE = 'export LC_ALL=en_US.UTF-8'
 
 function shq(s: string): string {
   return `'${s.replace(/'/g, "'\\''")}'`
@@ -308,7 +309,9 @@ for p do
   printf '%s\t%s\n' "$m" "$name"
 done
 		`.trim()
-  args.push(`cd ${cdTarget(target)} && pwd && find . ! -name . -prune -exec sh -c ${shq(listDirs)} sh {} +`)
+  args.push(
+    `${REMOTE_UTF8_LOCALE}; cd ${cdTarget(target)} && pwd && find . ! -name . -prune -exec sh -c ${shq(listDirs)} sh {} +`
+  )
 
   return new Promise((resolve) => {
     execFile(sshBin, args, { timeout: 15000, windowsHide: true }, async (err, stdout, stderr) => {
@@ -464,7 +467,7 @@ exit 0
 	`.trim()
   args.push(
     [
-      `cd ${cdTarget(target)} && pwd &&`,
+      `${REMOTE_UTF8_LOCALE}; cd ${cdTarget(target)} && pwd &&`,
       `find . -maxdepth ${maxDepth} \\( -name '.*' -a ! -name . \\) -prune -o`,
       `-type d ! -name . -print 2>/dev/null | sh -c ${shq(searchDirs)} sh ${queryArgs
         .map(shq)
