@@ -6668,6 +6668,28 @@ button.agent-attachment-chip {
 .workspace-picker {
   width: min(560px, 92vw);
 }
+
+.workspace-restore-prompt {
+  width: min(520px, calc(100vw - 32px));
+}
+
+.workspace-restore-source {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  margin-top: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+.workspace-restore-source span {
+  color: var(--muted);
+}
+
+.workspace-restore-actions {
+  flex-wrap: wrap;
+}
 .draft-history-modal {
   width: min(640px, 92vw);
 }

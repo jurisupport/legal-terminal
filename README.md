@@ -95,10 +95,11 @@ curl -fsSL https://raw.githubusercontent.com/jurisupport/legal-terminal/main/ins
 
 ## 이번 업데이트
 
-최신 릴리스: [v0.1.194](https://github.com/jurisupport/legal-terminal/releases/tag/v0.1.194)
+최신 릴리스: [v0.1.195](https://github.com/jurisupport/legal-terminal/releases/tag/v0.1.195)
 
-- **원격 한글 경로 표시 복구**: SSH 서버의 기본 로케일이 `C`여도 폴더 찾기 오류에서 한글 경로가 깨지지 않습니다.
-- **목록·검색 처리 통일**: 원격 폴더 목록과 하위 폴더 검색 모두 UTF-8 로케일로 실행합니다.
+- **사건별 세션 자동 복원**: 사건이나 작성서류 폴더를 다시 열면 이전에 열어 둔 Agent/Claude 세션과 문서 배치를 자동으로 복원합니다.
+- **컴퓨터 간 세션 공유**: 같은 SSH 작업 폴더를 다른 컴퓨터에서 열면 원격 세션 구성을 복원할지 확인합니다.
+- **충돌 선택 지원**: 이 컴퓨터와 원격 구성이 다르면 이 컴퓨터만, 원격만, 둘 다 중에서 선택할 수 있습니다.
 
 ## 처음 쓰는 순서
 

@@ -202,6 +202,7 @@ export interface WorkspaceSnapshot {
   savedAt: string
   workspaceId?: string
   workspaceLabel?: string
+  workspaceDevice?: string
   mode: 'explorer' | 'cases' | 'viewer' | 'todos'
   docs: WorkspaceDocTabPayload[]
   terminals: TerminalTabPayload[]
@@ -255,6 +256,19 @@ export interface WorkspaceLoadResult {
 export interface WorkspaceListResult {
   ok: boolean
   entries?: WorkspaceEntry[]
+  error?: string
+}
+
+export interface AutomaticWorkspaceLocation {
+  cwd: string
+  profileId?: string
+  ssh?: SshConn
+}
+
+export interface AutomaticWorkspaceLoadResult {
+  ok: boolean
+  local?: WorkspaceLoadResult
+  remote?: WorkspaceLoadResult
   error?: string
 }
 
@@ -906,6 +920,11 @@ export interface LtApi {
     save: (snapshot: WorkspaceSnapshot) => Promise<WorkspaceSaveResult>
     list: () => Promise<WorkspaceListResult>
     load: (id?: string) => Promise<WorkspaceLoadResult>
+    autoSave: (
+      snapshot: WorkspaceSnapshot,
+      location: AutomaticWorkspaceLocation
+    ) => Promise<WorkspaceSaveResult & { remoteError?: string }>
+    autoLoad: (location: AutomaticWorkspaceLocation) => Promise<AutomaticWorkspaceLoadResult>
     exportFile: (snapshot: WorkspaceSnapshot) => Promise<WorkspaceSaveResult>
     importFile: () => Promise<WorkspaceLoadResult>
   }

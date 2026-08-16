@@ -1,7 +1,10 @@
 import { app } from 'electron'
 import { createHash } from 'crypto'
+import { execFile, spawn } from 'child_process'
+import { homedir, hostname } from 'os'
 import { basename, dirname, isAbsolute, join } from 'path'
-import { mkdir, readFile, readdir, writeFile } from 'fs/promises'
+import { mkdir, readFile, readdir, rename, writeFile } from 'fs/promises'
+import { buildSshArgs, type SshProfileLike } from './sshOptions'
 
 export interface WorkspaceSnapshot {
   version: number
@@ -54,6 +57,19 @@ export interface WorkspaceListResult {
   error?: string
 }
 
+export interface AutomaticWorkspaceLocation {
+  cwd: string
+  profileId?: string
+  ssh?: SshProfileLike
+}
+
+export interface AutomaticWorkspaceLoadResult {
+  ok: boolean
+  local?: WorkspaceLoadResult
+  remote?: WorkspaceLoadResult
+  error?: string
+}
+
 interface WorkspaceIndex {
   version: number
   entries: WorkspaceEntry[]
@@ -61,6 +77,17 @@ interface WorkspaceIndex {
 
 const LEGACY_WORKSPACE_ID = 'legacy-default'
 const WORKSPACE_INDEX_VERSION = 1
+const SHARED_WORKSPACE_MAX_BYTES = 16 * 1024 * 1024
+const SHARED_WORKSPACE_TIMEOUT_MS = 12_000
+const sshBin = process.platform === 'win32' ? 'ssh.exe' : 'ssh'
+let sharedWriteSeq = 0
+let workspaceIndexChain: Promise<unknown> = Promise.resolve()
+
+function withWorkspaceIndexLock<T>(fn: () => Promise<T>): Promise<T> {
+  const run = workspaceIndexChain.then(fn, fn)
+  workspaceIndexChain = run.catch(() => undefined)
+  return run
+}
 
 export function defaultWorkspacePath(): string {
   return join(app.getPath('userData'), 'workspace-state.json')
@@ -76,6 +103,16 @@ function workspaceIndexPath(): string {
 
 function workspaceSnapshotPath(id: string): string {
   return join(workspaceStoreDir(), `${id}.json`)
+}
+
+export function workspaceIdForLocation(cwd: string, profileId?: string): string {
+  const key = profileId ? `auto-workspace:${profileId}:${cwd}` : `auto-workspace:${cwd}`
+  return createHash('sha256').update(key).digest('hex').slice(0, 16)
+}
+
+function sharedWorkspacePath(cwd: string): string {
+  const id = createHash('sha256').update(cwd).digest('hex').slice(0, 24)
+  return join(homedir(), '.claude', 'legal-terminal-workspaces', `${id}.json`)
 }
 
 function isSnapshot(value: unknown): value is WorkspaceSnapshot {
@@ -143,6 +180,9 @@ function workspaceEntryMetadata(snapshot: WorkspaceSnapshot): Partial<WorkspaceE
 }
 
 function workspaceIdentity(snapshot: WorkspaceSnapshot): { id: string; label: string } {
+  const explicitId = asString(snapshot.workspaceId)
+  const explicitLabel = asString(snapshot.workspaceLabel)
+  if (explicitId && explicitLabel) return { id: explicitId, label: explicitLabel }
   const termRecord = activeTermRecord(snapshot)
   const cwd = asString(termRecord?.cwd)
   if (cwd) {
@@ -175,6 +215,92 @@ function workspaceIdentity(snapshot: WorkspaceSnapshot): { id: string; label: st
   }
 
   return { id: 'default', label: '기본 작업환경' }
+}
+
+async function loadSnapshotFile(filePath: string): Promise<WorkspaceLoadResult> {
+  try {
+    const parsed = JSON.parse(await readFile(filePath, 'utf8')) as unknown
+    if (!isSnapshot(parsed)) {
+      return { ok: false, path: filePath, error: '작업환경 파일 형식이 올바르지 않습니다.' }
+    }
+    return { ok: true, path: filePath, snapshot: parsed, entry: entryFromSnapshot(parsed, filePath) }
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === 'ENOENT') return { ok: true, path: filePath, snapshot: null }
+    return { ok: false, path: filePath, error: String(e) }
+  }
+}
+
+async function saveSharedLocal(snapshot: WorkspaceSnapshot, cwd: string): Promise<void> {
+  const path = sharedWorkspacePath(cwd)
+  const tmp = `${path}.${process.pid}.${++sharedWriteSeq}.tmp`
+  await mkdir(dirname(path), { recursive: true })
+  await writeFile(tmp, JSON.stringify(snapshot, null, 2), 'utf8')
+  await rename(tmp, path)
+}
+
+function sharedRemoteFile(cwd: string): string {
+  return `${createHash('sha256').update(cwd).digest('hex').slice(0, 24)}.json`
+}
+
+function loadSharedRemote(ssh: SshProfileLike, cwd: string): Promise<WorkspaceLoadResult> {
+  const name = sharedRemoteFile(cwd)
+  const command = `file="$HOME/.claude/legal-terminal-workspaces/${name}"; [ -f "$file" ] && cat "$file"`
+  return new Promise((resolve) => {
+    execFile(
+      sshBin,
+      [...buildSshArgs(ssh, { usage: 'oneshot' }), command],
+      { timeout: SHARED_WORKSPACE_TIMEOUT_MS, windowsHide: true, maxBuffer: SHARED_WORKSPACE_MAX_BYTES },
+      (error, stdout) => {
+        if (error || !stdout.trim()) {
+          resolve({ ok: true, snapshot: null })
+          return
+        }
+        try {
+          const parsed = JSON.parse(stdout) as unknown
+          resolve(
+            isSnapshot(parsed)
+              ? { ok: true, snapshot: parsed }
+              : { ok: false, error: '원격 작업환경 파일 형식이 올바르지 않습니다.' }
+          )
+        } catch (e) {
+          resolve({ ok: false, error: String(e) })
+        }
+      }
+    )
+  })
+}
+
+function saveSharedRemote(
+  ssh: SshProfileLike,
+  cwd: string,
+  snapshot: WorkspaceSnapshot
+): Promise<void> {
+  const name = sharedRemoteFile(cwd)
+  const command = [
+    'dir="$HOME/.claude/legal-terminal-workspaces"',
+    `file="$dir/${name}"`,
+    'mkdir -p "$dir" || exit 1',
+    'tmp="$file.$$.tmp"',
+    'cat > "$tmp" && mv "$tmp" "$file"'
+  ].join('\n')
+  return new Promise((resolve, reject) => {
+    const proc = spawn(sshBin, [...buildSshArgs(ssh, { usage: 'oneshot' }), command], {
+      windowsHide: true
+    })
+    let stderr = ''
+    const timer = setTimeout(() => proc.kill(), SHARED_WORKSPACE_TIMEOUT_MS)
+    proc.stderr?.on('data', (chunk: Buffer) => {
+      if (stderr.length < 4096) stderr += chunk.toString('utf8')
+    })
+    proc.on('error', reject)
+    proc.on('close', (code) => {
+      clearTimeout(timer)
+      if (code === 0) resolve()
+      else reject(new Error(stderr.trim() || `원격 작업환경 저장 실패 (${code ?? 'unknown'})`))
+    })
+    proc.stdin?.on('error', () => {})
+    proc.stdin?.end(JSON.stringify(snapshot, null, 2))
+  })
 }
 
 function entryFromSnapshot(
@@ -248,9 +374,11 @@ async function writeWorkspaceIndex(entries: WorkspaceEntry[]): Promise<void> {
 }
 
 async function saveEntry(entry: WorkspaceEntry): Promise<void> {
-  const entries = await readWorkspaceIndex()
-  const next = [entry, ...entries.filter((existing) => existing.id !== entry.id)]
-  await writeWorkspaceIndex(next)
+  await withWorkspaceIndexLock(async () => {
+    const entries = await readWorkspaceIndex()
+    const next = [entry, ...entries.filter((existing) => existing.id !== entry.id)]
+    await writeWorkspaceIndex(next)
+  })
 }
 
 async function listStoredWorkspaceEntries(): Promise<WorkspaceEntry[]> {
@@ -350,5 +478,49 @@ export async function listWorkspaceSnapshots(): Promise<WorkspaceListResult> {
     }
   } catch (e) {
     return { ok: false, error: String(e) }
+  }
+}
+
+export async function saveAutomaticWorkspace(
+  snapshot: WorkspaceSnapshot,
+  location: AutomaticWorkspaceLocation
+): Promise<WorkspaceSaveResult & { remoteError?: string }> {
+  const savedSnapshot: WorkspaceSnapshot = {
+    ...snapshot,
+    workspaceId: workspaceIdForLocation(location.cwd, location.profileId),
+    workspaceLabel: snapshot.workspaceLabel || displayNameFromPath(location.cwd) || '사건 작업환경',
+    workspaceDevice: hostname()
+  }
+  const local = await saveWorkspaceSnapshot(savedSnapshot)
+  if (!local.ok) return local
+  try {
+    if (location.ssh) await saveSharedRemote(location.ssh, location.cwd, savedSnapshot)
+    else await saveSharedLocal(savedSnapshot, location.cwd)
+    return local
+  } catch (e) {
+    // 로컬 자동 저장은 성공했으므로 복원 가능하다. 원격 실패만 별도로 알려 다음 변경 때 재시도한다.
+    return { ...local, remoteError: String(e) }
+  }
+}
+
+export async function loadAutomaticWorkspace(
+  location: AutomaticWorkspaceLocation
+): Promise<AutomaticWorkspaceLoadResult> {
+  const local = await loadWorkspaceSnapshot(workspaceIdForLocation(location.cwd, location.profileId))
+  if (!location.ssh) {
+    const shared = await loadSnapshotFile(sharedWorkspacePath(location.cwd))
+    return {
+      ok: local.ok && shared.ok,
+      local,
+      remote: shared,
+      error: local.error || shared.error
+    }
+  }
+  const remote = await loadSharedRemote(location.ssh, location.cwd)
+  return {
+    ok: local.ok && remote.ok,
+    local,
+    remote,
+    error: local.error || remote.error
   }
 }

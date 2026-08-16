@@ -74,9 +74,12 @@ import {
 } from './pty/claude-pty'
 import { decodeTextBuffer } from './textEncoding'
 import {
+  loadAutomaticWorkspace,
   listWorkspaceSnapshots,
   loadWorkspaceSnapshot,
+  saveAutomaticWorkspace,
   saveWorkspaceSnapshot,
+  type AutomaticWorkspaceLocation,
   type WorkspaceSnapshot
 } from './workspace'
 import { disposeAgentSessions, registerAgentIpc } from './agent/agent-service'
@@ -736,6 +739,14 @@ ipcMain.handle('workspace:save', (_e, snapshot: WorkspaceSnapshot) =>
 )
 ipcMain.handle('workspace:list', () => listWorkspaceSnapshots())
 ipcMain.handle('workspace:load', (_e, id?: string) => loadWorkspaceSnapshot(id))
+ipcMain.handle(
+  'workspace:autoSave',
+  (_e, p: { snapshot: WorkspaceSnapshot; location: AutomaticWorkspaceLocation }) =>
+    saveAutomaticWorkspace(p.snapshot, p.location)
+)
+ipcMain.handle('workspace:autoLoad', (_e, location: AutomaticWorkspaceLocation) =>
+  loadAutomaticWorkspace(location)
+)
 ipcMain.handle('workspace:exportFile', async (e, snapshot: WorkspaceSnapshot) => {
   const win = BrowserWindow.fromWebContents(e.sender)
   const r = win

@@ -79,6 +79,7 @@ import {
   type CaseFolderInfo,
   type FolderMatchSuggestion
 } from './caseFolderMatch'
+import { mergeWorkspaceSessions, sameWorkspaceSessions } from './workspaceSessions'
 import type {
   AppSettings,
   AgentAttachment,
@@ -342,6 +343,13 @@ interface CloseWindowPromptState {
   docs: DirtyDocTarget[]
   saving: boolean
   error?: string
+}
+
+type WorkspaceRestoreChoice = 'local' | 'remote' | 'both' | 'skip'
+interface WorkspaceRestorePromptState {
+  local?: WorkspaceSnapshot
+  remote: WorkspaceSnapshot
+  resolve: (choice: WorkspaceRestoreChoice) => void
 }
 
 type SaveDirtyDocResult = { ok: true } | { ok: false; error: string }
@@ -1588,6 +1596,13 @@ export default function App(): JSX.Element {
     })
   }, [caseTabs])
   const termTabsRef = useRef<TermTab[]>([])
+  const caseTabsRef = useRef<CaseWorkspaceTab[]>([])
+  const autoRestoreWorkspaceRef = useRef<(source: CurrentCase) => void>(() => {})
+  const autoRestoreInFlightRef = useRef<Set<string>>(new Set())
+  const autoRestoreDoneRef = useRef<Set<string>>(new Set())
+  const autoSaveEligibleRef = useRef<Set<string>>(new Set())
+  const autoWorkspaceSaveChainRef = useRef<Promise<void>>(Promise.resolve())
+  const saveAllCaseWorkspacesRef = useRef<() => Promise<void>>(async () => {})
   const agentAttachmentRequestsRef = useRef<Record<string, AgentAttachmentRequest[]>>({})
   const agentDraftsRef = useRef<Record<string, AgentDraftState>>({})
   const selectionAttachmentSeqRef = useRef(0)
@@ -1632,6 +1647,8 @@ export default function App(): JSX.Element {
     entries: WorkspaceEntry[]
     error?: string
   } | null>(null)
+  const [workspaceRestorePrompt, setWorkspaceRestorePrompt] =
+    useState<WorkspaceRestorePromptState | null>(null)
 
   // 활성 PDF의 목차 분류 결과 + 페이지 점프 신호
   const [pdfRecord, setPdfRecord] = useState<{ path: string; parsed: ParsedRecord } | null>(null)
@@ -1719,6 +1736,7 @@ export default function App(): JSX.Element {
   docTabsRef.current = docTabs
   dirtyDocsRef.current = dirtyDocs
   termTabsRef.current = termTabs
+  caseTabsRef.current = caseTabs
   agentAttachmentRequestsRef.current = agentAttachmentRequests
   agentDraftsRef.current = agentDrafts
   useEffect(() => {
@@ -2059,7 +2077,8 @@ export default function App(): JSX.Element {
     return saveDirtyDocFromDraft(doc)
   }
 
-  const forceCloseWindow = (): void => {
+  const forceCloseWindow = async (): Promise<void> => {
+    await saveAllCaseWorkspacesRef.current().catch(() => {})
     forceWindowCloseRef.current = true
     setCloseWindowPrompt(null)
     void window.lt.app.forceCloseWindow()
@@ -2091,13 +2110,13 @@ export default function App(): JSX.Element {
       })
       return
     }
-    forceCloseWindow()
+    await forceCloseWindow()
   }
 
   requestWindowCloseRef.current = (): void => {
     const docs = dirtyDocTargets()
     if (docs.length === 0) {
-      forceCloseWindow()
+      void forceCloseWindow()
       return
     }
     setCloseWindowPrompt({ docs, saving: false })
@@ -2543,6 +2562,7 @@ export default function App(): JSX.Element {
       records: source.records,
       name: source.name
     }).then(setRecent)
+    autoRestoreWorkspaceRef.current(source)
     return tab
   }
 
@@ -4310,12 +4330,18 @@ export default function App(): JSX.Element {
   const agentSelectionInputText = (attachment: AgentAttachment): string =>
     `「${attachment.label}」 선택 부분에 대해 `
 
-  const buildWorkspaceSnapshot = async (): Promise<WorkspaceSnapshot> => {
-    const docs = docTabs
+  const buildWorkspaceSnapshot = async (onlyCaseTabId?: string): Promise<WorkspaceSnapshot> => {
+    const sourceDocs = onlyCaseTabId
+      ? docTabs.filter((tab) => !isSharedDocTab(tab) && caseIdForDoc(tab) === onlyCaseTabId)
+      : docTabs
+    const sourceTerms = onlyCaseTabId
+      ? termTabs.filter((tab) => caseIdForTerm(tab) === onlyCaseTabId)
+      : termTabs
+    const docs = sourceDocs
       .map((tab) => toWorkspaceDoc({ ...tab, caseTabId: tab.caseTabId ?? caseIdForDoc(tab) }))
       .filter((t): t is WorkspaceDocTabPayload => !!t)
     const terminals = await Promise.all(
-      termTabs.map(async (t) => {
+      sourceTerms.map(async (t) => {
         const caseTabIdValue = caseIdForTerm(t)
         if (isAgentTab(t)) {
           const agentSnapshot = await window.lt.agent.snapshot(t.id).catch(() => null)
@@ -4351,7 +4377,10 @@ export default function App(): JSX.Element {
         id: term.caseTabId ?? caseTabId(source)
       }
     }
-    const caseTabsWithActivity = caseTabs.map((tab) =>
+    const selectedCaseTabs = onlyCaseTabId
+      ? caseTabs.filter((tab) => tab.id === onlyCaseTabId)
+      : caseTabs
+    const caseTabsWithActivity = selectedCaseTabs.map((tab) =>
       tab.id === activeCaseTabId
         ? {
             ...tab,
@@ -4362,26 +4391,56 @@ export default function App(): JSX.Element {
           }
         : tab
     )
+    const selectedCurrentCase = onlyCaseTabId
+      ? caseTabsWithActivity[0]
+        ? currentCaseFromCaseTab(caseTabsWithActivity[0])
+        : sourceTerms[0]
+          ? currentCaseFromTerm(sourceTerms[0])
+          : undefined
+      : currentCase
     const snapshotCaseTabs = mergeCaseTabs(
       caseTabsWithActivity,
       [
         ...terminals.map((term) => caseTabFromTermPayload(term)),
-        ...(currentCase ? [caseTabFromCurrentCase(currentCase, activeTermTab?.id)] : [])
+        ...(selectedCurrentCase
+          ? [
+              caseTabFromCurrentCase(
+                selectedCurrentCase,
+                sourceTerms.some((term) => term.id === activeTerm) ? activeTerm : sourceTerms[0]?.id
+              )
+            ]
+          : [])
       ]
     )
+    const snapshotActiveDoc = sourceDocs.some((tab) => tab.id === activeDoc)
+      ? activeDoc
+      : caseTabsWithActivity[0]?.activeDocId
+    const snapshotActiveTerm = sourceTerms.some((tab) => tab.id === activeTerm)
+      ? activeTerm
+      : caseTabsWithActivity[0]?.activeTermId ?? sourceTerms[0]?.id
+    const snapshotActiveWork =
+      onlyCaseTabId && activeCaseTabId !== onlyCaseTabId
+        ? (caseTabsWithActivity[0]?.activeWork ?? {})
+        : activeWork
+    const snapshotDocPaths = new Set(docs.map((doc) => doc.path).filter(Boolean))
+    const snapshotPdfStatus = onlyCaseTabId
+      ? Object.fromEntries(
+          Object.entries(pdfStatus).filter(([, status]) => snapshotDocPaths.has(status.path))
+        )
+      : pdfStatus
     return {
       version: WORKSPACE_VERSION,
       savedAt: new Date().toISOString(),
-      mode,
+      mode: onlyCaseTabId ? 'explorer' : mode,
       docs,
       terminals,
       caseTabs: snapshotCaseTabs,
-      activeDoc,
-      activeTerm,
-      activeCaseTabId,
-      activeWork,
-      currentCase,
-      pdfStatus,
+      activeDoc: snapshotActiveDoc,
+      activeTerm: snapshotActiveTerm,
+      activeCaseTabId: onlyCaseTabId ?? activeCaseTabId,
+      activeWork: snapshotActiveWork,
+      currentCase: selectedCurrentCase,
+      pdfStatus: snapshotPdfStatus,
       crop: { on: cropOn, ratio: cropRatio }
     }
   }
@@ -4444,7 +4503,7 @@ export default function App(): JSX.Element {
           .filter((tab): tab is CaseWorkspaceTab => !!tab)
       : []
 
-    const nextTerms = [...termTabs]
+    const nextTerms = [...termTabsRef.current]
     const termIdSet = new Set(nextTerms.map((t) => t.id))
     for (const saved of snapshotTerms) {
       const tab = sanitizeWorkspaceTerm(saved)
@@ -4461,13 +4520,13 @@ export default function App(): JSX.Element {
         id: term.caseTabId ?? caseTabId(source)
       }
     }
-    const nextCaseTabs = mergeCaseTabs(caseTabs, [
+    const nextCaseTabs = mergeCaseTabs(caseTabsRef.current, [
       ...restoredCaseTabs,
       ...nextTerms.map(caseTabFromTermForRestore),
       ...(restoredCase ? [caseTabFromCurrentCase(restoredCase, snapshot.activeTerm || undefined)] : [])
     ])
 
-    const nextDocs = [...docTabs]
+    const nextDocs = [...docTabsRef.current]
     const docIdMap = new Map<string, string>()
     for (const saved of snapshotDocs) {
       const tab = toDocTab(saved)
@@ -4582,6 +4641,194 @@ export default function App(): JSX.Element {
     }
     setTreeRefresh((n) => n + 1)
   }
+
+  const workspaceLocation = (source: CurrentCase): { cwd: string; profileId?: string; ssh?: SshConn } => ({
+    cwd: source.remotePath ?? parseRemoteUri(source.drafts)?.path ?? source.drafts,
+    profileId: source.profileId,
+    ssh: source.ssh
+  })
+
+  const workspaceLocationKey = (source: CurrentCase): string => {
+    const location = workspaceLocation(source)
+    return `${location.profileId ?? 'local'}\0${normalizedCasePathKey(location.cwd)}`
+  }
+
+  const remoteWorkspacePath = (value: string | undefined, profileId: string): string | undefined => {
+    if (!value) return undefined
+    return remoteUri(profileId, parseRemoteUri(value)?.path ?? value)
+  }
+
+  // 공유 파일은 그것을 저장한 컴퓨터의 SSH 프로필 id를 담을 수 있다. 현재 컴퓨터의
+  // 프로필로 갈아끼우고, 원격 호스트에서 직접 저장한 로컬 경로도 ssh:// URI로 바꾼다.
+  const rebaseRemoteWorkspace = (
+    snapshot: WorkspaceSnapshot,
+    source: CurrentCase
+  ): WorkspaceSnapshot => {
+    if (!source.ssh || !source.profileId) return snapshot
+    const profileId = source.profileId
+    const ssh = source.ssh
+    const docs = (snapshot.docs ?? []).map((doc) => ({
+      ...doc,
+      caseTabId: undefined,
+      path: remoteWorkspacePath(doc.path, profileId)
+    }))
+    const terminals = (snapshot.terminals ?? []).map((term) => ({
+      ...term,
+      caseTabId: undefined,
+      recordsFolder: remoteWorkspacePath(term.recordsFolder, profileId),
+      suggestedRecords: remoteWorkspacePath(term.suggestedRecords, profileId),
+      suggestedRecordOptions: term.suggestedRecordOptions?.map((item) => ({
+        ...item,
+        path: remoteWorkspacePath(item.path, profileId) ?? item.path
+      })),
+      ssh,
+      sshLabel: source.sshLabel,
+      profileId
+    }))
+    const storedCase =
+      snapshot.currentCase && typeof snapshot.currentCase === 'object'
+        ? (snapshot.currentCase as Partial<CurrentCase>)
+        : undefined
+    const records = remoteWorkspacePath(storedCase?.records ?? source.records, profileId)
+    const suggestedRecords = remoteWorkspacePath(
+      storedCase?.suggestedRecords ?? source.suggestedRecords,
+      profileId
+    )
+    const sourceRemotePath = source.remotePath ?? parseRemoteUri(source.drafts)?.path ?? source.drafts
+    const currentCase: CurrentCase = {
+      ...storedCase,
+      ...source,
+      drafts: remoteUri(profileId, sourceRemotePath),
+      records,
+      suggestedRecords,
+      suggestedRecordOptions: (storedCase?.suggestedRecordOptions ?? source.suggestedRecordOptions)?.map(
+        (item) => ({ ...item, path: remoteWorkspacePath(item.path, profileId) ?? item.path })
+      ),
+      ssh,
+      sshLabel: source.sshLabel,
+      profileId,
+      remotePath: sourceRemotePath
+    }
+    return {
+      ...snapshot,
+      workspaceId: undefined,
+      docs,
+      terminals,
+      caseTabs: undefined,
+      activeCaseTabId: undefined,
+      currentCase
+    }
+  }
+
+  const askWorkspaceRestore = (
+    local: WorkspaceSnapshot | undefined,
+    remote: WorkspaceSnapshot
+  ): Promise<WorkspaceRestoreChoice> =>
+    new Promise((resolve) => setWorkspaceRestorePrompt({ local, remote, resolve }))
+
+  const saveCaseWorkspace = async (caseTabIdValue: string): Promise<void> => {
+    const tab = caseTabs.find((item) => item.id === caseTabIdValue)
+    if (!tab) return
+    const source = currentCaseFromCaseTab(tab)
+    if (autoRestoreInFlightRef.current.has(workspaceLocationKey(source))) return
+    const snapshot = await buildWorkspaceSnapshot(caseTabIdValue)
+    snapshot.workspaceLabel = tab.name
+    await window.lt.workspace.autoSave(snapshot, workspaceLocation(source))
+  }
+
+  const saveAllCaseWorkspaces = async (): Promise<void> => {
+    const saves = caseTabs.flatMap((tab) => {
+      const hasWork =
+        termTabs.some((term) => caseIdForTerm(term) === tab.id) ||
+        docTabs.some((doc) => !isSharedDocTab(doc) && caseIdForDoc(doc) === tab.id)
+      if (!hasWork && !autoSaveEligibleRef.current.has(tab.id)) return []
+      if (hasWork) autoSaveEligibleRef.current.add(tab.id)
+      return [saveCaseWorkspace(tab.id)]
+    })
+    await Promise.all(saves)
+  }
+  saveAllCaseWorkspacesRef.current = saveAllCaseWorkspaces
+
+  const restoreAutomaticWorkspace = async (source: CurrentCase): Promise<void> => {
+    const id = caseTabId(source)
+    const key = workspaceLocationKey(source)
+    if (
+      autoRestoreDoneRef.current.has(key) ||
+      autoRestoreInFlightRef.current.has(key) ||
+      termTabs.some((term) => caseIdForTerm(term) === id) ||
+      docTabs.some((doc) => !isSharedDocTab(doc) && caseIdForDoc(doc) === id)
+    )
+      return
+    autoRestoreDoneRef.current.add(key)
+    autoRestoreInFlightRef.current.add(key)
+    try {
+      const result = await window.lt.workspace.autoLoad(workspaceLocation(source))
+      const local = result.local?.snapshot
+        ? rebaseRemoteWorkspace(result.local.snapshot, source)
+        : undefined
+      const remote = result.remote?.snapshot
+        ? rebaseRemoteWorkspace(result.remote.snapshot, source)
+        : undefined
+      let selected: WorkspaceSnapshot | undefined
+      if (local && remote) {
+        if (sameWorkspaceSessions(local, remote)) {
+          selected = local.savedAt >= remote.savedAt ? local : remote
+        } else {
+          const choice = await askWorkspaceRestore(local, remote)
+          selected =
+            choice === 'local'
+              ? local
+              : choice === 'remote'
+                ? remote
+                : choice === 'both'
+                  ? mergeWorkspaceSessions(local, remote)
+                  : undefined
+        }
+      } else if (remote) {
+        const choice = await askWorkspaceRestore(undefined, remote)
+        if (choice === 'remote' || choice === 'both') selected = remote
+      } else {
+        selected = local
+      }
+      if (!selected) return
+      restoreWorkspaceSnapshot(selected)
+      autoSaveEligibleRef.current.add(id)
+      window.setTimeout(() => {
+        autoWorkspaceSaveChainRef.current = autoWorkspaceSaveChainRef.current
+          .then(() => saveAllCaseWorkspacesRef.current())
+          .catch(() => {})
+      }, 0)
+    } finally {
+      autoRestoreInFlightRef.current.delete(key)
+    }
+  }
+  autoRestoreWorkspaceRef.current = (source) => void restoreAutomaticWorkspace(source)
+
+  const automaticWorkspaceSignature = JSON.stringify({
+    cases: caseTabs.map((tab) => [tab.id, tab.activeDocId, tab.activeTermId, tab.activeWork]),
+    docs: docTabs
+      .filter((tab) => !isSharedDocTab(tab))
+      .map((tab) => [tab.id, tab.caseTabId ?? caseIdForDoc(tab), tab.path, tab.side]),
+    terminals: termTabs.map((tab) => [
+      tab.id,
+      tab.caseTabId ?? caseIdForTerm(tab),
+      tab.cwd,
+      tab.resumeSessionId,
+      tab.sessionTitle,
+      tab.side
+    ])
+  })
+  useEffect(() => {
+    if (caseTabs.length === 0) return
+    const timer = window.setTimeout(() => {
+      autoWorkspaceSaveChainRef.current = autoWorkspaceSaveChainRef.current
+        .then(saveAllCaseWorkspaces)
+        .catch(() => {})
+    }, 1200)
+    return () => window.clearTimeout(timer)
+    // automaticWorkspaceSignature is the deliberately small persistence surface.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [automaticWorkspaceSignature])
 
   const saveWorkspace = async (exportFile = false): Promise<void> => {
     const snapshot = await buildWorkspaceSnapshot()
@@ -5677,7 +5924,7 @@ export default function App(): JSX.Element {
     })
   }
 
-  const closeCaseTab = (tabId: string): void => {
+  const closeCaseTab = async (tabId: string): Promise<void> => {
     const tab = caseTabs.find((item) => item.id === tabId)
     if (!tab) return
     const docs = docsForCaseTab(tab)
@@ -5698,6 +5945,8 @@ export default function App(): JSX.Element {
       return
     }
 
+    autoSaveEligibleRef.current.add(tabId)
+    await saveCaseWorkspace(tabId).catch(() => {})
     for (const term of terms) {
       if (isAgentTab(term)) void window.lt.agent.close(term.id)
       else window.lt.pty.kill(term.id)
@@ -5750,6 +5999,9 @@ export default function App(): JSX.Element {
     })
     setCaseTabs(remainingCaseTabs)
     setCaseTabContextMenu(null)
+    const sourceKey = workspaceLocationKey(currentCaseFromCaseTab(tab))
+    autoRestoreDoneRef.current.delete(sourceKey)
+    autoSaveEligibleRef.current.delete(tabId)
 
     if (activeCaseTabId !== tabId) return
     const nextTab = remainingCaseTabs[0]
@@ -5767,7 +6019,7 @@ export default function App(): JSX.Element {
   }
   closeActiveCaseTabRef.current = (): void => {
     const tabId = activeCaseTabId || caseTabRows.find((row) => row.active)?.tab.id || caseTabs[0]?.id
-    if (tabId) closeCaseTab(tabId)
+    if (tabId) void closeCaseTab(tabId)
   }
 
   const cycleCaseTab = (dir: number): void => {
@@ -7780,6 +8032,17 @@ export default function App(): JSX.Element {
           onImportFile={() => void restoreWorkspace(true)}
           onRefresh={() => void openSavedWorkspacePicker()}
           onClose={() => setWorkspacePick(null)}
+        />
+      )}
+
+      {workspaceRestorePrompt && (
+        <WorkspaceRestorePrompt
+          state={workspaceRestorePrompt}
+          onChoose={(choice) => {
+            const prompt = workspaceRestorePrompt
+            setWorkspaceRestorePrompt(null)
+            prompt.resolve(choice)
+          }}
         />
       )}
 
@@ -11746,6 +12009,58 @@ function WorkspacePicker({
           </button>
           <button className="header-btn" type="button" onClick={onClose}>
             닫기
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function WorkspaceRestorePrompt({
+  state,
+  onChoose
+}: {
+  state: WorkspaceRestorePromptState
+  onChoose: (choice: WorkspaceRestoreChoice) => void
+}): JSX.Element {
+  const conflict = !!state.local
+  const summary = (snapshot: WorkspaceSnapshot): string =>
+    `세션 ${snapshot.terminals?.length ?? 0}개 · ${formatWorkspaceSavedAt(snapshot.savedAt)}`
+  return (
+    <div className="modal-overlay" onMouseDown={() => onChoose('skip')}>
+      <div className="modal workspace-restore-prompt" onMouseDown={(event) => event.stopPropagation()}>
+        <div className="modal-title">열려 있던 세션 복원</div>
+        <p>
+          {conflict
+            ? '이 컴퓨터와 원격 컴퓨터에 서로 다른 세션 구성이 있습니다. 무엇을 열까요?'
+            : '다른 컴퓨터에서 이 사건 또는 폴더로 열었던 세션이 있습니다. 복원할까요?'}
+        </p>
+        {state.local && (
+          <div className="workspace-restore-source">
+            <b>이 컴퓨터</b>
+            <span>{summary(state.local)}</span>
+          </div>
+        )}
+        <div className="workspace-restore-source">
+          <b>{state.remote.workspaceDevice || '원격 컴퓨터'}</b>
+          <span>{summary(state.remote)}</span>
+        </div>
+        <div className="modal-actions workspace-restore-actions">
+          {conflict && (
+            <button className="header-btn" type="button" onClick={() => onChoose('local')}>
+              이 컴퓨터만
+            </button>
+          )}
+          <button className="header-btn primary" type="button" onClick={() => onChoose('remote')}>
+            {conflict ? '원격만' : '복원'}
+          </button>
+          {conflict && (
+            <button className="header-btn" type="button" onClick={() => onChoose('both')}>
+              둘 다
+            </button>
+          )}
+          <button className="header-btn" type="button" onClick={() => onChoose('skip')}>
+            {conflict ? '취소' : '새로 시작'}
           </button>
         </div>
       </div>

@@ -1,6 +1,6 @@
 {
   "name": "legal-terminal",
-  "version": "0.1.194",
+  "version": "0.1.195",
   "description": "대한민국 송무 변호사를 위한 AI 통합 작업환경 — Claude Code + 준비서면 에디터 + 전자소송기록 뷰어 + 사건 대시보드 + 원격(SSH) 작업",
   "main": "./out/main/index.js",
   "author": "lawpid",
@@ -18,6 +18,7 @@
     "verify:case-folder-safety": "node --experimental-strip-types --no-warnings scripts/verify-case-folder-safety.mjs",
     "verify:case-activity": "node --experimental-strip-types --no-warnings scripts/verify-case-activity.mjs",
     "verify:session-sync": "node --experimental-strip-types --no-warnings scripts/verify-session-sync.mjs",
+    "verify:workspace-sessions": "node --experimental-strip-types --no-warnings scripts/verify-workspace-sessions.mjs",
     "verify:sync-unicode": "node --experimental-strip-types --no-warnings scripts/verify-sync-unicode.mjs",
     "verify:ssh-pool": "node --experimental-strip-types --no-warnings scripts/verify-ssh-connection-pool.mjs",
     "verify:case-sync": "node --experimental-strip-types --no-warnings scripts/verify-case-sync.mjs",

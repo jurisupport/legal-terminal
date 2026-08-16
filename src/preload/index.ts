@@ -204,6 +204,7 @@ interface WorkspaceSnapshot {
   savedAt: string
   workspaceId?: string
   workspaceLabel?: string
+  workspaceDevice?: string
   mode: 'explorer' | 'cases' | 'viewer' | 'todos'
   docs: WorkspaceDocTabPayload[]
   terminals: TerminalTabPayload[]
@@ -257,6 +258,19 @@ interface WorkspaceLoadResult {
 interface WorkspaceListResult {
   ok: boolean
   entries?: WorkspaceEntry[]
+  error?: string
+}
+
+interface AutomaticWorkspaceLocation {
+  cwd: string
+  profileId?: string
+  ssh?: SshConn
+}
+
+interface AutomaticWorkspaceLoadResult {
+  ok: boolean
+  local?: WorkspaceLoadResult
+  remote?: WorkspaceLoadResult
   error?: string
 }
 
@@ -1010,6 +1024,13 @@ const api = {
       ipcRenderer.invoke('workspace:save', snapshot),
     list: (): Promise<WorkspaceListResult> => ipcRenderer.invoke('workspace:list'),
     load: (id?: string): Promise<WorkspaceLoadResult> => ipcRenderer.invoke('workspace:load', id),
+    autoSave: (
+      snapshot: WorkspaceSnapshot,
+      location: AutomaticWorkspaceLocation
+    ): Promise<WorkspaceSaveResult & { remoteError?: string }> =>
+      ipcRenderer.invoke('workspace:autoSave', { snapshot, location }),
+    autoLoad: (location: AutomaticWorkspaceLocation): Promise<AutomaticWorkspaceLoadResult> =>
+      ipcRenderer.invoke('workspace:autoLoad', location),
     exportFile: (snapshot: WorkspaceSnapshot): Promise<WorkspaceSaveResult> =>
       ipcRenderer.invoke('workspace:exportFile', snapshot),
     importFile: (): Promise<WorkspaceLoadResult> => ipcRenderer.invoke('workspace:importFile')
