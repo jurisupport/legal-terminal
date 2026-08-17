@@ -85,7 +85,9 @@ jurisupport_plugins_installed() {
 }
 
 run_jurisupport_plugins_bootstrap() {
-  curl -fsSL https://raw.githubusercontent.com/jurisupport/jurisupport-plugins/main/bootstrap.sh \
+  curl -fsSL \
+    -H 'Accept: application/vnd.github.raw+json' \
+    https://api.github.com/repos/jurisupport/jurisupport-plugins/contents/bootstrap.sh \
     | JURISUPPORT_SKIP_LAWYER_PROFILE=1 JURISUPPORT_SKIP_LEGAL_TERMINAL=1 bash
   refresh_path
 }
@@ -117,7 +119,9 @@ lawyer_profile_plugin_installed() {
 }
 
 run_lawyer_profile_plugin_installer() {
-  curl -fsSL https://raw.githubusercontent.com/jurisupport/jurisupport-lawyer-profile-plugin/main/install.sh \
+  curl -fsSL \
+    -H 'Accept: application/vnd.github.raw+json' \
+    https://api.github.com/repos/jurisupport/jurisupport-lawyer-profile-plugin/contents/install.sh \
     | JURISUPPORT_LAWYER_PROFILE_SKIP_JURISUPPORT=1 JURISUPPORT_LAWYER_PROFILE_SKIP_LEGAL_TERMINAL=1 JURISUPPORT_CONNECT_MCP=0 bash
   refresh_path
 }

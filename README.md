@@ -74,13 +74,13 @@ legal-terminal은 따로 떠 있던 AI Agent, 터미널, 문서 에디터, 전�
 Windows:
 
 ```powershell
-irm https://raw.githubusercontent.com/jurisupport/legal-terminal/main/install.ps1 | iex
+irm https://github.com/jurisupport/legal-terminal/releases/latest/download/install.ps1 | iex
 ```
 
 macOS:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/jurisupport/legal-terminal/main/install-mac.sh | bash
+curl -fsSL https://github.com/jurisupport/legal-terminal/releases/latest/download/install-mac.sh | bash
 ```
 
 직접 내려받기:
@@ -95,11 +95,10 @@ curl -fsSL https://raw.githubusercontent.com/jurisupport/legal-terminal/main/ins
 
 ## 이번 업데이트
 
-최신 릴리스: [v0.1.195](https://github.com/jurisupport/legal-terminal/releases/tag/v0.1.195)
+최신 릴리스: [v0.1.196](https://github.com/jurisupport/legal-terminal/releases/tag/v0.1.196)
 
-- **사건별 세션 자동 복원**: 사건이나 작성서류 폴더를 다시 열면 이전에 열어 둔 Agent/Claude 세션과 문서 배치를 자동으로 복원합니다.
-- **컴퓨터 간 세션 공유**: 같은 SSH 작업 폴더를 다른 컴퓨터에서 열면 원격 세션 구성을 복원할지 확인합니다.
-- **충돌 선택 지원**: 이 컴퓨터와 원격 구성이 다르면 이 컴퓨터만, 원격만, 둘 다 중에서 선택할 수 있습니다.
+- **설치 안정성 개선**: 한 줄 설치 스크립트를 GitHub Release에서 제공해 Raw GitHub 요청 제한의 영향을 받지 않습니다.
+- **macOS 플러그인 설치 보강**: 추가 설치 스크립트도 Raw GitHub 대신 GitHub API에서 내려받습니다.
 
 ## 처음 쓰는 순서
 
@@ -172,14 +171,14 @@ curl -fsSL https://raw.githubusercontent.com/jurisupport/legal-terminal/main/ins
 PowerShell을 열고 아래 명령을 실행합니다.
 
 ```powershell
-irm https://raw.githubusercontent.com/jurisupport/legal-terminal/main/install.ps1 | iex
+irm https://github.com/jurisupport/legal-terminal/releases/latest/download/install.ps1 | iex
 ```
 
 회사 보안 정책 때문에 한 줄 실행이 막히면 파일로 저장해 확인한 뒤 실행할 수 있습니다.
 
 ```powershell
 $installer = "$env:TEMP\legal-terminal-install.ps1"
-iwr https://raw.githubusercontent.com/jurisupport/legal-terminal/main/install.ps1 -UseBasicParsing -OutFile $installer
+iwr https://github.com/jurisupport/legal-terminal/releases/latest/download/install.ps1 -UseBasicParsing -OutFile $installer
 notepad $installer
 powershell -NoProfile -ExecutionPolicy Bypass -File $installer
 ```
@@ -191,7 +190,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File $installer
 터미널을 열고 아래 명령을 실행합니다.
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/jurisupport/legal-terminal/main/install-mac.sh | bash
+curl -fsSL https://github.com/jurisupport/legal-terminal/releases/latest/download/install-mac.sh | bash
 ```
 
 아직 코드서명/공증 전 빌드라서 Gatekeeper가 앱을 막을 수 있습니다. "손상되었기 때문에 휴지통으로 이동" 경고가 뜨면 앱 위치에 맞춰 격리 속성을 지운 뒤 Finder에서 우클릭 → 열기로 실행합니다.
