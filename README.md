@@ -95,7 +95,7 @@ curl -fsSL https://github.com/jurisupport/legal-terminal/releases/latest/downloa
 
 ## 이번 업데이트
 
-최신 릴리스: [v0.1.196](https://github.com/jurisupport/legal-terminal/releases/tag/v0.1.196)
+최신 릴리스: [v0.1.197](https://github.com/jurisupport/legal-terminal/releases/tag/v0.1.197)
 
 - **설치 안정성 개선**: 한 줄 설치 스크립트를 GitHub Release에서 제공해 Raw GitHub 요청 제한의 영향을 받지 않습니다.
 - **macOS 플러그인 설치 보강**: 추가 설치 스크립트도 Raw GitHub 대신 GitHub API에서 내려받습니다.

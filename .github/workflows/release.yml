@@ -62,10 +62,18 @@ jobs:
       - name: Build renderer/main (electron-vite)
         run: npm run build
 
-      - name: Package & publish macOS
-        run: npx electron-builder --mac ${{ matrix.mac_targets }} --${{ matrix.arch }} --publish always
+      - name: Package macOS
+        run: npx electron-builder --mac ${{ matrix.mac_targets }} --${{ matrix.arch }} --publish never
+
+      - name: Upload macOS
+        run: |
+          gh release upload "$GITHUB_REF_NAME" dist/legal-terminal-mac-${{ matrix.arch }}.* --clobber
+          if [[ "${{ matrix.arch }}" == "arm64" ]]; then
+            gh release upload "$GITHUB_REF_NAME" dist/latest-mac.yml --clobber
+          fi
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
 
   build-windows:
     name: Windows (x64)
@@ -87,10 +95,14 @@ jobs:
       - name: Build renderer/main (electron-vite)
         run: npm run build
 
-      - name: Package & publish Windows
-        run: npx electron-builder --win --publish always
+      - name: Package Windows
+        run: npx electron-builder --win --publish never
+
+      - name: Upload Windows
+        run: gh release upload $env:GITHUB_REF_NAME dist/legal-terminal-Setup.exe dist/legal-terminal-Setup.exe.blockmap dist/legal-terminal-portable.exe dist/latest.yml --clobber
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
 
   finalize-release:
     name: Publish release
