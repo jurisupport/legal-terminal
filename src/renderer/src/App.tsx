@@ -1191,7 +1191,7 @@ const toDocTab = (tab: WorkspaceDocTabPayload): DocTab | null => {
   if (!RESTORABLE_DOC_KINDS.has(tab.kind)) return null
   if (tab.kind !== 'settings' && !tab.path) return null
   return {
-    id: tab.id || `file-${++docSeq}`,
+    id: tab.id || newId(),
     title: tab.title || tab.path?.split(/[\\/]/).pop() || '문서',
     kind: normalizeDocKind(tab.kind, tab.path),
     caseTabId: tab.caseTabId,
@@ -2136,7 +2136,7 @@ export default function App(): JSX.Element {
     }
     const n = ++docSeq
     const tab: DocTab = {
-      id: `doc-${n}`,
+      id: newId(),
       title: `새 문서 ${n}.md`,
       kind: 'mdview',
       caseTabId: currentCaseTabIdForNewTab(),
@@ -2394,7 +2394,7 @@ export default function App(): JSX.Element {
       return existing.id
     }
     const kind = docKindForPath(path)
-    const tab: DocTab = { id: `file-${++docSeq}`, title: name, kind, caseTabId: caseTabIdValue, path, side }
+    const tab: DocTab = { id: newId(), title: name, kind, caseTabId: caseTabIdValue, path, side }
     setDocTabs((t) => [...t, tab])
     setActiveDoc(tab.id)
     setWorkActive(side, docKey(tab.id))
@@ -2616,7 +2616,7 @@ export default function App(): JSX.Element {
       setWorkActive(side, docKey(existing.id))
       return
     }
-    const id = payload?.id && !docTabs.some((t) => t.id === payload.id) ? payload.id : `file-${++docSeq}`
+    const id = payload?.id && !docTabs.some((t) => t.id === payload.id) ? payload.id : newId()
     const tab: DocTab = { id, title, kind, caseTabId: caseTabIdValue, path, side }
     setDocTabs((tabs) => [...tabs, tab])
     setActiveDoc(tab.id)
@@ -5211,7 +5211,7 @@ export default function App(): JSX.Element {
     }
     // 파일: 이름 없으면 무제 스크래치(저장 시 이름 물어봄)
     if (!n) {
-      const id = `doc-${++docSeq}`
+      const id = newId()
       setDocTabs((t) => [
         ...t,
         { id, title: '무제.md', kind: 'mdview', caseTabId: currentCaseTabIdForNewTab(), side: 'left' }
