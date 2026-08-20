@@ -1,4 +1,5 @@
 import {
+  startTransition,
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -1566,7 +1567,6 @@ function reduceTimeline(items: TimelineItem[], event: AgentEvent, agentLabel: st
         id: dialogId,
         kind: 'dialog',
         title: stringValue(dialog?.title) ?? `${agentLabel} 질문`,
-        text: stringValue(dialog?.dialogKind),
         status: 'waiting',
         dialogId,
         questions: dialogQuestions(dialog?.questions),
@@ -1575,6 +1575,7 @@ function reduceTimeline(items: TimelineItem[], event: AgentEvent, agentLabel: st
       (item) => ({
         ...item,
         title: stringValue(dialog?.title) ?? item.title,
+        text: undefined,
         status: 'waiting',
         questions: dialogQuestions(dialog?.questions),
         inputPreview: stringValue(dialog?.payloadPreview) ?? item.inputPreview
@@ -1591,7 +1592,7 @@ function reduceTimeline(items: TimelineItem[], event: AgentEvent, agentLabel: st
             ...item,
             status: event.cancelled ? 'cancelled' : 'resolved',
             answers: answers ?? item.answers,
-            text: stringValue(event.response) ?? item.text
+            text: stringValue(event.response)
           }
         : item
     )
@@ -2178,7 +2179,14 @@ export default function AgentPanel({
           )
         }
       }
-      if (event.type !== 'raw') setItems((prev) => reduceTimeline(prev, event, agentLabel))
+      if (event.type !== 'raw') {
+        const updateTimeline = (): void => setItems((prev) => reduceTimeline(prev, event, agentLabel))
+        if (event.type === 'message:assistant_delta' || event.type === 'message:assistant_replace') {
+          startTransition(updateTimeline)
+        } else {
+          updateTimeline()
+        }
+      }
       if (event.type === 'status') {
         const next = stringValue(event.status)
         if (
@@ -3059,18 +3067,25 @@ export default function AgentPanel({
     answers?: Record<string, string>,
     response?: string,
     cancelled = false
-  ): Promise<void> => {
-    if (!item.dialogId) return
+  ): Promise<boolean> => {
+    if (!item.dialogId) return false
+    const extraInput = !cancelled && attachments.length === 0 && !quotedMessage ? input.trim() : ''
+    const combinedResponse = [response?.trim(), extraInput].filter(Boolean).join('\n') || undefined
     const result = await window.lt.agent.answerDialog({
       sessionId: id,
       dialogId: item.dialogId,
       answers,
-      response,
+      response: combinedResponse,
       cancelled
     })
     if (!result.ok) {
       setError(result.error ?? '선택 응답을 보낼 수 없습니다.')
-      return
+      return false
+    }
+    if (extraInput) {
+      rememberPrompts([extraInput])
+      setInput('')
+      setMentionState(null)
     }
     setDialogChoices((current) => {
       const next = { ...current }
@@ -3082,14 +3097,33 @@ export default function AgentPanel({
       delete next[item.dialogId!]
       return next
     })
+    return true
   }
 
-  const answerSingleOption = async (
+  const selectDialogOption = async (
     item: TimelineItem,
     question: AgentDialogQuestion,
     option: AgentDialogOption
   ): Promise<void> => {
-    await answerDialog(item, { [question.question]: option.label })
+    if (!item.dialogId || question.multiSelect) {
+      toggleDialogChoice(item.dialogId ?? item.id, question, option.label)
+      return
+    }
+    const dialogId = item.dialogId
+    const questions = item.questions ?? []
+    const choices = {
+      ...(dialogChoices[dialogId] ?? {}),
+      [question.id]: [option.label]
+    }
+    if (!questions.every((candidate) => !candidate.multiSelect && choices[candidate.id]?.length)) {
+      toggleDialogChoice(dialogId, question, option.label)
+      return
+    }
+    const answers = Object.fromEntries(
+      questions.map((candidate) => [candidate.question, choices[candidate.id].join(', ')])
+    )
+    setError('')
+    await answerDialog(item, answers, dialogResponses[dialogId]?.trim())
   }
 
   const submitDialogChoices = async (item: TimelineItem): Promise<void> => {
@@ -3663,6 +3697,7 @@ export default function AgentPanel({
                     <div className="agent-msg-tools" aria-label="출력 작업">
                       <button
                         type="button"
+                        data-agent-quote=""
                         title="선택한 부분 또는 이 답변 전체를 인용해 지시"
                         onClick={() => {
                           const source = document.getElementById(`agent-message-${id}-${item.id}`)
@@ -3728,7 +3763,6 @@ export default function AgentPanel({
             const waiting = item.status === 'waiting'
             const choices = dialogChoices[dialogId] ?? {}
             const directResponse = dialogResponses[dialogId] ?? ''
-            const quickAnswer = waiting && questions.length === 1 && questions[0]?.multiSelect !== true
             return (
               <section key={item.id} className={`agent-card dialog ${item.status ?? ''}`}>
                 <div className="agent-card-head">
@@ -3751,11 +3785,7 @@ export default function AgentPanel({
                               type="button"
                               className={`agent-option ${selected ? 'selected' : ''}`}
                               disabled={!waiting}
-                              onClick={() =>
-                                quickAnswer
-                                  ? void answerSingleOption(item, question, option)
-                                  : toggleDialogChoice(dialogId, question, option.label)
-                              }
+                              onClick={() => void selectDialogOption(item, question, option)}
                             >
                               <span>{option.label}</span>
                               {option.description && <small>{option.description}</small>}
@@ -3774,12 +3804,15 @@ export default function AgentPanel({
                       .join('\n')}
                   </pre>
                 )}
+                {item.status !== 'waiting' && item.text && (
+                  <pre className="agent-card-input">추가 메시지: {item.text}</pre>
+                )}
                 {waiting && (
                   <>
                     <input
                       className="agent-question-freeform"
                       value={directResponse}
-                      placeholder="직접 입력"
+                      placeholder="추가 메시지 또는 직접 입력"
                       onChange={(e) =>
                         setDialogResponses((current) => ({
                           ...current,

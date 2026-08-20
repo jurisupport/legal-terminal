@@ -2649,7 +2649,11 @@ function buildCodexDialogResult(dialog: AgentDialogRequest, answer: AgentDialogA
   }
   const response = answer.response?.trim()
   const firstQuestion = dialog.questions[0]
-  if (response && firstQuestion && !answers[firstQuestion.id]) answers[firstQuestion.id] = { answers: [response] }
+  if (response && firstQuestion) {
+    const selected = answers[firstQuestion.id] ?? { answers: [] }
+    selected.answers.push(response)
+    answers[firstQuestion.id] = selected
+  }
   return { answers }
 }
 
@@ -4868,6 +4872,7 @@ export function answerAgentDialog(answer: AgentDialogAnswer): AgentCommandResult
       pending.kind === 'codex-user-input'
         ? buildCodexDialogResult(dialog, answer)
         : buildQuestionDialogResult(dialog, answer)
+    session.turnAssistantMessageId = randomUUID()
     pending.finish(result, answer)
     return { ok: true }
   }

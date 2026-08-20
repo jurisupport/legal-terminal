@@ -590,6 +590,7 @@ interface ClaudeAskOptions extends ClaudeDraftPromptOptions {
   docPath?: string | null
   sourceLabel?: string
   selectionSource?: ClaudeSelectionSource
+  agentQuoteMessageId?: string
 }
 
 type CaseWorkspaceTab = WorkspaceCaseTabPayload
@@ -8463,10 +8464,24 @@ const askOptionsForSelectionElement = (
   selectionSource?: ClaudeSelectionSource
 ): ClaudeAskOptions | undefined =>
   element?.closest('.agent-panel')
-    ? { docPath: null, sourceLabel: 'Agent 패널' }
+    ? {
+        docPath: null,
+        sourceLabel: 'Agent 패널',
+        agentQuoteMessageId: element?.closest<HTMLElement>('.agent-msg.assistant')?.id
+      }
     : selectionSource
       ? { selectionSource }
       : undefined
+
+const quoteAgentPanelSelection = (opts?: ClaudeAskOptions): boolean => {
+  const button = opts?.agentQuoteMessageId
+    ? document
+        .getElementById(opts.agentQuoteMessageId)
+        ?.querySelector<HTMLButtonElement>('[data-agent-quote]')
+    : undefined
+  button?.click()
+  return !!button
+}
 
 type SelectionAskHandler = (text: string, opts?: ClaudeAskOptions) => void
 type SelectionActionBox = TextSelectionOverlayDetail & { askOpts?: ClaudeAskOptions }
@@ -8554,7 +8569,12 @@ function SelectionMenu({ onAsk }: { onAsk: SelectionAskHandler }): JSX.Element |
           }
         ]
       : []),
-    { label: '✳ Claude에 물어보기', act: () => onAsk(menu.text, menu.askOpts) },
+    {
+      label: '✳ Claude에 물어보기',
+      act: () => {
+        if (!quoteAgentPanelSelection(menu.askOpts)) onAsk(menu.text, menu.askOpts)
+      }
+    },
     { label: '법제처 검색', act: () => open(`https://www.law.go.kr/LSW/lsSc.do?menuId=1&query=${q}`) },
     {
       label: '법고을 검색',
@@ -8727,7 +8747,7 @@ function SelectionAsk({ onAsk }: { onAsk: SelectionAskHandler }): JSX.Element | 
       <button
         type="button"
         onClick={() => {
-          onAsk(box.text, box.askOpts)
+          if (!quoteAgentPanelSelection(box.askOpts)) onAsk(box.text, box.askOpts)
           setBox(null)
           window.getSelection()?.removeAllRanges()
         }}

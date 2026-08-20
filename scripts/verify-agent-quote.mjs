@@ -34,6 +34,23 @@ assert.match(
   /restoreTextSelection\(content, quote\.selectionStart, quote\.selectionEnd\)/,
   'opening a selected quote must restore the original text selection'
 )
+assert.match(
+  panel,
+  /data-agent-quote=""/,
+  'the existing quote action must be reusable by the selection question UI'
+)
+
+const app = await readFile(new URL('../src/renderer/src/App.tsx', import.meta.url), 'utf8')
+assert.match(
+  app,
+  /agentQuoteMessageId:\s*element\?\.closest<HTMLElement>\('\.agent-msg\.assistant'\)\?\.id/,
+  'an Agent-panel selection must retain its source message id'
+)
+assert.equal(
+  app.match(/quoteAgentPanelSelection\([^)]*\.askOpts\)/g)?.length,
+  2,
+  'both Agent-panel selection question entry points must reuse the quote action'
+)
 
 const firstText = { length: 5, parentElement: { id: 'first' } }
 const secondText = { length: 6, parentElement: { id: 'second' } }

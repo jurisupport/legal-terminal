@@ -44,6 +44,16 @@ assert.match(wrap, /cursor:\s*text/, 'selection mode must show a text cursor')
 
 const textLayer = blockFor('.textLayer')
 assert.match(textLayer, /user-select:\s*text/, 'the PDF text layer must allow native text selection')
+assert.doesNotMatch(
+  css,
+  /\.pdf-canvas-wrap\.pannable \.textLayer\s*{[^}]*user-select:\s*none/,
+  'pan mode must not disable PDF text selection'
+)
+assert.match(
+  pdfViewer,
+  /PDF_PAN_EXCLUDE_SELECTOR\s*=\s*[\s\S]*?\.textLayer span, \.textLayer br/,
+  'pan mode must leave rendered PDF text to native selection'
+)
 
 assert.match(
   pdfViewer,

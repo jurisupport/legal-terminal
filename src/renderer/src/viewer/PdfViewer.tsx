@@ -31,7 +31,7 @@ const isLocalCloudPath = (p: string): boolean =>
   p.includes('/OneDrive/') || p.includes('/Library/CloudStorage/OneDrive')
 type PasswordPrompt = { reason: 'need' | 'incorrect' }
 const PDF_PAN_EXCLUDE_SELECTOR =
-  'input, textarea, button, select, a, [contenteditable="true"], .pdf-password'
+  'input, textarea, button, select, a, [contenteditable="true"], .pdf-password, .textLayer span, .textLayer br'
 
 function cleanPdfError(e: unknown): string {
   return (e instanceof Error ? e.message : String(e))
@@ -611,10 +611,6 @@ export default function PdfViewer({
       wrap.scrollLeft = sl - (e.clientX - sx)
       wrap.scrollTop = st - (e.clientY - sy)
     }
-    const onSelectStart = (e: Event): void => {
-      const target = e.target instanceof Element ? e.target : null
-      if (target?.closest('.textLayer')) e.preventDefault()
-    }
     const onDragStart = (e: DragEvent): void => {
       const target = e.target instanceof Element ? e.target : null
       if (!target?.closest('.pdf-page')) return
@@ -623,14 +619,12 @@ export default function PdfViewer({
       finishDrag()
     }
     wrap.addEventListener('mousedown', down)
-    wrap.addEventListener('selectstart', onSelectStart)
     window.addEventListener('mousemove', move)
     window.addEventListener('mouseup', finishDrag)
     window.addEventListener('blur', finishDrag)
     document.addEventListener('dragstart', onDragStart, true)
     return () => {
       wrap.removeEventListener('mousedown', down)
-      wrap.removeEventListener('selectstart', onSelectStart)
       window.removeEventListener('mousemove', move)
       window.removeEventListener('mouseup', finishDrag)
       window.removeEventListener('blur', finishDrag)

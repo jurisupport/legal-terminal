@@ -3153,6 +3153,13 @@ body {
 .agent-msg.user {
   margin-top: 14px;
 }
+.agent-msg.user:not(:has(~ .agent-msg.user)) {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: #181818;
+  box-shadow: 0 -10px #181818;
+}
 .agent-msg-bubble {
   padding: 7px 10px;
   border-left: 2px solid color-mix(in srgb, var(--accent) 62%, var(--border));
@@ -6104,11 +6111,6 @@ button.agent-attachment-chip {
 }
 .pdf-canvas-wrap.fit-page .pdf-page {
   margin: 0;
-}
-.pdf-canvas-wrap.pannable .textLayer {
-  -webkit-user-select: none;
-  user-select: none;
-  -webkit-user-drag: none;
 }
 .pdf-canvas-wrap.grabbing {
   cursor: grabbing;
