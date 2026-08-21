@@ -3473,6 +3473,9 @@ export default function AgentPanel({
   const panelStyle = {
     '--agent-font-size': `${agentFontSize}px`
   } as CSSProperties
+  const userQuestionOrders = new Map(
+    items.filter((item) => item.kind === 'user').map((item, index) => [item.id, index])
+  )
 
   return (
     <div
@@ -3616,7 +3619,13 @@ export default function AgentPanel({
             if (item.kind === 'user') {
               const userCopyText = item.text && item.text.trim().length > 0 ? item.text : ''
               return (
-                <section key={item.id} className="agent-msg user">
+                <section
+                  key={item.id}
+                  className="agent-msg user"
+                  style={{
+                    '--agent-user-question-top': `${(userQuestionOrders.get(item.id) ?? 0) * (agentFontSize * 3.1 + 18)}px`
+                  } as CSSProperties}
+                >
                   <div className="agent-msg-bubble">
                     {item.quote && (
                       <QuoteReference
