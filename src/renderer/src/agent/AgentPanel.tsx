@@ -3624,7 +3624,11 @@ export default function AgentPanel({
                         onOpen={() => revealQuotedMessage(item.quote!)}
                       />
                     )}
-                    <pre className="agent-card-text">{item.text}</pre>
+                    <details className="agent-user-question">
+                      <summary title="질문 펼치기/접기">
+                        <pre className="agent-card-text">{item.text}</pre>
+                      </summary>
+                    </details>
                     {item.attachments && item.attachments.length > 0 && (
                       <div className="agent-attachments sent" aria-label="전송된 첨부">
                         {item.attachments.map((attachment, index) => {

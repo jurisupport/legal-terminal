@@ -3171,6 +3171,29 @@ body {
   color: #e4e4e4;
   font-family: var(--font-sans);
 }
+.agent-user-question summary {
+  display: flex;
+  align-items: flex-start;
+  gap: 5px;
+  list-style: none;
+  cursor: pointer;
+}
+.agent-user-question summary::before {
+  content: '▶';
+  flex: 0 0 auto;
+}
+.agent-user-question[open] summary::before {
+  content: '▼';
+}
+.agent-user-question .agent-card-text {
+  min-width: 0;
+}
+.agent-user-question:not([open]) .agent-card-text {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+}
 .agent-msg.assistant {
   padding: 0 2px;
 }
