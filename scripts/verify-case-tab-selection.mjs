@@ -9,6 +9,10 @@ assert.match(
   'opening a file must stay in the current case before considering a nested case path'
 )
 
+const caseTabSubtitle = app.match(/const caseTabSubtitle[\s\S]*?\n    \]\)/)?.[0] ?? ''
+assert.match(caseTabSubtitle, /tab\.remotePath \?\? tab\.drafts/, 'case tabs must expose the full case path')
+assert.doesNotMatch(caseTabSubtitle, /pathLeaf\(/, 'case tabs must not reduce the case path to its last folder')
+
 const oldCaseAgent = { id: 'old-case-agent' }
 const newCaseAgent = { id: 'new-case-agent' }
 let active = newCaseAgent.id

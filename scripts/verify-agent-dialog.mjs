@@ -8,6 +8,7 @@ const assistantMessage = service.match(/function handleAssistantMessage[\s\S]*?\
 const streamEvent = service.match(/function handleStreamEvent[\s\S]*?\n}\n\nfunction handleSdkMessage/)?.[0] ?? ''
 const codexDialogResult = service.match(/function buildCodexDialogResult[\s\S]*?\n}\n\nfunction handleCodexUserInputRequest/)?.[0] ?? ''
 const serviceAnswerDialog = service.match(/export function answerAgentDialog[\s\S]*?\n}\n\nexport function interruptAgentSession/)?.[0] ?? ''
+const toggleDialogChoice = panel.match(/const toggleDialogChoice[\s\S]*?\n  const answerDialog/)?.[0] ?? ''
 const panelAnswerDialog = panel.match(/const answerDialog[\s\S]*?\n  const selectDialogOption/)?.[0] ?? ''
 const selectDialogOption = panel.match(/const selectDialogOption[\s\S]*?\n  const submitDialogChoices/)?.[0] ?? ''
 
@@ -18,9 +19,10 @@ assert.doesNotMatch(assistantMessage, /makeQuestionDialog\(/)
 assert.doesNotMatch(streamEvent, /makeQuestionDialog\(/)
 assert.match(codexDialogResult, /selected\.answers\.push\(response\)/)
 assert.match(serviceAnswerDialog, /session\.turnAssistantMessageId = randomUUID\(\)[\s\S]*pending\.finish/)
+assert.match(toggleDialogChoice, /dialogChoicesRef\.current = next[\s\S]*setDialogChoices\(next\)[\s\S]*return nextDialog/)
 assert.match(panelAnswerDialog, /input\.trim\(\)[\s\S]*response: combinedResponse[\s\S]*setInput\(''\)/)
 assert.match(selectDialogOption, /dialogResponses\[dialogId\]\?\.trim\(\)/)
-assert.match(selectDialogOption, /questions\.every\([\s\S]*answerDialog/)
+assert.match(selectDialogOption, /const choices = toggleDialogChoice\([\s\S]*questions\.every\([\s\S]*answerDialog/)
 assert.match(panel, /placeholder="추가 메시지 또는 직접 입력"/)
 assert.match(panel, /item\.status !== 'waiting' && item\.text/)
 

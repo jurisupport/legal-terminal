@@ -5837,7 +5837,7 @@ export default function App(): JSX.Element {
     joinStatus([
       tab.sshLabel ? `원격 ${tab.sshLabel}` : '로컬',
       tab.records ? '소송기록 연결' : undefined,
-      pathLeaf(tab.remotePath ?? tab.drafts)
+      tab.remotePath ?? tab.drafts
     ])
 
   const openCaseTab = (tab: CaseWorkspaceTab): void => {

@@ -1870,6 +1870,7 @@ export default function AgentPanel({
     text: string
   } | null>(null)
   const [dialogChoices, setDialogChoices] = useState<Record<string, Record<string, string[]>>>({})
+  const dialogChoicesRef = useRef<Record<string, Record<string, string[]>>>({})
   const [dialogResponses, setDialogResponses] = useState<Record<string, string>>({})
   const [attachments, setAttachments] = useState<AgentAttachment[]>(() => initialDraft?.attachments ?? [])
   const [attachmentDropOver, setAttachmentDropOver] = useState(false)
@@ -3043,23 +3044,24 @@ export default function AgentPanel({
     return () => window.removeEventListener('keydown', onKeyDown)
   }, [resolvePermission, visible, waitingPermission])
 
-  const toggleDialogChoice = (dialogId: string, question: AgentDialogQuestion, label: string): void => {
-    setDialogChoices((current) => {
-      const dialog = current[dialogId] ?? {}
-      const selected = dialog[question.id] ?? []
-      const nextSelected = question.multiSelect
-        ? selected.includes(label)
-          ? selected.filter((item) => item !== label)
-          : [...selected, label]
-        : [label]
-      return {
-        ...current,
-        [dialogId]: {
-          ...dialog,
-          [question.id]: nextSelected
-        }
-      }
-    })
+  const toggleDialogChoice = (
+    dialogId: string,
+    question: AgentDialogQuestion,
+    label: string
+  ): Record<string, string[]> => {
+    const current = dialogChoicesRef.current
+    const dialog = current[dialogId] ?? {}
+    const selected = dialog[question.id] ?? []
+    const nextSelected = question.multiSelect
+      ? selected.includes(label)
+        ? selected.filter((item) => item !== label)
+        : [...selected, label]
+      : [label]
+    const nextDialog = { ...dialog, [question.id]: nextSelected }
+    const next = { ...current, [dialogId]: nextDialog }
+    dialogChoicesRef.current = next
+    setDialogChoices(next)
+    return nextDialog
   }
 
   const answerDialog = async (
@@ -3087,11 +3089,10 @@ export default function AgentPanel({
       setInput('')
       setMentionState(null)
     }
-    setDialogChoices((current) => {
-      const next = { ...current }
-      delete next[item.dialogId!]
-      return next
-    })
+    const nextChoices = { ...dialogChoicesRef.current }
+    delete nextChoices[item.dialogId]
+    dialogChoicesRef.current = nextChoices
+    setDialogChoices(nextChoices)
     setDialogResponses((current) => {
       const next = { ...current }
       delete next[item.dialogId!]
@@ -3105,20 +3106,11 @@ export default function AgentPanel({
     question: AgentDialogQuestion,
     option: AgentDialogOption
   ): Promise<void> => {
-    if (!item.dialogId || question.multiSelect) {
-      toggleDialogChoice(item.dialogId ?? item.id, question, option.label)
-      return
-    }
+    if (!item.dialogId) return
     const dialogId = item.dialogId
     const questions = item.questions ?? []
-    const choices = {
-      ...(dialogChoices[dialogId] ?? {}),
-      [question.id]: [option.label]
-    }
-    if (!questions.every((candidate) => !candidate.multiSelect && choices[candidate.id]?.length)) {
-      toggleDialogChoice(dialogId, question, option.label)
-      return
-    }
+    const choices = toggleDialogChoice(dialogId, question, option.label)
+    if (!questions.every((candidate) => !candidate.multiSelect && choices[candidate.id]?.length)) return
     const answers = Object.fromEntries(
       questions.map((candidate) => [candidate.question, choices[candidate.id].join(', ')])
     )
