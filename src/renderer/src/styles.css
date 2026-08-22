@@ -3153,13 +3153,10 @@ body {
 .agent-msg.user {
   margin-top: 14px;
   position: sticky;
-  top: var(--agent-user-question-top, 0);
+  top: 0;
   z-index: 2;
   background: #181818;
   box-shadow: 0 -10px #181818;
-}
-.agent-msg.user:has(.agent-user-question[open]) {
-  z-index: 3;
 }
 .agent-msg-bubble {
   padding: 7px 10px;
