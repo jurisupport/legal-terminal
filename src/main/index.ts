@@ -210,6 +210,7 @@ function createWindow(setMain = true, opts?: { docOnly?: boolean; termOnly?: boo
   if (setMain) mainWindow = win
 
   let closeGuardReady = false
+  let lastRendererRecoveryAt = 0
 
   win.on('focus', () => stopWindowAttention(win))
   win.on('close', (event) => {
@@ -263,6 +264,40 @@ function createWindow(setMain = true, opts?: { docOnly?: boolean; termOnly?: boo
     win.webContents.send(closeCaseTab ? 'app:closeActiveCaseTab' : 'app:closeActiveTab')
   })
 
+  win.webContents.on('render-process-gone', (_event, details) => {
+    if (details.reason === 'clean-exit' || win.isDestroyed() || forceClosingWindowIds.has(win.id)) return
+    console.error(`[renderer] process gone: ${details.reason} (${details.exitCode})`)
+    closeGuardReady = false
+
+    const now = Date.now()
+    if (now - lastRendererRecoveryAt >= 30_000) {
+      lastRendererRecoveryAt = now
+      win.webContents.reload()
+      return
+    }
+
+    void dialog
+      .showMessageBox(win, {
+        type: 'error',
+        title: 'legal-terminal 화면 오류',
+        message: '화면을 다시 불러오지 못했습니다.',
+        detail: 'Renderer가 반복해서 종료되었습니다. 다시 시도하거나 창을 닫아 주세요.',
+        buttons: ['다시 불러오기', '창 닫기'],
+        defaultId: 0,
+        cancelId: 1
+      })
+      .then(({ response }) => {
+        if (win.isDestroyed()) return
+        if (response === 0) {
+          lastRendererRecoveryAt = Date.now()
+          win.webContents.reload()
+        } else {
+          forceClosingWindowIds.add(win.id)
+          win.close()
+        }
+      })
+  })
+
   let revealed = false
   const revealWindow = (): void => {
     if (revealed || win.isDestroyed()) return
@@ -281,7 +316,7 @@ function createWindow(setMain = true, opts?: { docOnly?: boolean; termOnly?: boo
     }
   }
   win.on('ready-to-show', revealWindow)
-  win.webContents.once('did-finish-load', () => {
+  win.webContents.on('did-finish-load', () => {
     closeGuardReady = true
     setTimeout(revealWindow, 0)
   })
