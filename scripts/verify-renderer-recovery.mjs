@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { execFile, spawn } from 'node:child_process'
 import fs from 'node:fs/promises'
+import { createRequire } from 'node:module'
 import os from 'node:os'
 import path from 'node:path'
 import { promisify } from 'node:util'
@@ -12,13 +13,14 @@ if (process.platform !== 'darwin') {
 }
 
 const execFileAsync = promisify(execFile)
+const electronPath = createRequire(import.meta.url)('electron')
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const userData = await fs.mkdtemp(path.join(os.tmpdir(), 'legal-terminal-renderer-recovery-'))
 const env = { ...process.env }
 delete env.ELECTRON_RUN_AS_NODE
 
 const electron = spawn(
-  path.join(repo, 'node_modules/electron/dist/Electron.app/Contents/MacOS/Electron'),
+  electronPath,
   [`--user-data-dir=${userData}`, repo],
   { env, stdio: ['ignore', 'pipe', 'pipe'] }
 )
