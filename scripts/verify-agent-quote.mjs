@@ -36,6 +36,16 @@ assert.match(
 )
 assert.match(
   panel,
+  /shouldFollowTimelineRef\.current = false\s+target\.scrollIntoView/,
+  'opening a quote must pause streaming output auto-scroll'
+)
+assert.match(
+  panel,
+  /!timelineUserScrollRef\.current && shouldFollowTimelineRef\.current !== atBottom/,
+  'programmatic scrolling must not override the explicit timeline follow state'
+)
+assert.match(
+  panel,
   /data-agent-quote=""/,
   'the existing quote action must be reusable by the selection question UI'
 )

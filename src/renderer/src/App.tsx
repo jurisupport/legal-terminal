@@ -9944,7 +9944,7 @@ function Welcome({
   return (
     <div className="welcome">
       <h1>legal-terminal</h1>
-      <p className="subtitle">Claude Code · Markdown 준비서면 · 전자소송기록 뷰어 — 한 화면에서</p>
+      <p className="subtitle">사건기록부터 준비서면까지, 한 화면에서.</p>
 
       {recent.length > 0 && (
         <div className="recent">

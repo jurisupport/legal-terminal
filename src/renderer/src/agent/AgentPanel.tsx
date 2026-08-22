@@ -1987,7 +1987,10 @@ export default function AgentPanel({
         quote.selectionEnd !== undefined
           ? restoreTextSelection(content, quote.selectionStart, quote.selectionEnd)
           : undefined
-      ;(selected ?? source)?.scrollIntoView({
+      const target = selected ?? source
+      if (!target) return
+      shouldFollowTimelineRef.current = false
+      target.scrollIntoView({
         behavior: 'smooth',
         block: 'center'
       })
@@ -2123,7 +2126,7 @@ export default function AgentPanel({
     const timeline = scrollRef.current
     if (!timeline) return
     const atBottom = isTimelineNearBottom(timeline)
-    if (!timelineUserScrollRef.current && shouldFollowTimelineRef.current && !atBottom) return
+    if (!timelineUserScrollRef.current && shouldFollowTimelineRef.current !== atBottom) return
     shouldFollowTimelineRef.current = atBottom
     if (atBottom) setShowNewOutputNotice(false)
   }, [])
