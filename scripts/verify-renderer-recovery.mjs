@@ -15,9 +15,18 @@ if (process.platform !== 'darwin') {
 const execFileAsync = promisify(execFile)
 const electronPath = createRequire(import.meta.url)('electron')
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
+const mainSource = await fs.readFile(path.join(repo, 'src/main/index.ts'), 'utf8')
 const userData = await fs.mkdtemp(path.join(os.tmpdir(), 'legal-terminal-renderer-recovery-'))
 const env = { ...process.env }
 delete env.ELECTRON_RUN_AS_NODE
+
+assert.match(
+  mainSource,
+  /webContents\.on\('render-process-gone'[\s\S]*?rendererRecoveryRequested[\s\S]*?reload\(\)/,
+  'a requested renderer recovery must reload after the crash event'
+)
+assert.match(mainSource, /webContents\.on\('unresponsive'[\s\S]*?forcefullyCrashRenderer\(\)/)
+assert.match(mainSource, /role: 'reload', label: '화면 다시 불러오기'/)
 
 const electron = spawn(
   electronPath,

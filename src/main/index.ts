@@ -211,6 +211,8 @@ function createWindow(setMain = true, opts?: { docOnly?: boolean; termOnly?: boo
 
   let closeGuardReady = false
   let lastRendererRecoveryAt = 0
+  let rendererRecoveryRequested = false
+  let unresponsiveDialogOpen = false
 
   win.on('focus', () => stopWindowAttention(win))
   win.on('close', (event) => {
@@ -266,6 +268,13 @@ function createWindow(setMain = true, opts?: { docOnly?: boolean; termOnly?: boo
 
   win.webContents.on('render-process-gone', (_event, details) => {
     if (details.reason === 'clean-exit' || win.isDestroyed() || forceClosingWindowIds.has(win.id)) return
+    if (rendererRecoveryRequested) {
+      rendererRecoveryRequested = false
+      closeGuardReady = false
+      lastRendererRecoveryAt = Date.now()
+      win.webContents.reload()
+      return
+    }
     console.error(`[renderer] process gone: ${details.reason} (${details.exitCode})`)
     closeGuardReady = false
 
@@ -295,6 +304,29 @@ function createWindow(setMain = true, opts?: { docOnly?: boolean; termOnly?: boo
           forceClosingWindowIds.add(win.id)
           win.close()
         }
+      })
+  })
+
+  win.webContents.on('unresponsive', () => {
+    if (unresponsiveDialogOpen || win.isDestroyed()) return
+    unresponsiveDialogOpen = true
+    console.error('[renderer] unresponsive')
+    void dialog
+      .showMessageBox(win, {
+        type: 'warning',
+        title: 'legal-terminal 화면 멈춤',
+        message: '화면이 응답하지 않습니다.',
+        detail: '작업이 오래 걸리는 중일 수 있습니다. 잠시 기다리거나 화면을 다시 불러오세요.',
+        buttons: ['기다리기', '다시 불러오기'],
+        defaultId: 0,
+        cancelId: 0
+      })
+      .then(({ response }) => {
+        unresponsiveDialogOpen = false
+        if (response !== 1 || win.isDestroyed() || win.webContents.isDestroyed()) return
+        closeGuardReady = false
+        rendererRecoveryRequested = true
+        win.webContents.forcefullyCrashRenderer()
       })
   })
 
@@ -2707,10 +2739,16 @@ app.whenReady().then(() => {
   applyDockIcon()
   // 기본 메뉴 제거 — 기본 메뉴가 Ctrl+W를 '창 닫기'에 바인딩해 터미널 Ctrl+W가 창을 닫는 문제 방지.
   // 단 macOS는 메뉴가 아예 없으면 Cmd+C/V 같은 편집 단축키 자체가 죽으므로(설정창 토큰
-  // 붙여넣기 불가) 편집 롤만 담은 최소 메뉴를 단다 — 여기에는 Cmd+W 바인딩이 없다.
+  // 붙여넣기 불가) 편집 롤과 화면 복구용 reload만 둔다 — 여기에는 Cmd+W 바인딩이 없다.
   // (메뉴바는 autoHideMenuBar로 이미 숨겨져 있어 UX 변화 없음. Ctrl+W는 렌더러에서 탭 닫기로 처리.)
   if (process.platform === 'darwin') {
-    Menu.setApplicationMenu(Menu.buildFromTemplate([{ role: 'appMenu' }, { role: 'editMenu' }]))
+    Menu.setApplicationMenu(
+      Menu.buildFromTemplate([
+        { role: 'appMenu' },
+        { role: 'editMenu' },
+        { label: '보기', submenu: [{ role: 'reload', label: '화면 다시 불러오기' }] }
+      ])
+    )
   } else {
     Menu.setApplicationMenu(null)
   }
