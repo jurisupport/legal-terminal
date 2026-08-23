@@ -1896,6 +1896,7 @@ export default function AgentPanel({
   const createdRef = useRef(false)
   const scrollRef = useRef<HTMLDivElement>(null)
   const shouldFollowTimelineRef = useRef(true)
+  const showNewOutputNoticeRef = useRef(false)
   const timelineUserScrollRef = useRef(false)
   const timelineUserScrollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
@@ -2077,6 +2078,12 @@ export default function AgentPanel({
     [items, showNewOutputNotice]
   )
 
+  const setNewOutputNotice = useCallback((visible: boolean): void => {
+    if (showNewOutputNoticeRef.current === visible) return
+    showNewOutputNoticeRef.current = visible
+    setShowNewOutputNotice(visible)
+  }, [])
+
   const showTransientFeedback = useCallback((message: string): void => {
     setCopyFeedback(message)
     if (copyFeedbackTimerRef.current) clearTimeout(copyFeedbackTimerRef.current)
@@ -2104,14 +2111,14 @@ export default function AgentPanel({
 
   const scrollTimelineToBottom = useCallback((): void => {
     shouldFollowTimelineRef.current = true
-    setShowNewOutputNotice(false)
+    setNewOutputNotice(false)
     const scroll = (): void => {
       const timeline = scrollRef.current
       timeline?.scrollTo({ top: timeline.scrollHeight })
     }
     scroll()
     window.requestAnimationFrame(scroll)
-  }, [])
+  }, [setNewOutputNotice])
 
   const markTimelineUserScroll = useCallback((): void => {
     timelineUserScrollRef.current = true
@@ -2128,8 +2135,8 @@ export default function AgentPanel({
     const atBottom = isTimelineNearBottom(timeline)
     if (!timelineUserScrollRef.current && shouldFollowTimelineRef.current !== atBottom) return
     shouldFollowTimelineRef.current = atBottom
-    if (atBottom) setShowNewOutputNotice(false)
-  }, [])
+    if (atBottom) setNewOutputNotice(false)
+  }, [setNewOutputNotice])
 
   useEffect(() => {
     const off = window.lt.agent.onEvent((event) => {
@@ -2339,8 +2346,8 @@ export default function AgentPanel({
       scrollTimelineToBottom()
       return
     }
-    setShowNewOutputNotice(items.length > 0)
-  }, [items, scrollTimelineToBottom, visible])
+    setNewOutputNotice(items.length > 0)
+  }, [items, scrollTimelineToBottom, setNewOutputNotice, visible])
 
   useEffect(
     () => () => {

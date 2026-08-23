@@ -58,6 +58,8 @@ try {
   await page.locator('.new-case-row', { hasText: '작성서류 폴더' }).click()
   const local = page.locator('.modal.conn-menu button.conn-row', { hasText: '이 컴퓨터' })
   if (await local.isVisible({ timeout: 2_000 }).catch(() => false)) await local.click()
+  const startFresh = page.locator('button', { hasText: '새로 시작' })
+  if (await startFresh.isVisible({ timeout: 2_000 }).catch(() => false)) await startFresh.click()
   const openAgent = page.locator('button', { hasText: '이 사건에서 Agent 열기' })
   if (await openAgent.isVisible({ timeout: 2_000 }).catch(() => false)) await openAgent.click()
   const composer = page.locator('.agent-composer textarea')
@@ -87,7 +89,56 @@ try {
   assert.equal(await composer.inputValue(), followUp)
   assert.equal(await composer.isEditable(), true)
   assert.equal(await composer.evaluate((textarea) => document.activeElement === textarea), true)
-  console.log('agent composer accepts and retains input while output streams')
+
+  await app.evaluate(() => {
+    globalThis.__workingInputSender?.send('agent:event', {
+      type: 'message:assistant_delta',
+      sessionId: globalThis.__workingInputSessionId,
+      messageId: 'working-input-assistant',
+      text: '준비 '.repeat(2_000)
+    })
+  })
+  await page.waitForTimeout(100)
+  await page.locator('.agent-timeline').evaluate((timeline) => {
+    if (timeline.scrollHeight <= timeline.clientHeight) throw new Error('timeline did not overflow')
+    timeline.dispatchEvent(new WheelEvent('wheel', { bubbles: true }))
+    timeline.scrollTop = 0
+    timeline.dispatchEvent(new Event('scroll', { bubbles: true }))
+  })
+  await app.evaluate(() => {
+    clearInterval(globalThis.__workingInputTimer)
+    const sender = globalThis.__workingInputSender
+    const sessionId = globalThis.__workingInputSessionId
+    sender?.send('agent:event', {
+      type: 'message:assistant_done',
+      sessionId,
+      messageId: 'working-input-assistant'
+    })
+    sender?.send('agent:event', {
+      type: 'tool:start',
+      sessionId,
+      toolId: 'working-input-tool',
+      name: 'Bash'
+    })
+    sender?.send('agent:event', {
+      type: 'tool:done',
+      sessionId,
+      toolId: 'working-input-tool',
+      outputPreview: 'done'
+    })
+    let index = 0
+    globalThis.__workingInputTimer = setInterval(() => {
+      sender?.send('agent:event', {
+        type: 'message:assistant_delta',
+        sessionId,
+        messageId: 'working-input-assistant',
+        text: `재개 ${index++} `
+      })
+    }, 1)
+  })
+  await page.waitForTimeout(1_500)
+  assert.equal(await page.locator('.agent-panel').isVisible(), true)
+  console.log('agent stream remains usable after tool output while the timeline is scrolled')
 } finally {
   await app.evaluate(() => clearInterval(globalThis.__workingInputTimer)).catch(() => {})
   await app.evaluate(({ app }) => app.exit(0)).catch(() => {})
