@@ -19,6 +19,12 @@ import AgentPanel, {
   type AgentProviderHandoff
 } from './agent/AgentPanel'
 import { preloadSessionTranscripts } from './agent/transcriptCache'
+import {
+  expandSessionSearchLimit,
+  matchesSearch,
+  SESSION_SEARCH_MAX_LIMIT,
+  SESSION_SEARCH_RECENT_LIMIT
+} from './search/sessionSearch'
 import FileTree, { LT_PATH, sortEntries, type PendingCreateRequest, type SortMode } from './filetree/FileTree'
 import PdfViewer, { type PdfViewStatus } from './viewer/PdfViewer'
 import RecordViewer from './viewer/RecordViewer'
@@ -899,12 +905,6 @@ const buildWindowTitle = (opts: {
   return context ? `${context} - ${APP_WINDOW_TITLE}` : APP_WINDOW_TITLE
 }
 
-const searchNorm = (value?: string): string =>
-  (value ?? '')
-    .normalize('NFKC')
-    .toLowerCase()
-    .replace(/\s+/g, '')
-
 const matchNorm = (value?: string | null): string =>
   (value ?? '')
     .normalize('NFC')
@@ -958,20 +958,6 @@ const replacePathPrefix = (
   if (value.startsWith(from + '/')) return to + value.slice(from.length)
   if (value.startsWith(from + '\\')) return to + value.slice(from.length)
   return value
-}
-
-const matchesSearch = (parts: (string | number | undefined)[], query: string): boolean => {
-  const tokens = query
-    .split(/\s+/)
-    .map(searchNorm)
-    .filter(Boolean)
-  if (!tokens.length) return true
-  const haystack = searchNorm(
-    parts
-      .filter((part): part is string | number => part !== undefined && String(part).trim().length > 0)
-      .join(' ')
-  )
-  return tokens.every((token) => haystack.includes(token))
 }
 
 const koreanSessionTitle = (source?: Partial<TermTab>): string | undefined => {
@@ -1046,7 +1032,8 @@ const sessionListInflight = new Map<string, Promise<SessionListEntry[]>>()
 const sessionListKey = (
   cwd: string,
   ssh?: SshConn,
-  context?: SessionSearchContext
+  context?: SessionSearchContext,
+  limit = 40
 ): string =>
   JSON.stringify({
     cwd,
@@ -1058,26 +1045,29 @@ const sessionListKey = (
           identityFile: ssh.identityFile ?? ''
         }
       : null,
-    context: context ?? null
+    context: context ?? null,
+    limit
   })
 
 const cachedPastSessions = (
   cwd: string,
   source?: TermTab,
-  query = ''
+  query = '',
+  limit = 40
 ): SessionListEntry[] | undefined => {
   const context = sessionContextForTerm(source, query)
-  return sessionListCache.get(sessionListKey(cwd, source?.ssh, context))
+  return sessionListCache.get(sessionListKey(cwd, source?.ssh, context, limit))
 }
 
 const loadPastSessions = (
   cwd: string,
   source?: TermTab,
   query = '',
-  refresh = false
+  refresh = false,
+  limit = 40
 ): Promise<SessionListEntry[]> => {
   const context = sessionContextForTerm(source, query)
-  const key = sessionListKey(cwd, source?.ssh, context)
+  const key = sessionListKey(cwd, source?.ssh, context, limit)
   if (!refresh) {
     const cached = sessionListCache.get(key)
     if (cached) return Promise.resolve(cached)
@@ -1085,14 +1075,14 @@ const loadPastSessions = (
     if (inflight) return inflight
   }
   const request = window.lt.sessions
-    .list(cwd, source?.ssh, context)
+    .list(cwd, source?.ssh, context, limit)
     .then((entries) => {
       if (source) {
         // 제목·시각 등 세션 고유 정보만 인덱스에 보충한다. 현재 사건의 caseNumber·caseName을
         // 폴더의 모든 과거 세션에 일괄로 찍으면, 폴더를 공유하는 다른 사건의 세션까지
         // 이 사건 것으로 기록돼 사건 대시보드 매칭이 틀어진다 — 사건 연결은 실제로
         // 세션이 열린 터미널에서만(sessionRememberInput 단건 호출) 기록한다.
-        entries.forEach((entry) => {
+        entries.slice(0, SESSION_SEARCH_RECENT_LIMIT).forEach((entry) => {
           void window.lt.sessions
             .remember({
               sessionId: entry.sessionId,
@@ -9710,6 +9700,7 @@ function SessionList({
 }): JSX.Element {
   const [past, setPast] = useState<SessionListEntry[] | null>(null)
   const [query, setQuery] = useState('')
+  const [pastLimit, setPastLimit] = useState(SESSION_SEARCH_RECENT_LIMIT)
 
   useEffect(() => {
     const close = (): void => onClose()
@@ -9795,10 +9786,10 @@ function SessionList({
       return
     }
     let alive = true
-    const cached = cachedPastSessions(filterCwd, filterSource, query)
+    const cached = cachedPastSessions(filterCwd, filterSource, query, pastLimit)
     if (cached) setPast(cached)
     else setPast(null)
-    loadPastSessions(filterCwd, filterSource, query, !!cached)
+    loadPastSessions(filterCwd, filterSource, query, !!cached, pastLimit)
       .then((r) => {
         if (!alive) return
         setPast(r)
@@ -9820,8 +9811,16 @@ function SessionList({
     filterSource?.ssh?.user,
     filterSource?.ssh?.port,
     filterSource?.ssh?.identityFile,
-    query
+    query,
+    pastLimit
   ])
+
+  const shownPast = past?.filter((s) =>
+    matchesSearch(
+      [s.transcriptTitle, s.title, s.caseNumber, s.caseName, s.folderName, s.cwd, s.sessionId],
+      query
+    )
+  )
 
   // 날짜 그룹(오늘/어제/…) + 그룹 안에서는 시각만 — 훑어보기 좋게
   const startOfDay = (d: Date): number =>
@@ -9850,7 +9849,14 @@ function SessionList({
     >
       <div className="sl-head">
         <span className="sl-title">세션</span>
-        <select className="sl-filter" value={filter} onChange={(e) => onFilter(e.target.value)}>
+        <select
+          className="sl-filter"
+          value={filter}
+          onChange={(e) => {
+            setPastLimit(SESSION_SEARCH_RECENT_LIMIT)
+            onFilter(e.target.value)
+          }}
+        >
           <option value="all">전체 사건</option>
           {caseOpts.map((o) => (
             <option key={o.value} value={o.value}>
@@ -9864,7 +9870,10 @@ function SessionList({
         <input
           className="sl-search"
           value={query}
-          onChange={(e) => setQuery(e.target.value)}
+          onChange={(e) => {
+            setQuery(e.target.value)
+            setPastLimit(SESSION_SEARCH_RECENT_LIMIT)
+          }}
           placeholder="사건번호·사건명·작성서류 폴더명 검색"
         />
       </div>
@@ -9890,13 +9899,15 @@ function SessionList({
         <li className="sl-section">과거 세션 (이어서 열기)</li>
         {!filterCwd && <li className="muted pad small">사건을 먼저 여세요.</li>}
         {filterCwd && past === null && <li className="muted pad small">불러오는 중…</li>}
-        {filterCwd && past && past.length === 0 && (
-          <li className="muted pad small">과거 세션이 없습니다.</li>
+        {filterCwd && shownPast && shownPast.length === 0 && (
+          <li className="muted pad small">
+            {query.trim() ? `최근 ${pastLimit}개에서 검색 결과가 없습니다.` : '과거 세션이 없습니다.'}
+          </li>
         )}
         {filterCwd &&
-          past?.map((p, i) => {
+          shownPast?.map((p, i) => {
             const group = dayLabel(p.mtime)
-            const prevGroup = i > 0 ? dayLabel(past[i - 1].mtime) : undefined
+            const prevGroup = i > 0 ? dayLabel(shownPast[i - 1].mtime) : undefined
             // 대화 내용 제목을 앞세우고, 사건/폴더 맥락은 보조 줄로
             const name = p.transcriptTitle || p.title || '(제목 없음)'
             const caseLabel =
@@ -9919,6 +9930,20 @@ function SessionList({
               </Fragment>
             )
           })}
+        {query.trim() &&
+          past &&
+          past.length >= pastLimit &&
+          pastLimit < SESSION_SEARCH_MAX_LIMIT && (
+            <li className="sl-more-row">
+              <button
+                className="sl-more"
+                type="button"
+                onClick={() => setPastLimit(expandSessionSearchLimit)}
+              >
+                더 오래된 세션에서 검색
+              </button>
+            </li>
+          )}
       </ul>
     </div>
   )

@@ -889,7 +889,8 @@ export interface LtApi {
     list: (
       cwd: string,
       ssh?: SshConn,
-      context?: SessionSearchContext
+      context?: SessionSearchContext,
+      limit?: number
     ) => Promise<SessionListEntry[]>
     transcript: (sessionId: string, ssh?: SshConn) => Promise<SessionTranscript | null>
     remember: (input: SessionRememberInput) => Promise<{ ok: boolean; error?: string }>

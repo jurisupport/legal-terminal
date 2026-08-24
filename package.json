@@ -32,6 +32,7 @@
     "verify:agent-account-switch": "node scripts/verify-agent-account-switch.mjs",
     "verify:agent-auth-queue": "node scripts/verify-agent-auth-queue.mjs",
     "verify:agent-case-context": "node --experimental-strip-types --no-warnings scripts/verify-agent-case-context.mjs",
+    "verify:agent-session-search": "node --experimental-strip-types --no-warnings scripts/verify-agent-session-search.mjs",
     "verify:agent-quote": "node --experimental-strip-types --no-warnings scripts/verify-agent-quote.mjs",
     "verify:agent-slash-autocomplete": "node --experimental-strip-types --no-warnings scripts/verify-agent-slash-autocomplete.mjs",
     "verify:ssh-options": "node --experimental-strip-types --no-warnings scripts/verify-ssh-options.mjs",

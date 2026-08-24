@@ -784,8 +784,14 @@ ipcMain.on('sync:cancel', () => cancelSync())
 ipcMain.handle('sessions:current', (_e, p: { cwd: string; since?: number; ssh?: SshProfile }) =>
   currentSession(p.cwd, p.since ?? 0, p.ssh)
 )
-ipcMain.handle('sessions:list', (_e, p: { cwd: string; ssh?: SshProfile; context?: SessionSearchContext }) =>
-  listSessions(p.cwd, 40, p.ssh, p.context)
+ipcMain.handle(
+  'sessions:list',
+  (_e, p: { cwd: string; ssh?: SshProfile; context?: SessionSearchContext; limit?: number }) => {
+    const limit = Number.isFinite(p.limit)
+      ? Math.min(Math.max(Math.trunc(p.limit as number), 1), 1000)
+      : 40
+    return listSessions(p.cwd, limit, p.ssh, p.context)
+  }
 )
 ipcMain.handle('sessions:transcript', (_e, p: { sessionId: string; ssh?: SshProfile }) =>
   readSessionTranscript(p.sessionId, p.ssh)

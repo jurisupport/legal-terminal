@@ -966,9 +966,10 @@ const api = {
     list: (
       cwd: string,
       ssh?: SshConn,
-      context?: SessionSearchContext
+      context?: SessionSearchContext,
+      limit?: number
     ): Promise<SessionListEntry[]> =>
-      ipcRenderer.invoke('sessions:list', { cwd, ssh, context }),
+      ipcRenderer.invoke('sessions:list', { cwd, ssh, context, limit }),
     transcript: (sessionId: string, ssh?: SshConn): Promise<SessionTranscript | null> =>
       ipcRenderer.invoke('sessions:transcript', { sessionId, ssh }),
     remember: (input: SessionRememberInput): Promise<{ ok: boolean; error?: string }> =>

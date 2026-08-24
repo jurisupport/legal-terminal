@@ -2779,6 +2779,24 @@ body {
   padding: 8px 9px 2px;
   letter-spacing: 0.05em;
 }
+.sl-more-row {
+  list-style: none;
+  padding: 8px 9px;
+}
+.sl-more {
+  width: 100%;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--accent);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+.sl-more:hover {
+  background: rgba(255, 255, 255, 0.06);
+}
 .sl-row:hover {
   background: rgba(255, 255, 255, 0.06);
 }
@@ -3159,7 +3177,7 @@ body {
   box-shadow: 0 -10px #181818;
 }
 .agent-msg-bubble {
-  padding: 7px 10px;
+  padding: 4px 10px;
   border-left: 2px solid color-mix(in srgb, var(--accent) 62%, var(--border));
   border-radius: 0 6px 6px 0;
   background: color-mix(in srgb, var(--accent) 9%, transparent);
@@ -3189,7 +3207,7 @@ body {
 .agent-user-question:not([open]) .agent-card-text {
   display: -webkit-box;
   -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
+  -webkit-line-clamp: 1;
   overflow: hidden;
 }
 .agent-msg.assistant {
