@@ -8,6 +8,7 @@ import {
 } from 'react'
 import type { JsHearing } from '../env'
 import { isCommittedEnter, isImeComposing } from '../ime'
+import { shouldKeepPendingRecord } from './loadPolicy'
 
 type SpeakerRole = 'court' | 'plaintiff' | 'defendant' | 'preparation' | 'other'
 type SaveStatus = 'idle' | 'saving' | 'saved' | 'error'
@@ -616,15 +617,20 @@ export default function HearingRecordPanel({
 
   const loadFromPath = useCallback(
     async (path: string): Promise<void> => {
+      const previousPath = loadedPathRef.current
+      const keepPending = shouldKeepPendingRecord(previousPath, path)
+      loadedPathRef.current = path
       updateLoadState('loading')
       const stat = await window.lt.fs
         .stat(path)
         .catch(() => ({ ok: false as const, error: 'stat failed' }))
+      if (loadedPathRef.current !== path) return
       if (!stat.ok) {
         // 파일이 아직 없다 → 새 기록으로 시작
         const pending = latestRecordRef.current
         const base = createInitialRecord(initialCase, initialHearing)
-        const next = recordHasContent(pending)
+        const hasPending = keepPending && recordHasContent(pending)
+        const next = hasPending
           ? {
               ...pending,
               case: { ...pending.case, ...base.case },
@@ -640,19 +646,18 @@ export default function HearingRecordPanel({
         updateLoadState('idle')
         setSaveStatus('idle')
         setSaveMessage(
-          recordHasContent(pending)
-            ? '현장 입력 유지 · 자동저장 대기'
-            : '새 기록 · 입력하면 자동저장'
+          hasPending ? '현장 입력 유지 · 자동저장 대기' : '새 기록 · 입력하면 자동저장'
         )
         setLastSavedAt('')
         return
       }
       try {
         const read = await window.lt.fs.readText(path)
+        if (loadedPathRef.current !== path) return
         const parsed = JSON.parse(read.text) as unknown
         const loaded = sanitizeRecord(parsed, initialCase, initialHearing)
         const pending = latestRecordRef.current
-        const hasPending = recordHasContent(pending)
+        const hasPending = keepPending && recordHasContent(pending)
         const next = hasPending ? mergePendingRecord(loaded, pending) : loaded
         lastSavedSourceStampRef.current = hasPending ? '' : next.updatedAt
         latestRecordRef.current = next
@@ -665,6 +670,7 @@ export default function HearingRecordPanel({
         setLastSavedAt(hasPending ? '' : next.updatedAt)
         onSavedPathRef.current?.(path, buildHearingRecordTitle(next.case, next.hearing))
       } catch (error) {
+        if (loadedPathRef.current !== path) return
         // 파일은 있는데 읽기/파싱에 실패 — 빈 기록으로 덮어쓰지 않도록 저장을 막는다.
         loadedPathRef.current = path
         setRecordPath(path)
