@@ -6,12 +6,12 @@ log() {
 }
 
 die() {
-  printf '[legal-terminal] ERROR: %s\n' "$1" >&2
+  printf '[legal-terminal] 오류: %s\n' "$1" >&2
   exit 1
 }
 
 require_command() {
-  command -v "$1" >/dev/null 2>&1 || die "$1 command not found"
+  command -v "$1" >/dev/null 2>&1 || die "$1 명령을 찾을 수 없습니다"
 }
 
 env_yes_no() {
@@ -36,7 +36,7 @@ ask_yes_no() {
   fi
 
   if [[ -r /dev/tty && -w /dev/tty ]]; then
-    printf '[legal-terminal] %s [Y/n, Enter=yes] ' "$question" > /dev/tty
+    printf '[legal-terminal] %s [예/Y, 기본: 예] ' "$question" > /dev/tty
     IFS= read -r answer < /dev/tty || answer=""
   else
     return 1
@@ -56,24 +56,24 @@ ensure_claude() {
   if command -v claude >/dev/null 2>&1; then
     local claude_version
     claude_version="$(claude --version 2>/dev/null | head -1 || true)"
-    log "Claude Code found: $(command -v claude)${claude_version:+ (${claude_version})}"
-    if ask_yes_no "Update Claude Code to the latest version?" "LEGAL_TERMINAL_UPDATE_CLAUDE"; then
-      log "Updating Claude Code."
-      claude update || log "Claude Code update failed; keeping the current version."
+    log "Claude Code를 찾았습니다: $(command -v claude)${claude_version:+ (${claude_version})}"
+    if ask_yes_no "Claude Code를 최신 버전으로 업데이트할까요?" "LEGAL_TERMINAL_UPDATE_CLAUDE"; then
+      log "Claude Code를 업데이트합니다."
+      claude update || log "Claude Code 업데이트에 실패해 기존 버전을 유지합니다."
       refresh_path
-      log "Claude Code version now: $(claude --version 2>/dev/null | head -1 || echo unknown)"
+      log "현재 Claude Code 버전: $(claude --version 2>/dev/null | head -1 || echo '확인 불가')"
     else
-      log "Keeping the current Claude Code version."
+      log "기존 Claude Code 버전을 유지합니다."
     fi
     return
   fi
 
-  if ! ask_yes_no "Claude Code is not installed. Install it first?" "LEGAL_TERMINAL_INSTALL_CLAUDE"; then
-    log "Skipping Claude Code install."
+  if ! ask_yes_no "Claude Code가 설치되어 있지 않습니다. 먼저 설치할까요?" "LEGAL_TERMINAL_INSTALL_CLAUDE"; then
+    log "Claude Code 설치를 건너뜁니다."
     return
   fi
 
-  log "Installing Claude Code."
+  log "Claude Code를 설치합니다."
   curl -fsSL https://claude.ai/install.sh | bash
   refresh_path
 }
@@ -95,21 +95,21 @@ run_jurisupport_plugins_bootstrap() {
 install_jurisupport_plugins() {
   if jurisupport_plugins_installed; then
     # 설치 여부만 보고 넘어가면 구버전이 계속 남는다 — 최신화 여부를 물어 재실행한다.
-    if ask_yes_no "jurisupport-plugins is already installed. Update it to the latest version?" "LEGAL_TERMINAL_UPDATE_JURI_SUPPORT"; then
-      log "Updating jurisupport-plugins."
-      run_jurisupport_plugins_bootstrap || log "jurisupport-plugins update failed; keeping the current version."
+    if ask_yes_no "jurisupport-plugins가 이미 설치되어 있습니다. 최신 버전으로 업데이트할까요?" "LEGAL_TERMINAL_UPDATE_JURI_SUPPORT"; then
+      log "jurisupport-plugins를 업데이트합니다."
+      run_jurisupport_plugins_bootstrap || log "jurisupport-plugins 업데이트에 실패해 기존 버전을 유지합니다."
     else
-      log "Keeping existing jurisupport-plugins."
+      log "기존 jurisupport-plugins를 유지합니다."
     fi
     return
   fi
 
-  if ! ask_yes_no "Install jurisupport-plugins for legal search, skills, and privacy hooks?" "LEGAL_TERMINAL_INSTALL_JURI_SUPPORT"; then
-    log "Skipping jurisupport-plugins install."
+  if ! ask_yes_no "법률 검색, 스킬, 개인정보 보호 훅을 위한 jurisupport-plugins를 설치할까요?" "LEGAL_TERMINAL_INSTALL_JURI_SUPPORT"; then
+    log "jurisupport-plugins 설치를 건너뜁니다."
     return
   fi
 
-  log "Installing jurisupport-plugins."
+  log "jurisupport-plugins를 설치합니다."
   run_jurisupport_plugins_bootstrap
 }
 
@@ -128,33 +128,33 @@ run_lawyer_profile_plugin_installer() {
 
 install_lawyer_profile_plugin() {
   if lawyer_profile_plugin_installed; then
-    if ask_yes_no "JuriSupport lawyer profile plugin is already installed. Update it to the latest version?" "LEGAL_TERMINAL_UPDATE_LAWYER_PROFILE"; then
-      log "Updating lawyer strength/profile plugin."
-      run_lawyer_profile_plugin_installer || log "Lawyer profile plugin update failed; keeping the current version."
+    if ask_yes_no "JuriSupport 변호사 강점찾기 플러그인이 이미 설치되어 있습니다. 최신 버전으로 업데이트할까요?" "LEGAL_TERMINAL_UPDATE_LAWYER_PROFILE"; then
+      log "변호사 강점찾기 플러그인을 업데이트합니다."
+      run_lawyer_profile_plugin_installer || log "변호사 강점찾기 플러그인 업데이트에 실패해 기존 버전을 유지합니다."
     else
-      log "Keeping existing lawyer strength/profile plugin."
+      log "기존 변호사 강점찾기 플러그인을 유지합니다."
     fi
     return
   fi
 
-  if ! ask_yes_no "Install the JuriSupport lawyer strength/profile plugin?" "LEGAL_TERMINAL_INSTALL_LAWYER_PROFILE"; then
-    log "Skipping lawyer strength/profile plugin install."
+  if ! ask_yes_no "JuriSupport 변호사 강점찾기 플러그인을 설치할까요?" "LEGAL_TERMINAL_INSTALL_LAWYER_PROFILE"; then
+    log "변호사 강점찾기 플러그인 설치를 건너뜁니다."
     return
   fi
 
-  log "Installing lawyer strength/profile plugin."
+  log "변호사 강점찾기 플러그인을 설치합니다."
   run_lawyer_profile_plugin_installer
 }
 
 case "$(uname -s)" in
   Darwin) ;;
-  *) die "This installer is for macOS only." ;;
+  *) die "이 설치 스크립트는 macOS 전용입니다." ;;
 esac
 
 case "$(uname -m)" in
   arm64) arch="arm64" ;;
   x86_64) arch="x64" ;;
-  *) die "Unsupported Mac architecture: $(uname -m)" ;;
+  *) die "지원하지 않는 Mac 아키텍처입니다: $(uname -m)" ;;
 esac
 
 require_command curl
@@ -200,7 +200,7 @@ quit_running_app() {
     return
   fi
 
-  log "Quitting running legal-terminal before replacing the app."
+  log "앱을 교체하기 전에 실행 중인 legal-terminal을 종료합니다."
   if command -v osascript >/dev/null 2>&1; then
     osascript -e 'tell application id "kr.lawpid.legalterminal" to quit' >/dev/null 2>&1 \
       || osascript -e 'tell application "legal-terminal" to quit' >/dev/null 2>&1 \
@@ -217,7 +217,7 @@ quit_running_app() {
     attempt=$((attempt + 1))
   done
 
-  log "Stopping old legal-terminal process before install."
+  log "설치 전에 기존 legal-terminal 프로세스를 종료합니다."
   printf '%s\n' "$pids" | while IFS= read -r pid; do
     if [[ -n "$pid" ]]; then
       kill "$pid" 2>/dev/null || true
@@ -226,16 +226,16 @@ quit_running_app() {
   sleep 1
 }
 
-log "Downloading ${asset}"
+log "${asset} 파일을 내려받습니다."
 log "$download_url"
 curl -fL --retry 3 --progress-bar "$download_url" -o "$zip_path"
 
-log "Extracting app"
+log "앱의 압축을 풉니다."
 unzip -q "$zip_path" -d "$tmpdir"
 
 source_app="$(find "$tmpdir" -maxdepth 3 -type d -name 'legal-terminal.app' -print -quit)"
 if [[ -z "$source_app" ]]; then
-  die "legal-terminal.app not found in downloaded archive"
+  die "내려받은 압축 파일에서 legal-terminal.app을 찾을 수 없습니다"
 fi
 
 copy_app() {
@@ -246,9 +246,9 @@ copy_app() {
 
 quit_running_app
 
-log "Installing to ${target_app}"
+log "${target_app}에 설치합니다."
 if ! copy_app 2>/dev/null; then
-  log "Permission needed for ${install_dir}; requesting administrator password."
+  log "${install_dir}에 설치할 권한이 필요합니다. 관리자 암호를 요청합니다."
   sudo mkdir -p "$install_dir"
   sudo rm -rf "$target_app"
   sudo ditto "$source_app" "$target_app"
@@ -258,7 +258,7 @@ if command -v xattr >/dev/null 2>&1; then
   xattr -dr com.apple.quarantine "$target_app" 2>/dev/null || true
 fi
 
-log "Installed."
+log "설치가 끝났습니다."
 
 install_jurisupport_plugins
 install_lawyer_profile_plugin
