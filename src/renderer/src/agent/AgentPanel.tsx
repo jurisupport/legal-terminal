@@ -4186,6 +4186,29 @@ export default function AgentPanel({
                   </div>
                 )
               })}
+              <form
+                className="agent-model-custom"
+                onSubmit={(event) => {
+                  event.preventDefault()
+                  const model = new FormData(event.currentTarget).get('model')
+                  if (typeof model === 'string' && model.trim()) void chooseModel(model.trim())
+                }}
+              >
+                <label htmlFor={`agent-model-custom-${id}`}>목록에 없는 모델 ID</label>
+                <div className="agent-auth-input">
+                  <input
+                    id={`agent-model-custom-${id}`}
+                    name="model"
+                    defaultValue={selectedModel && !modelOptions.some((model) => model.model === selectedModel)
+                      ? selectedModel
+                      : ''}
+                    placeholder="예: claude-sonnet-5"
+                    autoComplete="off"
+                    spellCheck={false}
+                  />
+                  <button type="submit">적용</button>
+                </div>
+              </form>
               {modelOptions.length === 0 && <span className="muted small">선택 가능한 모델이 없습니다.</span>}
             </div>
           )}

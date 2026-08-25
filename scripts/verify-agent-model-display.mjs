@@ -47,5 +47,8 @@ assert.match(sessions, /model = typeof message\.model === 'string' \? message\.m
 assert.match(panel, /setResumedModel\(transcript\?\.model \?\? null\)/)
 assert.match(panel, /resumedModelDisplay\?\.modelLabel/)
 assert.match(panel, /resumedModel === null \? '\ubaa8\ub378 \uc815\ubcf4 \uc5c6\uc74c'/)
+assert.match(panel, /<label htmlFor=\{`agent-model-custom-\$\{id\}`\}>\ubaa9\ub85d\uc5d0 \uc5c6\ub294 \ubaa8\ub378 ID<\/label>/)
+assert.match(panel, /new FormData\(event\.currentTarget\)\.get\('model'\)/)
+assert.match(panel, /void chooseModel\(model\.trim\(\)\)/)
 
 console.log('agent model display verification passed')

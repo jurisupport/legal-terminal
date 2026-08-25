@@ -5108,6 +5108,17 @@ button.agent-attachment-chip {
   padding: 0 8px;
   font-size: var(--agent-small-font-size);
 }
+.agent-model-custom {
+  display: grid;
+  gap: 5px;
+}
+.agent-model-custom .agent-auth-input {
+  margin: 0;
+}
+.agent-model-custom button {
+  min-height: var(--agent-control-height);
+  padding: 0 9px;
+}
 .agent-model-list small,
 .agent-model-loading {
   color: var(--fg-muted);

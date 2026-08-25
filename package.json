@@ -1,6 +1,6 @@
 {
   "name": "legal-terminal",
-  "version": "0.1.210",
+  "version": "0.1.211",
   "description": "대한민국 송무 변호사를 위한 AI 통합 작업환경 — Claude Code + 준비서면 에디터 + 전자소송기록 뷰어 + 사건 대시보드 + 원격(SSH) 작업",
   "main": "./out/main/index.js",
   "author": "lawpid",
@@ -57,7 +57,7 @@
     "dist:win": "electron-vite build && npm run verify:node-pty:win && electron-builder --win"
   },
   "dependencies": {
-    "@anthropic-ai/claude-agent-sdk": "^0.3.162",
+    "@anthropic-ai/claude-agent-sdk": "^0.3.245",
     "@codemirror/commands": "^6.10.3",
     "@codemirror/lang-markdown": "^6.5.0",
     "@codemirror/language": "^6.12.3",
