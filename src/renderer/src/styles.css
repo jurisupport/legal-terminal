@@ -3182,6 +3182,9 @@ body {
   border-radius: 0 6px 6px 0;
   background: color-mix(in srgb, var(--accent) 9%, transparent);
 }
+.agent-msg-bubble:has(.agent-user-question:not([open])) {
+  padding-block: 0;
+}
 .agent-msg-bubble .agent-card-text {
   margin: 0;
   color: #e4e4e4;
@@ -3192,14 +3195,18 @@ body {
   align-items: flex-start;
   gap: 5px;
   list-style: none;
+  cursor: text;
+}
+.agent-user-question-toggle {
+  flex: 0 0 auto;
+  padding: 0;
+  border: 0;
+  color: inherit;
+  background: none;
   cursor: pointer;
 }
-.agent-user-question summary::before {
-  content: '▶';
-  flex: 0 0 auto;
-}
-.agent-user-question[open] summary::before {
-  content: '▼';
+.agent-user-question[open] .agent-user-question-toggle {
+  transform: rotate(90deg);
 }
 .agent-user-question .agent-card-text {
   min-width: 0;

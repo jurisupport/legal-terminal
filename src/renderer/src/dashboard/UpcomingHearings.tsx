@@ -1,6 +1,6 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { JsCase, JsHearing, SshProfile } from '../env'
-import { formatHearingLabel } from './hearings'
+import { formatHearingLabel, isActiveHearing } from './hearings'
 import CaseContextMenu, { type CaseContextMenuState } from './CaseContextMenu'
 import { listCasesCached, readCachedCaseList } from './caseListCache'
 
@@ -38,6 +38,7 @@ function buildRows(cases: JsCase[]): Row[] {
   const out: Row[] = []
   for (const c of cases) {
     for (const h of c.hearings ?? []) {
+      if (!isActiveHearing(h)) continue
       const d = new Date(h.dateTime)
       if (isNaN(d.getTime())) continue
       out.push({ c, when: d, h })
@@ -84,6 +85,7 @@ export default function UpcomingHearings({
   const [loading, setLoading] = useState(false)
   const [reloadNonce, setReloadNonce] = useState(0)
   const [menu, setMenu] = useState<CaseContextMenuState | null>(null)
+  const previousNonce = useRef(0)
   const defaultOpenProfile = defaultOpenProfileId
     ? sshProfiles.find((p) => p.id === defaultOpenProfileId)
     : undefined
@@ -91,6 +93,8 @@ export default function UpcomingHearings({
   useEffect(() => {
     let alive = true
     let retryTimer: ReturnType<typeof setTimeout> | null = null
+    const refresh = reloadNonce > 0 || nonce !== previousNonce.current
+    previousNonce.current = nonce
 
     const fail = (message: string, attempt: number): void => {
       if (!alive) return
@@ -107,7 +111,6 @@ export default function UpcomingHearings({
     }
 
     const load = (attempt = 0): void => {
-      const refresh = reloadNonce > 0
       if (attempt === 0) {
         setErr('')
         setNotice('')

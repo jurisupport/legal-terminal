@@ -547,6 +547,27 @@ function InputPreview({ text }: { text: string }): JSX.Element {
   )
 }
 
+function UserQuestion({ text }: { text: string }): JSX.Element {
+  const [expanded, setExpanded] = useState(false)
+  return (
+    <details className="agent-user-question" open={expanded}>
+      <summary onClick={(event) => event.preventDefault()} tabIndex={-1}>
+        <button
+          type="button"
+          className="agent-user-question-toggle"
+          title="질문 펼치기/접기"
+          aria-label="질문 펼치기/접기"
+          aria-expanded={expanded}
+          onClick={() => setExpanded((value) => !value)}
+        >
+          ▶
+        </button>
+        <pre className="agent-card-text">{text}</pre>
+      </summary>
+    </details>
+  )
+}
+
 function isWaitingQueueItem(item: TimelineItem): boolean {
   return (
     item.kind === 'queue' &&
@@ -3634,11 +3655,7 @@ export default function AgentPanel({
                         onOpen={() => revealQuotedMessage(item.quote!)}
                       />
                     )}
-                    <details className="agent-user-question">
-                      <summary title="질문 펼치기/접기">
-                        <pre className="agent-card-text">{item.text}</pre>
-                      </summary>
-                    </details>
+                    <UserQuestion text={item.text ?? ''} />
                     {item.attachments && item.attachments.length > 0 && (
                       <div className="agent-attachments sent" aria-label="전송된 첨부">
                         {item.attachments.map((attachment, index) => {

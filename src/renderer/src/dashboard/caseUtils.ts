@@ -1,5 +1,5 @@
 import type { JsCase, JsParty } from '../env'
-import { formatHearingLabel } from './hearings'
+import { formatHearingLabel, isActiveHearing } from './hearings'
 
 export const caseWebUrl = (id: string): string => `https://jurisupport.com/cases/${id}`
 
@@ -23,9 +23,10 @@ export function agoLabel(ms: number): string {
 }
 
 export function nextHearing(c: JsCase): { when: string; note: string } | null {
-  if (!c.hearings?.length) return null
+  const activeHearings = (c.hearings ?? []).filter(isActiveHearing)
+  if (!activeHearings.length) return null
   const now = Date.now()
-  const sorted = [...c.hearings].sort(
+  const sorted = activeHearings.sort(
     (a, b) => new Date(a.dateTime).getTime() - new Date(b.dateTime).getTime()
   )
   const h = sorted.find((x) => new Date(x.dateTime).getTime() >= now) ?? sorted[sorted.length - 1]

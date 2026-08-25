@@ -7,7 +7,7 @@ import type {
   SshProfile,
   WorkLogItem
 } from '../env'
-import { formatHearingLabel } from './hearings'
+import { formatHearingLabel, isActiveHearing } from './hearings'
 import CaseContextMenu, { type CaseContextMenuState } from './CaseContextMenu'
 import CaseActivityTimeline from './CaseActivityTimeline'
 import WorkLogView from './WorkLogView'
@@ -202,6 +202,13 @@ export default function CasesDashboard({
     searchTimer.current = setTimeout(() => load(v.trim()), 350)
   }
 
+  const refreshCases = (): void => {
+    clearCaseListCache()
+    setDetail({})
+    load(search.trim(), true)
+    onChanged?.()
+  }
+
   const toggleHistory = (id: string): void => {
     setHistoryOpen((m) => ({ ...m, [id]: !m[id] }))
   }
@@ -299,7 +306,7 @@ export default function CasesDashboard({
         >
           📅
         </button>
-        <button className="dash-btn" title="새로고침" onClick={() => load(search.trim(), true)}>
+        <button className="dash-btn" title="새로고침" onClick={refreshCases}>
           ↻
         </button>
         <button
@@ -371,6 +378,7 @@ export default function CasesDashboard({
           const client = partyNames(c.parties, 'client')
           const opponent = partyNames(c.parties, 'opponent')
           const det = detail[c.id]
+          const activeDetailHearings = det?.hearings.filter(isActiveHearing) ?? []
           const act = activity[c.id]
           const memo = (det?.memo ?? c.memo)?.trim()
           return (
@@ -437,10 +445,10 @@ export default function CasesDashboard({
               {historyOpen[c.id] && <CaseActivityTimeline c={c} onResume={onResumeSession} />}
               {det && (
                 <div className="case-detail" onClick={(e) => e.stopPropagation()}>
-                  {det.hearings.length > 0 && (
+                  {activeDetailHearings.length > 0 && (
                     <div className="cd-section">
                       <div className="cd-h">기일</div>
-                      {det.hearings
+                      {activeDetailHearings
                         .slice()
                         .sort(
                           (a, b) =>

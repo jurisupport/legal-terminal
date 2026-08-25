@@ -94,7 +94,7 @@ export function isEphemeralCwd(cwd?: string): boolean {
 }
 
 // 내부 태그·명령 래퍼를 걷어낸 사용자 지시 텍스트. 지시가 아니면 undefined.
-export function cleanUserInstruction(raw: string): string | undefined {
+export function cleanUserInstruction(raw: string, preserveFormatting = false): string | undefined {
   const command = /<command-name>\s*([^<\n]+?)\s*<\/command-name>/.exec(raw)
   if (command) {
     if (NOISE_COMMANDS.has(command[1].trim().toLowerCase())) return undefined
@@ -103,15 +103,30 @@ export function cleanUserInstruction(raw: string): string | undefined {
   }
   if (NOISE_COMMANDS.has(raw.trim().toLowerCase())) return undefined
   if (/<local-command-caveat>|<local-command-stdout>|<command-message>/.test(raw)) return undefined
-  if (/원본 대화 transcript입니다|진행하던 대화 transcript입니다/.test(raw)) return undefined
+  if (/원본 대화 transcript입니다/.test(raw)) return undefined
   if (/^\[Request interrupted/.test(raw.trim())) return undefined
-  const text = raw
+  let visible = /<legal-terminal-user-request>\s*([\s\S]*?)\s*<\/legal-terminal-user-request>/i.exec(raw)?.[1] ?? raw
+  visible = visible.replace(
+    /^사용자가 진행 중인 작업을 중단하고 방향 전환을 요청했습니다\. 아래 지시를 최우선으로 반영하세요\.\s*/,
+    ''
+  )
+  if (/진행하던 대화 transcript입니다/.test(visible)) {
+    const marker = '지금 처리할 사용자 지시:'
+    const markerAt = visible.lastIndexOf(marker)
+    if (markerAt >= 0) visible = visible.slice(markerAt + marker.length)
+  }
+  if (/다음은 사용자가 인용한 이전 에이전트 답변입니다/.test(visible)) {
+    const marker = '</quoted-agent-response>'
+    const markerAt = visible.lastIndexOf(marker)
+    if (markerAt >= 0) visible = visible.slice(markerAt + marker.length)
+  }
+  const text = visible
+    .replace(/(?:^|(?:\r?\n){2,})\[legal-terminal attachments\][\s\S]*$/g, '')
     .replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, ' ')
     .replace(/<ide_selection>[\s\S]*?<\/ide_selection>/g, ' ')
     .replace(/<\/?[a-z][a-z0-9_-]*>/gi, ' ')
-    .replace(/\s+/g, ' ')
     .trim()
-  return text || undefined
+  return (preserveFormatting ? text : text.replace(/\s+/g, ' ').trim()) || undefined
 }
 
 function entryUserText(d: Record<string, unknown>): string | undefined {

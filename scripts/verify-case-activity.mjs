@@ -148,6 +148,14 @@ const meta = (over) => ({
 
 assert.equal(cleanUserInstruction('<command-name>/usage</command-name>\n<command-message>usage</command-message>'), undefined)
 assert.equal(cleanUserInstruction('<command-name>/review</command-name>\n<command-args>변경분</command-args>'), '/review 변경분')
+assert.equal(
+  cleanUserInstruction(
+    '<legal-terminal-case-context>내부 사건 안내</legal-terminal-case-context>\n\n' +
+      '<legal-terminal-user-request>\n첫 줄\n\n- 둘째 줄\n\n[legal-terminal attachments]\n내부 첨부 안내\n</legal-terminal-user-request>',
+    true
+  ),
+  '첫 줄\n\n- 둘째 줄'
+)
 
 // 8b) 병합: 스캔된 세션은 날짜별 행, 스캔 안 된 세션은 인덱스 mtime 날짜에 폴백 행
 {

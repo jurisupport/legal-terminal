@@ -111,7 +111,13 @@ function normalizeHearing(value: unknown): JsHearing | null {
     location:
       firstString(obj, ['location', 'place', 'courtroom', 'courtRoom', 'court_room']) ?? null,
     note: firstString(obj, ['note', 'memo', 'description', 'name', 'title']) ?? null,
-    status: firstString(obj, ['status'])
+    status: firstString(obj, [
+      'status',
+      'scheduleStatus',
+      'schedule_status',
+      'hearingStatus',
+      'hearing_status'
+    ])
   }
 }
 

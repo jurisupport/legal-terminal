@@ -8,6 +8,26 @@ const HEARING_TYPE_KO: Record<string, string> = {
   other: '기일'
 }
 
+const INACTIVE_HEARING_STATUSES = new Set([
+  'changed',
+  'rescheduled',
+  'superseded',
+  'cancelled',
+  'canceled',
+  'postponed',
+  '변경',
+  '기일변경',
+  '취소',
+  '취소됨',
+  '연기',
+  '연기됨'
+])
+
+export function isActiveHearing(h: JsHearing): boolean {
+  const status = h.status?.normalize('NFKC').toLowerCase().replace(/[\s_-]+/g, '')
+  return !status || !INACTIVE_HEARING_STATUSES.has(status)
+}
+
 function isCriminalCase(c: JsCase): boolean {
   return c.caseType === 'criminal'
 }

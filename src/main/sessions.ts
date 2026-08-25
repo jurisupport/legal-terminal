@@ -980,7 +980,7 @@ function parseTranscriptMessages(
     if (!role || !message) continue
     if (role === 'assistant') model = typeof message.model === 'string' ? message.model : model
     const text = extractTranscriptText(message.content).trim()
-    const visibleText = role === 'user' ? cleanUserInstruction(text) : text
+    const visibleText = role === 'user' ? cleanUserInstruction(text, true) : text
     if (!visibleText) continue
     messages.push({
       id: `${sessionId}-history-${lineIndex}`,

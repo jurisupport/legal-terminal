@@ -61,6 +61,7 @@ import FindBar from './search/FindBar'
 import CasesDashboard, { JS_TOKEN_UPDATED_EVENT } from './dashboard/CasesDashboard'
 import { clearCaseListCache } from './dashboard/caseListCache'
 import UpcomingHearings from './dashboard/UpcomingHearings'
+import { isActiveHearing } from './dashboard/hearings'
 import TodosDashboard from './dashboard/TodosDashboard'
 import TodayTodos from './dashboard/TodayTodos'
 import HearingRecordPanel, {
@@ -6197,6 +6198,7 @@ export default function App(): JSX.Element {
 
   const nearestHearing = (hearings?: JsHearing[]): JsHearing | undefined => {
     const valid = (hearings ?? [])
+      .filter(isActiveHearing)
       .map((h) => ({ hearing: h, time: new Date(h.dateTime).getTime() }))
       .filter((item) => Number.isFinite(item.time))
       .sort((a, b) => Math.abs(a.time - Date.now()) - Math.abs(b.time - Date.now()))
