@@ -637,6 +637,7 @@ const api = {
       versions: { electron: string; node: string; chrome: string }
     }> => ipcRenderer.invoke('app:info'),
     openExternal: (url: string): Promise<void> => ipcRenderer.invoke('app:openExternal', url),
+    openHtml: (path: string): Promise<void> => ipcRenderer.invoke('app:openHtml', path),
     newWindow: (opts?: NewWindowOptions): Promise<void> => ipcRenderer.invoke('window:new', opts),
     closeWindow: (): Promise<void> => ipcRenderer.invoke('window:close'),
     forceCloseWindow: (): Promise<void> => ipcRenderer.invoke('window:forceClose'),

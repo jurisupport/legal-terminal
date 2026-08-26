@@ -10494,6 +10494,17 @@ function HtmlView({ path }: { path: string }): JSX.Element {
         <button className="tb-btn" title="HTML 코드 보기" onClick={() => setMode('code')}>
           코드
         </button>
+        <span className="tb-divider" />
+        {!path.startsWith('ssh://') && (
+          <button
+            className="tb-btn"
+            title="스크립트와 복사 기능을 사용하려면 기본 브라우저로 열기"
+            onClick={() => void window.lt.app.openHtml(path)}
+          >
+            브라우저로 열기
+          </button>
+        )}
+        <span className="muted small">스크립트는 미리보기에서 실행되지 않습니다.</span>
       </div>
       <iframe
         className="html-frame"

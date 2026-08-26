@@ -699,6 +699,7 @@ export interface LtApi {
       versions: { electron: string; node: string; chrome: string }
     }>
     openExternal: (url: string) => Promise<void>
+    openHtml: (path: string) => Promise<void>
     newWindow: (opts?: NewWindowOptions) => Promise<void>
     closeWindow: () => Promise<void>
     forceCloseWindow: () => Promise<void>

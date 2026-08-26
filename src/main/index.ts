@@ -1,7 +1,7 @@
 import { app, BrowserWindow, shell, ipcMain, dialog, screen, Menu, clipboard, Notification, type WebContents } from 'electron'
 import { spawn } from 'child_process'
 import { createHash } from 'crypto'
-import { join, basename, dirname, extname, resolve, sep, posix } from 'path'
+import { join, basename, dirname, extname, isAbsolute, resolve, sep, posix } from 'path'
 import { readdir, readFile, stat, writeFile, copyFile, rm, mkdir, rename, cp } from 'fs/promises'
 import { existsSync, watch, type Dirent, type FSWatcher } from 'fs'
 import { fileURLToPath } from 'url'
@@ -617,6 +617,13 @@ ipcMain.handle('tabs:endDrag', async (): Promise<TabMoveResult> => {
 
 // 앱 정보 핑 (preload 브리지 동작 확인용)
 ipcMain.handle('app:openExternal', (_e, url: string) => shell.openExternal(url))
+ipcMain.handle('app:openHtml', async (_e, path: string) => {
+  if (typeof path !== 'string' || !isAbsolute(path) || !/\.html?$/i.test(path)) {
+    throw new Error('로컬 HTML 파일만 브라우저로 열 수 있습니다.')
+  }
+  const error = await shell.openPath(path)
+  if (error) throw new Error(error)
+})
 
 ipcMain.handle('app:info', () => ({
   version: app.getVersion(),
