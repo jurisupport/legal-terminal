@@ -179,7 +179,7 @@ irm https://github.com/jurisupport/legal-terminal/releases/latest/download/insta
 
 ```powershell
 $installer = "$env:TEMP\legal-terminal-install.ps1"
-iwr https://github.com/jurisupport/legal-terminal/releases/latest/download/install.ps1 -UseBasicParsing -OutFile $installer
+iwr https://github.com/jurisupport/legal-terminal/releases/latest/download/install-windows.ps1 -UseBasicParsing -OutFile $installer
 notepad $installer
 powershell -NoProfile -ExecutionPolicy Bypass -File $installer
 ```

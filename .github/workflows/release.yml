@@ -16,6 +16,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Verify installer scripts
+        run: node scripts/verify-windows-installer.mjs
+
       - name: Ensure release exists
         env:
           GH_TOKEN: ${{ github.token }}
@@ -29,7 +32,7 @@ jobs:
           if ! gh release view "$tag" >/dev/null 2>&1; then
             gh release create "$tag" --title "$title" --notes "Automated release $tag" --prerelease
           fi
-          gh release upload "$tag" install-mac.sh install.ps1 --clobber
+          gh release upload "$tag" install-mac.sh install.ps1 install-windows.ps1 --clobber
 
   build-macos:
     name: macOS (${{ matrix.arch }})
