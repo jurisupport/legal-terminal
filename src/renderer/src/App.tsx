@@ -6841,6 +6841,7 @@ export default function App(): JSX.Element {
       suggestedRecordOptions={activeSuggestedRecordOptions}
       record={panelRecord}
       refreshNonce={treeRefresh}
+      onRefresh={() => setTreeRefresh((current) => current + 1)}
       onOpenFile={openFile}
       onDropTo={copyFilesTo}
       onMove={moveEntry}
@@ -8764,6 +8765,7 @@ function DocsPanel({
   suggestedRecordOptions,
   record,
   refreshNonce,
+  onRefresh,
   onOpenFile,
   onDropTo,
   onMove,
@@ -8807,6 +8809,7 @@ function DocsPanel({
   suggestedRecordOptions?: FolderMatchSuggestion[]
   record: ParsedRecord | null
   refreshNonce: number
+  onRefresh: () => void
   onOpenFile: (path: string, name: string) => void
   onDropTo: (dir: string, files: FileList) => void
   onMove: (src: string, destDir: string) => void
@@ -8934,6 +8937,14 @@ function DocsPanel({
                   <IconSaveAs size={15} />
                 </ExplorerToolButton>
                 <ExplorerToolButton
+                  label="폴더 새로고침"
+                  tooltip="현재 폴더 목록 새로고침"
+                  disabled={!draftsFolder}
+                  onClick={onRefresh}
+                >
+                  <span aria-hidden="true">⟳</span>
+                </ExplorerToolButton>
+                <ExplorerToolButton
                   label="소송기록 폴더 변경"
                   tooltip="소송기록 폴더 변경"
                   disabled={!draftsFolder}
@@ -9012,6 +9023,10 @@ function DocsPanel({
             <span className="header-actions">
               {mode === 'viewer' && recordsFolder && (
                 <>
+                  <button className="tool-btn" title="소송기록 폴더 목록 새로고침" onClick={onRefresh}>
+                    <span aria-hidden="true">⟳</span>
+                    <span className="sr-only">소송기록 폴더 새로고침</span>
+                  </button>
                   {onSyncRecords && (
                     <button
                       className="tool-btn"
@@ -12602,8 +12617,12 @@ function RemoteFolderPicker({
               </div>
               <code className="remote-cwd">{cwd}</code>
             </div>
-            <button className="header-btn" onClick={() => load(cwd, { refresh: true })} title="새로고침">
-              ⟳
+            <button
+              className="header-btn"
+              onClick={() => load(cwd, { refresh: true })}
+              title="현재 폴더 목록을 다시 읽기"
+            >
+              목록 새로고침
             </button>
             <select
               className="sort-select remote-sort"
