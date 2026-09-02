@@ -1,6 +1,6 @@
 {
   "name": "legal-terminal",
-  "version": "0.1.214",
+  "version": "0.1.215",
   "description": "대한민국 송무 변호사를 위한 AI 통합 작업환경 — Claude Code + 준비서면 에디터 + 전자소송기록 뷰어 + 사건 대시보드 + 원격(SSH) 작업",
   "main": "./out/main/index.js",
   "author": "lawpid",
@@ -42,6 +42,7 @@
     "verify:renderer-recovery": "electron-vite build && node scripts/verify-renderer-recovery.mjs",
     "verify:skill-install": "node --experimental-strip-types --no-warnings scripts/verify-skill-install.mjs",
     "verify:hearing-ime": "node --experimental-strip-types --no-warnings scripts/verify-hearing-ime.mjs",
+    "verify:hearing-dictation": "node --experimental-strip-types --no-warnings scripts/verify-hearing-dictation.mjs",
     "verify:hearing-load-policy": "node --experimental-strip-types --no-warnings scripts/verify-hearing-load-policy.mjs",
     "verify:hearing-tab": "electron-vite build && node scripts/verify-hearing-tab.mjs",
     "verify:slash-commands": "electron-vite build && node scripts/verify-slash-commands.mjs",

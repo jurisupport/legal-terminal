@@ -92,6 +92,8 @@ export interface Settings {
   lastDownloadDir?: string
   /** JuriSupport MCP 토큰 (safeStorage로 암호화된 base64) */
   jurisupportTokenEnc?: string
+  /** OpenAI API 키 (safeStorage로 암호화된 base64) */
+  openaiApiKeyEnc?: string
   /** 사용자가 건너뛴 최신 릴리스 버전. 더 높은 버전이 나오면 다시 알린다. */
   ignoredUpdateVersion?: string
   /** 설치 환경+스킬 이름 → 사용자가 "다시 묻지 않기"한 SKILL.md 해시. */

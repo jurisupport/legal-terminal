@@ -255,6 +255,29 @@ interface WorkspaceLoadResult {
   canceled?: boolean
 }
 
+interface DictationContext {
+  court?: string
+  caseNumber?: string
+  caseName?: string
+  client?: string
+  opponent?: string
+  partyNames?: string
+  speaker?: string
+}
+
+interface DictationTranscribeInput {
+  audio: Uint8Array
+  mimeType: string
+  context?: DictationContext
+}
+
+interface DictationTranscribeResult {
+  ok: boolean
+  text?: string
+  corrected?: boolean
+  error?: string
+}
+
 interface WorkspaceListResult {
   ok: boolean
   entries?: WorkspaceEntry[]
@@ -689,6 +712,13 @@ const api = {
     get: (): Promise<AppSettings> => ipcRenderer.invoke('settings:get'),
     set: (patch: Partial<AppSettings>): Promise<AppSettings> =>
       ipcRenderer.invoke('settings:set', patch)
+  },
+  dictation: {
+    keyStatus: (): Promise<'ok' | 'missing' | 'locked' | 'unavailable'> =>
+      ipcRenderer.invoke('dictation:keyStatus'),
+    setKey: (key: string): Promise<void> => ipcRenderer.invoke('dictation:setKey', key),
+    transcribe: (input: DictationTranscribeInput): Promise<DictationTranscribeResult> =>
+      ipcRenderer.invoke('dictation:transcribe', input)
   },
   export: {
     mdToPdf: (

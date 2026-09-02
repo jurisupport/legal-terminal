@@ -1,4 +1,4 @@
-import { app, BrowserWindow, shell, ipcMain, dialog, screen, Menu, clipboard, Notification, type WebContents } from 'electron'
+import { app, BrowserWindow, shell, ipcMain, dialog, screen, session, Menu, clipboard, Notification, type WebContents } from 'electron'
 import { spawn } from 'child_process'
 import { createHash } from 'crypto'
 import { join, basename, dirname, extname, isAbsolute, resolve, sep, posix } from 'path'
@@ -10,6 +10,7 @@ import { getSettings, setSettings, type Settings } from './settings'
 import { checkUpdate, compareVersions, fetchLatestRelease } from './update'
 import { promptBundledSkillInstall } from './skillInstall'
 import { imageInfo } from './imageSize'
+import { keyStatus as dictationKeyStatus, setKey as setDictationKey, transcribe as transcribeDictation } from './dictation'
 import {
   getPairing,
   setPairing,
@@ -865,8 +866,23 @@ ipcMain.handle('workspace:importFile', async (e) => {
 })
 
 // ── 설정 IPC ──
-ipcMain.handle('settings:get', () => getSettings())
-ipcMain.handle('settings:set', (_e, patch: Partial<Settings>) => setSettings(patch))
+const publicSettings = ({ jurisupportTokenEnc: _js, openaiApiKeyEnc: _openai, ...settings }: Settings) => settings
+ipcMain.handle('settings:get', async () => publicSettings(await getSettings()))
+ipcMain.handle('settings:set', async (_e, patch: Partial<Settings>) => {
+  const { jurisupportTokenEnc: _js, openaiApiKeyEnc: _openai, ...safePatch } = patch
+  return publicSettings(await setSettings(safePatch))
+})
+ipcMain.handle('dictation:keyStatus', () => dictationKeyStatus())
+ipcMain.handle('dictation:setKey', (_e, key: string) => setDictationKey(key))
+ipcMain.handle('dictation:transcribe', (_e, input: { audio: Uint8Array; mimeType: string; context?: {
+  court?: string
+  caseNumber?: string
+  caseName?: string
+  client?: string
+  opponent?: string
+  partyNames?: string
+  speaker?: string
+} }) => transcribeDictation(input))
 
 // ── 사건 페어링·히스토리 IPC ──
 ipcMain.handle('case:getPairing', (_e, drafts: string) => getPairing(drafts))
@@ -2765,6 +2781,20 @@ app.whenReady().then(() => {
   } else {
     Menu.setApplicationMenu(null)
   }
+  const isAppWindow = (webContents: WebContents | null): boolean =>
+    !!webContents && BrowserWindow.getAllWindows().some((win) => win.webContents.id === webContents.id)
+  session.defaultSession.setPermissionCheckHandler((webContents, permission, _origin, details) =>
+    permission === 'media' && details.mediaType === 'audio' && details.isMainFrame && isAppWindow(webContents)
+  )
+  session.defaultSession.setPermissionRequestHandler((webContents, permission, callback, details) => {
+    const mediaTypes = 'mediaTypes' in details ? details.mediaTypes ?? [] : []
+    callback(
+      permission === 'media' &&
+        mediaTypes.length > 0 &&
+        mediaTypes.every((type) => type === 'audio') &&
+        isAppWindow(webContents)
+    )
+  })
   createWindow()
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()

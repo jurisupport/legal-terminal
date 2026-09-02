@@ -8,12 +8,16 @@ import {
 } from 'react'
 import type { JsHearing } from '../env'
 import { isCommittedEnter, isImeComposing } from '../ime'
+import { insertDictationText } from './dictationText'
 import { shouldKeepPendingRecord } from './loadPolicy'
 
 type SpeakerRole = 'court' | 'plaintiff' | 'defendant' | 'preparation' | 'other'
 type SaveStatus = 'idle' | 'saving' | 'saved' | 'error'
 type JsSyncStatus = 'idle' | 'syncing' | 'synced' | 'error'
 type LoadState = 'idle' | 'loading' | 'error'
+type DictationState = 'idle' | 'recording' | 'transcribing'
+
+const DICTATION_MAX_MS = 80 * 60_000
 
 export interface HearingRecordCase {
   jsId?: string
@@ -417,6 +421,10 @@ function formatTime(iso: string): string {
   return hm(d)
 }
 
+function formatDuration(seconds: number): string {
+  return `${pad2(Math.floor(seconds / 60))}:${pad2(seconds % 60)}`
+}
+
 function buildReport(record: HearingRecordData): string {
   const speakerMap = new Map(record.speakers.map((speaker) => [speaker.id, speaker]))
   const caseLine = [record.case.court, record.case.division, record.case.caseNumber, record.case.caseName]
@@ -515,6 +523,9 @@ export default function HearingRecordPanel({
   const [lastSavedAt, setLastSavedAt] = useState('')
   const [jsStatus, setJsStatus] = useState<JsSyncStatus>('idle')
   const [jsMessage, setJsMessage] = useState('')
+  const [dictationState, setDictationState] = useState<DictationState>('idle')
+  const [dictationSeconds, setDictationSeconds] = useState(0)
+  const [dictationMessage, setDictationMessage] = useState('')
   const loadStateRef = useRef<LoadState>(initialPath ? 'loading' : 'idle')
   const [loadState, setLoadState] = useState<LoadState>(loadStateRef.current)
   const inputRef = useRef<HTMLTextAreaElement>(null)
@@ -522,8 +533,19 @@ export default function HearingRecordPanel({
   const saveTimer = useRef<number | null>(null)
   const loadedPathRef = useRef<string | undefined>(undefined)
   const latestRecordRef = useRef(record)
+  const latestDraftRef = useRef(draft)
   const hasContentRef = useRef(false)
   const lastSavedSourceStampRef = useRef('')
+  const recorderRef = useRef<MediaRecorder | null>(null)
+  const streamRef = useRef<MediaStream | null>(null)
+  const audioContextRef = useRef<AudioContext | null>(null)
+  const dictationChunksRef = useRef<Blob[]>([])
+  const dictationTimerRef = useRef<number | null>(null)
+  const dictationMaxTimerRef = useRef<number | null>(null)
+  const dictationSignalTimerRef = useRef<number | null>(null)
+  const heardAudioRef = useRef(false)
+  const dictationErrorRef = useRef(false)
+  const dictationSelectionRef = useRef({ value: '', start: 0, end: 0 })
   // onSavedPath는 부모가 인라인으로 넘겨 렌더마다 바뀌므로 ref로 받아
   // saveRecord/flushAutoSave의 useCallback 재생성(→ 렌더마다 저장 루프)을 막는다.
   const onSavedPathRef = useRef(onSavedPath)
@@ -546,6 +568,10 @@ export default function HearingRecordPanel({
   }, [record])
 
   useEffect(() => {
+    latestDraftRef.current = draft
+  }, [draft])
+
+  useEffect(() => {
     hasContentRef.current = hasContent
   }, [hasContent])
 
@@ -553,6 +579,198 @@ export default function HearingRecordPanel({
     if (!visible) return
     window.requestAnimationFrame(() => inputRef.current?.focus())
   }, [visible])
+
+  const clearDictationTimers = useCallback((): void => {
+    for (const timer of [
+      dictationTimerRef.current,
+      dictationMaxTimerRef.current,
+      dictationSignalTimerRef.current
+    ]) {
+      if (timer !== null) window.clearInterval(timer)
+    }
+    dictationTimerRef.current = null
+    dictationMaxTimerRef.current = null
+    dictationSignalTimerRef.current = null
+  }, [])
+
+  const releaseDictationMedia = useCallback((): void => {
+    clearDictationTimers()
+    streamRef.current?.getTracks().forEach((track) => track.stop())
+    streamRef.current = null
+    const audioContext = audioContextRef.current
+    audioContextRef.current = null
+    if (audioContext && audioContext.state !== 'closed') void audioContext.close().catch(() => {})
+  }, [clearDictationTimers])
+
+  const transcribeDictation = useCallback(
+    async (mimeType: string): Promise<void> => {
+      const chunks = dictationChunksRef.current
+      dictationChunksRef.current = []
+      recorderRef.current = null
+      releaseDictationMedia()
+      try {
+        const audio = new Uint8Array(await new Blob(chunks, { type: mimeType }).arrayBuffer())
+        if (audio.byteLength === 0) throw new Error('녹음된 음성이 없습니다.')
+        const currentRecord = latestRecordRef.current
+        const speaker = currentRecord.speakers.find(
+          (item) => item.id === currentRecord.activeSpeakerId
+        )?.label
+        const result = await window.lt.dictation.transcribe({
+          audio,
+          mimeType: mimeType || 'audio/webm',
+          context: {
+            court: currentRecord.case.court,
+            caseNumber: currentRecord.case.caseNumber,
+            caseName: currentRecord.case.caseName,
+            client: currentRecord.case.client,
+            opponent: currentRecord.case.opponent,
+            partyNames: currentRecord.case.partyNames,
+            speaker
+          }
+        })
+        if (!result.ok || !result.text?.trim()) throw new Error(result.error || '전사 결과가 없습니다.')
+        const selection = dictationSelectionRef.current
+        const insertion = insertDictationText(
+          selection.value,
+          result.text,
+          selection.start,
+          selection.end
+        )
+        latestDraftRef.current = insertion.value
+        setDraft(insertion.value)
+        setDictationMessage(result.corrected ? 'AI 보정 후 입력했습니다.' : '전사 원문을 입력했습니다.')
+        window.requestAnimationFrame(() => {
+          inputRef.current?.focus()
+          inputRef.current?.setSelectionRange(insertion.caret, insertion.caret)
+        })
+      } catch (error) {
+        setDictationMessage(error instanceof Error ? error.message : String(error))
+      } finally {
+        setDictationState('idle')
+      }
+    },
+    [releaseDictationMedia]
+  )
+
+  const stopDictation = useCallback(
+    (message = '전사 중…'): void => {
+      const recorder = recorderRef.current
+      if (!recorder || recorder.state === 'inactive') return
+      const value = latestDraftRef.current
+      const input = inputRef.current
+      dictationSelectionRef.current = {
+        value,
+        start: input?.selectionStart ?? value.length,
+        end: input?.selectionEnd ?? value.length
+      }
+      clearDictationTimers()
+      setDictationState('transcribing')
+      setDictationMessage(message)
+      recorder.stop()
+    },
+    [clearDictationTimers]
+  )
+
+  const startDictation = useCallback(async (): Promise<void> => {
+    if (dictationState !== 'idle') return
+    setDictationMessage('마이크 권한 확인 중…')
+    try {
+      const keyStatus = await window.lt.dictation.keyStatus()
+      if (keyStatus !== 'ok') {
+        throw new Error(
+          keyStatus === 'missing'
+            ? '설정에서 OpenAI API 키를 먼저 저장하세요.'
+            : keyStatus === 'unavailable'
+              ? '이 환경에서는 API 키를 안전하게 저장할 수 없습니다.'
+              : '저장된 OpenAI API 키를 불러올 수 없습니다. 설정에서 다시 저장하세요.'
+        )
+      }
+      if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === 'undefined') {
+        throw new Error('이 환경에서는 마이크 녹음을 지원하지 않습니다.')
+      }
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }
+      })
+      const preferredMime = 'audio/webm;codecs=opus'
+      const mimeType = MediaRecorder.isTypeSupported(preferredMime) ? preferredMime : 'audio/webm'
+      const recorder = new MediaRecorder(stream, { mimeType, audioBitsPerSecond: 32_000 })
+      const audioContext = new AudioContext()
+      if (audioContext.state === 'suspended') void audioContext.resume().catch(() => {})
+      const analyser = audioContext.createAnalyser()
+      analyser.fftSize = 256
+      audioContext.createMediaStreamSource(stream).connect(analyser)
+      const levels = new Uint8Array(analyser.fftSize)
+      const startedAt = Date.now()
+      let warned = false
+
+      streamRef.current = stream
+      audioContextRef.current = audioContext
+      recorderRef.current = recorder
+      dictationChunksRef.current = []
+      heardAudioRef.current = false
+      dictationErrorRef.current = false
+      setDictationSeconds(0)
+      setDictationMessage('')
+
+      recorder.ondataavailable = (event) => {
+        if (event.data.size > 0) dictationChunksRef.current.push(event.data)
+      }
+      recorder.onerror = () => {
+        dictationErrorRef.current = true
+        dictationChunksRef.current = []
+        recorderRef.current = null
+        releaseDictationMedia()
+        setDictationState('idle')
+        setDictationMessage('마이크 녹음 중 오류가 발생했습니다.')
+      }
+      recorder.onstop = () => {
+        if (!dictationErrorRef.current) void transcribeDictation(recorder.mimeType || mimeType)
+      }
+      recorder.start(1000)
+      setDictationState('recording')
+
+      dictationTimerRef.current = window.setInterval(
+        () => setDictationSeconds(Math.floor((Date.now() - startedAt) / 1000)),
+        1000
+      )
+      dictationSignalTimerRef.current = window.setInterval(() => {
+        analyser.getByteTimeDomainData(levels)
+        if (levels.some((value) => Math.abs(value - 128) > 5)) {
+          heardAudioRef.current = true
+          if (warned) setDictationMessage('')
+          return
+        }
+        if (!warned && Date.now() - startedAt >= 5000 && !heardAudioRef.current) {
+          warned = true
+          setDictationMessage('마이크 소리가 감지되지 않습니다.')
+        }
+      }, 250)
+      dictationMaxTimerRef.current = window.setTimeout(
+        () => stopDictation('최대 녹음 시간에 도달해 전사 중…'),
+        DICTATION_MAX_MS
+      )
+    } catch (error) {
+      releaseDictationMedia()
+      recorderRef.current = null
+      dictationChunksRef.current = []
+      setDictationState('idle')
+      setDictationMessage(error instanceof Error ? error.message : String(error))
+    }
+  }, [dictationState, releaseDictationMedia, stopDictation, transcribeDictation])
+
+  useEffect(
+    () => () => {
+      const recorder = recorderRef.current
+      if (recorder && recorder.state !== 'inactive') {
+        recorder.onstop = null
+        recorder.stop()
+      }
+      recorderRef.current = null
+      dictationChunksRef.current = []
+      releaseDictationMedia()
+    },
+    [releaseDictationMedia]
+  )
 
   const touch = useCallback((updater: (current: HearingRecordData) => HearingRecordData): void => {
     setRecord((current) => {
@@ -1469,11 +1687,43 @@ export default function HearingRecordPanel({
           value={draft}
           onChange={(event) => setDraft(event.target.value)}
           onKeyDown={handleDraftKeyDown}
+          disabled={dictationState === 'transcribing'}
           placeholder="메모 입력 · 숫자만 누르면 화자 전환 · \\1 처럼 시작하면 숫자도 그대로 입력"
         />
-        <button className="hearing-primary-btn" onClick={submitDraft}>
+        <button
+          className={`hearing-dictation-btn ${dictationState === 'recording' ? 'recording' : ''}`}
+          type="button"
+          title={dictationState === 'recording' ? '녹음을 끝내고 받아쓰기' : '마이크로 받아쓰기'}
+          aria-label={dictationState === 'recording' ? '녹음 정지' : '음성 받아쓰기'}
+          disabled={dictationState === 'transcribing'}
+          onClick={() =>
+            dictationState === 'recording' ? stopDictation() : void startDictation()
+          }
+        >
+          {dictationState === 'recording'
+            ? `■ ${formatDuration(dictationSeconds)}`
+            : dictationState === 'transcribing'
+              ? '전사 중…'
+              : '🎙 받아쓰기'}
+        </button>
+        <button
+          className="hearing-primary-btn"
+          onClick={submitDraft}
+          disabled={dictationState === 'transcribing'}
+        >
           입력
         </button>
+        <div className="hearing-dictation-note">
+          <span>
+            마이크 음성이 OpenAI API로 전송됩니다. 녹음 전에 관련 법령과 필요한 고지 절차를
+            확인하세요.
+          </span>
+          {dictationMessage && (
+            <strong role="status" aria-live="polite">
+              {dictationMessage}
+            </strong>
+          )}
+        </div>
         {speakerFormOpen && (
           <div className="hearing-speaker-form">
             <input

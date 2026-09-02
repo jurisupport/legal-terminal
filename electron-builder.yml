@@ -31,6 +31,8 @@ npmRebuild: false
 mac:
   icon: build/icon.icns
   category: public.app-category.productivity
+  extendInfo:
+    NSMicrophoneUsageDescription: 기일기록 받아쓰기 기능에서 마이크 입력을 사용합니다.
   target:
     - dmg
     - zip

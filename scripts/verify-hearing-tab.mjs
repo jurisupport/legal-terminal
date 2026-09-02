@@ -57,6 +57,54 @@ const app = await _electron.launch({
 
 try {
   const page = await app.firstWindow()
+  await page.addInitScript(() => {
+    class FakeMediaRecorder {
+      static isTypeSupported() {
+        return true
+      }
+      state = 'inactive'
+      mimeType
+      ondataavailable = null
+      onstop = null
+      constructor(_stream, options = {}) {
+        this.mimeType = options.mimeType || 'audio/webm'
+      }
+      start() {
+        this.state = 'recording'
+      }
+      stop() {
+        this.state = 'inactive'
+        this.ondataavailable?.({ data: new Blob(['fake-audio'], { type: this.mimeType }) })
+        queueMicrotask(() => this.onstop?.())
+      }
+    }
+    class FakeAudioContext {
+      state = 'running'
+      createAnalyser() {
+        return {
+          fftSize: 256,
+          getByteTimeDomainData(values) {
+            values.fill(128)
+            values[0] = 140
+          }
+        }
+      }
+      createMediaStreamSource() {
+        return { connect() {} }
+      }
+      close() {
+        this.state = 'closed'
+        return Promise.resolve()
+      }
+    }
+    Object.defineProperty(globalThis, 'MediaRecorder', { value: FakeMediaRecorder })
+    Object.defineProperty(globalThis, 'AudioContext', { value: FakeAudioContext })
+    Object.defineProperty(navigator, 'mediaDevices', {
+      value: {
+        getUserMedia: async () => ({ getTracks: () => [{ stop() {} }] })
+      }
+    })
+  })
   await app.evaluate(({ ipcMain }, { profile, recent, dashboardCase, dashboardDrafts }) => {
     const replace = (channel, handler) => {
       ipcMain.removeHandler(channel)
@@ -69,6 +117,13 @@ try {
     replace('sessions:byCase', () => ({}))
     replace('sessions:byFolder', () => [])
     replace('js:tokenStatus', () => 'ok')
+    replace('dictation:keyStatus', () => 'ok')
+    replace('dictation:setKey', () => undefined)
+    replace('dictation:transcribe', () => ({
+      ok: true,
+      text: '가운데',
+      corrected: true
+    }))
     replace('js:listCases', () => ({ ok: true, cases: [dashboardCase] }))
     replace('js:getCase', async () => {
       await new Promise((resolve) => setTimeout(resolve, 3_000))
@@ -142,7 +197,33 @@ try {
     /검사/,
     '형사 템플릿을 선택하면 형사 화자가 표시되어야 한다'
   )
+  const dictationComposer = shellPanel.locator('.hearing-composer textarea')
+  await dictationComposer.fill('앞 뒤')
+  await dictationComposer.evaluate((input) => input.setSelectionRange(2, 2))
+  const entryCountBeforeDictation = await shellPanel.locator('.hearing-message').count()
+  const dictationButton = shellPanel.locator('.hearing-dictation-btn')
+  await dictationButton.click()
+  await page.waitForFunction(() => document.querySelector('.hearing-dictation-btn')?.textContent?.includes('00:00'))
+  assert.match(
+    await dictationButton.textContent(),
+    /00:00/,
+    `받아쓰기 녹음이 시작되어야 한다: ${await shellPanel.locator('.hearing-dictation-note').textContent()}`
+  )
+  await dictationButton.click()
+  await dictationComposer.waitFor({ state: 'visible' })
+  await page.waitForFunction(
+    () => document.querySelector('.hearing-composer textarea')?.value === '앞 가운데 뒤'
+  )
+  assert.equal(await dictationComposer.inputValue(), '앞 가운데 뒤')
+  assert.equal(
+    await shellPanel.locator('.hearing-message').count(),
+    entryCountBeforeDictation,
+    '받아쓰기 결과는 사용자가 입력 버튼을 누르기 전에는 기록으로 제출되지 않아야 한다'
+  )
+  console.log('hearing dictation inserts at the cursor without submitting')
+
   await page.locator('.activity-item[title="설정"]').click()
+  await page.locator('.setting-label', { hasText: 'OpenAI API 키' }).waitFor()
   await page
     .locator('[data-work-side="left"] button[title="문서를 오른쪽으로 이동"]')
     .click()

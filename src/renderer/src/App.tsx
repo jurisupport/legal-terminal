@@ -10948,6 +10948,11 @@ function SettingsView(): JSX.Element {
   const [jsTokenStatus, setJsTokenStatus] = useState<'ok' | 'missing' | 'locked' | null>(null)
   const [jsTokenInput, setJsTokenInput] = useState('')
   const [jsTokenMsg, setJsTokenMsg] = useState('')
+  const [dictationKeyStatus, setDictationKeyStatus] = useState<
+    'ok' | 'missing' | 'locked' | 'unavailable' | null
+  >(null)
+  const [dictationKeyInput, setDictationKeyInput] = useState('')
+  const [dictationKeyMsg, setDictationKeyMsg] = useState('')
   const [office, setOffice] = useState<OfficeProfileSettings>({})
   const [officeMsg, setOfficeMsg] = useState('')
 
@@ -10962,6 +10967,7 @@ function SettingsView(): JSX.Element {
     window.lt.settings.get().then(applySettings)
     window.lt.app.info().then((info) => setAppVersion(info.version)).catch(() => setAppVersion('알 수 없음'))
     window.lt.js.tokenStatus().then(setJsTokenStatus).catch(() => setJsTokenStatus(null))
+    window.lt.dictation.keyStatus().then(setDictationKeyStatus).catch(() => setDictationKeyStatus(null))
     const onSettingsUpdated = (e: Event): void => applySettings((e as CustomEvent<AppSettings>).detail)
     window.addEventListener(SETTINGS_UPDATED_EVENT, onSettingsUpdated)
     return () => window.removeEventListener(SETTINGS_UPDATED_EVENT, onSettingsUpdated)
@@ -11001,6 +11007,27 @@ function SettingsView(): JSX.Element {
   const deleteJsToken = (): void => {
     if (!window.confirm('JuriSupport 토큰을 삭제할까요? 사건 대시보드 연결이 해제됩니다.')) return
     void applyJsToken('', '토큰을 삭제했습니다.')
+  }
+
+  const applyDictationKey = async (key: string, message: string): Promise<void> => {
+    try {
+      await window.lt.dictation.setKey(key)
+      setDictationKeyInput('')
+      setDictationKeyMsg(message)
+      setDictationKeyStatus(await window.lt.dictation.keyStatus())
+    } catch (error) {
+      setDictationKeyMsg(`실패: ${String(error instanceof Error ? error.message : error)}`)
+    }
+  }
+
+  const saveDictationKey = (): void => {
+    const key = dictationKeyInput.trim()
+    if (key) void applyDictationKey(key, 'OpenAI API 키를 안전하게 저장했습니다.')
+  }
+
+  const deleteDictationKey = (): void => {
+    if (!window.confirm('OpenAI API 키를 삭제할까요? 음성 받아쓰기를 사용할 수 없게 됩니다.')) return
+    void applyDictationKey('', 'OpenAI API 키를 삭제했습니다.')
   }
 
   useEffect(() => {
@@ -11195,6 +11222,48 @@ function SettingsView(): JSX.Element {
             ))}
           </select>
         </div>
+      </section>
+
+      <section className="setting-row">
+        <div className="setting-label">
+          OpenAI API 키 <span className="muted small">— 기일기록 음성 받아쓰기·AI 보정</span>
+        </div>
+        <div className="setting-value">
+          <code>
+            {dictationKeyStatus === 'ok' && '연결됨 (암호화 저장됨)'}
+            {dictationKeyStatus === 'missing' && '미설정'}
+            {dictationKeyStatus === 'locked' && '불러오기 실패 — 다시 붙여넣기 필요'}
+            {dictationKeyStatus === 'unavailable' && '암호 저장소를 사용할 수 없음'}
+            {dictationKeyStatus === null && '확인 중…'}
+          </code>
+          <input
+            type="password"
+            className="setting-input"
+            placeholder="OpenAI API 키(sk-…) 붙여넣기"
+            value={dictationKeyInput}
+            disabled={dictationKeyStatus === 'unavailable'}
+            onChange={(event) => setDictationKeyInput(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter') saveDictationKey()
+            }}
+          />
+          <button
+            className="empty-action"
+            onClick={saveDictationKey}
+            disabled={!dictationKeyInput.trim() || dictationKeyStatus === 'unavailable'}
+          >
+            저장
+          </button>
+          {dictationKeyStatus !== 'missing' && dictationKeyStatus !== null && (
+            <button className="empty-action" onClick={deleteDictationKey}>
+              삭제
+            </button>
+          )}
+        </div>
+        {dictationKeyStatus === 'unavailable' && (
+          <p className="muted small">운영체제 암호 저장소를 사용할 수 없어 API 키를 저장하지 않습니다.</p>
+        )}
+        {dictationKeyMsg && <p className="muted small">{dictationKeyMsg}</p>}
       </section>
 
       <section className="setting-row">

@@ -4221,7 +4221,7 @@ body {
   min-width: 0;
   max-width: 100%;
   display: grid;
-  grid-template-columns: minmax(160px, 220px) minmax(0, 1fr) auto;
+  grid-template-columns: minmax(160px, 220px) minmax(0, 1fr) auto auto;
   align-items: stretch;
   gap: 7px;
   padding: 8px;
@@ -4284,6 +4284,37 @@ body {
   background: var(--bg);
   font: 13px/1.45 var(--font-ui);
   outline: none;
+}
+.hearing-dictation-btn {
+  min-width: 92px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--fg);
+  background: #2a2d2e;
+  cursor: pointer;
+}
+.hearing-dictation-btn.recording {
+  border-color: #e05252;
+  color: #fff;
+  background: #a12626;
+}
+.hearing-dictation-btn:disabled {
+  opacity: 0.65;
+  cursor: wait;
+}
+.hearing-dictation-note {
+  grid-column: 2 / -1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 11.5px;
+}
+.hearing-dictation-note strong {
+  color: #d7ba7d;
+  font-weight: 500;
 }
 .hearing-speaker-form {
   grid-column: 1 / -1;
@@ -4375,6 +4406,11 @@ body {
   .hearing-composer {
     grid-template-columns: minmax(0, 1fr);
   }
+  .hearing-dictation-note {
+    grid-column: 1;
+    align-items: flex-start;
+    flex-direction: column;
+  }
   .hearing-speaker-form {
     grid-template-columns: minmax(0, 1fr) auto;
   }
@@ -4398,6 +4434,9 @@ body {
   }
   .hearing-composer {
     grid-template-columns: minmax(0, 1fr);
+  }
+  .hearing-dictation-note {
+    grid-column: 1;
   }
   .hearing-speaker-form {
     grid-template-columns: minmax(0, 1fr) auto;

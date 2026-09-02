@@ -272,6 +272,29 @@ export interface AutomaticWorkspaceLoadResult {
   error?: string
 }
 
+export interface DictationContext {
+  court?: string
+  caseNumber?: string
+  caseName?: string
+  client?: string
+  opponent?: string
+  partyNames?: string
+  speaker?: string
+}
+
+export interface DictationTranscribeInput {
+  audio: Uint8Array
+  mimeType: string
+  context?: DictationContext
+}
+
+export interface DictationTranscribeResult {
+  ok: boolean
+  text?: string
+  corrected?: boolean
+  error?: string
+}
+
 export interface SessionSearchContext {
   query?: string
   displayTitle?: string
@@ -731,6 +754,11 @@ export interface LtApi {
   settings: {
     get: () => Promise<AppSettings>
     set: (patch: Partial<AppSettings>) => Promise<AppSettings>
+  }
+  dictation: {
+    keyStatus: () => Promise<'ok' | 'missing' | 'locked' | 'unavailable'>
+    setKey: (key: string) => Promise<void>
+    transcribe: (input: DictationTranscribeInput) => Promise<DictationTranscribeResult>
   }
   export: {
     mdToPdf: (
