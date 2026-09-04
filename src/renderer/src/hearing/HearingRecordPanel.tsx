@@ -8,7 +8,7 @@ import {
 } from 'react'
 import type { JsHearing } from '../env'
 import { isCommittedEnter, isImeComposing } from '../ime'
-import { insertDictationText } from './dictationText'
+import { insertDictationText, isDictationShortcut } from './dictationText'
 import { shouldKeepPendingRecord } from './loadPolicy'
 
 type SpeakerRole = 'court' | 'plaintiff' | 'defendant' | 'preparation' | 'other'
@@ -757,6 +757,16 @@ export default function HearingRecordPanel({
       setDictationMessage(error instanceof Error ? error.message : String(error))
     }
   }, [dictationState, releaseDictationMedia, stopDictation, transcribeDictation])
+
+  useEffect(() => {
+    const toggleDictation = (event: globalThis.KeyboardEvent): void => {
+      if (!visible || !isDictationShortcut(event) || dictationState === 'transcribing') return
+      event.preventDefault()
+      dictationState === 'recording' ? stopDictation() : void startDictation()
+    }
+    window.addEventListener('keydown', toggleDictation)
+    return () => window.removeEventListener('keydown', toggleDictation)
+  }, [dictationState, startDictation, stopDictation, visible])
 
   useEffect(
     () => () => {
@@ -1693,7 +1703,11 @@ export default function HearingRecordPanel({
         <button
           className={`hearing-dictation-btn ${dictationState === 'recording' ? 'recording' : ''}`}
           type="button"
-          title={dictationState === 'recording' ? '녹음을 끝내고 받아쓰기' : '마이크로 받아쓰기'}
+          title={
+            dictationState === 'recording'
+              ? '녹음을 끝내고 받아쓰기 (Ctrl/Cmd+Shift+D)'
+              : '마이크로 받아쓰기 (Ctrl/Cmd+Shift+D)'
+          }
           aria-label={dictationState === 'recording' ? '녹음 정지' : '음성 받아쓰기'}
           disabled={dictationState === 'transcribing'}
           onClick={() =>
@@ -1715,8 +1729,8 @@ export default function HearingRecordPanel({
         </button>
         <div className="hearing-dictation-note">
           <span>
-            마이크 음성이 OpenAI API로 전송됩니다. 녹음 전에 관련 법령과 필요한 고지 절차를
-            확인하세요.
+            Ctrl/Cmd+Shift+D로 시작·정지합니다. 정지하면 현재 커서 위치에 자동 입력됩니다.
+            마이크 음성이 OpenAI API로 전송되므로 관련 법령과 필요한 고지 절차를 확인하세요.
           </span>
           {dictationMessage && (
             <strong role="status" aria-live="polite">

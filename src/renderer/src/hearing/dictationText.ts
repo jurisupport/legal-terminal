@@ -3,6 +3,19 @@ export interface DictationInsertion {
   caret: number
 }
 
+export function isDictationShortcut(
+  event: Pick<KeyboardEvent, 'key' | 'code' | 'ctrlKey' | 'metaKey' | 'shiftKey' | 'altKey' | 'repeat' | 'isComposing'>
+): boolean {
+  return (
+    (event.key.toLowerCase() === 'd' || event.code === 'KeyD') &&
+    (event.ctrlKey || event.metaKey) &&
+    event.shiftKey &&
+    !event.altKey &&
+    !event.repeat &&
+    !event.isComposing
+  )
+}
+
 export function insertDictationText(
   value: string,
   dictated: string,

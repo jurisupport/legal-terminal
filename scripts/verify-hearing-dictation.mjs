@@ -1,6 +1,22 @@
 import assert from 'node:assert/strict'
 import { shouldUseDictationCorrection } from '../src/main/dictationGuard.ts'
-import { insertDictationText } from '../src/renderer/src/hearing/dictationText.ts'
+import { insertDictationText, isDictationShortcut } from '../src/renderer/src/hearing/dictationText.ts'
+
+const shortcut = {
+  key: 'd',
+  code: 'KeyD',
+  ctrlKey: true,
+  metaKey: false,
+  shiftKey: true,
+  altKey: false,
+  repeat: false,
+  isComposing: false
+}
+
+assert.equal(isDictationShortcut(shortcut), true)
+assert.equal(isDictationShortcut({ ...shortcut, ctrlKey: false, metaKey: true }), true)
+assert.equal(isDictationShortcut({ ...shortcut, shiftKey: false }), false)
+assert.equal(isDictationShortcut({ ...shortcut, repeat: true }), false)
 
 assert.deepEqual(insertDictationText('', '  재판부가 석명을 요구했습니다.  ', 0, 0), {
   value: '재판부가 석명을 요구했습니다.',
