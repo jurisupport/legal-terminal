@@ -90,12 +90,15 @@ const syncSource = await readFile(new URL('../src/main/sync.ts', import.meta.url
 const agentSource = await readFile(new URL('../src/main/agent/agent-service.ts', import.meta.url), 'utf8')
 const ptySource = await readFile(new URL('../src/main/pty/claude-pty.ts', import.meta.url), 'utf8')
 const indexSource = await readFile(new URL('../src/main/index.ts', import.meta.url), 'utf8')
+const sshSource = await readFile(new URL('../src/main/ssh.ts', import.meta.url), 'utf8')
 
 assert.match(syncSource, /buildSshArgs\(opts\.profile, \{ usage: 'oneshot' \}\)/)
 assert.match(agentSource, /sshArgs\(session\.ssh, \{ usage: 'interactive' \}\), remoteCodexCommand/)
 assert.match(agentSource, /sshArgs\(ssh, \{ usage: 'interactive' \}\), remoteClaudeCommand/)
 assert.match(ptySource, /usage: 'interactive'/)
 assert.match(indexSource, /disposeSshControlMasters\(\)/)
+assert.match(sshSource, /command -v mdfind/)
+assert.match(sshSource, /error\?\.killed/)
 
 const stalePath = getControlPathForProfile({ user: 'stale-test', host: 'example.invalid' })
 buildSshArgs({ user: 'stale-test', host: 'example.invalid' }, { usage: 'oneshot' })

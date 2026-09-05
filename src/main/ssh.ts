@@ -31,9 +31,12 @@ function resolveWindowsOpenSsh(): string | undefined {
 }
 
 function sshError(err: unknown, stderr?: string): string {
-  const error = err as NodeJS.ErrnoException
+  const error = err as NodeJS.ErrnoException & { killed?: boolean; signal?: string }
   if (error?.code === 'ENOENT') {
     return '로컬 Windows OpenSSH Client(ssh.exe)를 찾을 수 없습니다. Windows 설정 > 시스템 > 선택적 기능에서 OpenSSH Client를 설치한 뒤 앱을 다시 시작하세요.'
+  }
+  if (error?.killed || error?.signal === 'SIGTERM') {
+    return '원격 응답 시간이 초과되었습니다. 검색 시작 위치를 좁혀 다시 시도하세요.'
   }
   return (stderr || error?.message || String(err) || '연결 실패').trim()
 }
@@ -47,11 +50,10 @@ function cdTarget(path: string): string {
 }
 
 function oneDriveCloudPath(path: string): string | undefined {
-  const marker = '/OneDrive/'
-  const idx = path.indexOf(marker)
-  if (idx >= 0) return 'onedrive:' + path.slice(idx + marker.length).normalize('NFC')
-  const cloudStorage = path.match(/\/Library\/CloudStorage\/OneDrive[^/]*\/(.+)$/)
-  return cloudStorage ? 'onedrive:' + cloudStorage[1].normalize('NFC') : undefined
+  const oneDrive = path.match(/\/OneDrive(?:\/(.*))?$/)
+  if (oneDrive) return 'onedrive:' + (oneDrive[1] ?? '').normalize('NFC')
+  const cloudStorage = path.match(/\/Library\/CloudStorage\/OneDrive[^/]*(?:\/(.*))?$/)
+  return cloudStorage ? 'onedrive:' + (cloudStorage[1] ?? '').normalize('NFC') : undefined
 }
 
 function remoteRcloneBootstrap(): string {
@@ -325,7 +327,7 @@ done
             /* fall through to the original SSH error */
           }
         }
-        resolve({ ok: false, error: (stderr || err.message || '연결 실패').trim() })
+        resolve({ ok: false, error: sshError(err, stderr) })
         return
       }
       const lines = stdout.split('\n')
@@ -429,8 +431,30 @@ export function searchRemoteDirs(
   const shellLimit = limit + 1
   const args = buildSshArgs(profile, { usage: 'oneshot', connectTimeout: 20 })
   const target = remotePath && remotePath.trim() ? remotePath : '~'
+  const useSpotlight = oneDriveCloudPath(target) !== undefined
   const queryVariants = remoteSearchQueryVariants(query)
   const queryArgs = [...queryVariants, ...Array(Math.max(0, 4 - queryVariants.length)).fill('')].slice(0, 4)
+  const scanDirs = `
+if ${useSpotlight ? 'command -v mdfind >/dev/null 2>&1' : 'false'}; then
+  root=$(pwd -P)
+  mdfind -onlyin "$root" -name ${shq(query)} 2>/dev/null |
+  while IFS= read -r p; do
+    case "$p" in "$root"/*) rel=\${p#"$root"/} ;; *) continue ;; esac
+    [ -d "$p" ] || continue
+    rest=$rel
+    depth=1
+    while [ "\${rest#*/}" != "$rest" ]; do
+      depth=$((depth + 1))
+      rest=\${rest#*/}
+    done
+    [ "$depth" -le ${maxDepth} ] || continue
+    case "/$rel/" in */.*/*) continue ;; esac
+    printf './%s\\n' "$rel"
+  done
+else
+  find . -maxdepth ${maxDepth} \\( -name '.*' -a ! -name . \\) -prune -o -type d ! -name . -print 2>/dev/null
+fi
+	`.trim()
   const searchDirs = `
 q1=$1
 q2=$2
@@ -468,8 +492,7 @@ exit 0
   args.push(
     [
       `${REMOTE_UTF8_LOCALE}; cd ${cdTarget(target)} && pwd &&`,
-      `find . -maxdepth ${maxDepth} \\( -name '.*' -a ! -name . \\) -prune -o`,
-      `-type d ! -name . -print 2>/dev/null | sh -c ${shq(searchDirs)} sh ${queryArgs
+      `{ ${scanDirs}; } | sh -c ${shq(searchDirs)} sh ${queryArgs
         .map(shq)
         .join(' ')} ${shq(String(shellLimit))}`
     ].join(' ')
@@ -482,7 +505,7 @@ exit 0
       { timeout: 30000, windowsHide: true, maxBuffer: 4 * 1024 * 1024 },
       (err, stdout, stderr) => {
         if (err) {
-          resolve({ ok: false, error: (stderr || err.message || '검색 실패').trim() })
+          resolve({ ok: false, error: sshError(err, stderr) })
           return
         }
         const lines = stdout.split('\n')
