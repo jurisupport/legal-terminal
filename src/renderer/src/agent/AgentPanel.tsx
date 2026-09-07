@@ -1353,7 +1353,7 @@ function mergeProcessStep(existing: ProcessStep | undefined, patch: ProcessStepP
 }
 
 function upsertProcessStep(items: TimelineItem[], patch: ProcessStepPatch): TimelineItem[] {
-  const id = processGroupId(items)
+  const id = items.find((item) => item.processSteps?.some((step) => step.id === patch.id))?.id ?? processGroupId(items)
   const makeItem = (): TimelineItem => {
     const step = mergeProcessStep(undefined, patch)
     return {
@@ -1469,6 +1469,8 @@ function reduceTimeline(items: TimelineItem[], event: AgentEvent, agentLabel: st
       id: stringValue(event.processId) ?? `process-${Date.now()}`,
       title: stringValue(event.title) ?? '프로세스',
       text: stringValue(event.text),
+      toolName: stringValue(event.toolName),
+      elapsedMs: numberValue(event.elapsedMs),
       status: stringValue(event.status) ?? 'running'
     })
   }

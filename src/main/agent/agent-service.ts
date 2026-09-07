@@ -87,6 +87,13 @@ interface CodexTurnWaiter {
   reject: (error: Error) => void
 }
 
+interface ClaudeTask {
+  toolId: string
+  name?: string
+  status: string
+  background: boolean
+}
+
 interface AgentSession {
   id: string
   cwd: string
@@ -120,6 +127,8 @@ interface AgentSession {
   assistantText: Map<string, string>
   assistantStreamed: Set<string>
   startedTools: Set<string>
+  claudeTasks?: Map<string, ClaudeTask>
+  claudeBackgroundTasks?: Set<string>
   queue: QueuedAgentMessage[]
   turnAssistantMessageId?: string
   activeAssistantMessageId?: string
@@ -1301,7 +1310,7 @@ function emitProcessEvent(
 function currentSessionStatus(session: AgentSession): AgentStatus {
   if (session.pendingPermissions.size > 0) return 'waiting_permission'
   if (session.pendingDialogs.size > 0) return 'waiting_user'
-  if ((session.running && !session.running.signal.aborted) || session.codexActiveWork?.size) return 'working'
+  if ((session.running && !session.running.signal.aborted) || session.codexActiveWork?.size || hasRunningClaudeTasks(session)) return 'working'
   return 'idle'
 }
 
@@ -1860,9 +1869,10 @@ function makeDiffProposal(session: AgentSession, toolId: string, input: Record<s
 }
 
 function handleAssistantMessage(session: AgentSession, message: Record<string, unknown>): void {
-  rememberClaudeAssistantUsage(session, message)
+  const parentToolId = stringValue(message.parent_tool_use_id)
+  if (!parentToolId) rememberClaudeAssistantUsage(session, message)
   const body = asRecord(message.message)
-  const messageId = activeAssistantOutputId(session, stringValue(body?.id) ?? stringValue(message.uuid))
+  const messageId = parentToolId ?? activeAssistantOutputId(session, stringValue(body?.id) ?? stringValue(message.uuid))
   if (message.error) {
     emitProcessEvent(session, `assistant-error-${messageId}`, 'Claude 응답 오류', stringValue(message.error), 'error')
   }
@@ -1899,6 +1909,14 @@ function handleAssistantMessage(session: AgentSession, message: Record<string, u
   }
 
   const snapshot = textBlocks.join('')
+  if (parentToolId) {
+    emit(session, {
+      type: 'process:event', sessionId: session.id, processId: parentToolId,
+      title: '도구 · Agent', toolName: 'Agent', status: 'running',
+      text: snapshot || stringValue(message.task_description)
+    })
+    return
+  }
   if (snapshot) {
     rememberClaudeUsageSummary(session, snapshot)
     reconcileAssistantSnapshot(session, messageId, snapshot)
@@ -1914,6 +1932,23 @@ function handleUserMessage(session: AgentSession, message: Record<string, unknow
     const block = asRecord(blockValue)
     if (!block || block.type !== 'tool_result') continue
     const toolId = stringValue(block.tool_use_id) ?? randomUUID()
+    const result = asRecord(message.tool_use_result)
+    // ponytail: scan the small session task map; index by tool ID if sessions accumulate many tasks.
+    const task = Array.from(session.claudeTasks?.values() ?? []).find((entry) => entry.toolId === toolId)
+    if (result?.status === 'async_launched' || result?.status === 'remote_launched' || result?.isAsync === true || stringValue(result?.backgroundTaskId)) {
+      const taskId = stringValue(result?.agentId) ?? stringValue(result?.taskId) ?? stringValue(result?.backgroundTaskId)
+      if (task) task.background = true
+      else if (taskId && !session.claudeTasks?.has(taskId)) {
+        handleClaudeTaskMessage(session, {
+          subtype: 'task_started', task_id: taskId, tool_use_id: toolId,
+          task_type: result?.backgroundTaskId ? 'local_bash' : 'local_agent', description: result?.description, is_backgrounded: true
+        })
+      }
+      continue
+    }
+    // A background launch result ends the tool call; the task notification ends the work.
+    if (task?.background && block.is_error !== true) continue
+    if (task) task.status = block.is_error === true ? 'error' : 'done'
     emit(session, {
       type: 'tool:done',
       sessionId: session.id,
@@ -1922,7 +1957,6 @@ function handleUserMessage(session: AgentSession, message: Record<string, unknow
       isError: block.is_error === true
     })
 
-    const result = asRecord(message.tool_use_result)
     if (result?.structuredPatch || result?.gitDiff) {
       const gitDiff = asRecord(result.gitDiff)
       emit(session, {
@@ -2000,8 +2034,61 @@ function handleStreamEvent(session: AgentSession, message: Record<string, unknow
   appendAssistantText(session, messageId, text)
 }
 
+function hasRunningClaudeTasks(session: AgentSession): boolean {
+  if (session.claudeBackgroundTasks?.size) return true
+  return Array.from(session.claudeTasks?.values() ?? []).some((task) =>
+    (task.status === 'running' || task.status === 'paused') && (!task.background || !session.claudeBackgroundTasks)
+  )
+}
+
+function handleClaudeTaskMessage(session: AgentSession, message: Record<string, unknown>): boolean {
+  const subtype = stringValue(message.subtype)
+  if (!['task_started', 'task_progress', 'task_notification', 'task_updated'].includes(subtype ?? '')) return false
+  const taskId = stringValue(message.task_id)
+  if (!taskId || message.skip_transcript === true) return true
+  session.claudeTasks ??= new Map()
+  const previous = session.claudeTasks.get(taskId)
+  const patch = asRecord(message.patch)
+  if (subtype === 'task_updated' && !previous) return true
+  const rawStatus = stringValue(patch?.status) ?? stringValue(message.status)
+  const status = rawStatus === 'completed' ? 'done'
+    : rawStatus === 'failed' ? 'error'
+      : rawStatus === 'stopped' || rawStatus === 'killed' ? 'cancelled'
+        : rawStatus === 'paused' ? 'paused'
+          : rawStatus === 'running' || rawStatus === 'pending' || subtype === 'task_started' ? 'running'
+            : previous?.status ?? 'running'
+  const task: ClaudeTask = {
+    toolId: previous?.toolId ?? stringValue(message.tool_use_id) ?? `claude-task:${taskId}`,
+    name: previous?.name ?? (message.task_type === 'local_agent' || message.task_type === 'remote_agent' || message.subagent_type
+      ? 'Agent' : message.task_type === 'local_bash' ? 'Bash' : undefined),
+    status,
+    background: typeof patch?.is_backgrounded === 'boolean' ? patch.is_backgrounded
+      : typeof message.is_backgrounded === 'boolean' ? message.is_backgrounded : previous?.background ?? false
+  }
+  session.claudeTasks.set(taskId, task)
+  emit(session, {
+    type: 'process:event', sessionId: session.id, processId: task.toolId,
+    title: task.name ? `도구 · ${task.name}` : '백그라운드 작업', toolName: task.name,
+    text: stringValue(patch?.error) ?? stringValue(message.summary) ?? stringValue(patch?.description) ?? stringValue(message.description),
+    elapsedMs: numberValue(asRecord(message.usage)?.duration_ms),
+    status
+  })
+  emitCurrentSessionStatus(session)
+  return true
+}
+
 function handleSystemMessage(session: AgentSession, message: Record<string, unknown>): void {
+  if (handleClaudeTaskMessage(session, message)) return
   const subtype = message.subtype
+  if (subtype === 'background_tasks_changed') {
+    const tasks = unknownArray(message.tasks).map(asRecord)
+    session.claudeBackgroundTasks = new Set(tasks.map((task) => stringValue(task?.task_id)).filter((id): id is string => Boolean(id)))
+    emitProcessEvent(session, 'claude-background-tasks', '백그라운드 작업',
+      tasks.map((task) => stringValue(task?.description)).filter(Boolean).join('\n'),
+      session.claudeBackgroundTasks.size > 0 ? 'running' : 'done')
+    emitCurrentSessionStatus(session)
+    return
+  }
   if (subtype === 'init') {
     const claudeSessionId = stringValue(message.session_id)
     if (claudeSessionId) session.resumeSessionId = claudeSessionId
@@ -2125,7 +2212,7 @@ function handleResultMessage(session: AgentSession, message: Record<string, unkn
   emit(session, {
     type: 'status',
     sessionId: session.id,
-    status: isError ? 'error' : 'done'
+    status: isError ? 'error' : hasRunningClaudeTasks(session) ? 'working' : 'done'
   })
   if (!isError) {
     session.turnCount = (session.turnCount ?? 0) + 1
@@ -2355,19 +2442,23 @@ function handleSdkMessage(session: AgentSession, sdkMessage: unknown): void {
   const message = asRecord(sdkMessage)
   if (!message) return
 
+  const parentToolId = stringValue(message.parent_tool_use_id)
+  if (parentToolId && message.type === 'stream_event') return
+
   if (message.type === 'system') handleSystemMessage(session, message)
   else if (message.type === 'assistant') handleAssistantMessage(session, message)
   else if (message.type === 'user') handleUserMessage(session, message)
   else if (message.type === 'stream_event') handleStreamEvent(session, message)
   else if (message.type === 'result') handleResultMessage(session, message)
   else if (message.type === 'tool_progress') {
-    emitProcessEvent(
-      session,
-      stringValue(message.tool_use_id) ?? stringValue(message.uuid) ?? randomUUID(),
-      `도구 실행 · ${stringValue(message.tool_name) ?? 'tool'}`,
-      undefined,
-      `${String(message.elapsed_time_seconds ?? 0)}s`
-    )
+    emit(session, {
+      type: 'process:event', sessionId: session.id,
+      processId: stringValue(message.tool_use_id) ?? stringValue(message.uuid) ?? randomUUID(),
+      title: `도구 · ${stringValue(message.tool_name) ?? 'tool'}`,
+      toolName: stringValue(message.tool_name),
+      elapsedMs: (numberValue(message.elapsed_time_seconds) ?? 0) * 1000,
+      status: 'running'
+    })
   } else if (message.type === 'tool_use_summary') {
     emitProcessEvent(session, stringValue(message.uuid) ?? randomUUID(), '도구 요약', stringValue(message.summary), 'done')
   } else if (message.type === 'auth_status') {
@@ -3452,6 +3543,7 @@ function runRemoteAgentMessage(
     let sawJson = false
     let contextRequestId: string | undefined
     let contextTimer: ReturnType<typeof setTimeout> | undefined
+    let sawResult = false
 
     const endRemoteInput = (): void => {
       if (contextTimer) clearTimeout(contextTimer)
@@ -3485,7 +3577,9 @@ function runRemoteAgentMessage(
     }
 
     const handleRemoteUsageMessage = (message: Record<string, unknown> | null): void => {
-      if (message?.type === 'result') {
+      if (message?.type === 'result') sawResult = true
+      else if ((message?.type === 'assistant' || message?.type === 'stream_event') && !message.parent_tool_use_id) sawResult = false
+      if (sawResult && !contextRequestId && !hasRunningClaudeTasks(session)) {
         requestContextUsage()
         return
       }
@@ -3575,7 +3669,7 @@ function runRemoteAgentMessage(
         resolve()
         return
       }
-      emit(session, { type: 'status', sessionId: session.id, status: 'idle' })
+      if (!hasRunningClaudeTasks(session)) emit(session, { type: 'status', sessionId: session.id, status: 'idle' })
       resolve()
     })
 
@@ -4564,6 +4658,10 @@ function startAgentTurn(session: AgentSession, input: AgentSendInput): void {
   const assistantMessageId = randomUUID()
   const abortController = new AbortController()
   session.running = abortController
+  if (session.provider === 'claude') {
+    session.claudeTasks = new Map()
+    session.claudeBackgroundTasks = undefined
+  }
   session.turnAssistantMessageId = assistantMessageId
   session.activeAssistantMessageId = assistantMessageId
   const userDisplayText = agentInputDisplayText(input)
@@ -4584,6 +4682,7 @@ function startAgentTurn(session: AgentSession, input: AgentSendInput): void {
     let contextUsageTimer: NodeJS.Timeout | undefined
     let contextUsageActive = true
     let contextUsagePending = false
+    let endClaudeInput: (() => void) | undefined
     try {
       await session.usageHydration
       if (abortController.signal.aborted || session.running !== abortController) return
@@ -4600,8 +4699,13 @@ function startAgentTurn(session: AgentSession, input: AgentSendInput): void {
         await runRemoteAgentMessage(session, prompt, abortController)
         return
       }
+      // String prompts close the SDK input on the first result, even with live child tasks.
+      const inputFinished = new Promise<void>((resolve) => { endClaudeInput = resolve })
       const response = query({
-        prompt,
+        prompt: (async function* () {
+          yield { type: 'user' as const, session_id: '', parent_tool_use_id: null, message: { role: 'user' as const, content: prompt } }
+          await inputFinished
+        })(),
         options: {
           abortController,
           cwd: session.cwd,
@@ -4642,11 +4746,15 @@ function startAgentTurn(session: AgentSession, input: AgentSendInput): void {
       }
       pollContextUsage()
       contextUsageTimer = setInterval(pollContextUsage, 3000)
+      let sawResult = false
       for await (const sdkMessage of response) {
         if (abortController.signal.aborted || session.running !== abortController) break
         handleSdkMessage(session, sdkMessage)
+        if (sdkMessage.type === 'result') sawResult = true
+        else if ((sdkMessage.type === 'assistant' || sdkMessage.type === 'stream_event') && !sdkMessage.parent_tool_use_id) sawResult = false
+        if (sawResult && !hasRunningClaudeTasks(session)) endClaudeInput?.()
       }
-      if (!abortController.signal.aborted && session.running === abortController) {
+      if (!abortController.signal.aborted && session.running === abortController && !hasRunningClaudeTasks(session)) {
         emit(session, { type: 'status', sessionId, status: 'idle' })
       }
     } catch (error) {
@@ -4665,8 +4773,25 @@ function startAgentTurn(session: AgentSession, input: AgentSendInput): void {
       }
     } finally {
       contextUsageActive = false
+      endClaudeInput?.()
       if (contextUsageTimer) clearInterval(contextUsageTimer)
-      if (session.running === abortController) session.running = undefined
+      if (session.running === abortController) {
+        session.running = undefined
+        let unfinishedTasks = Boolean(session.claudeBackgroundTasks?.size)
+        if (unfinishedTasks) {
+          emitProcessEvent(session, 'claude-background-tasks', '백그라운드 작업',
+            '실행 연결이 종료되어 작업 결과를 확인하지 못했습니다.', abortController.signal.aborted ? 'cancelled' : 'error')
+        }
+        for (const task of session.claudeTasks?.values() ?? []) {
+          if (task.status !== 'running' && task.status !== 'paused') continue
+          task.status = abortController.signal.aborted ? 'cancelled' : 'error'
+          unfinishedTasks = true
+          emitProcessEvent(session, task.toolId, `도구 · ${task.name ?? '작업'}`,
+            '실행 연결이 종료되어 작업 결과를 확인하지 못했습니다.', task.status)
+        }
+        if (unfinishedTasks && !abortController.signal.aborted) emit(session, { type: 'status', sessionId, status: 'error' })
+        session.claudeBackgroundTasks = undefined
+      }
       if (session.queue.length === 0) {
         session.turnAssistantMessageId = undefined
         session.activeAssistantMessageId = undefined
@@ -4919,6 +5044,8 @@ export function interruptAgentSession(sessionId: string): AgentCommandResult {
   session.codexProcess?.kill()
   session.codexProcess = undefined
   session.codexActiveWork?.clear()
+  session.claudeTasks?.clear()
+  session.claudeBackgroundTasks = undefined
   session.running = undefined
   session.turnAssistantMessageId = undefined
   session.activeAssistantMessageId = undefined

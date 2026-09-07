@@ -260,7 +260,7 @@ export type AgentEvent =
   | { type: 'message:assistant_delta'; sessionId: string; messageId: string; text: string }
   | { type: 'message:assistant_replace'; sessionId: string; messageId: string; text: string }
   | { type: 'message:assistant_done'; sessionId: string; messageId: string }
-  | { type: 'process:event'; sessionId: string; processId: string; title: string; text?: string; status?: string }
+  | { type: 'process:event'; sessionId: string; processId: string; title: string; text?: string; status?: string; toolName?: string; elapsedMs?: number }
   | {
       type: 'queue:added'
       sessionId: string

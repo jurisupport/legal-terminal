@@ -96,7 +96,7 @@ export function toolStepDisplay(step: ProcessStep): { name: string; arg?: string
     const command = step.input.split('\n', 1)[0]
     if (command.trim()) return { name, arg: clipArg(command), rawName }
   }
-  if (!step.toolName && step.text) return { name, arg: clipArg(step.text), rawName }
+  if (step.text && (!step.toolName || isSubAgentStep(step))) return { name, arg: clipArg(step.text), rawName }
   return { name, rawName }
 }
 
@@ -190,6 +190,7 @@ export function ToolRow({
         <span className="agent-tool-meta">
           {subAgent && status === 'running' && <span className="agent-tool-flag">실행 중</span>}
           {subAgent && status === 'done' && <span className="agent-tool-flag">완료</span>}
+          {status === 'paused' && <span className="agent-tool-flag">일시 중지</span>}
           {status === 'error' && <span className="agent-tool-flag error">실패</span>}
           {(status === 'cancelled' || status === 'canceled') && (
             <span className="agent-tool-flag">중지됨</span>

@@ -95,11 +95,11 @@ curl -fsSL https://github.com/jurisupport/legal-terminal/releases/latest/downloa
 
 ## 이번 업데이트
 
-최신 릴리스: [v0.1.198](https://github.com/jurisupport/legal-terminal/releases/tag/v0.1.198)
+최신 릴리스: [v0.1.220](https://github.com/jurisupport/legal-terminal/releases/tag/v0.1.220)
 
-- **Markdown 탭 표시 수정**: 복원된 문서를 연 상태에서 다른 Markdown 문서를 열면 두 본문이 겹쳐 보이던 문제를 해결했습니다.
-- **설치 안정성 개선**: 한 줄 설치 스크립트를 GitHub Release에서 제공해 Raw GitHub 요청 제한의 영향을 받지 않습니다.
-- **macOS 플러그인 설치 보강**: 추가 설치 스크립트도 Raw GitHub 대신 GitHub API에서 내려받습니다.
+- **Claude 하위 에이전트 추적 수정**: 진행 알림 뒤 작업이 사라지지 않고 완료·실패·중지 상태까지 표시합니다.
+- **백그라운드 작업 연결 유지**: 첫 응답 이후에도 하위 작업의 결과를 받을 수 있도록 로컬·원격 Claude 연결을 유지합니다.
+- **작업 결과 표시 개선**: 다음 질문을 보낸 뒤에도 기존 작업 행에 결과를 갱신하고, 하위 에이전트의 응답을 해당 작업에 표시합니다.
 
 ## 처음 쓰는 순서
 
