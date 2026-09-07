@@ -3219,6 +3219,9 @@ body {
   -webkit-line-clamp: 1;
   overflow: hidden;
 }
+.agent-user-question:not([open]) + .agent-attachments.sent {
+  display: none;
+}
 .agent-msg.assistant {
   padding: 0 2px;
 }

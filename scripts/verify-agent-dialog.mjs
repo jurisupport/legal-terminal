@@ -3,6 +3,7 @@ import { readFile } from 'node:fs/promises'
 
 const service = await readFile(new URL('../src/main/agent/agent-service.ts', import.meta.url), 'utf8')
 const panel = await readFile(new URL('../src/renderer/src/agent/AgentPanel.tsx', import.meta.url), 'utf8')
+const styles = await readFile(new URL('../src/renderer/src/styles.css', import.meta.url), 'utf8')
 const remoteControl = service.match(/function handleRemoteControlRequest[\s\S]*?\n}\n\nfunction runRemoteAgentMessage/)?.[0] ?? ''
 const assistantMessage = service.match(/function handleAssistantMessage[\s\S]*?\n}\n\nfunction handleUserMessage/)?.[0] ?? ''
 const streamEvent = service.match(/function handleStreamEvent[\s\S]*?\n}\n\nfunction handleSdkMessage/)?.[0] ?? ''
@@ -29,5 +30,15 @@ assert.match(panel, /className="agent-user-question-toggle"/)
 assert.match(panel, /event\.preventDefault\(\)/)
 assert.match(panel, /aria-expanded=\{expanded\}/)
 assert.match(panel, /setExpanded\(\(value\) => !value\)/)
+assert.match(
+  panel,
+  /<UserQuestion text=\{item\.text \?\? ''\} \/>\s*\{item\.attachments && item\.attachments\.length > 0 && \(\s*<div className="agent-attachments sent"/,
+  'sent attachments must remain adjacent to their collapsible question'
+)
+assert.match(
+  styles,
+  /\.agent-user-question:not\(\[open\]\) \+ \.agent-attachments\.sent\s*\{\s*display:\s*none;/,
+  'collapsed sticky questions must hide their sent attachments'
+)
 
 console.log('selection dialogs preserve ordering and submit complete answers immediately')
