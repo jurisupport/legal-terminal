@@ -160,6 +160,14 @@ function stopWindowAttention(win: BrowserWindow): void {
   dockBounceByWindow.delete(win.id)
 }
 
+function recoverWindowInput(win: BrowserWindow | null): void {
+  if (!win || win.isDestroyed() || !win.isEnabled() || win.webContents.isDestroyed()) return
+  // 창과 웹 화면의 입력 상태만 다시 연결한다. 문서·대화·실행 중인 작업은 유지한다.
+  win.blur()
+  win.focus()
+  win.webContents.focus()
+}
+
 function requestWindowAttention(win: BrowserWindow, reason?: 'done' | 'question'): void {
   if (win.isDestroyed() || win.isFocused()) return
 
@@ -215,7 +223,17 @@ function createWindow(setMain = true, opts?: { docOnly?: boolean; termOnly?: boo
   let rendererRecoveryRequested = false
   let unresponsiveDialogOpen = false
 
-  win.on('focus', () => stopWindowAttention(win))
+  win.on('focus', () => {
+    stopWindowAttention(win)
+    if (
+      win.isEnabled() &&
+      !win.webContents.isDestroyed() &&
+      !win.webContents.isDevToolsFocused() &&
+      !win.webContents.isFocused()
+    ) {
+      win.webContents.focus()
+    }
+  })
   win.on('close', (event) => {
     if (!closeGuardReady || forceClosingWindowIds.has(win.id) || win.webContents.isDestroyed()) return
     event.preventDefault()
@@ -2768,14 +2786,25 @@ app.whenReady().then(() => {
   applyDockIcon()
   // 기본 메뉴 제거 — 기본 메뉴가 Ctrl+W를 '창 닫기'에 바인딩해 터미널 Ctrl+W가 창을 닫는 문제 방지.
   // 단 macOS는 메뉴가 아예 없으면 Cmd+C/V 같은 편집 단축키 자체가 죽으므로(설정창 토큰
-  // 붙여넣기 불가) 편집 롤과 화면 복구용 reload만 둔다 — 여기에는 Cmd+W 바인딩이 없다.
+  // 붙여넣기 불가) 편집 롤과 입력·화면 복구 메뉴를 둔다 — 여기에는 Cmd+W 바인딩이 없다.
   // (메뉴바는 autoHideMenuBar로 이미 숨겨져 있어 UX 변화 없음. Ctrl+W는 렌더러에서 탭 닫기로 처리.)
   if (process.platform === 'darwin') {
     Menu.setApplicationMenu(
       Menu.buildFromTemplate([
         { role: 'appMenu' },
         { role: 'editMenu' },
-        { label: '보기', submenu: [{ role: 'reload', label: '화면 다시 불러오기' }] }
+        {
+          label: '보기',
+          submenu: [
+            {
+              label: '입력 다시 활성화',
+              click: (_item, win) => recoverWindowInput(
+                win ? BrowserWindow.fromId(win.id) : BrowserWindow.getFocusedWindow()
+              )
+            },
+            { role: 'reload', label: '화면 다시 불러오기' }
+          ]
+        }
       ])
     )
   } else {

@@ -1083,6 +1083,7 @@ export default function MarkdownEditor({
   useEffect(() => {
     let alive = true
     setErr('')
+    const initialFocus = document.activeElement
     const init = pathRef.current
       ? window.lt.fs.readText(pathRef.current)
       : Promise.resolve({ ext: '', kind: 'text' as const, text: '', size: 0, mtimeMs: undefined })
@@ -1194,7 +1195,8 @@ export default function MarkdownEditor({
           })
         }
         applyRevealRequest()
-        viewRef.current.focus()
+        // 원격 파일·임시저장을 읽는 동안 옮긴 입력 위치를 빼앗지 않는다.
+        if (document.activeElement === initialFocus) viewRef.current.focus()
       })
       .catch((e) => alive && setErr(String(e)))
     return () => {

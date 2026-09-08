@@ -448,6 +448,7 @@ export default function Terminal({
     if (!host) return
     let disposed = false
     let cleanup: () => void = () => {}
+    const initialFocus = document.activeElement
 
     Promise.all([window.lt.settings.get(), window.lt.app.info()]).then(async ([s, appInfo]) => {
       const fontSize = s.termFontSize || 13
@@ -508,8 +509,8 @@ export default function Terminal({
         onBracketedPasteModeChangeRef.current?.(next)
       }
       const onWriteParsedDisp = term.onWriteParsed(emitBracketedPasteMode)
-      // 새 터미널 생성 직후 활성 탭이면 바로 포커스 (커서가 그 터미널 안에 들어가게)
-      if (visible) term.focus()
+      // 로딩 중 검색창 등으로 이동했다면 사용자가 선택한 입력 위치를 유지한다.
+      if (visibleRef.current && document.activeElement === initialFocus) term.focus()
 
       // 붙여넣기는 xterm에 맡긴다. xterm은 대상 프로그램이 bracketed paste를 켠 경우에만 감싼다.
       const pasteText = (txt: string): void => {
