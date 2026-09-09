@@ -119,10 +119,9 @@ try {
     replace('js:tokenStatus', () => 'ok')
     replace('dictation:keyStatus', () => 'ok')
     replace('dictation:setKey', () => undefined)
-    replace('dictation:transcribe', () => ({
-      ok: true,
-      text: '가운데',
-      corrected: true
+    globalThis.__hearingTranscriptions = []
+    replace('dictation:transcribe', (_event, payload) => new Promise((resolve, reject) => {
+      globalThis.__hearingTranscriptions.push({ payload, resolve, reject })
     }))
     replace('js:listCases', () => ({ ok: true, cases: [dashboardCase] }))
     replace('js:getCase', async () => {
@@ -197,31 +196,6 @@ try {
     /검사/,
     '형사 템플릿을 선택하면 형사 화자가 표시되어야 한다'
   )
-  const dictationComposer = shellPanel.locator('.hearing-composer textarea')
-  await dictationComposer.fill('앞 뒤')
-  await dictationComposer.evaluate((input) => input.setSelectionRange(2, 2))
-  const entryCountBeforeDictation = await shellPanel.locator('.hearing-message').count()
-  const dictationButton = shellPanel.locator('.hearing-dictation-btn')
-  await dictationButton.click()
-  await page.waitForFunction(() => document.querySelector('.hearing-dictation-btn')?.textContent?.includes('00:00'))
-  assert.match(
-    await dictationButton.textContent(),
-    /00:00/,
-    `받아쓰기 녹음이 시작되어야 한다: ${await shellPanel.locator('.hearing-dictation-note').textContent()}`
-  )
-  await dictationButton.click()
-  await dictationComposer.waitFor({ state: 'visible' })
-  await page.waitForFunction(
-    () => document.querySelector('.hearing-composer textarea')?.value === '앞 가운데 뒤'
-  )
-  assert.equal(await dictationComposer.inputValue(), '앞 가운데 뒤')
-  assert.equal(
-    await shellPanel.locator('.hearing-message').count(),
-    entryCountBeforeDictation,
-    '받아쓰기 결과는 사용자가 입력 버튼을 누르기 전에는 기록으로 제출되지 않아야 한다'
-  )
-  console.log('hearing dictation inserts at the cursor without submitting')
-
   await page.locator('.activity-item[title="설정"]').click()
   await page.locator('.setting-label', { hasText: 'OpenAI API 키' }).waitFor()
   await page
@@ -279,6 +253,138 @@ try {
 
   const composer = shellPanel.locator('.hearing-composer textarea')
   const submit = shellPanel.locator('.hearing-composer .hearing-primary-btn', { hasText: '입력' })
+  const dictationButton = shellPanel.locator('.hearing-dictation-btn')
+  const speakerPicker = shellPanel.locator('select[title="화자 선택"]')
+  const messages = shellPanel.locator('.hearing-message')
+  const entryCountBeforeDictation = await messages.count()
+  const resolveDictation = (index, result) => app.evaluate(async (_electron, { index, result }) => {
+    const deadline = Date.now() + 5_000
+    while (!globalThis.__hearingTranscriptions[index] && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 20))
+    }
+    const request = globalThis.__hearingTranscriptions[index]
+    if (!request) throw new Error(`Dictation request ${index} did not arrive`)
+    if (result.rejection) request.reject(new Error(result.rejection))
+    else request.resolve(result)
+    return request.payload.context
+  }, { index, result })
+
+  await speakerPicker.selectOption('court')
+  await composer.fill('앞 뒤')
+  await composer.evaluate((input) => input.setSelectionRange(2, 2))
+  await dictationButton.click()
+  await shellPanel.locator('.hearing-dictation-btn.recording').waitFor()
+  assert.equal(await dictationButton.textContent(), '... 00:00')
+  const recordingColor = await dictationButton.evaluate((button) => getComputedStyle(button).color)
+  const [red, green, blue] = recordingColor.match(/\d+/g).map(Number)
+  assert.ok(green > red && green > blue, `녹음 중 표시는 녹색이어야 한다: ${recordingColor}`)
+  await dictationButton.click()
+  const firstDictation = messages.nth(entryCountBeforeDictation)
+  const firstStatus = firstDictation.locator('.hearing-dictation-status[role="status"]')
+  await firstStatus.waitFor()
+  assert.equal(await firstStatus.textContent(), '전사 중...')
+  assert.equal(await firstDictation.locator('textarea').inputValue(), '앞 뒤')
+  assert.equal(await composer.inputValue(), '', '녹음 정지 직후 기존 초안은 대화목록으로 옮겨져야 한다')
+  assert.ok(await composer.isEnabled(), '전사 중에도 새 메모를 입력할 수 있어야 한다')
+  assert.ok(await submit.isEnabled(), '전사 중에도 새 메모를 제출할 수 있어야 한다')
+  assert.ok(await dictationButton.isEnabled(), '전사 중에도 다음 녹음을 시작할 수 있어야 한다')
+  assert.ok(await firstDictation.locator('textarea').isDisabled(), '전사 중인 원본 초안은 수정할 수 없어야 한다')
+  await composer.press('ArrowUp')
+  assert.equal(await messages.count(), entryCountBeforeDictation + 1, '위쪽 방향키가 전사 대기 행을 제거하면 안 된다')
+  assert.equal(await firstDictation.locator('textarea').inputValue(), '앞 뒤')
+  assert.equal(await composer.inputValue(), '')
+
+  await speakerPicker.selectOption('prosecutor')
+  await composer.fill('전사 대기 중 직접 입력')
+  await submit.click()
+  assert.equal(await messages.last().locator('textarea').inputValue(), '전사 대기 중 직접 입력')
+  await composer.fill('두 번째 초안')
+  await dictationButton.click()
+  await shellPanel.locator('.hearing-dictation-btn.recording').waitFor()
+  await page.screenshot({ path: '/tmp/legal-terminal-dictation-check.png' })
+  const firstContext = await resolveDictation(0, { ok: true, text: '가운데', corrected: true })
+  await page.waitForFunction(
+    (index) => document.querySelectorAll('.hearing-message textarea')[index]?.value === '앞 가운데 뒤',
+    entryCountBeforeDictation
+  )
+  assert.equal(firstContext.speaker, '재판부', '전사 요청은 정지 당시 화자를 사용해야 한다')
+  assert.equal(await firstDictation.locator('select').inputValue(), 'court')
+  assert.equal(await composer.inputValue(), '두 번째 초안', '완료된 전사는 새 초안을 덮어쓰면 안 된다')
+  assert.equal(await dictationButton.getAttribute('aria-label'), '녹음 정지')
+  assert.ok(await dictationButton.evaluate((button) => button.classList.contains('recording')),
+    '이전 전사가 완료되어도 다음 녹음은 계속되어야 한다')
+  console.log('hearing dictation moves progress to a row and keeps new input and recording available')
+
+  await dictationButton.click()
+  const secondDictation = messages.nth(entryCountBeforeDictation + 2)
+  await secondDictation.locator('.hearing-dictation-status[role="status"]').waitFor()
+  await speakerPicker.selectOption('court')
+  await dictationButton.click()
+  await shellPanel.locator('.hearing-dictation-btn.recording').waitFor()
+  await dictationButton.click()
+  const thirdDictation = messages.nth(entryCountBeforeDictation + 3)
+  await thirdDictation.locator('.hearing-dictation-status[role="status"]').waitFor()
+  await composer.fill('새로 작성 중인 메모')
+  await resolveDictation(2, { ok: true, text: '세 번째 발언', corrected: false })
+  await page.waitForFunction(
+    (index) => document.querySelectorAll('.hearing-message textarea')[index]?.value === '세 번째 발언',
+    entryCountBeforeDictation + 3
+  )
+  assert.equal(await secondDictation.locator('.hearing-dictation-status').textContent(), '전사 중...')
+  await resolveDictation(1, { ok: true, text: '두 번째 발언', corrected: false })
+  await page.waitForFunction(
+    (index) => document.querySelectorAll('.hearing-message textarea')[index]?.value === '두 번째 초안 두 번째 발언',
+    entryCountBeforeDictation + 2
+  )
+  assert.equal(await secondDictation.locator('select').inputValue(), 'prosecutor')
+  assert.equal(await thirdDictation.locator('select').inputValue(), 'court')
+  assert.deepEqual(
+    await messages.locator('textarea').evaluateAll((inputs) => inputs.map((input) => input.value)),
+    [revisedSavedMemo, urgentMemo, '앞 가운데 뒤', '전사 대기 중 직접 입력', '두 번째 초안 두 번째 발언', '세 번째 발언'],
+    '전사가 역순으로 완료되어도 발언 순서는 녹음 정지 순서를 유지해야 한다'
+  )
+  assert.equal(await composer.inputValue(), '새로 작성 중인 메모')
+  await page.waitForTimeout(1_100)
+  const dictationWrites = await app.evaluate(() => globalThis.__hearingWrites ?? [])
+  const savedDictations = JSON.parse(dictationWrites.at(-1).content).entries
+  assert.deepEqual(savedDictations.slice(entryCountBeforeDictation).map((entry) => entry.text), [
+    '앞 가운데 뒤', '전사 대기 중 직접 입력', '두 번째 초안 두 번째 발언', '세 번째 발언'
+  ], '완료된 전사 결과와 발언 순서는 자동 저장되어야 한다')
+  assert.ok(savedDictations.every((entry) => !entry.dictation), '완료된 전사는 대기 상태로 저장되면 안 된다')
+  console.log('hearing dictation resolves out of order without changing row order, speakers, or new drafts')
+
+  await dictationButton.click()
+  await shellPanel.locator('.hearing-dictation-btn.recording').waitFor()
+  await dictationButton.click()
+  const failedDictation = messages.last()
+  await failedDictation.locator('.hearing-dictation-status[role="status"]').waitFor()
+  await composer.fill('실패 후에도 새 입력')
+  await resolveDictation(3, { ok: false, error: '전사 연결 실패' })
+  await page.waitForFunction(() =>
+    document.querySelector('.hearing-message:last-child .hearing-dictation-status')?.textContent?.includes('전사 연결 실패')
+  )
+  assert.equal(await failedDictation.locator('textarea').inputValue(), '새로 작성 중인 메모')
+  assert.equal(await composer.inputValue(), '실패 후에도 새 입력')
+  assert.ok(await composer.isEnabled())
+  assert.ok(await dictationButton.isEnabled())
+  assert.ok(await submit.isEnabled())
+  await submit.click()
+  assert.equal(await messages.last().locator('textarea').inputValue(), '실패 후에도 새 입력')
+  assert.equal(await messages.locator('.hearing-dictation-status', { hasText: '전사 연결 실패' }).count(), 1)
+  console.log('hearing dictation failure stays with its row and allows more input')
+
+  await dictationButton.click()
+  await shellPanel.locator('.hearing-dictation-btn.recording').waitFor()
+  await dictationButton.click()
+  await messages.last().locator('.hearing-dictation-status[role="status"]').waitFor()
+  await resolveDictation(4, { rejection: 'IPC 전사 오류' })
+  await page.waitForFunction(() =>
+    document.querySelector('.hearing-message:last-child .hearing-dictation-status')?.textContent?.includes('IPC 전사 오류')
+  )
+  assert.ok(await composer.isEnabled())
+  assert.ok(await dictationButton.isEnabled())
+  console.log('hearing dictation handles rejected transcription requests without blocking input')
+
   for (let index = 1; index <= 16; index += 1) {
     await composer.fill(`연속 발언 ${index}`)
     await submit.click()

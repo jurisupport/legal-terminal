@@ -4148,6 +4148,11 @@ body {
   font-weight: 600;
   cursor: pointer;
 }
+.hearing-dictation-status {
+  padding: 3px 9px;
+  color: #7fd6a0;
+  font-size: 12px;
+}
 .hearing-message-bubble {
   width: 100%;
   min-height: 34px;
@@ -4298,16 +4303,16 @@ body {
   cursor: pointer;
 }
 .hearing-dictation-btn.recording {
-  border-color: #e05252;
-  color: #fff;
-  background: #a12626;
+  border-color: rgba(127, 214, 160, 0.45);
+  color: #7fd6a0;
+  background: #2a2d2e;
 }
 .hearing-dictation-btn:disabled {
   opacity: 0.65;
   cursor: wait;
 }
 .hearing-dictation-note {
-  grid-column: 2 / -1;
+  grid-column: 1 / -1;
   display: flex;
   align-items: center;
   justify-content: space-between;
