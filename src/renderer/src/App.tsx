@@ -1242,15 +1242,39 @@ const safeHash = (value: string): string => {
   return (hash >>> 0).toString(36)
 }
 
-const normalizedCasePathKey = (path?: string): string => (path ?? '').replace(/[\\/]+$/, '')
+const normalizedCasePathKey = (path?: string): string => (path ?? '').normalize('NFC').replace(/[\\/]+$/, '')
+
+const caseProfileKey = (source: CurrentCase): string =>
+  source.profileId ?? (source.ssh ? source.sshLabel ?? 'remote' : 'local')
 
 const caseIdentityKey = (source: CurrentCase): string => {
-  const profileKey = source.profileId ?? (source.ssh ? source.sshLabel ?? 'remote' : 'local')
+  const profileKey = caseProfileKey(source)
   if (source.meta?.jsId) return `js:${profileKey}:${source.meta.jsId}`
   return `drafts:${profileKey}:${normalizedCasePathKey(source.remotePath ?? source.drafts)}`
 }
 
-const caseTabId = (source: CurrentCase): string => `case-${safeHash(caseIdentityKey(source))}`
+const caseTabId = (source: CurrentCase, tabs: readonly CaseWorkspaceTab[] = []): string => {
+  const existing = findCaseTab(tabs, source)
+  if (existing) return existing.id
+  const base = `case-${safeHash(caseIdentityKey(source))}`
+  let id = base
+  for (let suffix = 1; tabs.some((tab) => tab.id === id); suffix += 1) id = `${base}-${suffix}`
+  return id
+}
+
+const findCaseTab = (
+  tabs: readonly CaseWorkspaceTab[],
+  source: CurrentCase
+): CaseWorkspaceTab | undefined => {
+  const identity = caseIdentityKey(source)
+  const path = normalizedCasePathKey(source.remotePath ?? source.drafts)
+  return tabs.find((tab) => caseIdentityKey(tab) === identity) ?? tabs.find((tab) =>
+    !!path &&
+    caseProfileKey(tab) === caseProfileKey(source) &&
+    normalizedCasePathKey(tab.remotePath ?? tab.drafts) === path &&
+    !(tab.meta?.jsId && source.meta?.jsId && tab.meta.jsId !== source.meta.jsId)
+  )
+}
 
 const pathMatchesCasePrefix = (path: string, prefix?: string): boolean => {
   if (!prefix) return false
@@ -1317,15 +1341,22 @@ const upsertCaseTab = (
   tabs: readonly CaseWorkspaceTab[],
   incoming: CaseWorkspaceTab
 ): CaseWorkspaceTab[] => {
-  const existing = tabs.find((tab) => tab.id === incoming.id)
+  const matchingId = tabs.find((tab) => tab.id === incoming.id)
+  const existing = matchingId && incoming.id !== caseTabId(incoming)
+    ? matchingId
+    : findCaseTab(tabs, incoming)
   const merged: CaseWorkspaceTab = existing
     ? {
         ...existing,
         ...incoming,
+        id: existing.id,
         records: incoming.records ?? existing.records,
         suggestedRecords: incoming.records ? undefined : incoming.suggestedRecords,
         suggestedRecordOptions: incoming.records ? undefined : incoming.suggestedRecordOptions,
-        meta: incoming.meta ?? existing.meta,
+        meta: {
+          ...existing.meta,
+          ...Object.fromEntries(Object.entries(incoming.meta ?? {}).filter(([, value]) => value !== undefined))
+        },
         ssh: incoming.ssh ?? existing.ssh,
         sshLabel: incoming.sshLabel ?? existing.sshLabel,
         profileId: incoming.profileId ?? existing.profileId,
@@ -1335,8 +1366,8 @@ const upsertCaseTab = (
         activeWork: incoming.activeWork ?? existing.activeWork,
         updatedAt: incoming.updatedAt ?? Date.now()
       }
-    : incoming
-  return [merged, ...tabs.filter((tab) => tab.id !== incoming.id)]
+    : matchingId ? { ...incoming, id: caseTabId(incoming, tabs) } : incoming
+  return [merged, ...tabs.filter((tab) => tab.id !== merged.id)]
 }
 
 const mergeCaseTabs = (
@@ -2495,29 +2526,36 @@ export default function App(): JSX.Element {
     }
   }
 
-  const registerCaseTab = (source: CurrentCase, activeTermId?: string): CaseWorkspaceTab => {
-    const tab = caseTabFromCurrentCase(source, activeTermId)
-    setCaseTabs((tabs) => upsertCaseTab(tabs, tab))
+  const resolveCaseTabId = (source: CurrentCase, tabs = caseTabsRef.current): string =>
+    caseTabId(source, tabs)
+
+  const registerCaseTab = (
+    source: CurrentCase,
+    activeTermId?: string,
+    id = resolveCaseTabId(source)
+  ): CaseWorkspaceTab => {
+    const incoming = { ...caseTabFromCurrentCase(source, activeTermId), id }
+    const nextTabs = upsertCaseTab(caseTabsRef.current, incoming)
+    const tab = nextTabs[0]
+    caseTabsRef.current = nextTabs
+    setCaseTabs((tabs) => upsertCaseTab(tabs, { ...incoming, id: tab.id }))
     setActiveCaseTabId(tab.id)
     return tab
   }
 
   const registerCaseTabFromTerm = (term: TermTab): CaseWorkspaceTab => {
-    const source = currentCaseFromTerm(term)
-    const tab: CaseWorkspaceTab = {
-      ...caseTabFromCurrentCase(source, term.id),
-      id: term.caseTabId ?? caseTabId(source)
+    const tab = registerCaseTab(currentCaseFromTerm(term), term.id, term.caseTabId)
+    if (term.caseTabId !== tab.id) {
+      setTermTabs((tabs) => tabs.map((item) => item.id === term.id ? { ...item, caseTabId: tab.id } : item))
     }
-    setCaseTabs((tabs) => upsertCaseTab(tabs, tab))
-    setActiveCaseTabId(tab.id)
     return tab
   }
 
-  const caseIdForTerm = (term: TermTab): string => term.caseTabId ?? caseTabId(currentCaseFromTerm(term))
+  const caseIdForTerm = (term: TermTab): string => term.caseTabId ?? resolveCaseTabId(currentCaseFromTerm(term))
   const caseIdForDoc = (doc: DocTab): string | undefined =>
     doc.caseTabId ?? inferCaseTabIdForPath(doc.path, caseTabs)
   const currentCaseTabIdForNewTab = (source?: TermTab): string | undefined =>
-    source?.caseTabId || activeCaseTabId || (currentCase ? caseTabId(currentCase) : undefined)
+    source?.caseTabId || activeCaseTabId || (currentCase ? resolveCaseTabId(currentCase) : undefined)
   const visibleInActiveCase = (caseTabIdValue?: string): boolean =>
     !activeCaseTabId || caseTabIdValue === activeCaseTabId
   const isSharedDocTab = (tab: DocTab): boolean => tab.kind === 'settings'
@@ -2544,6 +2582,7 @@ export default function App(): JSX.Element {
 
   const openCaseContext = (source: CurrentCase, activeTermId?: string): CaseWorkspaceTab => {
     const tab = registerCaseTab(source, activeTermId)
+    source = currentCaseFromCaseTab(tab)
     setCurrentCase(source)
     if (activeTermId) {
       setActiveTerm(activeTermId)
@@ -2572,7 +2611,7 @@ export default function App(): JSX.Element {
       const receivedCase = currentCaseFromTerm(rawTab)
       const tab = {
         ...rawTab,
-        caseTabId: rawTab.caseTabId ?? caseTabId(receivedCase),
+        caseTabId: resolveCaseTabId(receivedCase),
         agentProvider: rawTab.kind === 'agent' ? resolveAgentProvider(rawTab.agentProvider, rawTab.ssh) : undefined,
         side: rawTab.side ?? 'right'
       }
@@ -2583,7 +2622,7 @@ export default function App(): JSX.Element {
       )
       setActiveTerm(tab.id)
       setCurrentCase(receivedCase)
-      registerCaseTab(receivedCase, tab.id)
+      registerCaseTabFromTerm(tab)
       setWorkActive(termSide(tab), termKeyOf(tab.id))
       preloadPastSessions(tab.cwd, tab)
       void window.lt.case
@@ -2602,7 +2641,10 @@ export default function App(): JSX.Element {
     const kind = normalizeDocKind(rawKind, path)
     if (!path && kind !== 'settings') return
     const title = payload?.title ?? p.title ?? pathLeaf(path) ?? '문서'
-    const caseTabIdValue = payload?.caseTabId ?? currentCaseTabIdForNewTab()
+    const caseTabIdValue =
+      (caseTabsRef.current.some((tab) => tab.id === payload?.caseTabId) ? payload?.caseTabId : undefined) ??
+      inferCaseTabIdForPath(path, caseTabsRef.current) ??
+      currentCaseTabIdForNewTab()
     const existing = path
       ? docTabs.find((t) => t.path === path && caseIdForDoc(t) === caseTabIdValue)
       : payload?.id
@@ -2759,7 +2801,7 @@ export default function App(): JSX.Element {
     agentProviderOverride?: AgentProvider
   ): TermTab => {
     const source: CurrentCase = { drafts, records, name, meta: caseMeta }
-    const caseTabIdValue = caseTabId(source)
+    const caseTabIdValue = resolveCaseTabId(source)
     const tab: TermTab = {
       id: newId(),
       title: name,
@@ -2859,7 +2901,7 @@ export default function App(): JSX.Element {
       profileId: profile.id,
       remotePath
     }
-    const caseTabIdValue = caseTabId(source)
+    const caseTabIdValue = resolveCaseTabId(source)
     const tab: TermTab = {
       id: newId(),
       title,
@@ -3228,7 +3270,7 @@ export default function App(): JSX.Element {
       id: newId(),
       title: title ? title : base?.name ?? cwd.split(/[\\/]/).pop() ?? '세션',
       kind: 'agent',
-      caseTabId: source?.caseTabId ?? (base ? caseTabId(base) : currentCaseTabIdForNewTab(source)),
+      caseTabId: source?.caseTabId ?? (base ? resolveCaseTabId(base) : currentCaseTabIdForNewTab(source)),
       cwd,
       recordsFolder: base?.records ?? source?.recordsFolder,
       autoClaude: false,
@@ -3625,7 +3667,7 @@ export default function App(): JSX.Element {
       suggestedRecords: undefined,
       suggestedRecordOptions: undefined
     }
-    const targetCaseTabId = cur ? caseIdForTerm(cur) : caseTabId(source)
+    const targetCaseTabId = cur ? caseIdForTerm(cur) : resolveCaseTabId(source)
     setTermTabs((tabs) =>
       tabs.map((t) =>
         caseIdForTerm(t) === targetCaseTabId
@@ -3891,7 +3933,7 @@ export default function App(): JSX.Element {
       (target?.termId ? termTabs.find((t) => t.id === target.termId) : undefined) ??
       termTabs.find((t) => t.id === activeTerm)
     const source = target?.source ?? (cur ? currentCaseFromTerm(cur) : currentCase ?? undefined)
-    const caseTabIdValue = cur?.caseTabId ?? activeCaseTabId ?? (source ? caseTabId(source) : undefined)
+    const caseTabIdValue = cur?.caseTabId ?? activeCaseTabId ?? (source ? resolveCaseTabId(source) : undefined)
     const records = cur?.recordsFolder ?? source?.records
     const name = source?.meta?.jsId ? source.name : next.name
     const nextSource: CurrentCase = {
@@ -3926,10 +3968,10 @@ export default function App(): JSX.Element {
     setCaseTabs((tabs) =>
       upsertCaseTab(tabs, {
         ...caseTabFromCurrentCase(nextSource, cur?.id),
-        id: caseTabIdValue ?? caseTabId(nextSource)
+        id: caseTabIdValue ?? resolveCaseTabId(nextSource)
       })
     )
-    setActiveCaseTabId(caseTabIdValue ?? caseTabId(nextSource))
+    setActiveCaseTabId(caseTabIdValue ?? resolveCaseTabId(nextSource))
     void window.lt.case.addHistory({ drafts: next.drafts, records, name }).then(setRecent)
     if (records) void window.lt.case.setPairing(next.drafts, records)
     saveJsPairing(nextSource, next.drafts, records)
@@ -4372,7 +4414,7 @@ export default function App(): JSX.Element {
       const source = currentCaseFromTerm(term)
       return {
         ...caseTabFromCurrentCase(source, term.id),
-        id: term.caseTabId ?? caseTabId(source)
+        id: term.caseTabId ?? resolveCaseTabId(source)
       }
     }
     const selectedCaseTabs = onlyCaseTabId
@@ -4501,28 +4543,34 @@ export default function App(): JSX.Element {
           .filter((tab): tab is CaseWorkspaceTab => !!tab)
       : []
 
-    const nextTerms = [...termTabsRef.current]
-    const termIdSet = new Set(nextTerms.map((t) => t.id))
-    for (const saved of snapshotTerms) {
-      const tab = sanitizeWorkspaceTerm(saved)
-      if (!tab || termIdSet.has(tab.id)) continue
-      const source = currentCaseFromTerm(tab)
-      nextTerms.push({ ...tab, caseTabId: tab.caseTabId ?? caseTabId(source) })
-      termIdSet.add(tab.id)
+    // 저장된 ID는 다른 창의 ID와 충돌할 수 있으므로 사건별로 먼저 대응시킨다.
+    let nextCaseTabs = [...caseTabsRef.current]
+    const caseIdMap = new Map<string, string>()
+    for (const tab of restoredCaseTabs) {
+      const id = resolveCaseTabId(tab, nextCaseTabs)
+      nextCaseTabs = upsertCaseTab(nextCaseTabs, { ...tab, id })
+      caseIdMap.set(tab.id, id)
     }
 
-    const caseTabFromTermForRestore = (term: TermTab): CaseWorkspaceTab => {
-      const source = currentCaseFromTerm(term)
-      return {
-        ...caseTabFromCurrentCase(source, term.id),
-        id: term.caseTabId ?? caseTabId(source)
-      }
+    const nextTerms = [...termTabsRef.current]
+    for (const saved of snapshotTerms) {
+      const tab = sanitizeWorkspaceTerm(saved)
+      if (!tab) continue
+      const existing = nextTerms.find((term) => term.id === tab.id)
+      const source = currentCaseFromTerm(existing ?? tab)
+      const id = existing?.caseTabId ??
+        (tab.caseTabId && caseIdMap.get(tab.caseTabId)) ?? resolveCaseTabId(source, nextCaseTabs)
+      if (tab.caseTabId) caseIdMap.set(tab.caseTabId, id)
+      if (existing) continue
+      nextCaseTabs = upsertCaseTab(nextCaseTabs, { ...caseTabFromCurrentCase(source, tab.id), id })
+      nextTerms.push({ ...tab, caseTabId: id })
     }
-    const nextCaseTabs = mergeCaseTabs(caseTabsRef.current, [
-      ...restoredCaseTabs,
-      ...nextTerms.map(caseTabFromTermForRestore),
-      ...(restoredCase ? [caseTabFromCurrentCase(restoredCase, snapshot.activeTerm || undefined)] : [])
-    ])
+    if (restoredCase) {
+      const tab = caseTabFromCurrentCase(restoredCase, snapshot.activeTerm || undefined)
+      const id = resolveCaseTabId(restoredCase, nextCaseTabs)
+      nextCaseTabs = upsertCaseTab(nextCaseTabs, { ...tab, id })
+      if (!caseIdMap.has(tab.id)) caseIdMap.set(tab.id, id)
+    }
 
     const nextDocs = [...docTabsRef.current]
     const docIdMap = new Map<string, string>()
@@ -4530,6 +4578,7 @@ export default function App(): JSX.Element {
       const tab = toDocTab(saved)
       if (!tab) continue
       const caseTabIdValue =
+        (tab.caseTabId && caseIdMap.get(tab.caseTabId)) ??
         tab.caseTabId ??
         inferCaseTabIdForPath(tab.path, nextCaseTabs) ??
         (nextCaseTabs.length === 1 && !isSharedDocTab(tab) ? nextCaseTabs[0].id : undefined)
@@ -4562,12 +4611,14 @@ export default function App(): JSX.Element {
       })
     }
 
+    const savedActiveCaseTabId =
+      caseIdMap.get(snapshot.activeCaseTabId ?? '') ?? snapshot.activeCaseTabId
     const nextActiveCaseTabId =
-      (typeof snapshot.activeCaseTabId === 'string' &&
-      nextCaseTabs.some((tab) => tab.id === snapshot.activeCaseTabId)
-        ? snapshot.activeCaseTabId
+      (typeof savedActiveCaseTabId === 'string' &&
+      nextCaseTabs.some((tab) => tab.id === savedActiveCaseTabId)
+        ? savedActiveCaseTabId
         : undefined) ??
-      (restoredCase ? caseTabId(restoredCase) : undefined) ??
+      (restoredCase ? resolveCaseTabId(restoredCase, nextCaseTabs) : undefined) ??
       (activeCaseTabId && nextCaseTabs.some((tab) => tab.id === activeCaseTabId)
         ? activeCaseTabId
         : undefined) ??
@@ -4600,6 +4651,7 @@ export default function App(): JSX.Element {
     setTermTabs(nextTerms)
     setActiveDoc(activeDocId)
     setActiveTerm(activeTermId)
+    caseTabsRef.current = nextCaseTabs
     setCaseTabs(nextCaseTabs)
 
     const validKeys = new Set([
@@ -4612,7 +4664,12 @@ export default function App(): JSX.Element {
       const term = caseTerms.find((t) => termSide(t) === side)
       return term ? termKeyOf(term.id) : ''
     }
-    const restoredActiveWork = activeCaseTab?.activeWork ?? snapshot.activeWork
+    const restoredActiveWork = { ...(activeCaseTab?.activeWork ?? snapshot.activeWork) }
+    for (const side of ['left', 'right'] as const) {
+      const key = restoredActiveWork[side]
+      const docId = key?.startsWith('doc:') ? docIdMap.get(key.slice(4)) : undefined
+      if (docId) restoredActiveWork[side] = docKey(docId)
+    }
     const left =
       isWorkKey(restoredActiveWork?.left) && validKeys.has(restoredActiveWork.left)
         ? restoredActiveWork.left
@@ -4748,7 +4805,7 @@ export default function App(): JSX.Element {
   saveAllCaseWorkspacesRef.current = saveAllCaseWorkspaces
 
   const restoreAutomaticWorkspace = async (source: CurrentCase): Promise<void> => {
-    const id = caseTabId(source)
+    const id = resolveCaseTabId(source)
     const key = workspaceLocationKey(source)
     if (
       autoRestoreDoneRef.current.has(key) ||
@@ -5071,7 +5128,7 @@ export default function App(): JSX.Element {
         )
           return tab
         const next = { ...tab, drafts: nextDrafts, records: nextRecords, remotePath: nextRemotePath }
-        return { ...next, id: caseTabId(currentCaseFromCaseTab(next)), updatedAt: Date.now() }
+        return { ...next, id: resolveCaseTabId(currentCaseFromCaseTab(next)), updatedAt: Date.now() }
       })
     )
     setCurrentCase((c) => {
@@ -6491,7 +6548,7 @@ export default function App(): JSX.Element {
         memo: shellCase.memo
       }
     }
-    const knownCaseTab = caseTabs.find((tab) => tab.id === caseTabId(shellSource))
+    const knownCaseTab = caseTabs.find((tab) => tab.id === resolveCaseTabId(shellSource))
     const shellCaseTab = knownCaseTab ?? registerCaseTab(shellSource)
     if (knownCaseTab) setActiveCaseTabId(knownCaseTab.id)
     const shellTab: DocTab = {
@@ -6524,7 +6581,7 @@ export default function App(): JSX.Element {
           ? {
               ...tab,
               title: buildHearingRecordTitle(hearingCase, hearing),
-              caseTabId: caseTabId(opened),
+              caseTabId: resolveCaseTabId(opened),
               path,
               hearingCase,
               hearingDrafts: opened.drafts,

@@ -1,8 +1,168 @@
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
+import vm from 'node:vm'
+import ts from 'typescript'
 import { closeTab } from '../src/renderer/src/tabSelection.ts'
 
 const app = readFileSync(new URL('../src/renderer/src/App.tsx', import.meta.url), 'utf8')
+const parsed = ts.createSourceFile('App.tsx', app, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX)
+const handlers = new Map()
+function visit(node) {
+  if (ts.isVariableDeclaration(node) && node.initializer) {
+    handlers.set(node.name.getText(parsed), node.initializer.getText(parsed))
+  }
+  ts.forEachChild(node, visit)
+}
+visit(parsed)
+function loadHandlers(names, context = {}) {
+  const source = names.map((name) => {
+    assert.ok(handlers.has(name), `find the actual ${name} implementation`)
+    return `const ${name} = ${handlers.get(name)};`
+  }).join('\n') + `\n({ ${names.join(', ')} })`
+  return vm.runInNewContext(ts.transpileModule(source, {
+    compilerOptions: { target: ts.ScriptTarget.ES2022 }
+  }).outputText, context)
+}
+const caseHelpers = [
+  'safeHash', 'normalizedCasePathKey', 'caseProfileKey', 'caseIdentityKey', 'caseTabId', 'findCaseTab',
+  'caseTabFromCurrentCase', 'currentCaseFromCaseTab', 'upsertCaseTab', 'mergeCaseTabs'
+]
+const actual = loadHandlers(caseHelpers)
+const folderCase = { drafts: '/drafts/홍길동', name: '홍길동' }
+const linkedCase = { ...folderCase, meta: { jsId: 'case-1', caseNumber: '2026가단1' } }
+const folderTab = actual.caseTabFromCurrentCase(folderCase)
+const linkedTab = actual.caseTabFromCurrentCase(linkedCase)
+assert.notEqual(folderTab.id, linkedTab.id, 'reproduce the legacy folder/dashboard identity mismatch')
+for (const [existing, incoming] of [[folderTab, linkedTab], [linkedTab, folderTab]]) {
+  const tabs = actual.upsertCaseTab([{ ...existing, activeDocId: 'draft', activeTermId: 'agent' }], incoming)
+  assert.equal(tabs.length, 1, 'reopening the same folder with or without case metadata must reuse its tab')
+  assert.equal(tabs[0].id, existing.id, 'keep the ID referenced by existing documents and agents')
+  assert.equal(tabs[0].meta.jsId, 'case-1')
+  assert.equal(tabs[0].activeDocId, 'draft')
+  assert.equal(tabs[0].activeTermId, 'agent')
+}
+for (const source of [
+  { ...folderCase, drafts: `${folderCase.drafts.normalize('NFD')}/` },
+  { ...folderCase, meta: { jsId: undefined } },
+  { ...linkedCase, drafts: '/renamed-folder' },
+  { ...linkedCase, drafts: '' }
+]) {
+  const tabs = actual.upsertCaseTab([linkedTab], actual.caseTabFromCurrentCase(source))
+  assert.equal(tabs.length, 1, 'path spelling and late case details must not duplicate a tab')
+  assert.equal(tabs[0].meta.jsId, 'case-1')
+}
+for (const source of [
+  { ...folderCase, drafts: '/drafts/other' },
+  { ...linkedCase, meta: { jsId: 'case-2' } },
+  { ...linkedCase, profileId: 'ssh-1', ssh: { host: 'remote' }, remotePath: folderCase.drafts }
+]) {
+  assert.equal(actual.upsertCaseTab([linkedTab], actual.caseTabFromCurrentCase(source)).length, 2,
+    'different folders, linked cases, and local/remote workspaces must stay separate')
+}
+const remoteSource = { ...folderCase, profileId: 'ssh-1', ssh: { host: 'remote' }, remotePath: folderCase.drafts }
+const remoteTab = actual.caseTabFromCurrentCase(remoteSource)
+assert.equal(actual.upsertCaseTab([remoteTab], actual.caseTabFromCurrentCase({
+  ...remoteSource, meta: linkedCase.meta
+})).length, 1, 'remote folder and dashboard entry points must reuse a tab')
+assert.equal(actual.upsertCaseTab([remoteTab], actual.caseTabFromCurrentCase({
+  ...remoteSource, profileId: 'ssh-2'
+})).length, 2, 'different SSH profiles must stay separate')
+
+// Model two opens before React applies its queued state updates.
+const queued = []
+const registry = { caseTabsRef: { current: [] }, activeId: '' }
+const registration = loadHandlers([...caseHelpers, 'resolveCaseTabId', 'registerCaseTab'], {
+  caseTabsRef: registry.caseTabsRef,
+  setCaseTabs: (update) => queued.push(update),
+  setActiveCaseTabId: (id) => { registry.activeId = id }
+})
+const firstOpen = registration.registerCaseTab(folderCase)
+const secondOpen = registration.registerCaseTab(linkedCase)
+const registered = queued.reduce((tabs, update) => update(tabs), [])
+assert.equal(registered.length, 1, 'back-to-back opening requests must not duplicate a tab')
+assert.equal(secondOpen.id, firstOpen.id)
+assert.equal(registry.activeId, registered[0].id, 'activate the surviving tab')
+const moved = registration.registerCaseTab({ ...linkedCase, drafts: '/moved-case' })
+const unrelated = registration.registerCaseTab(folderCase)
+assert.notEqual(unrelated.id, moved.id, 'a reused old folder must not collide with a moved case ID')
+assert.equal(registry.caseTabsRef.current.length, 2)
+assert.equal(registry.caseTabsRef.current.find((tab) => tab.id === moved.id).drafts, '/moved-case')
+assert.equal(actual.upsertCaseTab([{ ...linkedTab, id: folderTab.id, drafts: '/moved-case' }], folderTab).length,
+  2, 'restore-generated IDs must not overwrite a moved case either')
+
+const noop = () => {}
+const movedSource = { ...linkedCase, drafts: '/moved-case' }
+const movedTab = { ...linkedTab, id: folderTab.id, drafts: movedSource.drafts }
+for (const [existingTab, savedCaseTabs, savedSource, canonicalId, caseCount] of [
+  [undefined, [folderTab, linkedTab], linkedCase, folderTab.id, 1],
+  [folderTab, [folderTab, linkedTab], linkedCase, folderTab.id, 1],
+  [linkedTab, [folderTab, linkedTab], linkedCase, linkedTab.id, 1],
+  [movedTab, [folderTab], folderCase, `${folderTab.id}-1`, 2],
+  [folderTab, [movedTab], movedSource, linkedTab.id, 2]
+]) {
+  const state = {
+    caseTabs: existingTab ? [existingTab] : [],
+    termTabs: existingTab ? [{ id: 'live-agent', caseTabId: existingTab.id, cwd: existingTab.drafts, jsId: existingTab.meta?.jsId }] : [],
+    docTabs: existingTab ? [{ id: 'live-draft', caseTabId: existingTab.id, kind: 'markdown', path: `${existingTab.drafts}/live.md` }] : [],
+    activeCaseTabId: existingTab?.id ?? '', activeDoc: '', activeTerm: '', activeWork: {}
+  }
+  const context = { sshProfiles: [], ...state, currentCase: null }
+  for (const name of ['caseTabs', 'termTabs', 'docTabs']) context[`${name}Ref`] = { current: state[name] }
+  for (const name of ['caseTabs', 'termTabs', 'docTabs', 'activeCaseTabId', 'activeDoc', 'activeTerm', 'activeWork']) {
+    context[`set${name[0].toUpperCase()}${name.slice(1)}`] = (update) => {
+      state[name] = typeof update === 'function' ? update(state[name]) : update
+      if (context[`${name}Ref`]) context[`${name}Ref`].current = state[name]
+    }
+  }
+  Object.assign(context, {
+    RESTORABLE_DOC_KINDS: new Set(['markdown', 'pdf', 'settings']),
+    normalizeDocKind: (kind) => kind,
+    resolveAgentProvider: (provider) => provider ?? 'claude',
+    remoteUri: (profile, path) => `ssh://${profile}${path}`,
+    isAgentTab: () => false, isWorkspaceMode: () => false,
+    docKey: (id) => `doc:${id}`, termKeyOf: (id) => `terminal:${id}`,
+    docSide: (tab) => tab.side ?? 'left', termSide: (tab) => tab.side ?? 'right',
+    isWorkKey: (key) => /^(doc|terminal):/.test(key ?? ''),
+    setCurrentCase: noop, preloadPastSessions: noop, currentCaseSessionSource: noop, setTreeRefresh: noop
+  })
+  const restore = loadHandlers([
+    ...caseHelpers, 'resolveCaseTabId', 'sanitizeCurrentCase', 'sanitizeCaseWorkspaceTab',
+    'currentCaseFromTerm', 'sanitizeWorkspaceTerm', 'toDocTab',
+    'pathMatchesCasePrefix', 'caseTabPathPrefixes', 'inferCaseTabIdForPath',
+    'caseIdForTerm', 'isSharedDocTab', 'restoreWorkspaceSnapshot'
+  ], context)
+  const activeSavedIndex = savedCaseTabs.length - 1
+  const snapshot = {
+    caseTabs: savedCaseTabs, currentCase: savedSource, activeCaseTabId: savedCaseTabs.at(-1).id,
+    docs: savedCaseTabs.map((tab, i) => ({
+      id: `saved-draft-${i}`, title: '준비서면', kind: 'markdown', caseTabId: tab.id,
+      path: `${savedSource.drafts}/saved.md`
+    })),
+    terminals: savedCaseTabs.map((tab, i) => ({
+      id: `saved-agent-${i}`, kind: 'agent', caseTabId: tab.id, cwd: tab.drafts, jsId: tab.meta?.jsId
+    })),
+    activeDoc: `saved-draft-${activeSavedIndex}`, activeTerm: `saved-agent-${activeSavedIndex}`,
+    activeWork: { left: `doc:saved-draft-${activeSavedIndex}`, right: `terminal:saved-agent-${activeSavedIndex}` }
+  }
+  restore.restoreWorkspaceSnapshot(snapshot)
+  assert.equal(state.caseTabs.length, caseCount, 'restore merges duplicate cases and preserves distinct cases')
+  assert.ok(state.caseTabs.some((tab) => tab.id === canonicalId))
+  assert.equal(state.activeCaseTabId, canonicalId)
+  assert.equal(state.docTabs.length, existingTab ? 2 : 1, 'restore the same document only once')
+  const termCount = savedCaseTabs.length + (existingTab ? 1 : 0)
+  assert.equal(state.termTabs.length, termCount, 'keep every distinct live and saved agent')
+  for (const tab of [...state.docTabs, ...state.termTabs]) {
+    assert.equal(tab.caseTabId, tab.id.startsWith('live-') ? existingTab.id : canonicalId,
+      'restored aliases must not move existing work into a different case')
+  }
+  assert.equal(state.activeDoc, 'saved-draft-0')
+  assert.equal(state.activeWork.left, 'doc:saved-draft-0', 'show the remapped active document')
+  assert.equal(state.activeTerm, `saved-agent-${activeSavedIndex}`)
+  restore.restoreWorkspaceSnapshot(snapshot)
+  assert.equal(state.caseTabs.length, caseCount, 'repeated restore must remain idempotent')
+  assert.equal(state.docTabs.length, existingTab ? 2 : 1)
+  assert.equal(state.termTabs.length, termCount)
+}
 assert.match(
   app,
   /caseTabIdOverride \?\? currentCaseTabIdForNewTab\(\) \?\? inferCaseTabIdForPath\(path, caseTabs\)/,
