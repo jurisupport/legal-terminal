@@ -800,7 +800,7 @@ export default function MarkdownEditor({
       if (latest.text === content) return { action: 'already-saved', signature: current }
     }
 
-    const overwrite = window.confirm(
+    const overwrite = await window.lt.dialog.confirm(
       '이 파일은 에디터에서 연 뒤 외부에서 변경되었습니다.\n\n현재 화면의 내용으로 덮어쓰면 외부 변경사항이 사라질 수 있습니다.\n그래도 덮어쓸까요?'
     )
     if (!overwrite) {
@@ -1415,11 +1415,11 @@ export default function MarkdownEditor({
       .mdToPdf(mdToPrintHtml(v.state.doc.toString(), name, layout), def)
       .then((r) => {
         if (!r.ok) {
-          if (r.error) window.alert(`PDF 내보내기 실패: ${r.error}`)
+          if (r.error) void window.lt.dialog.alert(`PDF 내보내기 실패: ${r.error}`)
           return
         }
       })
-      .catch((e) => window.alert(`PDF 내보내기 실패: ${String(e)}`))
+      .catch((e) => void window.lt.dialog.alert(`PDF 내보내기 실패: ${String(e)}`))
   }
   const exportHwpxNow = (): void => {
     const v = viewRef.current
@@ -1429,9 +1429,9 @@ export default function MarkdownEditor({
     void window.lt.export
       .mdToHwpx(v.state.doc.toString(), name, def)
       .then((r) => {
-        if (!r.ok && r.error) window.alert(`HWPX 내보내기 실패: ${r.error}`)
+        if (!r.ok && r.error) void window.lt.dialog.alert(`HWPX 내보내기 실패: ${r.error}`)
       })
-      .catch((e) => window.alert(`HWPX 내보내기 실패: ${String(e)}`))
+      .catch((e) => void window.lt.dialog.alert(`HWPX 내보내기 실패: ${String(e)}`))
   }
 
   return (

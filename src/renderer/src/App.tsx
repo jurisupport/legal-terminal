@@ -1556,6 +1556,8 @@ export default function App(): JSX.Element {
   const [mountedTermIds, setMountedTermIds] = useState<Set<string>>(new Set())
   const [caseTabs, setCaseTabs] = useState<CaseWorkspaceTab[]>([])
   const [activeCaseTabId, setActiveCaseTabId] = useState<string>('')
+  const activeCaseTabIdRef = useRef(activeCaseTabId)
+  activeCaseTabIdRef.current = activeCaseTabId
   const caseTabCycleOrderRef = useRef<string[]>([])
   const [caseTabsOpen, setCaseTabsOpen] = useState(false)
   const [caseTabContextMenu, setCaseTabContextMenu] = useState<{
@@ -1795,11 +1797,12 @@ export default function App(): JSX.Element {
     let alive = true
     window.lt.fs
       .listDocumentDrafts()
-      .then((result) => {
+      .then(async (result) => {
         if (!alive || !result.ok) return
         const drafts = (result.drafts ?? []).filter((draft) => !draft.path && draft.content.trim())
         if (drafts.length === 0) return
-        if (!window.confirm(`임시저장된 새 문서 ${drafts.length}개가 있습니다. 복구 탭을 열까요?`)) return
+        if (!(await window.lt.dialog.confirm(`임시저장된 새 문서 ${drafts.length}개가 있습니다. 복구 탭을 열까요?`))) return
+        if (!alive) return
         const used = new Set(docTabsRef.current.map((tab) => tab.id))
         const created = drafts.map((draft): DocTab => {
           let id = draft.draftId || newId()
@@ -1992,13 +1995,13 @@ export default function App(): JSX.Element {
     })
   }
 
-  const confirmCloseDirtyDocs = (scope: 'tab' | 'window', title?: string): boolean => {
+  const confirmCloseDirtyDocs = async (scope: 'tab' | 'window', title?: string): Promise<boolean> => {
     const names = scope === 'tab' && title ? [title] : dirtyDocTitles()
     if (names.length === 0) return true
     const shown = names.slice(0, 5).map((name) => `- ${name}`)
     const more = names.length > shown.length ? `\n- 외 ${names.length - shown.length}개` : ''
     const target = scope === 'tab' ? '이 문서' : '이 창'
-    return window.confirm(
+    return window.lt.dialog.confirm(
       `저장하지 않은 변경사항이 있습니다.\n\n${shown.join('\n')}${more}\n\n` +
         `변경사항은 실제 파일에 저장되지 않았고, 복구용 임시저장본만 남아 있습니다.\n${target}을 닫을까요?`
     )
@@ -2039,13 +2042,14 @@ export default function App(): JSX.Element {
       Number.isFinite(draftSavedAt) &&
       typeof stat.mtimeMs === 'number' &&
       stat.mtimeMs > draftSavedAt + 1000 &&
-      !window.confirm(
+      !(await window.lt.dialog.confirm(
         `「${doc.title}」 파일이 임시저장 이후 외부에서 변경된 것 같습니다.\n\n현재 임시저장본으로 덮어쓸까요?`
-      )
+      ))
     ) {
       return { ok: false, error: `「${doc.title}」 저장을 취소했습니다.` }
     }
 
+    if (!docTabsRef.current.some((tab) => tab.id === doc.id)) return { ok: true }
     const result = await window.lt.fs.writeText(doc.path, draft.content)
     if (!result.ok) {
       return { ok: false, error: `「${doc.title}」 저장 실패: ${result.error ?? '알 수 없는 오류'}` }
@@ -2144,11 +2148,13 @@ export default function App(): JSX.Element {
         t.id === id ? { ...t, path, title: path.split(/[\\/]/).pop() ?? t.title } : t
       )
     )
-  const closeDoc = (id: string, opts: { confirmDirty?: boolean } = {}): boolean => {
-    const tab = docTabs.find((t) => t.id === id)
+  const closeDoc = async (id: string, opts: { confirmDirty?: boolean } = {}): Promise<boolean> => {
+    let tab = docTabsRef.current.find((t) => t.id === id)
     if (!tab) return false
     const confirmDirty = opts.confirmDirty ?? true
-    if (confirmDirty && dirtyDocs.has(id) && !confirmCloseDirtyDocs('tab', tab.title)) return false
+    if (confirmDirty && dirtyDocsRef.current.has(id) && !(await confirmCloseDirtyDocs('tab', tab.title))) return false
+    tab = docTabsRef.current.find((t) => t.id === id)
+    if (!tab) return false
     const side = docSide(tab)
     const closingKey = docKey(id)
     const sideKeys = workKeysForSide(visibleDocTabs, visibleTermTabs, side)
@@ -3062,7 +3068,7 @@ export default function App(): JSX.Element {
   // (클라우드 경유 모델: 맥에서 rclone 실행 → 맥 폴더 ↔ OneDrive 클라우드)
   const openSync = (): void => {
     if (sshProfiles.length === 0) {
-      window.alert('먼저 설정에서 SSH 접속 프로필을 추가하세요.')
+      void window.lt.dialog.alert('먼저 설정에서 SSH 접속 프로필을 추가하세요.')
       return
     }
     const remote = parseRemoteUri(activeDraftsFolder ?? '')
@@ -3083,7 +3089,7 @@ export default function App(): JSX.Element {
 
   const openFileSync = (path: string, name: string): void => {
     if (sshProfiles.length === 0) {
-      window.alert('먼저 설정에서 SSH 접속 프로필을 추가하세요.')
+      void window.lt.dialog.alert('먼저 설정에서 SSH 접속 프로필을 추가하세요.')
       return
     }
 
@@ -3105,11 +3111,11 @@ export default function App(): JSX.Element {
     }
 
     if (!macFilePath) {
-      window.alert('이 파일의 동기화 대상 경로를 계산하지 못했습니다.')
+      void window.lt.dialog.alert('이 파일의 동기화 대상 경로를 계산하지 못했습니다.')
       return
     }
     if (!looksLikeOneDrivePath(macFilePath)) {
-      window.alert('OneDrive 경로에 있는 파일만 rclone으로 동기화할 수 있습니다.')
+      void window.lt.dialog.alert('OneDrive 경로에 있는 파일만 rclone으로 동기화할 수 있습니다.')
       return
     }
 
@@ -3125,11 +3131,11 @@ export default function App(): JSX.Element {
   // 소송기록 폴더는 기록뷰어에서 클라우드 → 맥/로컬 최신화만 제공한다.
   const openRecordsSync = (): void => {
     if (sshProfiles.length === 0) {
-      window.alert('먼저 설정에서 SSH 접속 프로필을 추가하세요.')
+      void window.lt.dialog.alert('먼저 설정에서 SSH 접속 프로필을 추가하세요.')
       return
     }
     if (!activeRecordsFolder) {
-      window.alert('먼저 소송기록 폴더를 지정하세요.')
+      void window.lt.dialog.alert('먼저 소송기록 폴더를 지정하세요.')
       return
     }
     const remote = parseRemoteUri(activeRecordsFolder)
@@ -3177,7 +3183,7 @@ export default function App(): JSX.Element {
     setSshProfiles(profiles)
     const profile = profiles.find((p) => p.id === remote.profileId)
     if (!profile) {
-      window.alert('이 최근 사건에 연결된 SSH 프로필을 찾을 수 없습니다. 설정에서 SSH 프로필을 확인하세요.')
+      await window.lt.dialog.alert('이 최근 사건에 연결된 SSH 프로필을 찾을 수 없습니다. 설정에서 SSH 프로필을 확인하세요.')
       return
     }
     openRemoteCaseContext(profile, remote.path, entry.name, undefined, entry.records)
@@ -3567,7 +3573,7 @@ export default function App(): JSX.Element {
     const source = termTabsRef.current.find((t) => t.id === sourceTermId)
     if (!source || !isAgentTab(source)) return
     if (source.ssh) {
-      window.alert('원격 Agent 탭은 아직 worktree fork를 지원하지 않습니다.')
+      await window.lt.dialog.alert('원격 Agent 탭은 아직 worktree fork를 지원하지 않습니다.')
       return
     }
     const side = preferredSide ?? termSide(source)
@@ -3576,7 +3582,7 @@ export default function App(): JSX.Element {
       window.lt.agent.worktreeFork({ cwd: source.cwd })
     ])
     if (!result.ok || !result.path) {
-      window.alert(result.error || 'Git worktree 생성에 실패했습니다.')
+      await window.lt.dialog.alert(result.error || 'Git worktree 생성에 실패했습니다.')
       return
     }
     openForkedAgentTab(source, {
@@ -3949,7 +3955,7 @@ export default function App(): JSX.Element {
         prof = s.sshProfiles?.find((p) => p.id === remoteCtx.profileId)
       }
       if (!prof) {
-        window.alert('이 사건에 연결된 SSH 프로필을 찾을 수 없습니다. 설정에서 SSH 프로필을 확인하세요.')
+        await window.lt.dialog.alert('이 사건에 연결된 SSH 프로필을 찾을 수 없습니다. 설정에서 SSH 프로필을 확인하세요.')
         return
       }
       setDraftsPick({
@@ -4022,7 +4028,7 @@ export default function App(): JSX.Element {
           source: remoteCtx.source
         })
       } else {
-        window.alert('이 사건에 연결된 SSH 프로필을 찾을 수 없습니다. 설정에서 SSH 프로필을 확인하세요.')
+        await window.lt.dialog.alert('이 사건에 연결된 SSH 프로필을 찾을 수 없습니다. 설정에서 SSH 프로필을 확인하세요.')
       }
       return
     }
@@ -4135,7 +4141,7 @@ export default function App(): JSX.Element {
     if (remote) {
       const profile = sshProfiles.find((p) => p.id === remote.profileId)
       if (!profile) {
-        window.alert('원격 접속 프로필을 찾을 수 없어 새 작업환경을 열 수 없습니다.')
+        await window.lt.dialog.alert('원격 접속 프로필을 찾을 수 없어 새 작업환경을 열 수 없습니다.')
         return
       }
       const resolved: { records?: string; suggestions?: FolderMatchSuggestion[] } = keepRecords
@@ -4830,10 +4836,10 @@ export default function App(): JSX.Element {
       : await window.lt.workspace.save(snapshot)
     if (result.canceled) return
     if (!result.ok) {
-      window.alert('작업환경 저장 실패: ' + (result.error ?? '알 수 없는 오류'))
+      await window.lt.dialog.alert('작업환경 저장 실패: ' + (result.error ?? '알 수 없는 오류'))
       return
     }
-    window.alert(
+    await window.lt.dialog.alert(
       `${exportFile ? '작업환경 내보내기' : '작업환경 저장'} 완료\n문서 ${snapshot.docs.length}개, 터미널 ${snapshot.terminals.length}개` +
         (skippedDocs > 0 ? `\n임시/미저장 문서 ${skippedDocs}개는 제외했습니다.` : '') +
         (result.path ? `\n\n${exportFile ? '내보낸 파일 위치' : '저장 위치'}:\n${result.path}` : '')
@@ -4843,15 +4849,15 @@ export default function App(): JSX.Element {
   const applyWorkspaceLoadResult = (result: WorkspaceLoadResult): void => {
     if (result.canceled) return
     if (!result.ok) {
-      window.alert('작업환경 복원 실패: ' + (result.error ?? '알 수 없는 오류'))
+      void window.lt.dialog.alert('작업환경 복원 실패: ' + (result.error ?? '알 수 없는 오류'))
       return
     }
     if (!result.snapshot) {
-      window.alert('저장된 작업환경이 없습니다.')
+      void window.lt.dialog.alert('저장된 작업환경이 없습니다.')
       return
     }
     restoreWorkspaceSnapshot(result.snapshot)
-    window.alert(
+    void window.lt.dialog.alert(
       `작업환경 복원 완료${result.entry?.label ? `\n${result.entry.label}` : ''}\n문서 ${result.snapshot.docs?.length ?? 0}개, 터미널 ${
         result.snapshot.terminals?.length ?? 0
       }개`
@@ -4970,7 +4976,7 @@ export default function App(): JSX.Element {
     if (!paths.length) return
     window.lt.fs.copyInto(dir, paths).then((r) => {
       if (r.copied.length === 0) {
-        window.alert('붙여넣기/복사할 수 있는 파일이 없습니다.')
+        void window.lt.dialog.alert('붙여넣기/복사할 수 있는 파일이 없습니다.')
         return
       }
       setTreeRefresh((n) => n + 1)
@@ -4986,7 +4992,7 @@ export default function App(): JSX.Element {
   const pasteFilesTo = async (dir: string): Promise<void> => {
     const clip = await window.lt.fs.clipboardFiles()
     if (clip.paths.length === 0) {
-      window.alert('클립보드에 붙여넣을 로컬 파일 경로가 없습니다.')
+      await window.lt.dialog.alert('클립보드에 붙여넣을 로컬 파일 경로가 없습니다.')
       return
     }
     copyPathsTo(dir, clip.paths)
@@ -4999,10 +5005,10 @@ export default function App(): JSX.Element {
     if (!remotePaths.length) return
     window.lt.fs
       .download(remotePaths)
-      .then((r) => {
-        if (!r.canceled && !r.ok) window.alert('다운로드 실패: ' + (r.error ?? '알 수 없는 오류'))
+      .then(async (r) => {
+        if (!r.canceled && !r.ok) await window.lt.dialog.alert('다운로드 실패: ' + (r.error ?? '알 수 없는 오류'))
       })
-      .catch((e) => window.alert('다운로드 실패: ' + String(e)))
+      .catch((e) => window.lt.dialog.alert('다운로드 실패: ' + String(e)))
       .finally(() => {
         if (activeTerm) setTermFocusNonce((current) => bumpFocusNonce(current, activeTerm))
       })
@@ -5114,7 +5120,7 @@ export default function App(): JSX.Element {
   const renameEntry = (path: string, name: string): void => {
     window.lt.fs.rename(path, name).then((r) => {
       if (!r.ok || !r.path) {
-        if (r.error) window.alert('이름 변경 실패: ' + r.error)
+        if (r.error) void window.lt.dialog.alert('이름 변경 실패: ' + r.error)
         return
       }
       const nextRoot = r.path
@@ -5141,7 +5147,7 @@ export default function App(): JSX.Element {
     if (!nextName || nextName === currentName) return
     window.lt.fs.rename(tab.path, nextName).then((r) => {
       if (!r.ok || !r.path) {
-        if (r.error) window.alert('이름 변경 실패: ' + r.error)
+        if (r.error) void window.lt.dialog.alert('이름 변경 실패: ' + r.error)
         return
       }
       const previousPath = tab.path as string
@@ -5155,7 +5161,7 @@ export default function App(): JSX.Element {
   const deleteEntry = async (path: string): Promise<void> => {
     const r = await window.lt.fs.delete(path)
     if (!r.ok) {
-      if (r.error) window.alert('삭제 실패: ' + r.error)
+      if (r.error) await window.lt.dialog.alert('삭제 실패: ' + r.error)
       return
     }
     setTreeRefresh((n) => n + 1)
@@ -5196,7 +5202,7 @@ export default function App(): JSX.Element {
       if (n) {
         window.lt.fs.mkdir(dir, n).then((r) => {
           if (r.ok) setTreeRefresh((x) => x + 1)
-          else if (r.error) window.alert('폴더 생성 실패: ' + r.error)
+          else if (r.error) void window.lt.dialog.alert('폴더 생성 실패: ' + r.error)
         })
       }
       return
@@ -5218,7 +5224,7 @@ export default function App(): JSX.Element {
         setTreeRefresh((x) => x + 1)
         openFile(r.path, r.path.split(/[\\/]/).pop() ?? fn, createSide)
       } else if (r.error) {
-        window.alert('문서 생성 실패: ' + r.error)
+        void window.lt.dialog.alert('문서 생성 실패: ' + r.error)
       }
     })
   }
@@ -5485,13 +5491,13 @@ export default function App(): JSX.Element {
     return lines.join('\n')
   }
 
-  const confirmCaseFileScope = (term: TermTab | undefined, path: string, label?: string): boolean => {
+  const confirmCaseFileScope = async (term: TermTab | undefined, path: string, label?: string): Promise<boolean> => {
     if (!term?.jsId) return true
     if (
       pathBelongsToCaseFolder(path, term.cwd) ||
       (!!term.recordsFolder && pathBelongsToCaseFolder(path, term.recordsFolder))
     ) return true
-    return window.confirm(
+    return window.lt.dialog.confirm(
       `「${label || fileNameFromPath(path)}」은 현재 사건의 작성서류·소송기록 폴더 밖에 있습니다. 다른 사건 자료일 수 있습니다. 그래도 이 Agent에 첨부할까요?`
     )
   }
@@ -5545,13 +5551,14 @@ export default function App(): JSX.Element {
   )
 
   // 파일 1개를 "물어보기" 형태로 전송 (경로 포함 → claude가 실제 파일을 읽음).
-  const askAboutFile = (termId: string, path: string, label: string): void => {
-    const term = termTabs.find((t) => t.id === termId)
-    if (!confirmCaseFileScope(term, path, label)) return
-    void buildFreshFilePrompt(path, label, term).then((prompt) => {
-      if (isAgentTab(term)) void window.lt.agent.send(termId, { text: `${prompt}위 파일에 대해 ` })
-      else pasteToTerm(termId, `${prompt}위 파일에 대해 `)
-    })
+  const askAboutFile = async (termId: string, path: string, label: string): Promise<void> => {
+    const term = termTabsRef.current.find((t) => t.id === termId)
+    if (!term || !(await confirmCaseFileScope(term, path, label))) return
+    if (!termTabsRef.current.some((t) => t.id === termId)) return
+    const prompt = await buildFreshFilePrompt(path, label, term)
+    if (!termTabsRef.current.some((t) => t.id === termId)) return
+    if (isAgentTab(term)) void window.lt.agent.send(termId, { text: `${prompt}위 파일에 대해 ` })
+    else pasteToTerm(termId, `${prompt}위 파일에 대해 `)
   }
 
   const terminalSnippetPrompt = (text: string): string =>
@@ -5569,6 +5576,8 @@ export default function App(): JSX.Element {
 
   // 활성 문서명+경로 + (있으면) 선택 텍스트로 claude 프롬프트 주입. 텍스트 없으면 문서 전체에 대해 묻기.
   const askClaude = (text: string, opts?: ClaudeAskOptions): void => {
+    const targetTab = resolveClaudeAgentTargetTab(visibleTermTabs, activeTerm, activeWork) ?? activeTermTab
+    const promptTarget = targetTab ?? sessionCaseSource
     void (async () => {
       const d = docTabs.find((x) => x.id === activeDoc)
       let docPath = opts?.docPath === null ? undefined : (opts?.docPath ?? d?.path)
@@ -5597,9 +5606,8 @@ export default function App(): JSX.Element {
       const sourceLabel = opts?.sourceLabel ?? docName
       const ref = sourceLabel ? `「${sourceLabel}」${docPath ? `(${docPath})` : ''}` : ''
       const t = text.trim()
-      const promptTarget =
-        resolveClaudeAgentTargetTab(visibleTermTabs, activeTerm, activeWork) ?? activeTermTab ?? sessionCaseSource
-      if (docPath && !confirmCaseFileScope(promptTarget, docPath, sourceLabel)) return
+      if (docPath && !(await confirmCaseFileScope(promptTarget, docPath, sourceLabel))) return
+      if (targetTab && !termTabsRef.current.some((term) => term.id === targetTab.id)) return
       const selectionSource =
         t && opts?.selectionSource
           ? {
@@ -5648,6 +5656,7 @@ export default function App(): JSX.Element {
       } else if (docName) {
         payload = filePrompt ? `${filePrompt}${opts?.instruction ? '' : '위 파일에 대해 '}` : `${ref} 파일에 대해 `
       } else return
+      if (targetTab && !termTabsRef.current.some((term) => term.id === targetTab.id)) return
       sendClaude(payload, { displayText, contextPath: docPath, pasteOnly: true })
     })()
   }
@@ -5917,35 +5926,43 @@ export default function App(): JSX.Element {
   }
 
   const closeCaseTab = async (tabId: string): Promise<void> => {
-    const tab = caseTabs.find((item) => item.id === tabId)
+    const tab = caseTabsRef.current.find((item) => item.id === tabId)
     if (!tab) return
-    const docs = docsForCaseTab(tab)
-    const terms = termsForCaseTab(tab)
-    const dirty = docs.filter((doc) => dirtyDocs.has(doc.id))
+    const docs = docTabsRef.current.filter((doc) => !isSharedDocTab(doc) && caseIdForDoc(doc) === tabId)
+    const terms = termTabsRef.current.filter((term) => caseIdForTerm(term) === tabId)
+    const dirty = docs.filter((doc) => dirtyDocsRef.current.has(doc.id))
     if (dirty.length > 0) {
       const names = dirty.slice(0, 5).map((doc) => `- ${doc.title}`)
       const more = dirty.length > names.length ? `\n- 외 ${dirty.length - names.length}개` : ''
       if (
-        !window.confirm(
+        !(await window.lt.dialog.confirm(
           `이 사건탭에 저장하지 않은 문서가 있습니다.\n\n${names.join('\n')}${more}\n\n사건탭을 닫을까요?`
-        )
+        ))
       )
         return
     }
+    if (!caseTabsRef.current.some((item) => item.id === tabId)) return
     const working = terms.filter((term) => termStatus.get(term.id) === 'working')
-    if (working.length > 0 && !window.confirm('이 사건탭에 아직 작업 중인 Claude/Agent가 있습니다. 닫을까요?')) {
+    if (working.length > 0 && !(await window.lt.dialog.confirm('이 사건탭에 아직 작업 중인 Claude/Agent가 있습니다. 닫을까요?'))) {
       return
     }
 
+    if (!caseTabsRef.current.some((item) => item.id === tabId)) return
     autoSaveEligibleRef.current.add(tabId)
     await saveCaseWorkspace(tabId).catch(() => {})
+    if (!caseTabsRef.current.some((item) => item.id === tabId)) return
+    const docIds = new Set(docs.map((doc) => doc.id))
+    const termIds = new Set(terms.map((term) => term.id))
+    if (
+      docTabsRef.current.some((doc) => !isSharedDocTab(doc) && caseIdForDoc(doc) === tabId && !docIds.has(doc.id)) ||
+      termTabsRef.current.some((term) => caseIdForTerm(term) === tabId && !termIds.has(term.id))
+    ) return
     for (const term of terms) {
+      if (!termTabsRef.current.some((item) => item.id === term.id)) continue
       if (isAgentTab(term)) void window.lt.agent.close(term.id)
       else window.lt.pty.kill(term.id)
     }
-    const docIds = new Set(docs.map((doc) => doc.id))
-    const termIds = new Set(terms.map((term) => term.id))
-    const remainingCaseTabs = caseTabs.filter((item) => item.id !== tabId)
+    const remainingCaseTabs = caseTabsRef.current.filter((item) => item.id !== tabId)
 
     setDocTabs((tabs) => tabs.filter((doc) => !docIds.has(doc.id)))
     setTermTabs((tabs) => tabs.filter((term) => !termIds.has(term.id)))
@@ -5989,13 +6006,13 @@ export default function App(): JSX.Element {
       for (const id of termIds) delete next[id]
       return next
     })
-    setCaseTabs(remainingCaseTabs)
+    setCaseTabs((tabs) => tabs.filter((item) => item.id !== tabId))
     setCaseTabContextMenu(null)
     const sourceKey = workspaceLocationKey(currentCaseFromCaseTab(tab))
     autoRestoreDoneRef.current.delete(sourceKey)
     autoSaveEligibleRef.current.delete(tabId)
 
-    if (activeCaseTabId !== tabId) return
+    if (activeCaseTabIdRef.current !== tabId) return
     const nextTab = remainingCaseTabs[0]
     if (nextTab) {
       openCaseTab(nextTab)
@@ -6086,61 +6103,66 @@ export default function App(): JSX.Element {
   }, [windowTitle])
 
   // Ctrl+W 등으로 터미널 닫기 — claude가 작업 중이면 확인 후 닫는다.
-  const closeTermWithConfirm = (id: string): boolean => {
+  const closeTermWithConfirm = async (id: string): Promise<boolean> => {
+    if (!termTabsRef.current.some((term) => term.id === id)) return false
     if (termStatus.get(id) === 'working') {
-      if (!window.confirm('claude가 아직 작업 중입니다. 이 터미널을 닫을까요?')) return false
+      if (!(await window.lt.dialog.confirm('claude가 아직 작업 중입니다. 이 터미널을 닫을까요?'))) return false
     }
+    if (!termTabsRef.current.some((term) => term.id === id)) return false
     return closeTerm(id)
   }
   const closeCurrentWindowSoon = (): void => {
     window.setTimeout(() => void window.lt.app.closeWindow(), 0)
   }
-  const closeDetachedDoc = (id: string): void => {
-    const shouldCloseWindow = docOnly && docTabs.length <= 1
-    if (closeDoc(id) && shouldCloseWindow) closeCurrentWindowSoon()
+  const closeDetachedDoc = async (id: string): Promise<void> => {
+    if (await closeDoc(id)) {
+      if (docOnly && docTabsRef.current.every((tab) => tab.id === id)) closeCurrentWindowSoon()
+    }
   }
-  const closeDetachedTerm = (id: string): void => {
-    const shouldCloseWindow = termOnly && termTabs.length <= 1
-    if (closeTermWithConfirm(id) && shouldCloseWindow) closeCurrentWindowSoon()
+  const closeDetachedTerm = async (id: string): Promise<void> => {
+    if (await closeTermWithConfirm(id)) {
+      if (termOnly && termTabsRef.current.every((tab) => tab.id === id)) closeCurrentWindowSoon()
+    }
   }
-  const detachDocAfterMove = (id: string): void => {
-    const shouldCloseWindow = docOnly && docTabs.length <= 1
-    if (closeDoc(id, { confirmDirty: false }) && shouldCloseWindow) closeCurrentWindowSoon()
+  const detachDocAfterMove = async (id: string): Promise<void> => {
+    if (await closeDoc(id, { confirmDirty: false })) {
+      if (docOnly && docTabsRef.current.every((tab) => tab.id === id)) closeCurrentWindowSoon()
+    }
   }
   const detachTermAfterMove = (id: string): void => {
     const shouldCloseWindow = termOnly && termTabs.length <= 1
     if (detachTerm(id) && shouldCloseWindow) closeCurrentWindowSoon()
   }
   closeActiveTermRef.current = (): void => {
-    if (activeTerm) closeDetachedTerm(activeTerm)
+    if (activeTerm) void closeDetachedTerm(activeTerm)
   }
   closeActiveTabRef.current = (): void => {
     const activeEl = document.activeElement as HTMLElement | null
     const termId = focusedTermId(activeEl)
     const docId = focusedDocId(activeEl)
     if (termId && termTabs.some((t) => t.id === termId)) {
-      closeDetachedTerm(termId)
+      void closeDetachedTerm(termId)
       return
     }
     if (docId && docTabs.some((d) => d.id === docId)) {
-      closeDetachedDoc(docId)
+      void closeDetachedDoc(docId)
       return
     }
     const side = focusedWorkSide(activeEl)
     const parsed = side ? parseWorkKey(activeWork[side]) : null
     if (parsed?.kind === 'terminal') {
-      closeDetachedTerm(parsed.id)
+      void closeDetachedTerm(parsed.id)
       return
     }
     if (parsed?.kind === 'doc') {
-      closeDetachedDoc(parsed.id)
+      void closeDetachedDoc(parsed.id)
       return
     }
     if (activeTerm) {
-      closeDetachedTerm(activeTerm)
+      void closeDetachedTerm(activeTerm)
       return
     }
-    if (activeDoc) closeDetachedDoc(activeDoc)
+    if (activeDoc) void closeDetachedDoc(activeDoc)
     else if ((docOnly && docTabs.length === 0) || (termOnly && termTabs.length === 0)) {
       closeCurrentWindowSoon()
     }
@@ -6393,12 +6415,12 @@ export default function App(): JSX.Element {
   ): Promise<void> => {
     if (s.profileId) {
       if (!s.cwd) {
-        window.alert('원격 세션의 작업 폴더 정보가 없어 이어서 열 수 없습니다.')
+        await window.lt.dialog.alert('원격 세션의 작업 폴더 정보가 없어 이어서 열 수 없습니다.')
         return
       }
       const profile = await findSshProfile(s.profileId)
       if (!profile) {
-        window.alert('이 세션에 연결된 SSH 프로필을 찾을 수 없습니다. 설정에서 SSH 프로필을 확인하세요.')
+        await window.lt.dialog.alert('이 세션에 연결된 SSH 프로필을 찾을 수 없습니다. 설정에서 SSH 프로필을 확인하세요.')
         return
       }
       const opened = await openCaseRemote(c, profile, s.cwd)
@@ -6433,7 +6455,7 @@ export default function App(): JSX.Element {
     }
     const profile = await findSshProfile(profileId)
     if (!profile) {
-      window.alert('이 세션에 연결된 SSH 프로필을 찾을 수 없습니다. 설정에서 SSH 프로필을 확인하세요.')
+      await window.lt.dialog.alert('이 세션에 연결된 SSH 프로필을 찾을 수 없습니다. 설정에서 SSH 프로필을 확인하세요.')
       return
     }
     const opened = openRemoteCaseContext(profile, cwd, title)
@@ -6615,7 +6637,7 @@ export default function App(): JSX.Element {
     setWorkActive(termSide(tab), termKeyOf(termId))
     if (paths.length === 1) {
       const p = paths[0]
-      askAboutFile(termId, p, p.split(/[\\/]/).pop() ?? p)
+      void askAboutFile(termId, p, p.split(/[\\/]/).pop() ?? p)
     } else {
       void Promise.all(
         paths.map((p) => buildFreshFilePrompt(p, p.split(/[\\/]/).pop() ?? p, tab))
@@ -7062,7 +7084,7 @@ export default function App(): JSX.Element {
                 onDropPaths={(paths) => dropFilesToTerm(t.id, paths)}
                 onAskSelection={(text) => askAboutTerminalSelection(t.id, text)}
                 onNewTerminal={() => addTermSame(termSide(t), t.id)}
-                onRequestClose={() => closeTermWithConfirm(t.id)}
+                onRequestClose={() => void closeTermWithConfirm(t.id)}
                 onRequestCloseCaseTab={() => closeActiveCaseTabRef.current()}
                 onStatus={(s) => onTermStatus(t.id, s)}
                 onBracketedPasteModeChange={(enabled) => onTermBracketedPasteMode(t.id, enabled)}
@@ -7192,7 +7214,7 @@ export default function App(): JSX.Element {
           onClose={(key) => {
             const parsed = parseWorkKey(key)
             if (!parsed) return
-            if (parsed.kind === 'doc') closeDoc(parsed.id)
+            if (parsed.kind === 'doc') void closeDoc(parsed.id)
             else closeTerm(parsed.id)
           }}
           onAdd={() => (side === 'right' ? addAgentSame(side) : addDoc(side))}
@@ -7208,7 +7230,7 @@ export default function App(): JSX.Element {
           onTearOut={(key) => {
             const parsed = parseWorkKey(key)
             if (!parsed) return
-            if (parsed.kind === 'doc') closeDoc(parsed.id, { confirmDirty: false })
+            if (parsed.kind === 'doc') void closeDoc(parsed.id, { confirmDirty: false })
             else detachTerm(parsed.id)
           }}
           onDragActive={setTabDragging}
@@ -7433,7 +7455,7 @@ export default function App(): JSX.Element {
                   onDropPaths={(paths) => dropFilesToTerm(t.id, paths)}
                   onAskSelection={(text) => askAboutTerminalSelection(t.id, text)}
                   onNewTerminal={() => addTermSame(side, t.id)}
-                  onRequestClose={() => closeTermWithConfirm(t.id)}
+                  onRequestClose={() => void closeTermWithConfirm(t.id)}
                   onRequestCloseCaseTab={() => closeActiveCaseTabRef.current()}
                   onStatus={(s) => onTermStatus(t.id, s)}
                   onBracketedPasteModeChange={(enabled) => onTermBracketedPasteMode(t.id, enabled)}
@@ -10573,7 +10595,7 @@ function HwpView({
     const defaultName = fileNameFromPath(path).replace(/\.(hwp|hwpx)$/i, '.md')
     const defaultPath = path.startsWith('ssh://') ? defaultName : path.replace(/\.(hwp|hwpx)$/i, '.md')
     const result = await window.lt.fs.saveAs(state.markdown, defaultPath)
-    if (!result.ok && result.error) window.alert('Markdown 저장 실패: ' + result.error)
+    if (!result.ok && result.error) await window.lt.dialog.alert('Markdown 저장 실패: ' + result.error)
   }
 
   if (state.loading) return <div className="welcome"><p className="muted">HWP/HWPX Markdown 추출 중…</p></div>
@@ -11019,9 +11041,9 @@ function SettingsView(): JSX.Element {
     if (t) void applyJsToken(t, '토큰을 저장했습니다. 사건 대시보드가 다시 연결됩니다.')
   }
 
-  const deleteJsToken = (): void => {
-    if (!window.confirm('JuriSupport 토큰을 삭제할까요? 사건 대시보드 연결이 해제됩니다.')) return
-    void applyJsToken('', '토큰을 삭제했습니다.')
+  const deleteJsToken = async (): Promise<void> => {
+    if (!(await window.lt.dialog.confirm('JuriSupport 토큰을 삭제할까요? 사건 대시보드 연결이 해제됩니다.'))) return
+    await applyJsToken('', '토큰을 삭제했습니다.')
   }
 
   const applyDictationKey = async (key: string, message: string): Promise<void> => {
@@ -11040,9 +11062,9 @@ function SettingsView(): JSX.Element {
     if (key) void applyDictationKey(key, 'OpenAI API 키를 안전하게 저장했습니다.')
   }
 
-  const deleteDictationKey = (): void => {
-    if (!window.confirm('OpenAI API 키를 삭제할까요? 음성 받아쓰기를 사용할 수 없게 됩니다.')) return
-    void applyDictationKey('', 'OpenAI API 키를 삭제했습니다.')
+  const deleteDictationKey = async (): Promise<void> => {
+    if (!(await window.lt.dialog.confirm('OpenAI API 키를 삭제할까요? 음성 받아쓰기를 사용할 수 없게 됩니다.'))) return
+    await applyDictationKey('', 'OpenAI API 키를 삭제했습니다.')
   }
 
   useEffect(() => {

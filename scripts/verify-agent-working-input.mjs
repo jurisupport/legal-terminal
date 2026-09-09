@@ -3,7 +3,8 @@ import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { _electron } from 'playwright-core'
+import { createRequire } from 'node:module'
+const { _electron } = createRequire(import.meta.url)('playwright-core')
 
 if (process.platform !== 'darwin') {
   console.log('agent working-input check skipped: macOS only')
@@ -11,8 +12,9 @@ if (process.platform !== 'darwin') {
 }
 
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
-const userData = path.join(os.tmpdir(), 'legal-terminal-agent-working-input-check')
-await fs.rm(userData, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
+const userData = await fs.mkdtemp(path.join(os.tmpdir(), 'legal-terminal-agent-working-input-'))
+const caseDir = path.join(userData, 'input-case')
+await fs.mkdir(caseDir)
 
 const env = { ...process.env }
 delete env.ELECTRON_RUN_AS_NODE
@@ -25,13 +27,21 @@ const app = await _electron.launch({
 try {
   const page = await app.firstWindow()
   page.setDefaultTimeout(8_000)
-  await app.evaluate(({ dialog, ipcMain }, { repo }) => {
-    dialog.showMessageBox = async () => ({ response: 2, checkboxChecked: false })
+  await app.evaluate(({ dialog, ipcMain }, { caseDir }) => {
+    globalThis.__inputDialogs = []
+    dialog.showMessageBox = async (_parent, options) => {
+      globalThis.__inputDialogs.push(options.message)
+      return { response: options.buttons.length === 4 ? 2 : 0, checkboxChecked: false }
+    }
     const replace = (channel, handler) => {
       ipcMain.removeHandler(channel)
       ipcMain.handle(channel, handler)
     }
-    replace('dialog:pickFolder', () => ({ path: repo, name: '입력 회귀' }))
+    replace('dialog:pickFolder', () => ({ path: caseDir, name: '입력 회귀' }))
+    replace('js:tokenStatus', () => 'ok')
+    replace('js:listCases', () => ({ ok: true, cases: [] }))
+    replace('workspace:autoSave', () => ({ ok: true }))
+    replace('workspace:autoLoad', () => ({ ok: true }))
     replace('agent:create', () => ({ ok: true }))
     replace('agent:models', () => ({ ok: true, models: [] }))
     replace('agent:send', (event, payload) => {
@@ -52,7 +62,13 @@ try {
       globalThis.__workingInputSessionId = sessionId
       return { ok: true }
     })
-  }, { repo })
+  }, { caseDir })
+
+  const blockingDialogs = []
+  page.on('dialog', async (dialog) => {
+    blockingDialogs.push(dialog.message())
+    await dialog.dismiss().catch(() => {})
+  })
 
   await page.locator('.activity-item[title*="새 사건 추가"]').click()
   await page.locator('.new-case-row', { hasText: '작성서류 폴더' }).click()
@@ -139,6 +155,46 @@ try {
   await page.waitForTimeout(1_500)
   assert.equal(await page.locator('.agent-panel').isVisible(), true)
   console.log('agent stream remains usable after tool output while the timeline is scrolled')
+
+  await app.evaluate(() => clearInterval(globalThis.__workingInputTimer))
+  await page.getByRole('button', { name: '＋ 새 문서', exact: true }).click()
+  await page.getByPlaceholder('파일 이름 (비우면 무제)').fill('입력회귀.md')
+  await page.getByPlaceholder('파일 이름 (비우면 무제)').press('Enter')
+  const editor = page.locator('.cm-content:visible')
+  await editor.fill('MD 입력 보존')
+  await page.locator('.activity-item[title="사건"]').click()
+  const search = page.locator('.dash-search')
+  await search.fill('사건 검색 보존')
+
+  for (let round = 0; round < 3; round++) {
+    await page.locator('.activity-item[title="현재 작업환경 저장"]').click()
+    assert.equal(await app.evaluate(async (_electron, count) => {
+      const deadline = Date.now() + 8000
+      while (Date.now() < deadline) {
+        if (globalThis.__inputDialogs.filter((text) => text.startsWith('작업환경 저장 완료')).length >= count) return true
+        await new Promise((resolve) => setTimeout(resolve, 20))
+      }
+      return false
+    }, round + 1), true, 'wait for save to finish before opening the saved snapshot')
+    await page.locator('.activity-item[title="저장된 작업환경 불러오기"]').click()
+    await page.locator('.workspace-row').filter({ hasText: '문서 1' }).first().click()
+    await page.locator('.workspace-picker').waitFor({ state: 'hidden' })
+    await page.locator('.activity-item[title="사건"]').click()
+    if (!await search.isVisible()) await page.locator('.activity-item[title="사건"]').click()
+    for (const [input, text] of [[search, '사건 검색'], [page.locator('.agent-composer textarea:visible'), '후속 지시'], [editor, 'MD 편집']]) {
+      if (input === editor) await page.locator('.activity-item[title*="탐색기 표시/숨기기"]').click()
+      await input.click()
+      await page.keyboard.press('Meta+a')
+      await page.keyboard.insertText(`${text} ${round}`)
+      assert.equal(await input.evaluate((el) => document.activeElement === el), true)
+      assert.equal(await input.evaluate((el) => 'value' in el ? el.value : el.textContent), `${text} ${round}`)
+    }
+  }
+  assert.deepEqual(blockingDialogs, [], 'save/restore must not enter Chromium blocking dialogs')
+  const messages = await app.evaluate(() => globalThis.__inputDialogs)
+  assert.ok(messages.some((text) => text.startsWith('작업환경 저장 완료')))
+  assert.ok(messages.some((text) => text.startsWith('작업환경 복원 완료')))
+  console.log('Agent, case search and MD editing survive three workspace save/restore cycles')
 } finally {
   await app.evaluate(() => clearInterval(globalThis.__workingInputTimer)).catch(() => {})
   await app.evaluate(({ app }) => app.exit(0)).catch(() => {})

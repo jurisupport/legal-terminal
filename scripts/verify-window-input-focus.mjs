@@ -5,11 +5,14 @@ import ts from 'typescript'
 
 const source = await readFile(new URL('../src/main/index.ts', import.meta.url), 'utf8')
 const parsed = ts.createSourceFile('index.ts', source, ts.ScriptTarget.Latest, true)
-let recovery, focusListener, menuClick
+let recovery, inputFocus, focusListener, mouseListener, menuClick
 function visit(node) {
   if (ts.isFunctionDeclaration(node) && node.name?.text === 'recoverWindowInput') recovery = node
+  if (ts.isFunctionDeclaration(node) && node.name?.text === 'focusWindowInput') inputFocus = node
   if (ts.isCallExpression(node) && node.expression.getText(parsed) === 'win.on' &&
       node.arguments[0]?.text === 'focus') focusListener = node.arguments[1]
+  if (ts.isCallExpression(node) && node.expression.getText(parsed) === 'win.webContents.on' &&
+      node.arguments[0]?.text === 'before-mouse-event') mouseListener = node.arguments[1]
   if (ts.isObjectLiteralExpression(node) && node.properties.some((property) =>
     ts.isPropertyAssignment(property) && property.name.getText(parsed) === 'label' &&
     property.initializer.text === '입력 다시 활성화')) {
@@ -28,15 +31,18 @@ function evaluate(node, context) {
 }
 
 // ponytail: Electron objects are mocked; this checks recovery wiring, not the native lock's cause.
-function makeWindow(id, { destroyed = false, enabled = true, contentsDestroyed = false, devTools = false, focused = false } = {}) {
+function makeWindow(id, { destroyed = false, enabled = true, contentsDestroyed = false, devTools = false, focused = false, windowFocused = true } = {}) {
   const calls = []
   const unexpected = () => assert.fail('input recovery must not reload or close the window')
   return {
     id, calls,
     isDestroyed: () => destroyed,
     isEnabled: () => enabled,
+    isFocused: () => windowFocused,
     blur: () => calls.push('blur'),
     focus: () => calls.push('focus'),
+    blurWebView: () => calls.push('blurWebView'),
+    focusOnWebView: () => calls.push('focusOnWebView'),
     close: unexpected, destroy: unexpected, reload: unexpected,
     webContents: {
       isDestroyed: () => contentsDestroyed,
@@ -47,33 +53,46 @@ function makeWindow(id, { destroyed = false, enabled = true, contentsDestroyed =
     }
   }
 }
-const recoverWindowInput = evaluate(recovery, {})
+const focusWindowInput = evaluate(inputFocus, {})
+const recoverWindowInput = evaluate(recovery, { focusWindowInput })
 const mainWindow = makeWindow(1)
 const secondaryWindow = makeWindow(2)
-const recovered = ['blur', 'focus', 'webContents.focus']
+const recovered = ['blurWebView', 'blur', 'focus', 'webContents.focus', 'focusOnWebView']
 recoverWindowInput(secondaryWindow)
 assert.deepEqual(secondaryWindow.calls, recovered, 'recovery restores the window before the web contents')
 assert.deepEqual(mainWindow.calls, [], 'recovering another window leaves the main window untouched')
 recoverWindowInput(null)
-for (const state of [{ destroyed: true }, { enabled: false }, { contentsDestroyed: true }]) {
+for (const state of [{ destroyed: true }, { enabled: false }, { contentsDestroyed: true }, { devTools: true }]) {
   const win = makeWindow(3, state)
   recoverWindowInput(win)
   assert.deepEqual(win.calls, [], `unsafe recovery is ignored: ${JSON.stringify(state)}`)
 }
 
-for (const state of [{}, { contentsDestroyed: true }, { devTools: true }, { enabled: false }, { focused: true }]) {
+for (const state of [{}, { destroyed: true }, { contentsDestroyed: true }, { devTools: true }, { enabled: false }, { focused: true }, { windowFocused: false }]) {
   const win = makeWindow(4, state)
   evaluate(focusListener, {
     win,
+    focusWindowInput,
     stopWindowAttention: (target) => {
       assert.equal(target, win)
       target.calls.push('stopWindowAttention')
     }
   })()
   assert.deepEqual(win.calls,
-    state.contentsDestroyed || state.devTools || state.enabled === false || state.focused
-      ? ['stopWindowAttention'] : ['stopWindowAttention', 'webContents.focus'],
+    state.destroyed || state.contentsDestroyed || state.devTools || state.enabled === false || state.windowFocused === false
+      ? ['stopWindowAttention'] : ['stopWindowAttention', ...(!state.focused ? ['webContents.focus'] : []), 'focusOnWebView'],
     'window activation restores input only for live contents outside developer tools')
+
+  win.calls.length = 0
+  const onMouse = evaluate(mouseListener, { win, focusWindowInput })
+  const event = { preventDefault: () => assert.fail('normal mouse input must not be cancelled') }
+  for (const type of ['mouseMove', 'mouseUp', 'mouseWheel']) onMouse(event, { type })
+  assert.deepEqual(win.calls, [], 'hover, drag movement and release must not change focus')
+  onMouse(event, { type: 'mouseDown' })
+  assert.deepEqual(win.calls,
+    state.destroyed || state.contentsDestroyed || state.devTools || state.enabled === false || state.windowFocused === false
+      ? [] : [...(!state.focused ? ['webContents.focus'] : []), 'focusOnWebView'],
+    'click repairs widget focus even when native webContents reports focused, without blurring selection or IME')
 }
 
 let focusedWindow = mainWindow

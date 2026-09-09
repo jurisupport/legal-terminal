@@ -160,12 +160,22 @@ function stopWindowAttention(win: BrowserWindow): void {
   dockBounceByWindow.delete(win.id)
 }
 
+function focusWindowInput(win: BrowserWindow): void {
+  if (win.isDestroyed() || !win.isEnabled() || !win.isFocused() || win.webContents.isDestroyed() || win.webContents.isDevToolsFocused()) return
+  if (!win.webContents.isFocused()) win.webContents.focus()
+  // OS 창의 포커스와 Chromium 입력 위젯의 포커스는 별개다.
+  // isFocused()가 true여도 확인창 종료 후 입력 위젯이 비활성일 수 있다.
+  win.focusOnWebView()
+}
+
 function recoverWindowInput(win: BrowserWindow | null): void {
   if (!win || win.isDestroyed() || !win.isEnabled() || win.webContents.isDestroyed()) return
+  if (win.webContents.isDevToolsFocused()) return
   // 창과 웹 화면의 입력 상태만 다시 연결한다. 문서·대화·실행 중인 작업은 유지한다.
+  win.blurWebView()
   win.blur()
   win.focus()
-  win.webContents.focus()
+  focusWindowInput(win)
 }
 
 function requestWindowAttention(win: BrowserWindow, reason?: 'done' | 'question'): void {
@@ -225,14 +235,12 @@ function createWindow(setMain = true, opts?: { docOnly?: boolean; termOnly?: boo
 
   win.on('focus', () => {
     stopWindowAttention(win)
-    if (
-      win.isEnabled() &&
-      !win.webContents.isDestroyed() &&
-      !win.webContents.isDevToolsFocused() &&
-      !win.webContents.isFocused()
-    ) {
-      win.webContents.focus()
-    }
+    focusWindowInput(win)
+  })
+  win.webContents.on('before-mouse-event', (_event, input) => {
+    // 이미 활성인 창에서도 클릭 전에 입력 위젯을 연결한다.
+    // blur는 하지 않아 한글 조합, 선택 영역, 드래그를 유지한다.
+    if (input.type === 'mouseDown') focusWindowInput(win)
   })
   win.on('close', (event) => {
     if (!closeGuardReady || forceClosingWindowIds.has(win.id) || win.webContents.isDestroyed()) return
@@ -424,6 +432,25 @@ ipcMain.handle('window:new', (_e, opts?: NewWindowOptions) => {
 ipcMain.handle('window:close', (e) => {
   const win = BrowserWindow.fromWebContents(e.sender)
   if (win && !win.isDestroyed()) win.close()
+})
+
+ipcMain.handle('dialog:message', async (event, kind: 'alert' | 'confirm', message: string) => {
+  const win = BrowserWindow.fromWebContents(event.sender)
+  if (!win || win.isDestroyed() || event.senderFrame !== event.sender.mainFrame) return false
+  if ((kind !== 'alert' && kind !== 'confirm') || typeof message !== 'string') return false
+  try {
+    const { response } = await dialog.showMessageBox(win, {
+      type: kind === 'confirm' ? 'question' : 'info',
+      message: message || ' ',
+      buttons: kind === 'confirm' ? ['취소', '확인'] : ['확인'],
+      defaultId: kind === 'confirm' ? 1 : 0,
+      cancelId: 0,
+      noLink: true
+    })
+    return !win.isDestroyed() && (kind === 'alert' || response === 1)
+  } finally {
+    focusWindowInput(win)
+  }
 })
 
 ipcMain.handle('window:forceClose', (e) => {
@@ -2813,9 +2840,15 @@ app.whenReady().then(() => {
   const isAppWindow = (webContents: WebContents | null): boolean =>
     !!webContents && BrowserWindow.getAllWindows().some((win) => win.webContents.id === webContents.id)
   session.defaultSession.setPermissionCheckHandler((webContents, permission, _origin, details) =>
-    permission === 'media' && details.mediaType === 'audio' && details.isMainFrame && isAppWindow(webContents)
+    details.isMainFrame && isAppWindow(webContents) &&
+    (permission === 'clipboard-sanitized-write' || (permission === 'media' && details.mediaType === 'audio'))
   )
   session.defaultSession.setPermissionRequestHandler((webContents, permission, callback, details) => {
+    // 복사 버튼의 Clipboard API 쓰기만 허용하고 읽기 권한은 열지 않는다.
+    if (permission === 'clipboard-sanitized-write') {
+      callback(details.isMainFrame && isAppWindow(webContents))
+      return
+    }
     const mediaTypes = 'mediaTypes' in details ? details.mediaTypes ?? [] : []
     callback(
       permission === 'media' &&

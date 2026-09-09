@@ -740,6 +740,8 @@ export interface LtApi {
     check: () => Promise<UpdateCheckResult>
   }
   dialog: {
+    alert: (message: string) => Promise<void>
+    confirm: (message: string) => Promise<boolean>
     openCase: () => Promise<{ path: string; name: string } | null>
     pickFolder: (opts?: {
       title?: string

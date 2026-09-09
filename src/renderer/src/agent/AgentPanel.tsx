@@ -3007,7 +3007,7 @@ export default function AgentPanel({
       const path = agentFilePathForApp(item.diff.filePath, cwd, profileId, ssh)
       const edits = item.diff.revertEdits ?? []
       if (!path || edits.length === 0) return
-      if (!window.confirm(`${fileNameFromPath(path)} 변경을 되돌릴까요?`)) return
+      if (!await window.lt.dialog.confirm(`${fileNameFromPath(path)} 변경을 되돌릴까요?`)) return
 
       setRevertingDiffIds((current) => new Set(current).add(item.id))
       setError('')

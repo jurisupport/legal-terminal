@@ -318,7 +318,7 @@ export default function FileTree({
       unique.length === 1
         ? `'${unique[0].name}'${unique[0].isDir ? ' 폴더' : ''}을(를) 삭제할까요?`
         : `선택한 ${unique.length}개 항목을 삭제할까요?`
-    if (!window.confirm(label)) return
+    if (!await window.lt.dialog.confirm(label)) return
     await Promise.all(unique.map((entry) => onDelete(entry.path, entry.name, entry.isDir)))
     clearSelection()
   }

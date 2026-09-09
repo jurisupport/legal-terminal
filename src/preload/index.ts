@@ -697,6 +697,11 @@ const api = {
     check: (): Promise<UpdateCheckResult> => ipcRenderer.invoke('update:check')
   },
   dialog: {
+    alert: async (message: string): Promise<void> => {
+      await ipcRenderer.invoke('dialog:message', 'alert', message)
+    },
+    confirm: (message: string): Promise<boolean> =>
+      ipcRenderer.invoke('dialog:message', 'confirm', message),
     openCase: (): Promise<{ path: string; name: string } | null> =>
       ipcRenderer.invoke('dialog:openCase'),
     pickFolder: (opts?: {

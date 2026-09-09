@@ -802,9 +802,9 @@ export default function PdfViewer({
             void window.lt.fs
               .download(path)
               .then((r) => {
-                if (!r.canceled && !r.ok) window.alert('다운로드 실패: ' + (r.error ?? '알 수 없는 오류'))
+                if (!r.canceled && !r.ok) void window.lt.dialog.alert('다운로드 실패: ' + (r.error ?? '알 수 없는 오류'))
               })
-              .catch((e) => window.alert('다운로드 실패: ' + String(e)))
+              .catch((e) => void window.lt.dialog.alert('다운로드 실패: ' + String(e)))
           }}
         >
           ⬇
