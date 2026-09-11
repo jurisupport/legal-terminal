@@ -45,6 +45,7 @@ import {
 } from './diff'
 import { DiffPreview } from './DiffPreview'
 import { MarkdownMessage } from './MarkdownMessage'
+import { htmlToPlainText } from '../markdownClipboard'
 import { ToolRow, toolDisplayName, toolStepDisplay, type ProcessStep } from './ToolRow'
 import { activeSubAgentCount } from './subAgentStatus'
 import { quoteAgentRequest, restoreTextSelection, selectionTextOffsets } from './quote'
@@ -3348,12 +3349,13 @@ export default function AgentPanel({
     if (!selection || selection.isCollapsed || !timeline || !selectionIntersectsElement(selection, timeline)) return
     const text = selection.toString()
     if (!text.trim()) return
+    const html = selectedHtml(selection)
     event.preventDefault()
     setSelectionMenu({
       x: Math.min(event.clientX, window.innerWidth - 240),
       y: Math.min(event.clientY, window.innerHeight - 132),
-      html: selectedHtml(selection),
-      text
+      html,
+      text: /<(?:ol|ul)\b/i.test(html) ? htmlToPlainText(html) : text
     })
   }
 
