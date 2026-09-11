@@ -7244,6 +7244,7 @@ export default function App(): JSX.Element {
           {todoSummary}
           <TodosDashboard
             snapshot={todoSnapshot}
+            onOpenEvidenceFile={(path, label) => { openFile(path, label ?? fileNameFromPath(path)) }}
             initialFilter={todoFilter}
             filterNonce={todoFilterNonce}
             onGlobalWork={() => void openGlobalTodoWork()}

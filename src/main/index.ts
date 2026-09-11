@@ -2,7 +2,7 @@ import { app, BrowserWindow, shell, ipcMain, dialog, screen, session, Menu, clip
 import { spawn } from 'child_process'
 import { createHash } from 'crypto'
 import { join, basename, dirname, extname, isAbsolute, resolve, sep, posix } from 'path'
-import { readdir, readFile, stat, writeFile, copyFile, rm, mkdir, rename, cp } from 'fs/promises'
+import { readdir, readFile, realpath, stat, writeFile, copyFile, rm, mkdir, rename, cp } from 'fs/promises'
 import { existsSync, watch, type Dirent, type FSWatcher } from 'fs'
 import { fileURLToPath } from 'url'
 import { inflateRawSync } from 'zlib'
@@ -17,9 +17,11 @@ import {
   listHistory,
   addHistory,
   getJsPairing,
+  allJsPairings,
   setJsPairing
 } from './caseStore'
 import * as js from './jurisupport'
+import { pairedFileEvidence, containsCaseNumber, FILE_EVIDENCE_ENTRY_LIMIT } from './todoFileEvidence'
 import {
   clearRemoteDirCache as clearRemotePickerDirCache,
   invalidateRemoteDirCacheForProfile,
@@ -755,8 +757,44 @@ ipcMain.handle('todo:capabilities', async () => {
   catch (e) { return { ok: false, error: String(e instanceof Error ? e.message : e) } }
 })
 ipcMain.handle('todo:evidenceSuggestions', async (_e, id: string) => {
-  try { return { ok: true, candidates: await js.todoEvidenceSuggestions(id) } }
-  catch (e) { return { ok: false, error: String(e instanceof Error ? e.message : e) } }
+  try {
+    const settings = await getSettings()
+    const token = settings.jurisupportTokenEnc
+    const task = await js.getTodo(id)
+    if (!task) throw new Error('할일 원문을 확인할 수 없습니다.')
+    const linkedCase = task.caseId ? await js.getCase(task.caseId) : null
+    if (task.caseId && (!linkedCase || linkedCase.id !== task.caseId)) throw new Error('연결 사건의 조회 권한을 확인할 수 없습니다.')
+    const pairings = task.caseId ? await allJsPairings() : {}
+    const remoteKeys = (settings.sshProfiles ?? []).map((profile) => `remote:${profile.id}:${task.caseId}`)
+    const preferred = settings.caseOpenTarget?.startsWith('remote:') ? `${settings.caseOpenTarget}:${task.caseId}` : undefined
+    const keys = [preferred && remoteKeys.includes(preferred) ? preferred : undefined, task.caseId, ...remoteKeys]
+    const pairing = keys.map((key) => key ? pairings[key] : undefined).find(Boolean)
+    const caseNumber = linkedCase?.caseNumber
+    const folders: { path: string; kind: 'records' | 'drafts'; caseSpecific?: boolean }[] = []
+    for (const kind of ['records', 'drafts'] as const) {
+      const path = pairing?.[kind]
+      if (!path || folders.some((folder) => folder.path === path)) continue
+      // Resolve local symlinks before treating a folder name as proof of the case scope.
+      const actualPath = isRemote(path) ? path : await realpath(path).catch(() => path)
+      folders.push({ path: actualPath, kind, caseSpecific: kind === 'records' && !!caseNumber && containsCaseNumber(basename(isRemote(actualPath) ? parseRemote(actualPath).path : actualPath), caseNumber) })
+    }
+    const [server, local] = await Promise.all([
+      js.todoEvidenceSuggestions(id).then((candidates) => ({ candidates, error: '' })).catch((e) => ({ candidates: [] as js.TodoEvidence[], error: `서버 근거 조회 실패: ${e instanceof Error ? e.message : String(e)}` })),
+      pairedFileEvidence(caseNumber, folders, async (folder) => {
+        if (isRemote(folder)) return rfsList(folder, { refresh: true, prefetch: false, followSymlinks: false })
+        const entries = (await readdir(folder, { withFileTypes: true })).filter((entry) => !entry.name.startsWith('.')).slice(0, FILE_EVIDENCE_ENTRY_LIMIT + 1)
+        return Promise.all(entries.map(async (entry) => {
+          const path = join(folder, entry.name)
+          const info = entry.isFile() ? await stat(path) : undefined
+          return { name: entry.name, path, isDir: !entry.isFile(), mtimeMs: info?.mtimeMs }
+        }))
+      })
+    ])
+    if (token !== (await getSettings()).jurisupportTokenEnc) throw new Error('계정이 변경되었습니다. 다시 조회해 주세요.')
+    const reviewed = new Set((task.evidence ?? []).map((entry) => `${entry.kind}:${entry.id}`))
+    const candidates = [...server.candidates, ...local.candidates.filter((entry) => !reviewed.has(`${entry.kind}:${entry.id}`))]
+    return { ok: true, candidates, error: [server.error, ...local.warnings].filter(Boolean).join(' ') }
+  } catch (e) { return { ok: false, error: String(e instanceof Error ? e.message : e) } }
 })
 ipcMain.handle('js:caseClosurePreview', async (_e, id: string) => {
   try { return { ok: true, preview: await js.caseClosurePreview(id) } }

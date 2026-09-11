@@ -346,6 +346,7 @@ function TodosDashboardContent({
   onPickRecords,
   onBrief,
   onAskClaudeTodoUpdate,
+  onOpenEvidenceFile,
   snapshot, initialFilter = 'open', filterNonce = 0, onGlobalWork
 }: {
   snapshot: SharedTodoSnapshot
@@ -362,6 +363,7 @@ function TodosDashboardContent({
   onPickRecords?: (c: JsCase) => void | Promise<void>
   onBrief?: (c: JsCase) => void
   onAskClaudeTodoUpdate?: (prompt: string) => void
+  onOpenEvidenceFile?: (path: string, label?: string) => void | Promise<void>
 }): JSX.Element {
   const tokenReady = snapshot.hasToken
   const [history, setHistory] = useState<JsTodo[] | null>(null)
@@ -867,7 +869,7 @@ function TodosDashboardContent({
                 </button>
               </div>
               {relatedInput && <p className="todo-warning">추가할 할일에는 기한이 없습니다. 다른 기한·산출물은 별도 할일로 추가하세요.</p>}
-              <TodoDetails todo={todo} parentTitle={snapshot.todos?.find((parent) => parent.id === todo.parentId)?.title} capabilities={capabilities} onChanged={changed} onComplete={() => completeTodo(todo)} />
+              <TodoDetails todo={todo} parentTitle={snapshot.todos?.find((parent) => parent.id === todo.parentId)?.title} capabilities={capabilities} onOpenEvidenceFile={onOpenEvidenceFile} onChanged={changed} onComplete={() => completeTodo(todo)} />
               {relatedDrafts.length > 0 && (
                 <div className="todo-related-list" onClick={(e) => e.stopPropagation()}>
                   {relatedDrafts.map((draft) => (

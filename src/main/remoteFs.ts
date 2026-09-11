@@ -526,6 +526,8 @@ export interface RfsReadProgress {
 
 export interface RfsListOptions {
   refresh?: boolean
+  prefetch?: boolean
+  followSymlinks?: boolean
 }
 
 interface RemoteDirCacheEntry {
@@ -673,11 +675,17 @@ async function resolveRemotePath(sftp: SFTPWrapper, requestedPath: string): Prom
   return current
 }
 
-async function readRemoteDir(profileId: string, path: string): Promise<Entry[]> {
+async function readRemoteDir(profileId: string, path: string, prefetch = true, followSymlinks = true): Promise<Entry[]> {
   const sftp = await getSftp(profileId)
   const cloudPath = oneDriveCloudPath(path)
   let actualPath = path
+  if (!followSymlinks) {
+    actualPath = await resolveRemotePath(sftp, path)
+    const canonical = await new Promise<string>((resolve, reject) => sftp.realpath(actualPath, (error, resolved) => error ? reject(error) : resolve(resolved)))
+    if (canonical.normalize('NFC') !== actualPath.normalize('NFC')) throw new Error('연결 폴더의 실제 경로가 달라 파일 후보 조회를 생략했습니다.')
+  }
   let out: Entry[] = []
+  const excludedLinks = new Set<string>()
   let localListed = false
   try {
     actualPath = await resolveRemotePath(sftp, path)
@@ -691,6 +699,7 @@ async function readRemoteDir(profileId: string, path: string): Promise<Entry[]> 
       const remotePath = posix.join(actualPath, e.filename)
       let isDir = (e.attrs.mode & S_IFMT) === S_IFDIR
       if ((e.attrs.mode & S_IFMT) === S_IFLNK) {
+        if (!followSymlinks) { excludedLinks.add(e.filename); continue }
         isDir = await statIsDir(sftp, remotePath)
       }
       out.push({
@@ -723,13 +732,15 @@ async function readRemoteDir(profileId: string, path: string): Promise<Entry[]> 
   } else {
     out = sortEntryArray(out)
   }
-  prefetchRemoteOneDriveFiles(profileId, out.filter((e) => !e.isDir).map((e) => e.path))
+  out = out.filter((entry) => !excludedLinks.has(entry.name))
+  if (prefetch) prefetchRemoteOneDriveFiles(profileId, out.filter((e) => !e.isDir).map((e) => e.path))
   return out
 }
 
 // 디렉터리 목록. 심볼릭 링크는 stat으로 디렉터리 여부 확인.
 export async function rfsList(uri: string, opts: RfsListOptions = {}): Promise<Entry[]> {
   const { profileId, path } = parseRemote(uri)
+  if (opts.followSymlinks === false) return readRemoteDir(profileId, path, opts.prefetch !== false, false)
   const key = remoteDirCacheKey(profileId, path)
   if (!opts.refresh) {
     const cached = cachedRemoteDir(profileId, path)
@@ -742,7 +753,7 @@ export async function rfsList(uri: string, opts: RfsListOptions = {}): Promise<E
       return cloneEntries(diskCached.entries)
     }
   }
-  const request = readRemoteDir(profileId, path).then((entries) => {
+  const request = readRemoteDir(profileId, path, opts.prefetch !== false).then((entries) => {
     rememberRemoteDir(profileId, path, entries)
     return entries
   })

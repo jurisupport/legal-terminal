@@ -3,6 +3,20 @@ import type { JsTodo, TodoCapabilities, TodoEvidence } from '../env'
 import { kstDateKey, setTodoDate } from '../../../shared/todoSummary'
 import { caseWebUrl } from './caseUtils'
 
+function evidenceFilePath(uri: string): string {
+  if (/[\u0000-\u001f\u007f]/.test(uri)) throw new Error('파일 경로에 제어 문자가 있습니다.')
+  let path = uri
+  if (/^file:\/\//i.test(uri)) {
+    const url = new URL(uri)
+    if (url.username || url.password || url.port) throw new Error('인증 정보가 포함된 파일 주소는 열 수 없습니다.')
+    path = decodeURIComponent(url.pathname)
+    if (url.hostname && url.hostname !== 'localhost') path = `\\\\${url.hostname}${path.replaceAll('/', '\\')}`
+    else if (/^\/[a-z]:\//i.test(path)) path = path.slice(1)
+  }
+  if (/[\u0000-\u001f\u007f]/.test(path) || !/^(?:\/|[a-z]:[\\/]|\\\\|ssh:\/\/)/i.test(path)) throw new Error('현재 뷰어에서 열 수 있는 파일 경로가 없습니다.')
+  return path
+}
+
 export function TodoDialog({ title, onClose, children }: { title: string; onClose: () => void; children: ReactNode }): JSX.Element {
   const ref = useRef<HTMLDialogElement>(null)
   useEffect(() => { ref.current?.showModal() }, [])
@@ -37,7 +51,7 @@ export function TodoResolution({ todo, action, progressText, onClose, onSaved }:
   </TodoDialog>
 }
 
-export default function TodoDetails({ todo, parentTitle, capabilities, onChanged, onComplete }: { parentTitle?: string; todo: JsTodo; capabilities: TodoCapabilities | null; onChanged: () => void; onComplete: () => void }): JSX.Element {
+export default function TodoDetails({ todo, parentTitle, capabilities, onChanged, onComplete, onOpenEvidenceFile }: { onOpenEvidenceFile?: (path: string, label?: string) => void | Promise<void>; parentTitle?: string; todo: JsTodo; capabilities: TodoCapabilities | null; onChanged: () => void; onComplete: () => void }): JSX.Element {
   const [editing, setEditing] = useState(false)
   const [due, setDue] = useState('')
   const [review, setReview] = useState('')
@@ -58,12 +72,12 @@ export default function TodoDetails({ todo, parentTitle, capabilities, onChanged
   const loadEvidence = (): void => { void run(async () => {
     const [r, current] = await Promise.all([window.lt.todo.evidenceSuggestions(todo.id), window.lt.todo.get(todo.id)])
     if (!r.ok || !current.ok || !current.todo) throw new Error(r.error || current.error || '근거 조회 실패')
-    setDetail(current.todo); setCandidates(r.candidates ?? []); setConfirmed(false)
+    setDetail(current.todo); setCandidates(r.candidates ?? []); setConfirmed(false); setError(r.error ?? '')
   }) }
   const markEvidence = (candidate: TodoEvidence, status: 'confirmed' | 'dismissed'): void => { void run(async () => {
     if (!detail) return
     const evidence = [...(detail.evidence ?? []).filter((item) => !(item.kind === candidate.kind && item.id === candidate.id && item.uri === candidate.uri)), { ...candidate, status }]
-    const r = await window.lt.todo.update(todo.id, { evidence })
+    const r = await window.lt.todo.update(todo.id, { evidence, version: detail.version })
     if (!r.ok) throw new Error(r.error || '근거 저장 실패')
     setDetail(r.todo ?? { ...detail, evidence }); setCandidates((rows) => rows?.filter((item) => item !== candidate) ?? []); setConfirmed(status === 'confirmed'); onChanged()
   }) }
@@ -78,6 +92,14 @@ export default function TodoDetails({ todo, parentTitle, capabilities, onChanged
     {todo.parentId && <p className="muted small">상위 할일: {parentTitle || '연결된 상위 할일'}</p>}
     {!!todo.children?.length && <p className="muted small">자식 할일 {todo.children.length}건 · {todo.children.map((child) => child.title).join(', ')}</p>}
     {candidates !== null && <fieldset disabled={busy}><legend>완료 근거 후보</legend><p className="muted small">원문을 확인한 뒤 완료 여부를 결정하세요. 초안·제출대기는 제출 확인이 필요합니다.</p>{!candidates.length && <p>추가 근거 없음 · 완료 여부 확인 불가</p>}{candidates.map((candidate, index) => <div className="todo-evidence" key={`${candidate.kind}-${candidate.id || index}`}><strong>{candidate.label}</strong><span>{candidate.occurredAt && kstDateKey(candidate.occurredAt)} · {candidate.reason || '직접 확인 필요'}</span><div className="todo-actions"><button className="todo-small" onClick={() => {
+      if (candidate.kind === 'file') {
+        if (!candidate.uri || !onOpenEvidenceFile) {
+          setError('현재 뷰어에서 열 수 있는 파일 경로가 없습니다.')
+          return
+        }
+        void Promise.resolve().then(() => onOpenEvidenceFile(evidenceFilePath(candidate.uri!), candidate.label)).catch((e) => setError(String(e)))
+        return
+      }
       const uri = candidate.uri && /^https?:\/\//i.test(candidate.uri) ? candidate.uri : candidate.uri?.startsWith('/') && !candidate.uri.startsWith('//') ? new URL(candidate.uri, 'https://jurisupport.com').href : todo.caseId ? caseWebUrl(todo.caseId) : null
       if (uri) void window.lt.app.openExternal(uri).catch((e) => setError(String(e)))
       else setError('열 수 있는 원본 주소가 없습니다. 근거 ID를 확인하세요.')

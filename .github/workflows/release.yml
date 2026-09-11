@@ -63,6 +63,7 @@ jobs:
         run: |
           npm run typecheck
           npm run verify:todo-summary
+          npm run verify:todo-files
           npm run verify:agent-case-context
 
       - name: Verify native terminal binary
@@ -105,6 +106,7 @@ jobs:
         run: |
           npm run typecheck
           npm run verify:todo-summary
+          npm run verify:todo-files
           npm run verify:agent-case-context
 
       - name: Build renderer/main (electron-vite)
