@@ -674,11 +674,6 @@ function normalizeTodoList(r: unknown): JsTodo[] {
   return single ? [single] : []
 }
 
-function caseKey(c: JsCase): string {
-  return [c.id, c.caseNumber, c.court, c.caseName].filter(Boolean).join('\0')
-}
-
-
 function partyNamesFromCase(c: JsCase, role: string): string {
   return c.parties
     .filter((p) => p.role === role)
@@ -831,52 +826,55 @@ function caseListCacheKey(params: CaseListQuery): string {
   )
 }
 
-async function listCasePage(params: ListCasesParams): Promise<JsCase[]> {
-  return normalizeCaseList(await callTool('list_cases', params as Record<string, unknown>))
+async function listCasePage(params: ListCasesParams, strict = false): Promise<JsCase[]> {
+  const raw = await callTool('list_cases', params as Record<string, unknown>)
+  const cases = normalizeCaseList(raw)
+  if (strict) {
+    const keys = ['cases', 'caseList', 'case_list', 'items', 'data', 'results']
+    const object = asObject(raw)
+    const containers = [object, ...keys.map((key) => asObject(object?.[key]))]
+    const rows = [raw, ...containers.flatMap((container) => container ? keys.map((key) => container[key]) : [])].find(Array.isArray)
+    if (!rows || object?.error || object?.success === false || !Array.isArray(cases) || rows.length !== cases.length || cases.some((c) => !c.id)) {
+      throw new Error('사건 목록 응답을 확인할 수 없습니다. 전체 조회를 다시 시도해 주세요.')
+    }
+  }
+  return cases
 }
 
 async function listCasesFresh(params: CaseListQuery): Promise<JsCase[]> {
-  const epoch = accountEpoch
   const { page, limit, ...filters } = params
-  const hasExplicitPaging = page !== undefined || limit !== undefined
-
-  if (hasExplicitPaging) {
-    return listCasePage({
-      page: page ?? 1,
-      limit: limit ?? CASES_PAGE_LIMIT,
-      ...filters
-    })
+  if (page !== undefined || limit !== undefined) {
+    return listCasePage({ page: page ?? 1, limit: limit ?? CASES_PAGE_LIMIT, ...filters })
   }
-
-  const cases: JsCase[] = []
-  const seen = new Set<string>()
-
+  const cases = new Map<string, JsCase>()
   for (let pageNo = 1; pageNo <= CASES_MAX_PAGES; pageNo++) {
-    let pageCases: JsCase[]
-    try {
-      pageCases = await listCasePage({ page: pageNo, limit: CASES_PAGE_LIMIT, ...filters })
-    } catch (error) {
-      if (pageNo === 1) throw error
-      if (epoch !== accountEpoch) throw error
-      console.warn('[jurisupport] stopped paginating list_cases', error)
-      break
-    }
-
-    if (pageCases.length === 0) break
-
-    let added = 0
-    for (const c of pageCases) {
-      const key = caseKey(c)
-      if (key && seen.has(key)) continue
-      if (key) seen.add(key)
-      cases.push(c)
-      added++
-    }
-
-    if (added === 0 || pageCases.length < CASES_PAGE_LIMIT) break
+    const pageCases = await listCasePage({ page: pageNo, limit: CASES_PAGE_LIMIT, ...filters }, true)
+    const previousSize = cases.size
+    for (const c of pageCases) cases.set(c.id, c)
+    if (pageCases.length && cases.size === previousSize) throw new Error('사건 조회 페이지가 반복되었습니다. 전체 조회를 다시 시도해 주세요.')
+    if (pageCases.length < CASES_PAGE_LIMIT) return [...cases.values()]
   }
+  throw new Error('사건 전체 조회 상한에 도달했습니다. 전체 목록을 확인할 수 없습니다.')
+}
 
-  return cases
+export interface JsHearingSummary { todayCount: number; weekCount: number; fetchedAt: string }
+export async function hearingSummary(): Promise<JsHearingSummary> {
+  const epoch = accountEpoch
+  const raw = await callTool('get_dashboard', {}, epoch)
+  const response = asObject(raw)
+  const dashboard = asObject(response?.data) ?? response
+  const stats = asObject(dashboard?.stats)
+  const todayCount = stats?.todayHearingsCount
+  const weekCount = stats?.upcomingHearingsCount
+  if (response?.success === false || response?.error ||
+      stats?.hearingWindowDays !== 7 ||
+      stats?.hearingTimezone !== 'Asia/Seoul' ||
+      typeof todayCount !== 'number' || !Number.isSafeInteger(todayCount) || todayCount < 0 ||
+      typeof weekCount !== 'number' || !Number.isSafeInteger(weekCount) || weekCount < todayCount) {
+    throw new Error('서버에서 한국 시간 기준 오늘·7일 기일 집계를 확인할 수 없습니다. 서버 업데이트 후 다시 조회해 주세요.')
+  }
+  if (epoch !== accountEpoch) throw new Error('계정이 변경되었습니다. 다시 조회해 주세요.')
+  return { todayCount, weekCount, fetchedAt: new Date().toISOString() }
 }
 
 export async function listCases(params: ListCasesParams = {}): Promise<JsCase[]> {

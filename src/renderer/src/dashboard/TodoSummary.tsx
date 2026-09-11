@@ -1,7 +1,5 @@
-import type { JsCase } from '../env'
 import { filterTodos, kstDateKey, summarizeTodos, type TodoFilter } from '../../../shared/todoSummary'
 import type { TodoSnapshot } from './useTodoSnapshot'
-import { isActiveHearing } from './hearings'
 
 export function TodoSnapshotState({ snapshot }: { snapshot: TodoSnapshot }): JSX.Element {
   return <div className="todo-snapshot-state" role="status">
@@ -20,23 +18,18 @@ export function TodoHeaderBadge({ snapshot, onOpen }: { snapshot: TodoSnapshot; 
   </button>
 }
 
-export default function TodoSummary({ snapshot, onFilter, onGlobalWork, cases, hearingsLoading, hearingsError }: {
+export default function TodoSummary({ snapshot, onFilter, onGlobalWork, hearingSummary, hearingsLoading, hearingsError }: {
   snapshot: TodoSnapshot
   onFilter?: (filter: TodoFilter) => void
   onGlobalWork?: () => void
-  cases?: JsCase[] | null
+  hearingSummary?: { todayCount: number; weekCount: number; fetchedAt: string } | null
   hearingsLoading?: boolean
   hearingsError?: string
 }): JSX.Element {
   const counts = snapshot.todos ? summarizeTodos(snapshot.todos) : null
-  const today = kstDateKey(new Date().toISOString())!
-  const end = new Date(`${today}T00:00:00+09:00`)
-  end.setUTCDate(end.getUTCDate() + 7)
-  const endKey = kstDateKey(end.toISOString())!
-  const hearingDates = cases?.flatMap((c) => (c.hearings ?? []).filter(isActiveHearing).map((h) => kstDateKey(h.dateTime))).filter((d): d is string => !!d)
   const metrics: { label: string; value: number | null; filter?: TodoFilter }[] = [
-    { label: '오늘 기일', value: hearingDates ? hearingDates.filter((d) => d === today).length : null },
-    { label: '앞으로 7일 기일', value: hearingDates ? hearingDates.filter((d) => d >= today && d < endKey).length : null },
+    { label: '오늘 기일', value: hearingSummary?.todayCount ?? null },
+    { label: '앞으로 7일 기일', value: hearingSummary?.weekCount ?? null },
     { label: '기한 도과', value: counts?.overdueCount ?? null, filter: 'overdue' },
     { label: '기한 없음', value: counts?.undatedCount ?? null, filter: 'undated' },
     { label: '재확인 필요', value: counts?.reviewCount ?? null, filter: 'review' }
@@ -45,7 +38,8 @@ export default function TodoSummary({ snapshot, onFilter, onGlobalWork, cases, h
   return <section className="todo-summary" aria-label="오늘 업무 요약">
     <div className="todo-summary-heading"><h2>오늘 요약</h2>{onGlobalWork && <button className="todo-primary" onClick={onGlobalWork}>전체 할일 정리 시작</button>}</div>
     <div className="todo-summary-grid">{metrics.map(({label, value, filter}) => <button key={label} className="todo-metric" disabled={!filter || !onFilter || value === null} onClick={() => filter && onFilter?.(filter)}><span>{label}</span><strong>{value ?? '—'}</strong></button>)}</div>
-    {hearingsError && <p className="dash-err">기일 조회 실패: {hearingsError}{cases ? ' · 이전 조회 결과입니다.' : ''}</p>}
+    {hearingsError && <p className="dash-err">기일 조회 실패: {hearingsError}{hearingSummary ? ' · 이전 조회 결과입니다.' : ''}</p>}
+    {hearingSummary && <p className="muted small">기일 조회 {new Date(hearingSummary.fetchedAt).toLocaleString('ko-KR', { timeZone: 'Asia/Seoul' })} (한국 시간)</p>}
     {hearingsLoading && <p className="muted small">기일을 불러오는 중…</p>}
     <TodoSnapshotState snapshot={snapshot} />
     {counts && counts.openCount === 0 && !snapshot.error && !snapshot.loading && <p className="muted">처리할 할일이 없습니다.</p>}

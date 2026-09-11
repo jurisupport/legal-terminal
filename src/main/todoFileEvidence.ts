@@ -7,6 +7,7 @@ interface FileCandidate {
   kind: 'file'; id: string; uri: string; label: string; occurredAt?: string
   reason: string; status: 'candidate'
 }
+// ponytail: scan at most 200 immediate entries per pairing; use a case-scoped index if deeper inventories are needed.
 export const FILE_EVIDENCE_ENTRY_LIMIT = 200
 export const FILE_EVIDENCE_CANDIDATE_LIMIT = 20
 const supported = new Set(['.pdf', '.hwp', '.hwpx', '.doc', '.docx', '.md', '.txt', '.rtf', '.png', '.jpg', '.jpeg', '.tif', '.tiff', '.xlsx', '.csv'])

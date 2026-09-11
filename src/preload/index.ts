@@ -960,6 +960,7 @@ const api = {
   js: {
     setToken: (token: string): Promise<void> => ipcRenderer.invoke('js:setToken', token),
     hasToken: (): Promise<boolean> => ipcRenderer.invoke('js:hasToken'),
+    hearingSummary: (): Promise<{ ok: boolean; summary?: { todayCount: number; weekCount: number; fetchedAt: string }; error?: string }> => ipcRenderer.invoke('js:hearingSummary'),
     tokenStatus: (): Promise<'ok' | 'missing' | 'locked'> => ipcRenderer.invoke('js:tokenStatus'),
     listCases: (
       params?: {

@@ -46,6 +46,7 @@ function runApp({ root, temp, chosenDir, screenshot }) {
     if (channel === 'js:hasToken') return true
     if (channel === 'js:tokenStatus') return { hasToken: true, error: null }
     if (channel === 'js:listCases') return { ok: true, cases: [] }
+    if (channel === 'js:hearingSummary') return { ok: true, summary: { todayCount: 27, weekCount: 42, fetchedAt: new Date().toISOString() } }
     if (channel === 'todo:list') return { ok: true, todos: args[0]?.type === 'memo' ? [] : rows }
     if (channel === 'todo:capabilities') return { ok: true, capabilities: { queryFields: ['fields', 'includeClosed'], createFields: ['reviewAt', 'priority', 'parentId'], updateFields: ['reviewAt', 'priority', 'parentId', 'evidence'], statusFields: ['childDispositions'], evidenceSuggestions: true } }
     if (channel === 'dialog:pickFolder') return { path: chosenDir, name: 'existing-work' }
@@ -98,6 +99,8 @@ function runApp({ root, temp, chosenDir, screenshot }) {
       }; window.addEventListener('error', event => console.error('SMOKE_RUNTIME_ERROR: '+event.message)); window.addEventListener('unhandledrejection', event => console.error('SMOKE_REJECTION: '+event.reason));`)
       await wait(() => evaluate(`!!document.querySelector('.welcome .todo-summary') && document.querySelector('.workspace-todo-header')?.textContent.includes('기한 도과 1')`), 'Welcome summary and permanent header')
       await capture()
+      await wait(() => evaluate(`Array.from(document.querySelectorAll('.welcome .todo-metric strong')).some(node => node.textContent === '27')`), 'Complete hearing aggregate ready')
+      await evaluate(`smoke.check(Array.from(document.querySelectorAll('.welcome .todo-metric strong')).some(node => node.textContent === '27'), 'Today count is independent of case/list caps'); smoke.check(Array.from(document.querySelectorAll('.welcome .todo-metric strong')).some(node => node.textContent === '42'), 'Seven-day count is complete')`)
       await evaluate(`smoke.check(document.querySelector('.welcome .todo-summary').textContent.includes('통합 검증 도과 할일'), 'Welcome overdue item'); smoke.click('.workspace-todo-header .header-btn')`)
       await wait(() => evaluate(`document.querySelectorAll('.todo-card').length === 1 && document.querySelector('.todo-card').textContent.includes('통합 검증 도과 할일')`), 'Header opens overdue filter')
       await evaluate(`smoke.textButton('기한 없음')`)
@@ -152,7 +155,7 @@ function runApp({ root, temp, chosenDir, screenshot }) {
       assert.deepEqual([...new Set(unexpected)], [])
       assert.deepEqual(rendererErrors, [])
       await capture()
-      console.log('TODO_APP_RESULT ' + JSON.stringify({ checks: 18, ipcCalls: calls.length, actualWorkspaceSaveReload: true, rendererErrors, screenshot }))
+      console.log('TODO_APP_RESULT ' + JSON.stringify({ checks: 20, ipcCalls: calls.length, actualWorkspaceSaveReload: true, rendererErrors, screenshot }))
       app.exit(0)
     } catch (error) {
       await capture()

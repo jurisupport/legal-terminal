@@ -59,14 +59,14 @@ import MarkdownEditor, {
 import { markdownToPlainText, writeMarkdownClipboard } from './markdownClipboard'
 import FindBar from './search/FindBar'
 import CasesDashboard, { JS_TOKEN_UPDATED_EVENT } from './dashboard/CasesDashboard'
-import { clearCaseListCache, listCasesCached } from './dashboard/caseListCache'
+import { clearCaseListCache } from './dashboard/caseListCache'
 import UpcomingHearings from './dashboard/UpcomingHearings'
 import { isActiveHearing } from './dashboard/hearings'
 import TodosDashboard from './dashboard/TodosDashboard'
 import TodayTodos from './dashboard/TodayTodos'
 import TodoSummary, { TodoHeaderBadge } from './dashboard/TodoSummary'
 import { useTodoSnapshot, type TodoSnapshot } from './dashboard/useTodoSnapshot'
-import { kstDateKey, type TodoFilter } from '../../shared/todoSummary'
+import type { TodoFilter } from '../../shared/todoSummary'
 import { buildAgentWorkspaceContext, resolveAgentContextKind, type AgentContextKind, type AgentWorkspaceContext } from '../../shared/agentWorkspaceContext'
 import HearingRecordPanel, {
   buildHearingRecordTitle,
@@ -5763,30 +5763,25 @@ export default function App(): JSX.Element {
   // 토큰 변경 등으로 좌측 '다가오는 기일' 패널을 새로고침하기 위한 nonce
   const [jsNonce, setJsNonce] = useState(0)
   const [todoNonce, setTodoNonce] = useState(0)
-  const taskSnapshot = useTodoSnapshot(todoNonce)
-  const refreshTodoSummary = useCallback(() => { clearCaseListCache(); taskSnapshot.refresh() }, [taskSnapshot.refresh])
-  const todoSnapshot = { ...taskSnapshot, refresh: refreshTodoSummary }
-  const summaryQueryKey = useRef('')
+  const todoSnapshot = useTodoSnapshot(todoNonce)
   const [todoFilter, setTodoFilter] = useState<TodoFilter>('open')
   const [todoFilterNonce, setTodoFilterNonce] = useState(0)
   const [contextAppVersion, setContextAppVersion] = useState<string>()
-  const [summaryCases, setSummaryCases] = useState<JsCase[] | null>(null)
+  const [hearingSummary, setHearingSummary] = useState<{todayCount: number; weekCount: number; fetchedAt: string} | null>(null)
   const [summaryHearingsError, setSummaryHearingsError] = useState('')
   const [summaryHearingsLoading, setSummaryHearingsLoading] = useState(false)
   useEffect(() => { void window.lt.app.info().then((info) => setContextAppVersion(info.version)).catch(() => {}) }, [])
   useEffect(() => {
     let cancelled = false
     if (todoSnapshot.hasToken !== true) {
-      setSummaryCases(null)
+      setHearingSummary(null)
+      setSummaryHearingsLoading(false)
       return
     }
     setSummaryHearingsLoading(true)
-    const queryKey = `${jsNonce}:${kstDateKey(new Date())}`
-    const refresh = queryKey !== summaryQueryKey.current
-    summaryQueryKey.current = queryKey
-    void listCasesCached({ refresh }).then((result) => {
+    void window.lt.js.hearingSummary().then((result) => {
       if (cancelled) return
-      if (result.ok) { setSummaryCases(result.cases ?? []); setSummaryHearingsError('') }
+      if (result.ok && result.summary) { setHearingSummary(result.summary); setSummaryHearingsError('') }
       else setSummaryHearingsError(result.error ?? '기일을 불러오지 못했습니다.')
     }).catch((error) => { if (!cancelled) setSummaryHearingsError(String(error)) })
       .finally(() => { if (!cancelled) setSummaryHearingsLoading(false) })
@@ -5809,7 +5804,7 @@ export default function App(): JSX.Element {
     setMode('todos')
   }
   const todoSummary = <TodoSummary snapshot={todoSnapshot} onFilter={openTodoSummary}
-    onGlobalWork={() => void openGlobalTodoWork()} cases={summaryCases}
+    onGlobalWork={() => void openGlobalTodoWork()} hearingSummary={hearingSummary}
     hearingsLoading={summaryHearingsLoading} hearingsError={summaryHearingsError} />
 
   // 설정창에서 JuriSupport 토큰을 바꾸면 기일·할 일 패널도 새로고침한다.

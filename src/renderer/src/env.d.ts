@@ -745,6 +745,7 @@ export interface LtApi {
   js: {
     setToken: (token: string) => Promise<void>
     hasToken: () => Promise<boolean>
+    hearingSummary: () => Promise<{ ok: boolean; summary?: { todayCount: number; weekCount: number; fetchedAt: string }; error?: string }>
     tokenStatus: () => Promise<'ok' | 'missing' | 'locked'>
     listCases: (params?: {
       page?: number

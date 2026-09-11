@@ -178,3 +178,43 @@ transport=adapter(()=>todo('legacy',{notes:'original',version:2}),legacyTools)
 await assert.rejects(()=>transport.api.appendTodoProgress('legacy','new progress'),/서버 업데이트/)
 assert.equal(transport.calls.some(c=>c.name==='update_task'),false)
 console.log('legacy simple status/date writes remain available; unsafe legacy append is rejected')
+
+// Full case-list consumers must never cache truncated lists as complete results.
+for (const mode of ['late-error', 'repeat', 'cap', 'malformed', 'missing-id']) {
+  transport=adapter((_name,args)=>{
+    if(mode==='malformed')return {message:'not a case list'}
+    if(mode==='missing-id')return [{caseName:'no identity'}]
+    if(mode==='late-error'&&args.page===2)throw new Error('synthetic page two failure')
+    return Array.from({length:50},(_,i)=>({id:`${mode==='repeat'?'same':args.page}-${i}`,caseName:`page ${args.page}`}))
+  })
+  await assert.rejects(()=>transport.api.listCases(),undefined,mode)
+}
+let broken=false
+transport=adapter((_name,args)=>{
+  if(broken&&args.page===2)throw new Error('partial refresh')
+  return args.page===1?Array.from({length:50},(_,i)=>({id:String(i)})): [{id:'last'}]
+})
+assert.equal((await transport.api.listCases()).length,51)
+broken=true;await assert.rejects(()=>transport.api.listCases({refresh:true}),/partial refresh/)
+assert.equal((await transport.api.listCases()).length,51,'failed refresh must preserve last complete cache')
+transport=adapter((_name,args)=>Array.from({length:50},(_,i)=>({id:`${args.page}-${i}`})))
+assert.equal((await transport.api.listCases({page:2,limit:50})).length,50)
+assert.equal(transport.calls.length,1,'explicit paging must remain one page')
+const stats={todayHearingsCount:3,upcomingHearingsCount:8,hearingWindowDays:7,hearingTimezone:'Asia/Seoul'}
+transport=adapter(name=>{assert.equal(name,'get_dashboard');return {stats}})
+const hearing=await transport.api.hearingSummary()
+assert.equal(hearing.todayCount,3);assert.equal(hearing.weekCount,8);assert.ok(Number.isFinite(Date.parse(hearing.fetchedAt)))
+assert.equal(transport.calls.length,1,'summary must not perform per-case detail fetches')
+for(const invalid of [{}, {stats:{...stats,hearingWindowDays:undefined}}, {stats:{...stats,hearingTimezone:'UTC'}}, {stats:{...stats,todayHearingsCount:-1}}, {stats:{...stats,upcomingHearingsCount:2}}, {stats:{...stats,upcomingHearingsCount:8.5}}, {stats:{...stats,todayHearingsCount:'3'}}]){
+  transport=adapter(()=>invalid)
+  await assert.rejects(()=>transport.api.hearingSummary(),/기일 집계/)
+}
+transport=adapter(()=>({stats:{...stats,todayHearingsCount:0,upcomingHearingsCount:0}}))
+assert.equal((await transport.api.hearingSummary()).todayCount,0)
+let releaseHearing
+transport=adapter(async()=>{await new Promise(resolve=>{releaseHearing=resolve});return {stats}})
+const oldHearing=transport.api.hearingSummary()
+while(!releaseHearing)await new Promise(resolve=>setImmediate(resolve))
+await transport.api.setToken('changed-during-summary');releaseHearing()
+await assert.rejects(()=>oldHearing,/계정/)
+console.log('case pagination fails honestly; authoritative KST seven-day hearing summary validates contract, zeroes and account isolation')

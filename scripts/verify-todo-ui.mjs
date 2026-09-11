@@ -50,7 +50,7 @@ window.lt = {
  js:{listCases:async()=>({ok:true,cases:[{id:'case-2',caseName:'이관 대상 사건',status:'active'}]}),caseClosurePreview:async()=>({ok:true,preview:{id:'case-1',version:3,status:'active',engagementStatus:'unknown',tasks:rows.filter(r=>r.caseId),blocked:false}}),updateCaseStatus:async(...args)=>{window.calls.push(['caseStatus',...args]);return {ok:true}},updateCaseEngagement:async(...args)=>{window.calls.push(['engagement',...args]);return {ok:true}}},
  app:{openExternal:async(uri)=>window.calls.push(['open',uri])}
 }
-function Harness(){const [tick,setTick]=useState(0);const [filter,setFilter]=useState('open');const snapshot={todos:[...rows],loading:false,error:'',hasToken:true,fetchedAt:'2026-09-12T00:00:00Z',refresh:()=>setTick(t=>t+1)};return <div style={{height:'100vh',overflow:'auto'}}><TodoSummary snapshot={snapshot} onFilter={setFilter} cases={[]}/><TodosDashboard onOpenEvidenceFile={(file,label)=>window.calls.push(['openFile',file,label])} snapshot={snapshot} initialFilter={filter} filterNonce={tick}/></div>}
+function Harness(){const [tick,setTick]=useState(0);const [filter,setFilter]=useState('open');const [hearingState,setHearingState]=useState({summary:{todayCount:27,weekCount:42,fetchedAt:'2026-09-12T00:00:00Z'},error:''});window.setHearingState=setHearingState;const snapshot={todos:[...rows],loading:false,error:'',hasToken:true,fetchedAt:'2026-09-12T00:00:00Z',refresh:()=>setTick(t=>t+1)};return <div style={{height:'100vh',overflow:'auto'}}><TodoSummary snapshot={snapshot} onFilter={setFilter} hearingSummary={hearingState.summary} hearingsError={hearingState.error}/><TodosDashboard onOpenEvidenceFile={(file,label)=>window.calls.push(['openFile',file,label])} snapshot={snapshot} initialFilter={filter} filterNonce={tick}/></div>}
 createRoot(document.getElementById('root')).render(<Harness/>);
 window.uiCheck = async () => {
  const wait=async(fn)=>{for(let i=0;i<100;i++){if(fn())return;await new Promise(r=>setTimeout(r,20))}throw Error('Timed out: '+fn)};
@@ -59,6 +59,11 @@ window.uiCheck = async () => {
  const input=async(el,value)=>{const proto=el.tagName==='SELECT'?HTMLSelectElement.prototype:el.tagName==='TEXTAREA'?HTMLTextAreaElement.prototype:HTMLInputElement.prototype;Object.getOwnPropertyDescriptor(proto,'value').set.call(el,value);el.dispatchEvent(new Event(el.tagName==='SELECT'?'change':'input',{bubbles:true}));await new Promise(r=>setTimeout(r,30))};
  let checks=0; const check=(condition,message)=>{checks++;if(!condition)throw Error(message)};
  await wait(()=>document.querySelectorAll('.todo-card').length===3);
+ const hearingMetric=(label)=>[...document.querySelectorAll('.todo-metric')].find(e=>e.querySelector('span').textContent===label).querySelector('strong').textContent;
+ check(hearingMetric('오늘 기일')==='27','Complete today aggregate exceeds twenty');check(hearingMetric('앞으로 7일 기일')==='42','Complete seven-day aggregate exceeds twenty');
+ window.setHearingState({summary:{todayCount:27,weekCount:42,fetchedAt:'2026-09-12T00:00:00Z'},error:'합성 기일 조회 실패'});await wait(()=>document.querySelector('.todo-summary').textContent.includes('이전 조회 결과입니다.'));check(hearingMetric('오늘 기일')==='27','Failed hearing refresh retains aggregate with stale warning');
+ window.setHearingState({summary:null,error:'합성 기일 조회 실패'});await wait(()=>hearingMetric('오늘 기일')==='—');check(hearingMetric('앞으로 7일 기일')==='—','Missing hearing aggregate is not zero');
+ window.setHearingState({summary:{todayCount:27,weekCount:42,fetchedAt:'2026-09-12T00:00:00Z'},error:''});await wait(()=>hearingMetric('오늘 기일')==='27');
  check(!window.calls.some(c=>c[0]==='list'),'Open snapshot must not be independently fetched');
  await click('기한 없음'); check(document.querySelectorAll('.todo-card').length===1,'Undated filter');
  await click('전체 열린 할일');
