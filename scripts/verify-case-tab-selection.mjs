@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs'
 import vm from 'node:vm'
 import ts from 'typescript'
 import { closeTab } from '../src/renderer/src/tabSelection.ts'
+import { resolveAgentContextKind } from '../src/shared/agentWorkspaceContext.ts'
 
 const app = readFileSync(new URL('../src/renderer/src/App.tsx', import.meta.url), 'utf8')
 const parsed = ts.createSourceFile('App.tsx', app, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX)
@@ -30,6 +31,26 @@ const caseHelpers = [
 const actual = loadHandlers(caseHelpers)
 const folderCase = { drafts: '/drafts/홍길동', name: '홍길동' }
 const linkedCase = { ...folderCase, meta: { jsId: 'case-1', caseNumber: '2026가단1' } }
+const globalCase = { ...folderCase, meta: { contextKind: 'global' } }
+assert.notEqual(actual.caseTabFromCurrentCase(globalCase).id, actual.caseTabFromCurrentCase(folderCase).id)
+assert.equal(actual.upsertCaseTab([actual.caseTabFromCurrentCase(globalCase)], actual.caseTabFromCurrentCase(folderCase)).length, 2,
+  'global work and a folder case using the same cwd must remain separate')
+let resumed
+const resumeHandlers = loadHandlers(['currentCaseFromTerm', 'openPastSession'], {
+  currentCase: linkedCase,
+  termTabs: [{ id: 'wrong-existing', kind: 'agent', cwd: folderCase.drafts, resumeSessionId: 'same-session', jsId: 'case-1', caseNumber: '2026가단1' }],
+  resolveAgentContextKind,
+  termSide: () => 'right', isAgentTab: (term) => term.kind === 'agent',
+  selectTerm: () => assert.fail('must not reuse another scope'), newId: () => 'resumed',
+  resolveCaseTabId: () => 'scope-tab', currentCaseTabIdForNewTab: () => 'scope-tab',
+  setTermTabs: (update) => { resumed = update([])[0] }, setActiveTerm: () => {},
+  setWorkActive: () => {}, termKeyOf: (id) => id, registerCaseTabFromTerm: () => {}, preloadPastSessions: () => {}
+})
+resumeHandlers.openPastSession('same-session', folderCase.drafts, '전체 정리', {
+  id: 'global-source', cwd: folderCase.drafts, title: '전체 정리', contextKind: 'global'
+})
+assert.equal(resumed.contextKind, 'global', 'resume keeps the chosen source scope')
+assert.equal(resumed.jsId, undefined, 'same-cwd current case cannot overwrite global source')
 const folderTab = actual.caseTabFromCurrentCase(folderCase)
 const linkedTab = actual.caseTabFromCurrentCase(linkedCase)
 assert.notEqual(folderTab.id, linkedTab.id, 'reproduce the legacy folder/dashboard identity mismatch')

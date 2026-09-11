@@ -44,7 +44,9 @@ import type {
   AgentWorktreeForkInput,
   AgentWorktreeForkResult
 } from './agent-types'
-import { prependAgentContext } from './agentPrompt'
+import { currentAgentContext, prependAgentContext } from './agentPrompt'
+import type { AgentWorkspaceContext } from '../../shared/agentWorkspaceContext'
+import { listTodos } from '../jurisupport'
 import { codexTurnRunStatus, codexWorkStepStatus } from './agentProgress'
 import {
   buildSshArgs as buildAgentSshArgs,
@@ -109,6 +111,7 @@ interface AgentSession {
   source: AgentSource
   ssh?: AgentSshConn
   context?: string
+  workspaceContext?: AgentWorkspaceContext
   authStatus?: AgentAuthStatus
   commandProbe?: AbortController
   slashCommands?: AgentSlashCommand[]
@@ -4057,6 +4060,7 @@ export function createAgentSession(opts: AgentCreateOptions, webContents: WebCon
   const existing = sessions.get(opts.id)
   if (existing) {
     existing.context = opts.context?.trim() || existing.context
+    if (opts.workspaceContext) existing.workspaceContext = opts.workspaceContext
     attach(existing, webContents)
     emit(existing, {
       type: 'session:init',
@@ -4098,6 +4102,7 @@ export function createAgentSession(opts: AgentCreateOptions, webContents: WebCon
     source,
     ssh: opts.ssh,
     context: opts.context?.trim() || undefined,
+    workspaceContext: opts.workspaceContext,
     authStatus: provider === 'codex' || (source === 'ssh' && provider === 'claude') ? 'checking' : undefined,
     viewers: new Map(),
     pendingPermissions: new Map(),
@@ -4157,7 +4162,8 @@ export function getAgentSessionSnapshot(sessionId: string): AgentSessionSnapshot
       title: session.title,
       provider: session.provider,
       source: session.source,
-      resumeSessionId: session.resumeSessionId
+      resumeSessionId: session.resumeSessionId,
+      workspaceContext: session.workspaceContext
     }
   }
 }
@@ -4677,7 +4683,8 @@ function startAgentTurn(session: AgentSession, input: AgentSendInput): void {
   })
   emit(session, { type: 'status', sessionId, status: 'working' })
 
-  const prompt = prependAgentContext(session.context, renderPrompt(input))
+  const workspaceContext = input.workspaceContext ?? session.workspaceContext
+  if (workspaceContext) session.workspaceContext = workspaceContext
   void (async () => {
     let contextUsageTimer: NodeJS.Timeout | undefined
     let contextUsageActive = true
@@ -4686,6 +4693,11 @@ function startAgentTurn(session: AgentSession, input: AgentSendInput): void {
     try {
       await session.usageHydration
       if (abortController.signal.aborted || session.running !== abortController) return
+      const context = workspaceContext
+        ? await currentAgentContext(workspaceContext, (caseId) => listTodos({ caseId, openOnly: true, enrichCaseDetails: false }), abortController.signal)
+        : session.context
+      if (abortController.signal.aborted || session.running !== abortController || sessions.get(session.id) !== session) return
+      const prompt = prependAgentContext(context, renderPrompt(input))
       if (session.provider === 'claude') {
         session.claudeTurnUsageBase = { ...session.tokenUsage }
         session.claudeTurnUsage = undefined

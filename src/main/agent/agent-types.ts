@@ -1,3 +1,5 @@
+import type { AgentWorkspaceContext } from '../../shared/agentWorkspaceContext'
+
 export type AgentPermissionMode = 'ask' | 'plan' | 'acceptEdits' | 'bypassPermissions' | 'dontAsk'
 
 export type AgentProvider = 'claude' | 'codex'
@@ -52,6 +54,7 @@ export interface AgentCreateOptions {
   source?: AgentSource
   ssh?: AgentSshConn
   context?: string
+  workspaceContext?: AgentWorkspaceContext
 }
 
 export interface AgentWorktreeForkInput {
@@ -72,6 +75,7 @@ export interface AgentSessionSnapshot {
   provider: AgentProvider
   source: AgentSource
   resumeSessionId?: string
+  workspaceContext?: AgentWorkspaceContext
 }
 
 export interface AgentSessionSnapshotResult extends AgentCommandResult {
@@ -114,6 +118,7 @@ export interface AgentSendInput {
   attachments?: AgentAttachment[]
   permissionMode?: AgentPermissionMode
   delivery?: 'normal' | 'queue' | 'steer'
+  workspaceContext?: AgentWorkspaceContext
 }
 
 export interface AgentAuthInput {

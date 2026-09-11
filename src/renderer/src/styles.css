@@ -72,7 +72,7 @@ body {
 /* ── 전체 셸 그리드 (탐색기 + 좌우 작업 영역) ── */
 .shell {
   display: grid;
-  grid-template-rows: 1fr 22px;
+  grid-template-rows: auto minmax(0, 1fr) 22px;
   height: 100vh;
 }
 /* 기본: 액티비티 | 탐색기 | 조절선 | 왼쪽 작업 탭 | 조절선 | 오른쪽 작업 탭 */
@@ -82,6 +82,7 @@ body {
     minmax(220px, var(--left-pane-width, 1fr)) 4px
     minmax(220px, 1fr);
   grid-template-areas:
+    'todoheader todoheader todoheader todoheader todoheader todoheader'
     'activity side sidesplit workleft worksplit workright'
     'status   status status    status   status    status';
 }
@@ -93,6 +94,7 @@ body {
     minmax(180px, var(--evidence-pane-width, 280px)) 4px
     minmax(220px, 1fr);
   grid-template-areas:
+    'todoheader todoheader todoheader todoheader todoheader todoheader todoheader todoheader'
     'activity side sidesplit workleft worksplit evid evidsplit workright'
     'status   status status    status   status    status status    status';
 }
@@ -101,6 +103,7 @@ body {
     48px minmax(220px, var(--left-pane-width, 1fr)) 4px
     minmax(220px, 1fr);
   grid-template-areas:
+    'todoheader todoheader todoheader todoheader'
     'activity workleft worksplit workright'
     'status   status   status    status';
 }
@@ -110,6 +113,7 @@ body {
     minmax(180px, var(--evidence-pane-width, 280px)) 4px
     minmax(220px, 1fr);
   grid-template-areas:
+    'todoheader todoheader todoheader todoheader todoheader todoheader'
     'activity workleft worksplit evid evidsplit workright'
     'status   status   status    status status    status';
 }
@@ -7303,3 +7307,51 @@ button.agent-attachment-chip {
   word-break: break-all;
   margin: 0;
 }
+
+/* Shared task summary and review controls */
+.workspace-todo-header { grid-area: todoheader; display: flex; justify-content: flex-end; align-items: center; gap: 8px; padding: 5px 10px; min-height: 34px; border-bottom: 1px solid var(--border); background: var(--bg-alt); }
+.todo-work-pane { height: 100%; min-height: 0; overflow: auto; }
+.todo-work-pane > .todo-dash { height: auto; overflow: visible; }
+.todo-work-pane .todo-list { overflow: visible; }
+.todo-summary { margin: 12px; padding: 16px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-alt); }
+.todo-summary-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.todo-summary h2, .todo-dialog h2 { margin: 0 0 8px; font-size: 17px; }
+.todo-summary-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 8px; }
+.todo-metric { display: flex; flex-direction: column; text-align: left; gap: 10px; padding: 12px; background: var(--bg); color: var(--fg); border: 1px solid var(--border); border-radius: 6px; cursor: pointer; }
+.todo-metric:disabled { cursor: default; opacity: 1; }
+.todo-metric strong { font-size: 23px; }
+.todo-metric span { font-size: 12px; }
+.todo-snapshot-state { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 8px 10px; color: var(--fg-muted); font-size: 11px; line-height: 1.5; }
+.todo-snapshot-state span { flex: 1; }
+.todo-summary-overdue { margin-top: 12px; font-size: 12px; }
+.todo-summary-overdue ul { padding: 0; list-style: none; }
+.todo-summary-overdue li { display: flex; justify-content: space-between; gap: 10px; padding: 6px 0; border-bottom: 1px solid var(--border); }
+.todo-summary-overdue li span { overflow-wrap: anywhere; }
+.todo-summary-overdue small { color: var(--fg-muted); }
+.todo-filters { display: flex; flex-wrap: wrap; gap: 5px; padding: 8px 10px; }
+.todo-filter-count { display: flex; justify-content: space-between; align-items: center; padding: 4px 10px; color: var(--fg-muted); font-size: 12px; }
+.todo-list { display: flex; flex-direction: column; }
+.todo-group { min-width: 0; }
+.todo-group-heading { display: flex; align-items: center; gap: 8px; padding: 8px 0; }
+.todo-group-toggle { flex: 1; min-width: 0; border: 0; text-align: left; background: transparent; color: var(--fg); cursor: pointer; overflow-wrap: anywhere; }
+.todo-group-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(300px, 100%), 1fr)); gap: 10px; }
+fieldset.todo-card { margin: 0; min-width: 0; }
+.todo-tags { display: flex; flex-wrap: wrap; gap: 4px; }
+.todo-tags span { border: 1px solid #8c7548; border-radius: 3px; padding: 2px 5px; font-size: 10px; color: #efcc8c; }
+.todo-create { flex-wrap: wrap; margin: 0; border: 0; border-bottom: 1px solid var(--border); min-width: 0; }
+.todo-create-input { min-width: 180px; }
+.todo-create label, .todo-details label, .todo-dialog label { display: flex; align-items: center; gap: 6px; font-size: 12px; flex-wrap: wrap; }
+.todo-create input[type=date], .todo-create select, .todo-details input, .todo-details select, .todo-dialog input, .todo-dialog select, .todo-dialog textarea { background: var(--bg); color: var(--fg); border: 1px solid var(--border); border-radius: 4px; padding: 6px; max-width: 100%; min-width: 0; color-scheme: dark; }
+.todo-warning { color: #efcc8c; font-size: 11px; margin: 4px 0; }
+.todo-details { display: flex; flex-direction: column; gap: 6px; }
+.todo-details fieldset, .todo-dialog fieldset { min-width: 0; border: 1px solid var(--border); border-radius: 4px; margin: 5px 0; padding: 10px; }
+.todo-details fieldset > label, .todo-dialog fieldset > label { margin-bottom: 8px; }
+.todo-evidence { display: flex; flex-direction: column; gap: 8px; border-bottom: 1px solid var(--border); padding: 10px 0; font-size: 12px; overflow-wrap: anywhere; }
+.todo-dialog { width: min(640px, 90vw); max-height: 85vh; overflow: auto; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-alt); color: var(--fg); padding: 20px; }
+.todo-dialog::backdrop { background: #0009; }
+.todo-disposition { display: flex; justify-content: space-between; gap: 10px; margin: 10px 0; }
+.todo-disposition span { flex: 1; overflow-wrap: anywhere; }
+.todo-case-task { padding: 8px 0; border-bottom: 1px solid var(--border); }
+.todo-case-task label { margin: 6px 0; }
+.todo-dialog textarea { width: 100%; min-height: 70px; }
+.todo-summary button:focus-visible, .todo-dash button:focus-visible, .todo-dash input:focus-visible, .todo-dialog :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }

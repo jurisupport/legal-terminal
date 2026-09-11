@@ -59,6 +59,12 @@ jobs:
       - name: Install dependencies
         run: npm ci --include=optional
 
+      - name: Verify task management
+        run: |
+          npm run typecheck
+          npm run verify:todo-summary
+          npm run verify:agent-case-context
+
       - name: Verify native terminal binary
         run: npm run verify:node-pty
 
@@ -94,6 +100,12 @@ jobs:
 
       - name: Verify native terminal binary
         run: npm run verify:node-pty:win
+
+      - name: Verify task management
+        run: |
+          npm run typecheck
+          npm run verify:todo-summary
+          npm run verify:agent-case-context
 
       - name: Build renderer/main (electron-vite)
         run: npm run build

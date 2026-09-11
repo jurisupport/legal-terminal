@@ -1,3 +1,4 @@
+import type { AgentWorkspaceContext } from '../shared/agentWorkspaceContext'
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
 
 // 렌더러에 노출되는 좁은 API 표면. 이후 마일스톤에서
@@ -82,6 +83,7 @@ interface PtyCreateOpts {
 }
 
 interface TerminalTabPayload {
+  contextKind?: 'case' | 'global' | 'folder'
   id: string
   title: string
   kind?: 'terminal' | 'agent'
@@ -149,6 +151,7 @@ interface WorkspaceDocTabPayload {
 }
 
 interface WorkspaceCaseTabPayload {
+  contextKind?: 'case' | 'global' | 'folder'
   id: string
   name: string
   drafts: string
@@ -156,6 +159,7 @@ interface WorkspaceCaseTabPayload {
   suggestedRecords?: string
   suggestedRecordOptions?: FolderMatchSuggestion[]
   meta?: {
+    contextKind?: 'case' | 'global' | 'folder'
     jsId?: string
     court?: string
     caseNumber?: string
@@ -450,7 +454,49 @@ interface JsTodoProgress {
   cwd?: string
 }
 
+interface TodoEvidence {
+  kind: 'document' | 'progress' | 'event' | 'file'
+  id?: string
+  uri?: string
+  label: string
+  occurredAt?: string
+  reason?: string
+  status: 'candidate' | 'confirmed' | 'dismissed'
+}
+interface TodoStatusOptions {
+  childDispositions?: { id: string; action: 'complete' | 'close' | 'keep'; reason?: string }[]
+  version?: number
+}
+interface CaseTaskDisposition {
+  id: string
+  action: 'complete' | 'close' | 'keep' | 'transfer'
+  targetCaseId?: string
+  reason?: string
+  version?: number
+}
+interface CaseClosurePreview {
+  id: string
+  version: number
+  status: string
+  engagementStatus: string
+  tasks: JsTodo[]
+  blocked: boolean
+}
+interface TodoCapabilities {
+  queryFields: string[]
+  createFields: string[]
+  updateFields: string[]
+  statusFields: string[]
+  evidenceSuggestions: boolean
+  caseClosure: boolean
+}
 interface JsTodo {
+  type?: 'todo' | 'memo'
+  reviewAt?: string | null
+  parentId?: string | null
+  children?: { id: string; title: string; status: string }[]
+  evidence?: TodoEvidence[]
+  version?: number
   id: string
   title: string
   status: string
@@ -471,6 +517,17 @@ interface JsTodo {
 }
 
 interface ListTodosParams {
+  openOnly?: boolean
+  enrichCaseDetails?: boolean
+  type?: 'todo' | 'memo'
+  fields?: 'compact' | 'full'
+  dueBefore?: string
+  dueAfter?: string
+  hasDueDate?: boolean
+  updatedBefore?: string
+  sortBy?: 'dueDate' | 'createdAt' | 'updatedAt'
+  sortOrder?: 'asc' | 'desc'
+  includeClosed?: boolean
   page?: number
   limit?: number
   search?: string
@@ -479,7 +536,11 @@ interface ListTodosParams {
   includeArchived?: boolean
 }
 
-interface TodoMutationInput {
+interface TodoMutationInput extends TodoStatusOptions {
+  type?: 'todo' | 'memo'
+  reviewAt?: string | null
+  parentId?: string | null
+  evidence?: TodoEvidence[]
   title?: string
   status?: string
   priority?: string
@@ -495,6 +556,7 @@ interface TodoMutationInput {
 }
 
 interface TodoTerminalContext {
+  contextKind?: 'case' | 'global' | 'folder'
   terminalId?: string
   cwd?: string
   jsId?: string
@@ -541,6 +603,7 @@ interface AgentAttachment {
 }
 
 interface AgentCreateOptions {
+  workspaceContext?: AgentWorkspaceContext
   id: string
   cwd: string
   title?: string
@@ -568,6 +631,7 @@ interface AgentWorktreeForkResult extends AgentCommandResult {
 }
 
 interface AgentSessionSnapshot {
+  workspaceContext?: AgentWorkspaceContext
   id: string
   cwd: string
   title?: string
@@ -610,6 +674,7 @@ interface AgentReasoningEffortOption {
 }
 
 interface AgentSendInput {
+  workspaceContext?: AgentWorkspaceContext
   text: string
   displayText?: string
   quote?: AgentMessageQuote
@@ -908,9 +973,14 @@ const api = {
     ): Promise<{ ok: boolean; cases?: unknown[]; error?: string }> =>
       ipcRenderer.invoke('js:listCases', params ?? {}),
     getCase: (id: string): Promise<{ ok: boolean; case?: unknown; error?: string }> =>
-      ipcRenderer.invoke('js:getCase', id)
+      ipcRenderer.invoke('js:getCase', id),
+    caseClosurePreview: (id: string): Promise<{ ok: boolean; preview?: CaseClosurePreview; error?: string }> => ipcRenderer.invoke('js:caseClosurePreview', id),
+    updateCaseStatus: (id: string, status: string, taskDispositions?: CaseTaskDisposition[], version?: number): Promise<{ ok: boolean; case?: unknown; error?: string }> => ipcRenderer.invoke('js:updateCaseStatus', { id, status, taskDispositions, version }),
+    updateCaseEngagement: (id: string, engagementStatus: string, taskDispositions?: CaseTaskDisposition[], version?: number): Promise<{ ok: boolean; case?: unknown; error?: string }> => ipcRenderer.invoke('js:updateCaseEngagement', { id, engagementStatus, taskDispositions, version })
   },
   todo: {
+    capabilities: (): Promise<{ ok: boolean; capabilities?: TodoCapabilities; error?: string }> => ipcRenderer.invoke('todo:capabilities'),
+    evidenceSuggestions: (id: string): Promise<{ ok: boolean; candidates?: TodoEvidence[]; error?: string }> => ipcRenderer.invoke('todo:evidenceSuggestions', id),
     list: (params?: ListTodosParams): Promise<{ ok: boolean; todos?: JsTodo[]; error?: string }> =>
       ipcRenderer.invoke('todo:list', params ?? {}),
     get: (id: string): Promise<{ ok: boolean; todo?: JsTodo | null; error?: string }> =>
@@ -925,11 +995,12 @@ const api = {
     complete: (
       id: string,
       progressText?: string,
-      context?: TodoTerminalContext
+      context?: TodoTerminalContext,
+      options?: TodoStatusOptions
     ): Promise<{ ok: boolean; todo?: JsTodo | null; error?: string }> =>
-      ipcRenderer.invoke('todo:complete', { id, progressText, context }),
-    archive: (id: string): Promise<{ ok: boolean; todo?: JsTodo | null; error?: string }> =>
-      ipcRenderer.invoke('todo:archive', id),
+      ipcRenderer.invoke('todo:complete', { id, progressText, context, options }),
+    archive: (id: string, options?: TodoStatusOptions): Promise<{ ok: boolean; todo?: JsTodo | null; error?: string }> =>
+      ipcRenderer.invoke('todo:archive', { id, options }),
     appendProgress: (
       id: string,
       text: string,

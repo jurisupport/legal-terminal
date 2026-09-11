@@ -750,6 +750,26 @@ ipcMain.handle('js:getCase', async (_e, id: string) => {
     return { ok: false, error: String(e instanceof Error ? e.message : e) }
   }
 })
+ipcMain.handle('todo:capabilities', async () => {
+  try { return { ok: true, capabilities: await js.todoCapabilities() } }
+  catch (e) { return { ok: false, error: String(e instanceof Error ? e.message : e) } }
+})
+ipcMain.handle('todo:evidenceSuggestions', async (_e, id: string) => {
+  try { return { ok: true, candidates: await js.todoEvidenceSuggestions(id) } }
+  catch (e) { return { ok: false, error: String(e instanceof Error ? e.message : e) } }
+})
+ipcMain.handle('js:caseClosurePreview', async (_e, id: string) => {
+  try { return { ok: true, preview: await js.caseClosurePreview(id) } }
+  catch (e) { return { ok: false, error: String(e instanceof Error ? e.message : e) } }
+})
+ipcMain.handle('js:updateCaseStatus', async (_e, p: { id: string; status: string; taskDispositions?: js.CaseTaskDisposition[]; version?: number }) => {
+  try { return { ok: true, case: await js.updateCaseStatus(p.id, p.status, p.taskDispositions, p.version) } }
+  catch (e) { return { ok: false, error: String(e instanceof Error ? e.message : e) } }
+})
+ipcMain.handle('js:updateCaseEngagement', async (_e, p: { id: string; engagementStatus: string; taskDispositions?: js.CaseTaskDisposition[]; version?: number }) => {
+  try { return { ok: true, case: await js.updateCaseEngagement(p.id, p.engagementStatus, p.taskDispositions, p.version) } }
+  catch (e) { return { ok: false, error: String(e instanceof Error ? e.message : e) } }
+})
 ipcMain.handle('todo:list', async (_e, params: Record<string, unknown>) => {
   try {
     return { ok: true, todos: await js.listTodos(params ?? {}) }
@@ -778,16 +798,16 @@ ipcMain.handle('todo:update', async (_e, p: { id: string; patch: js.TodoMutation
     return { ok: false, error: String(e instanceof Error ? e.message : e) }
   }
 })
-ipcMain.handle('todo:complete', async (_e, p: { id: string; progressText?: string; context?: js.TodoTerminalContext }) => {
+ipcMain.handle('todo:complete', async (_e, p: { id: string; progressText?: string; context?: js.TodoTerminalContext; options?: js.TodoStatusOptions }) => {
   try {
-    return { ok: true, todo: await js.completeTodo(p.id, p.progressText, p.context) }
+    return { ok: true, todo: await js.completeTodo(p.id, p.progressText, p.context, p.options) }
   } catch (e) {
     return { ok: false, error: String(e instanceof Error ? e.message : e) }
   }
 })
-ipcMain.handle('todo:archive', async (_e, id: string) => {
+ipcMain.handle('todo:archive', async (_e, p: string | { id: string; options?: js.TodoStatusOptions }) => {
   try {
-    return { ok: true, todo: await js.archiveTodo(id) }
+    return { ok: true, todo: await js.archiveTodo(typeof p === 'string' ? p : p.id, typeof p === 'string' ? undefined : p.options) }
   } catch (e) {
     return { ok: false, error: String(e instanceof Error ? e.message : e) }
   }

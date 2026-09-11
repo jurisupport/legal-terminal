@@ -1,3 +1,4 @@
+import type { AgentWorkspaceContext } from '../../../shared/agentWorkspaceContext'
 import {
   startTransition,
   useCallback,
@@ -132,6 +133,7 @@ interface AgentPanelProps {
   profileId?: string
   caseTabId?: string
   caseContext?: string
+  workspaceContext?: AgentWorkspaceContext
   visible: boolean
   focusNonce?: number
   initialDraft?: AgentDraftState
@@ -294,6 +296,16 @@ const emptyStateSuggestions: { label: string; prompt: string }[] = [
     label: '다음 할 일',
     prompt: '사건 진행 상황을 검토하고 다음 기일까지 준비할 일 목록을 만들어줘.'
   }
+]
+
+const globalSuggestions = [
+  { label: '오래 열린 할일', prompt: '전체 열린 할일 중 기한 도과·기한 없음·장기 미갱신 항목을 구분해 정리해줘.' },
+  { label: '완료 근거 확인', prompt: '같은 사건의 자료로 완료를 확인할 수 있는 할일 후보와 근거를 보여줘. 상태는 바꾸지 말아줘.' },
+  { label: '앞으로 7일', prompt: '한국 시간 기준 오늘부터 앞으로 7일 안의 기일과 기한을 정리해줘.' }
+]
+const folderSuggestions = [
+  { label: '폴더 내용 정리', prompt: '현재 폴더의 자료를 살펴보고 확인된 내용과 아직 확인할 내용을 정리해줘.' },
+  { label: '다음 작업', prompt: '현재 폴더에서 진행하던 작업과 다음 할 일을 정리해줘.' }
 ]
 
 const isAgentPermissionMode = (value: unknown): value is AgentPermissionMode =>
@@ -1848,6 +1860,7 @@ export default function AgentPanel({
   profileId,
   caseTabId,
   caseContext,
+  workspaceContext,
   visible,
   focusNonce = 0,
   initialDraft,
@@ -2259,7 +2272,8 @@ export default function AgentPanel({
         permissionMode: mode,
         source: ssh ? 'ssh' : 'local',
         ssh,
-        context: caseContext
+        context: caseContext,
+        workspaceContext
       })
       .then(async (result) => {
         if (!result.ok) setError(result.error ?? 'Agent 세션을 만들 수 없습니다.')
@@ -2267,6 +2281,7 @@ export default function AgentPanel({
         const transcript = await loadSessionTranscript(forkFromSessionId, ssh, { refresh: true }).catch(() => null)
         if (!transcript || transcript.messages.length === 0) return
         const sendResult = await window.lt.agent.send(id, {
+          workspaceContext,
           text: forkContextPrompt(transcript),
           displayText: `Fork 맥락 가져오기 · ${transcript.messages.length}개 메시지`
         })
@@ -2937,6 +2952,7 @@ export default function AgentPanel({
         )
       : sendAttachments
     const result = await window.lt.agent.send(id, {
+      workspaceContext,
       text: handoff ? `${handoff.preamble}\n${requestText}` : requestText,
       ...(handoff || quote ? { displayText } : {}),
       ...(quote
@@ -3596,10 +3612,14 @@ export default function AgentPanel({
               <div className="agent-empty-sub">
                 {pendingHandoff
                   ? `이전 대화 ${pendingHandoff.count}개 메시지를 이어받았습니다. 하던 이야기를 그대로 이어서 지시하세요.`
-                  : '사건 폴더를 기반으로 검토·정리·초안 작업을 시킬 수 있습니다.'}
+                  : workspaceContext?.kind === 'global'
+                    ? '사건을 선택하지 않고 전체 할일과 기일을 함께 정리할 수 있습니다.'
+                    : workspaceContext?.kind === 'folder'
+                      ? '현재 폴더의 자료를 바탕으로 검토·정리 작업을 시작할 수 있습니다.'
+                      : '사건 폴더를 기반으로 검토·정리·초안 작업을 시킬 수 있습니다.'}
               </div>
               <div className="agent-empty-suggestions">
-                {emptyStateSuggestions.map((suggestion) => (
+                {(workspaceContext?.kind === 'global' ? globalSuggestions : workspaceContext?.kind === 'folder' ? folderSuggestions : emptyStateSuggestions).map((suggestion) => (
                   <button
                     key={suggestion.label}
                     type="button"
