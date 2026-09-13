@@ -62,6 +62,7 @@ jobs:
       - name: Verify task management
         run: |
           npm run typecheck
+          npm run verify:agent-runtime
           npm run verify:todo-summary
           npm run verify:todo-files
           npm run verify:agent-case-context
@@ -107,6 +108,7 @@ jobs:
       - name: Verify task management
         run: |
           npm run typecheck
+          npm run verify:agent-runtime
           npm run verify:todo-summary
           npm run verify:todo-files
           npm run verify:agent-case-context
