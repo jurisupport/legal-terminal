@@ -43,6 +43,11 @@ function runApp({ root, temp, chosenDir, screenshot }) {
     }
     if (channel === 'settings:get') return settings
     if (channel === 'settings:set') return Object.assign(settings, args[0])
+    if (channel === 'ssh:listDir') {
+      const { profile, path: requestedPath } = args[0]
+      if (profile.id === 'remote-error') return { ok: false, error: '합성 원격 경로 조회 실패' }
+      return { ok: true, entries: [], cwd: `/home/${profile.id}${requestedPath === '~' ? '' : '/drafts'}` }
+    }
     if (channel === 'js:hasToken') return true
     if (channel === 'js:tokenStatus') return { hasToken: true, error: null }
     if (channel === 'js:listCases') return { ok: true, cases: [] }
@@ -186,10 +191,80 @@ function runApp({ root, temp, chosenDir, screenshot }) {
       await wait(() => calls.filter(call => call.channel === 'workspace:save' && call.result?.ok).length > savesBeforeRetirement, 'Retired native snapshot saved')
       const retired = calls.filter(call => call.channel === 'workspace:save').at(-1).result
       assert.equal(JSON.parse(fs.readFileSync(retired.path,'utf8')).terminals[0].todoManagement, false, 'runtime retirement must survive stale renderer snapshots')
+      // Change backend settings without a renderer event: every open must read the current default.
+      const creates = () => calls.filter(call => call.channel === 'agent:create')
+      const closedBeforeRemote = calls.filter(call => call.channel === 'agent:close').length
+      const beforeRemoteIds = creates().map(call => call.args[0].id)
+      const profileA = { id: 'remote-a', label: '합성 원격 A', host: 'a.example.invalid', user: 'tester', draftsRoot: '/srv/legal-a' }
+      const profileB = { id: 'remote-b', label: '합성 원격 B', host: 'b.example.invalid', user: 'tester', draftsRoot: '/srv/legal-b' }
+      const openManager = async (twice = false) => {
+        const reads = calls.filter(call => call.channel === 'settings:get').length
+        await evaluate(`{ const button = Array.from(document.querySelectorAll('button')).find(button => button.textContent.trim() === '전체 할일 정리 시작'); button.click(); if (${twice}) button.click(); }`)
+        await wait(() => calls.filter(call => call.channel === 'settings:get').length > reads, 'Each task-manager open reads fresh default settings')
+      }
+      const remoteCreated = async (profile, cwd, twice = false) => {
+        const before = creates().length
+        settings.sshProfiles = [profileA, profileB, profile].filter((p, i, all) => all.findIndex(other => other.id === p.id) === i)
+        settings.caseOpenTarget = `remote:${profile.id}`
+        await openManager(twice)
+        await wait(() => creates().length > before, `Default ${profile.id} creates the correct remote manager`)
+        await evaluate(`new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))`)
+        assert.equal(creates().length, before + 1, 'one remote agent is created even for rapid repeated clicks')
+        const remote = creates().at(-1).args[0]
+        assert.equal(remote.source, 'ssh', 'remote default must not reuse a local manager')
+        assert.equal(remote.cwd, cwd, 'remote task manager uses the exact configured/resolved root')
+        assert.equal(remote.ssh?.host, profile.host)
+        assert.equal(remote.workspaceContext?.kind, 'global')
+        assert.equal(remote.workspaceContext?.todoManagement, true)
+        assert.match(remote.context, /"contextKind": "global"/)
+        return remote
+      }
+      const remoteA = await remoteCreated(profileA, profileA.draftsRoot, true)
+      const afterRemoteA = creates().length
+      await openManager()
+      await evaluate(`new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))`)
+      assert.equal(creates().length, afterRemoteA, 'same remote setting reuses its task manager')
+      assert.equal(await evaluate(`document.querySelector('.term-pane[data-term-id="${remoteA.id}"]')?.style.display !== 'none'`), true)
+      const remoteB = await remoteCreated(profileB, profileB.draftsRoot)
+      profileA.draftsRoot = '/srv/legal-a-next'
+      const movedA = await remoteCreated(profileA, profileA.draftsRoot)
+      const homeProfile = { id: 'remote-home', label: '합성 원격 홈', host: 'home.example.invalid', user: 'tester' }
+      const remoteHome = await remoteCreated(homeProfile, '/home/remote-home')
+      assert.ok(calls.some(call => call.channel === 'ssh:listDir' && call.args[0].profile.id === homeProfile.id && call.args[0].path === '~'), 'missing remote root resolves remote home')
+      const tildeProfile = { id: 'remote-tilde', label: '합성 원격 상대 경로', host: 'tilde.example.invalid', user: 'tester', draftsRoot: '~/drafts' }
+      const remoteTilde = await remoteCreated(tildeProfile, '/home/remote-tilde/drafts')
+      assert.ok(calls.some(call => call.channel === 'ssh:listDir' && call.args[0].profile.id === tildeProfile.id && call.args[0].path === '~/drafts'), 'tilde remote root resolves through SSH')
+      const errorProfile = { id: 'remote-error', label: '합성 실패 원격', host: 'error.example.invalid', user: 'tester' }
+      settings.sshProfiles = [errorProfile]
+      settings.caseOpenTarget = `remote:${errorProfile.id}`
+      const beforeRemoteError = creates().length
+      await openManager()
+      await wait(() => calls.some(call => call.channel === 'ssh:listDir' && call.args[0].profile.id === errorProfile.id), 'Remote error resolution attempted')
+      await wait(() => calls.some(call => call.channel === 'dialog:message' && call.args[0] === 'alert' && String(call.args[1]).includes('합성 원격 경로 조회 실패')), 'Remote path failure is shown to the user')
+      assert.equal(creates().length, beforeRemoteError, 'remote resolution failure never falls back to a local agent')
+      settings.caseOpenTarget = 'remote:missing-profile'
+      await openManager()
+      await wait(() => calls.some(call => call.channel === 'dialog:message' && call.args[0] === 'alert' && String(call.args[1]).includes('기본 원격 연결을 찾을 수 없습니다')), 'Missing default profile is shown to the user')
+      assert.equal(creates().length, beforeRemoteError, 'missing remote profile never falls back to local')
+      assert.equal(calls.filter(call => call.channel === 'agent:close').length, closedBeforeRemote, 'changing defaults keeps previous conversations')
+      const saveCount = calls.filter(call => call.channel === 'workspace:save' && call.result?.ok).length
+      await evaluate(`document.querySelector('button[title="현재 작업환경 저장"]').click()`)
+      await wait(() => calls.filter(call => call.channel === 'workspace:save' && call.result?.ok).length > saveCount, 'Remote task conversations persisted')
+      const remoteWorkspace = JSON.parse(fs.readFileSync(calls.filter(call => call.channel === 'workspace:save').at(-1).result.path, 'utf8'))
+      for (const [remote, profile] of [[remoteA, profileA], [remoteB, profileB], [movedA, profileA], [remoteHome, homeProfile], [remoteTilde, tildeProfile]]) {
+        const terminal = remoteWorkspace.terminals.find(item => item.id === remote.id)
+        assert.ok(terminal, 'all remote conversations stay in the workspace')
+        assert.equal(terminal.profileId, profile.id)
+        assert.equal(terminal.cwd, remote.cwd)
+        assert.equal(terminal.contextKind, 'global')
+        assert.equal(terminal.todoManagement, true)
+      }
+      assert.ok(beforeRemoteIds.some(id => remoteWorkspace.terminals.some(item => item.id === id)), 'the original local conversation is retained')
+      assert.equal(calls.filter(call => call.channel === 'dialog:pickFolder').length, 0, 'remote defaults never open a local folder picker')
       assert.deepEqual([...new Set(unexpected)], [])
       assert.deepEqual(rendererErrors, [])
       await capture()
-      console.log('TODO_APP_RESULT ' + JSON.stringify({ checks: 32, ipcCalls: calls.length, actualWorkspaceSaveReload: true, rendererErrors, screenshot }))
+      console.log('TODO_APP_RESULT ' + JSON.stringify({ checks: 47, remoteDefaults: true, ipcCalls: calls.length, actualWorkspaceSaveReload: true, rendererErrors, screenshot }))
       app.exit(0)
     } catch (error) {
       await capture()

@@ -5772,7 +5772,7 @@ export default function App(): JSX.Element {
   // 토큰 변경 등으로 좌측 '다가오는 기일' 패널을 새로고침하기 위한 nonce
   const [jsNonce, setJsNonce] = useState(0)
   const [todoNonce, setTodoNonce] = useState(0)
-  const todoManagerOpening = useRef<Promise<TermTab> | null>(null)
+  const todoManagerPendingRender = useRef(false)
   const todoManagerTab = useRef<TermTab | null>(null)
   const todoAccountGeneration = useRef(0)
   const todoSnapshot = useTodoSnapshot(todoNonce)
@@ -5806,42 +5806,59 @@ export default function App(): JSX.Element {
   }
   const openGlobalTodoWork = async (rows?: JsTodo[]): Promise<void> => {
     const accountGeneration = todoAccountGeneration.current
-    const manager = termTabsRef.current.find((term) => isAgentTab(term) && term.contextKind === 'global' &&
-      (term.todoManagement === true || (term.todoManagement === undefined && term.title === '전체 할일 정리')))
-    let tab = manager ?? todoManagerTab.current
-    if (tab && !termTabsRef.current.some((term) => term.id === tab!.id) && !todoManagerOpening.current) tab = null
-    if (!tab) {
-      if (!todoManagerOpening.current) {
-        todoManagerOpening.current = (async () => {
-          const info = await window.lt.app.info()
-          const cwd = draftsRoot && !parseRemoteUri(draftsRoot) ? draftsRoot : info.homeDirectory
-          if (!cwd) throw new Error('할일 대화의 작업 위치를 확인하지 못했습니다.')
-          const created = createCase(cwd, '전체 할일 정리', undefined, undefined, { contextKind: 'global' }, 'right')
-          const next = { ...created, todoManagement: true }
-          todoManagerTab.current = next
-          setTermTabs((tabs) => tabs.map((item) => item.id === created.id ? next : item))
-          return next
-        })().catch((error) => { todoManagerOpening.current = null; throw error })
+    try {
+      const settings = await window.lt.settings.get()
+      const profileId = caseOpenProfileId(settings.caseOpenTarget)
+      const profile = settings.sshProfiles?.find((item) => item.id === profileId)
+      if (profileId && !profile) throw new Error('기본 원격 연결을 찾을 수 없습니다. 설정에서 연결을 확인해 주세요.')
+      let cwd = profile ? profile.draftsRoot?.trim() : settings.draftsRoot
+      if (profile && (!cwd || !cwd.startsWith('/'))) {
+        const resolved = await window.lt.ssh.listDir(profile, cwd || '~')
+        if (!resolved.ok) throw new Error(resolved.error)
+        cwd = resolved.cwd
+      } else if (!profile && (!cwd || parseRemoteUri(cwd))) {
+        cwd = (await window.lt.app.info()).homeDirectory
       }
-      tab = await todoManagerOpening.current
+      if (!cwd) throw new Error('할일 대화의 작업 위치를 확인하지 못했습니다.')
+      if (accountGeneration !== todoAccountGeneration.current) return
+      const atLocation = (term: TermTab): boolean =>
+        normalizedCasePathKey(term.cwd) === normalizedCasePathKey(cwd) && (profile
+          ? term.profileId === profile.id && term.ssh?.host === profile.host && term.ssh?.user === profile.user &&
+            (term.ssh?.port ?? 22) === (profile.port ?? 22) && term.ssh?.identityFile === profile.identityFile &&
+            Boolean(term.ssh?.remoteControl) === Boolean(profile.remoteControl)
+          : !term.ssh)
+      const manager = termTabsRef.current.find((term) => isAgentTab(term) && term.contextKind === 'global' && atLocation(term) &&
+        (term.todoManagement === true || (term.todoManagement === undefined && term.title === '전체 할일 정리')))
+      let tab = manager ?? (todoManagerTab.current && atLocation(todoManagerTab.current) ? todoManagerTab.current : null)
+      if (tab && !termTabsRef.current.some((term) => term.id === tab!.id) && !todoManagerPendingRender.current) tab = null
+      if (!tab) {
+        // Resolve the destination before this synchronous creation, so rapid clicks reuse the pending tab.
+        tab = profile
+          ? createRemoteCase(profile, cwd, '전체 할일 정리', { contextKind: 'global' }, undefined, 'right')
+          : createCase(cwd, '전체 할일 정리', undefined, undefined, { contextKind: 'global' }, 'right')
+        todoManagerPendingRender.current = true
+      }
+      const selected = { ...tab, todoManagement: true, side: 'right' as const }
+      todoManagerTab.current = selected
+      setTermTabs((tabs) => tabs.map((item) => item.id === selected.id ? selected : item))
+      registerCaseTabFromTerm(selected)
+      setActiveTerm(selected.id)
+      setWorkActive('right', termKeyOf(selected.id))
+      if (rows?.length) {
+        const prompt = todoAgentPrompt(rows)
+        queueAgentAttachment(selected, { kind: 'selection', label: `선택한 할일 ${rows.length}건`, text: prompt }, '첨부한 선택 할일만 정리해줘.')
+      }
+      setTermFocusNonce((current) => ({ ...current, [selected.id]: (current[selected.id] ?? 0) + 1 }))
+      setMode('todos')
+    } catch (error) {
+      if (accountGeneration === todoAccountGeneration.current) {
+        await window.lt.dialog.alert('할일 에이전트를 열지 못했습니다: ' + (error instanceof Error ? error.message : String(error)))
+      }
     }
-    if (accountGeneration !== todoAccountGeneration.current) return
-    const selected = { ...tab, todoManagement: true, side: 'right' as const }
-    todoManagerTab.current = selected
-    setTermTabs((tabs) => tabs.map((item) => item.id === selected.id ? selected : item))
-    registerCaseTabFromTerm(selected)
-    setActiveTerm(selected.id)
-    setWorkActive('right', termKeyOf(selected.id))
-    if (rows?.length) {
-      const prompt = todoAgentPrompt(rows)
-      queueAgentAttachment(selected, { kind: 'selection', label: `선택한 할일 ${rows.length}건`, text: prompt }, '첨부한 선택 할일만 정리해줘.')
-    }
-    setTermFocusNonce((current) => ({ ...current, [selected.id]: (current[selected.id] ?? 0) + 1 }))
-    setMode('todos')
   }
   useEffect(() => {
-    if (todoManagerTab.current && termTabs.some((term) => term.id === todoManagerTab.current!.id)) todoManagerOpening.current = null
-    else if (!todoManagerOpening.current) todoManagerTab.current = null
+    if (todoManagerTab.current && termTabs.some((term) => term.id === todoManagerTab.current!.id)) todoManagerPendingRender.current = false
+    else if (!todoManagerPendingRender.current) todoManagerTab.current = null
   }, [termTabs])
   useEffect(() => {
     if (mode === 'todos' && todoSnapshot.hasToken === true) {
