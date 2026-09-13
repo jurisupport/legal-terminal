@@ -25,6 +25,7 @@ import React, { useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import TodosDashboard from './src/renderer/src/dashboard/TodosDashboard'
 import TodoSummary from './src/renderer/src/dashboard/TodoSummary'
+import {ToolRow,toolDisplayName,toolStepDisplay} from './src/renderer/src/agent/ToolRow'
 import './src/renderer/src/styles.css'
 const fileCases = ${JSON.stringify(fileCases)}
 const rows = [
@@ -33,7 +34,7 @@ const rows = [
  { id:'child', title:'첨부서류 확인', status:'pending', caseId:'case-1', caseName:'합성 사건', parentId:'parent', dueDate:'2020-02-01', createdAt:'2020-01-01' }
 ]
 let memos = [{id:'memo',type:'memo',title:'기존 사건 메모',version:7,status:'pending',caseId:'case-1'}]
-window.calls=[]; window.failUpdate=false
+window.calls=[]; window.handoffs=[]; window.failUpdate=false
 const capabilities={queryFields:[],createFields:['priority','parentId','reviewAt'],updateFields:['priority','reviewAt','evidence'],statusFields:['childDispositions'],evidenceSuggestions:true,caseClosure:true}
 window.lt = {
  todo:{
@@ -50,7 +51,7 @@ window.lt = {
  js:{listCases:async()=>({ok:true,cases:[{id:'case-2',caseName:'이관 대상 사건',status:'active'}]}),caseClosurePreview:async()=>({ok:true,preview:{id:'case-1',version:3,status:'active',engagementStatus:'unknown',tasks:rows.filter(r=>r.caseId),blocked:false}}),updateCaseStatus:async(...args)=>{window.calls.push(['caseStatus',...args]);return {ok:true}},updateCaseEngagement:async(...args)=>{window.calls.push(['engagement',...args]);return {ok:true}}},
  app:{openExternal:async(uri)=>window.calls.push(['open',uri])}
 }
-function Harness(){const [tick,setTick]=useState(0);const [filter,setFilter]=useState('open');const [hearingState,setHearingState]=useState({summary:{todayCount:27,weekCount:42,fetchedAt:'2026-09-12T00:00:00Z'},error:''});window.setHearingState=setHearingState;const snapshot={todos:[...rows],loading:false,error:'',hasToken:true,fetchedAt:'2026-09-12T00:00:00Z',refresh:()=>setTick(t=>t+1)};return <div style={{height:'100vh',overflow:'auto'}}><TodoSummary snapshot={snapshot} onFilter={setFilter} hearingSummary={hearingState.summary} hearingsError={hearingState.error}/><TodosDashboard onOpenEvidenceFile={(file,label)=>window.calls.push(['openFile',file,label])} snapshot={snapshot} initialFilter={filter} filterNonce={tick}/></div>}
+function Harness(){const [toolExpanded,setToolExpanded]=useState(false);const [tick,setTick]=useState(0);const [filter,setFilter]=useState('open');const [hearingState,setHearingState]=useState({summary:{todayCount:27,weekCount:42,fetchedAt:'2026-09-12T00:00:00Z'},error:''});window.setHearingState=setHearingState;const snapshot={todos:[...rows],loading:false,error:'',hasToken:true,fetchedAt:'2026-09-12T00:00:00Z',refresh:()=>setTick(t=>t+1)};return <div style={{height:'100vh',overflow:'auto'}}><TodoSummary snapshot={snapshot} onFilter={setFilter} hearingSummary={hearingState.summary} hearingsError={hearingState.error}/><TodosDashboard onManageTodos={(items)=>window.handoffs.push(items)} onOpenDefault={()=>window.calls.push(['workspace'])} onOpenEvidenceFile={(file,label)=>window.calls.push(['openFile',file,label])} snapshot={snapshot} initialFilter={filter} filterNonce={tick}/><ToolRow step={{id:'managed-tool',title:'',toolName:'mcp__legal_terminal_jurisupport__update_task',input:JSON.stringify({id:'opaque-task-id',title:'제출 확인'}),status:'done'}} expanded={toolExpanded} onToggle={()=>setToolExpanded(v=>!v)}/></div>}
 createRoot(document.getElementById('root')).render(<Harness/>);
 window.uiCheck = async () => {
  const wait=async(fn)=>{for(let i=0;i<100;i++){if(fn())return;await new Promise(r=>setTimeout(r,20))}throw Error('Timed out: '+fn)};
@@ -59,17 +60,25 @@ window.uiCheck = async () => {
  const input=async(el,value)=>{const proto=el.tagName==='SELECT'?HTMLSelectElement.prototype:el.tagName==='TEXTAREA'?HTMLTextAreaElement.prototype:HTMLInputElement.prototype;Object.getOwnPropertyDescriptor(proto,'value').set.call(el,value);el.dispatchEvent(new Event(el.tagName==='SELECT'?'change':'input',{bubbles:true}));await new Promise(r=>setTimeout(r,30))};
  let checks=0; const check=(condition,message)=>{checks++;if(!condition)throw Error(message)};
  await wait(()=>document.querySelectorAll('.todo-card').length===3);
+ const prefix='mcp__legal_terminal_jurisupport__';
+ for(const [tool,label] of Object.entries({list_tasks:'할일 목록 확인',get_task:'할일 상세 확인',create_task:'할일 추가',create_task_from_source:'원문에서 할일 추가',update_task:'할일 수정',update_task_from_source:'원문에서 할일 수정',update_task_status:'할일 상태 변경',get_task_evidence_suggestions:'완료 근거 확인',get_case_closure_preview:'사건 종결 전 할일 검토'}))check(toolDisplayName(prefix+tool)===label,'Managed tool label '+tool);
+ check(!toolStepDisplay({id:'x',title:'',toolName:prefix+'get_task',input:JSON.stringify({id:'opaque-task-id',caseId:'opaque-case-id'}),text:'opaque-task-id'}).arg,'Opaque identifiers stay out of collapsed tool row');
+ check(toolStepDisplay({id:'x',title:'',toolName:prefix+'update_task_status',input:JSON.stringify({id:'opaque-task-id',status:'completed'})}).arg==='완료','Friendly status argument');
+ const toolRow=document.querySelector('.agent-tool-row');check(toolRow.textContent.includes('할일 수정')&&!toolRow.textContent.includes('opaque-task-id'),'Friendly collapsed managed tool');toolRow.querySelector('button').click();await wait(()=>toolRow.querySelector('.agent-tool-details'));check(toolRow.textContent.includes('opaque-task-id')&&toolRow.textContent.includes('mcp__legal_terminal_jurisupport__update_task'),'Raw input remains expandable');toolRow.querySelector('button').click();
+ check(!document.querySelector('.todo-patch-panel')&&!document.body.textContent.includes('패치 적용')&&!document.body.textContent.includes('할일 다시 만들기'),'Legacy JSON workflow removed');
+ await click('오른쪽 에이전트로 정리');check(window.handoffs.at(-1).length===3&&window.handoffs.at(-1).every(row=>rows.includes(row)),'Full list passes exact source rows');
+
  const hearingMetric=(label)=>[...document.querySelectorAll('.todo-metric')].find(e=>e.querySelector('span').textContent===label).querySelector('strong').textContent;
  check(hearingMetric('오늘 기일')==='27','Complete today aggregate exceeds twenty');check(hearingMetric('앞으로 7일 기일')==='42','Complete seven-day aggregate exceeds twenty');
  window.setHearingState({summary:{todayCount:27,weekCount:42,fetchedAt:'2026-09-12T00:00:00Z'},error:'합성 기일 조회 실패'});await wait(()=>document.querySelector('.todo-summary').textContent.includes('이전 조회 결과입니다.'));check(hearingMetric('오늘 기일')==='27','Failed hearing refresh retains aggregate with stale warning');
  window.setHearingState({summary:null,error:'합성 기일 조회 실패'});await wait(()=>hearingMetric('오늘 기일')==='—');check(hearingMetric('앞으로 7일 기일')==='—','Missing hearing aggregate is not zero');
  window.setHearingState({summary:{todayCount:27,weekCount:42,fetchedAt:'2026-09-12T00:00:00Z'},error:''});await wait(()=>hearingMetric('오늘 기일')==='27');
  check(!window.calls.some(c=>c[0]==='list'),'Open snapshot must not be independently fetched');
- await click('기한 없음'); check(document.querySelectorAll('.todo-card').length===1,'Undated filter');
+ await click('기한 없음'); check(document.querySelectorAll('.todo-card').length===1,'Undated filter');await click('오른쪽 에이전트로 정리');check(window.handoffs.at(-1).length===1&&window.handoffs.at(-1)[0]===rows[1]&&!window.handoffs.at(-1)[0].caseId,'Filtered list handoff does not infer a case');
  await click('전체 열린 할일');
  const toggle=document.querySelector('.todo-group-toggle');toggle.click();await new Promise(r=>setTimeout(r,30));check(toggle.getAttribute('aria-expanded')==='false','Group collapse');toggle.click();await new Promise(r=>setTimeout(r,30));
  await input(document.querySelector('.dash-search'),'준비서면');check(document.querySelectorAll('.todo-card').length===1,'Local search');await input(document.querySelector('.dash-search'),'');
- let card=[...document.querySelectorAll('.todo-card')].find(c=>c.textContent.includes('준비서면 제출 확인'));
+ let card=[...document.querySelectorAll('.todo-card')].find(c=>c.textContent.includes('준비서면 제출 확인'));await click('에이전트로 정리',card);check(window.handoffs.at(-1).length===1&&window.handoffs.at(-1)[0]===rows[0],'Per-row handoff passes only selected task');check(window.calls.length===0,'Handoff does not mutate tasks or open case workspace');await input(document.querySelector('.dash-search'),'없는 합성 항목');check(buttons('오른쪽 에이전트로 정리')[0].disabled,'Empty filtered list cannot hand off');await input(document.querySelector('.dash-search'),'');card=[...document.querySelectorAll('.todo-card')].find(c=>c.textContent.includes('준비서면 제출 확인'));await input(card.querySelector('input[placeholder="같은 산출물의 자식 할일"]'),'새 자식 단계');await click('자식 추가',card);check(window.calls.findLast(c=>c[0]==='create')[1].parentId==='parent'&&window.calls.findLast(c=>c[0]==='create')[1].caseId==='case-1','Direct child creation retains exact parent and case after legacy cleanup');
  await click('기한·재확인 변경',card);await input(card.querySelector('input[type=date]'),'2026-10-01');window.failUpdate=true;await click('저장',card);check(card.textContent.includes('합성 저장 실패'),'Mutation failure remains visible');window.failUpdate=false;await click('저장',card);
  check(window.calls.findLast(c=>c[0]==='update')[2].dueDate==='2026-10-01T05:30:45.123Z','KST time preserved');
  await click('완료',card);await wait(()=>document.querySelector('dialog select'));let dialog=document.querySelector('dialog');check(buttons('완료 확인',dialog)[0].disabled,'Must choose child disposition');await input(dialog.querySelector('select'),'keep');await click('완료 확인',dialog);check(window.calls.findLast(c=>c[0]==='complete')[2].childDispositions[0].action==='keep','Explicit child keep');

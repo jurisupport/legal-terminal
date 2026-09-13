@@ -2,6 +2,8 @@ export type AgentContextKind = 'case' | 'global' | 'folder'
 
 export interface AgentWorkspaceContext {
   kind: AgentContextKind
+  /** true: app-account task manager; false: retired after account change; absent: ordinary agent. */
+  todoManagement?: boolean
   cwd: string
   appVersion?: string
   caseId?: string
@@ -51,6 +53,12 @@ export function buildAgentWorkspaceContext(context: AgentWorkspaceContext): stri
 ${JSON.stringify(data, null, 2).replace(/</g, '\\u003c')}
 
 ${rules}
+
+${context.todoManagement ? `이 대화는 앱의 할일 관리 대화입니다.
+- 앱 계정으로 연결된 legal_terminal_jurisupport 도구를 사용하세요. 별도 사용자 설정의 다른 JuriSupport 계정과 혼용하지 마세요.
+- 열린 할일은 type=todo의 pending과 in_progress입니다. 메모는 별도로 요청된 경우에만 포함하고, 전체 조회는 모든 페이지를 확인하세요. 목록 미리보기 길이를 전체 건수로 말하지 마세요.
+- 조회·정리 요청에는 최신 기록을 조회해 설명하고, 명시적인 변경 요청에는 실제 도구로 반영한 뒤 결과를 확인하세요.
+- 사용자가 JSON을 복사·붙여넣거나 패치를 수동 적용하도록 요구하지 마세요. 도구 연결 실패는 분명히 알리고 성공했다고 답하지 마세요.` : ''}
 
 할일 등록·정리 규칙:
 - 통화·문서에서 할일을 추출할 때 원문 기반 생성 도구를 우선 사용하고 원문에 없는 기한을 만들지 마세요.

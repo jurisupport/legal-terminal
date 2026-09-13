@@ -65,8 +65,10 @@ import { isActiveHearing } from './dashboard/hearings'
 import TodosDashboard from './dashboard/TodosDashboard'
 import TodayTodos from './dashboard/TodayTodos'
 import TodoSummary, { TodoHeaderBadge } from './dashboard/TodoSummary'
+import { todoAgentPrompt } from '../../shared/agentTodo'
 import { useTodoSnapshot, type TodoSnapshot } from './dashboard/useTodoSnapshot'
 import type { TodoFilter } from '../../shared/todoSummary'
+import type { JsTodo } from './env'
 import { buildAgentWorkspaceContext, resolveAgentContextKind, type AgentContextKind, type AgentWorkspaceContext } from '../../shared/agentWorkspaceContext'
 import HearingRecordPanel, {
   buildHearingRecordTitle,
@@ -370,6 +372,7 @@ type SaveDirtyDocResult = { ok: true } | { ok: false; error: string }
  * cwd = 작성서류 폴더(claude 작업·탐색기 기준). recordsFolder = 소송기록 폴더(뷰어 기준, 별도 지정).
  */
 interface TermTab {
+  todoManagement?: boolean
   contextKind?: AgentContextKind
   id: string
   title: string
@@ -992,6 +995,7 @@ const sessionContextForTerm = (source?: TermTab, query = ''): SessionSearchConte
 
 const agentWorkspaceContextForTerm = (source: TermTab, appVersion?: string): AgentWorkspaceContext => ({
   kind: resolveAgentContextKind(source),
+  todoManagement: source.todoManagement,
   cwd: source.cwd,
   appVersion,
   caseId: source.jsId,
@@ -3282,6 +3286,7 @@ export default function App(): JSX.Element {
       createdAt: Date.now(),
       resumeSessionId: sessionId,
       renamed: !!title, // 과거 세션 제목을 그대로 쓰면 자동 갱신 안 함
+      todoManagement: source?.todoManagement,
       contextKind: source?.contextKind ?? base?.meta?.contextKind,
       jsId: source?.jsId,
       court: source?.court,
@@ -3410,6 +3415,7 @@ export default function App(): JSX.Element {
       autoClaude: terminalAutoClaude,
       autoAgent: terminalAutoAgent,
       createdAt: Date.now(),
+      todoManagement: cur.todoManagement,
       contextKind: cur.contextKind,
       jsId: cur.jsId,
       court: cur.court,
@@ -3456,6 +3462,7 @@ export default function App(): JSX.Element {
       autoClaude: false,
       agentProvider: resolveAgentProvider(agentProviderOverride ?? cur?.agentProvider ?? agentDefaultProvider, ssh),
       createdAt: Date.now(),
+      todoManagement: cur?.todoManagement,
       contextKind: cur?.contextKind ?? currentCase?.meta?.contextKind,
       jsId: cur?.jsId ?? currentCase?.meta?.jsId,
       court: cur?.court ?? currentCase?.meta?.court,
@@ -4399,6 +4406,7 @@ export default function App(): JSX.Element {
           if (resumeSessionId) rememberSessionForTerm(t, resumeSessionId, t.sessionTitle)
           return {
             ...t,
+            todoManagement: agentSnapshot?.session?.workspaceContext?.todoManagement === false ? false : t.todoManagement,
             caseTabId: caseTabIdValue,
             side: termSide(t),
             resumeSessionId
@@ -4524,6 +4532,7 @@ export default function App(): JSX.Element {
       autoClaude: t.kind === 'agent' ? false : (t.autoClaude ?? true),
       autoAgent: t.kind === 'agent' ? undefined : isAgentProvider(t.autoAgent) ? t.autoAgent : undefined,
       agentProvider: t.kind === 'agent' ? resolveAgentProvider(t.agentProvider, ssh) : undefined,
+      todoManagement: typeof t.todoManagement === 'boolean' ? t.todoManagement : undefined,
       contextKind: t.contextKind === 'global' || t.contextKind === 'case' || t.contextKind === 'folder' ? t.contextKind : undefined,
       jsId: typeof t.jsId === 'string' ? t.jsId : undefined,
       court: typeof t.court === 'string' ? t.court : undefined,
@@ -5763,6 +5772,9 @@ export default function App(): JSX.Element {
   // 토큰 변경 등으로 좌측 '다가오는 기일' 패널을 새로고침하기 위한 nonce
   const [jsNonce, setJsNonce] = useState(0)
   const [todoNonce, setTodoNonce] = useState(0)
+  const todoManagerOpening = useRef<Promise<TermTab> | null>(null)
+  const todoManagerTab = useRef<TermTab | null>(null)
+  const todoAccountGeneration = useRef(0)
   const todoSnapshot = useTodoSnapshot(todoNonce)
   const [todoFilter, setTodoFilter] = useState<TodoFilter>('open')
   const [todoFilterNonce, setTodoFilterNonce] = useState(0)
@@ -5792,17 +5804,51 @@ export default function App(): JSX.Element {
     setTodoFilterNonce((value) => value + 1)
     setMode('todos')
   }
-  const openGlobalTodoWork = async (): Promise<void> => {
-    let cwd: string | undefined = draftsRoot && !parseRemoteUri(draftsRoot) ? draftsRoot : undefined
-    if (!cwd) {
-      const picked = await window.lt.dialog.pickFolder({ title: '전체 작업에서 사용할 기존 폴더' })
-      if (!picked) return
-      cwd = picked.path
+  const openGlobalTodoWork = async (rows?: JsTodo[]): Promise<void> => {
+    const accountGeneration = todoAccountGeneration.current
+    const manager = termTabsRef.current.find((term) => isAgentTab(term) && term.contextKind === 'global' &&
+      (term.todoManagement === true || (term.todoManagement === undefined && term.title === '전체 할일 정리')))
+    let tab = manager ?? todoManagerTab.current
+    if (tab && !termTabsRef.current.some((term) => term.id === tab!.id) && !todoManagerOpening.current) tab = null
+    if (!tab) {
+      if (!todoManagerOpening.current) {
+        todoManagerOpening.current = (async () => {
+          const info = await window.lt.app.info()
+          const cwd = draftsRoot && !parseRemoteUri(draftsRoot) ? draftsRoot : info.homeDirectory
+          if (!cwd) throw new Error('할일 대화의 작업 위치를 확인하지 못했습니다.')
+          const created = createCase(cwd, '전체 할일 정리', undefined, undefined, { contextKind: 'global' }, 'right')
+          const next = { ...created, todoManagement: true }
+          todoManagerTab.current = next
+          setTermTabs((tabs) => tabs.map((item) => item.id === created.id ? next : item))
+          return next
+        })().catch((error) => { todoManagerOpening.current = null; throw error })
+      }
+      tab = await todoManagerOpening.current
     }
-    const tab = createCase(cwd, '전체 할일 정리', undefined, undefined, { contextKind: 'global' })
-    setAgentDrafts((drafts) => ({ ...drafts, [tab.id]: { input: '전체 열린 할일을 확인하고 오래된 항목의 근거와 다음 조치를 정리해줘.', attachments: [] } }))
+    if (accountGeneration !== todoAccountGeneration.current) return
+    const selected = { ...tab, todoManagement: true, side: 'right' as const }
+    todoManagerTab.current = selected
+    setTermTabs((tabs) => tabs.map((item) => item.id === selected.id ? selected : item))
+    registerCaseTabFromTerm(selected)
+    setActiveTerm(selected.id)
+    setWorkActive('right', termKeyOf(selected.id))
+    if (rows?.length) {
+      const prompt = todoAgentPrompt(rows)
+      queueAgentAttachment(selected, { kind: 'selection', label: `선택한 할일 ${rows.length}건`, text: prompt }, '첨부한 선택 할일만 정리해줘.')
+    }
+    setTermFocusNonce((current) => ({ ...current, [selected.id]: (current[selected.id] ?? 0) + 1 }))
     setMode('todos')
   }
+  useEffect(() => {
+    if (todoManagerTab.current && termTabs.some((term) => term.id === todoManagerTab.current!.id)) todoManagerOpening.current = null
+    else if (!todoManagerOpening.current) todoManagerTab.current = null
+  }, [termTabs])
+  useEffect(() => {
+    if (mode === 'todos' && todoSnapshot.hasToken === true) {
+      void openGlobalTodoWork().catch((error) => console.warn('할일 에이전트를 열지 못했습니다.', error))
+    }
+  }, [mode, todoSnapshot.hasToken])
+
   const todoSummary = <TodoSummary snapshot={todoSnapshot} onFilter={openTodoSummary}
     onGlobalWork={() => void openGlobalTodoWork()} hearingSummary={hearingSummary}
     hearingsLoading={summaryHearingsLoading} hearingsError={summaryHearingsError} />
@@ -5810,6 +5856,9 @@ export default function App(): JSX.Element {
   // 설정창에서 JuriSupport 토큰을 바꾸면 기일·할 일 패널도 새로고침한다.
   useEffect(() => {
     const onTokenUpdated = (): void => {
+      todoAccountGeneration.current++
+      todoManagerTab.current = null
+      setTermTabs((tabs) => tabs.map((term) => term.contextKind === 'global' && (term.todoManagement || term.title === '전체 할일 정리') ? { ...term, todoManagement: false } : term))
       setJsNonce((n) => n + 1)
       setTodoNonce((n) => n + 1)
     }
@@ -7160,6 +7209,7 @@ export default function App(): JSX.Element {
                 caseTabId={t.caseTabId}
                 caseContext={agentCaseContextForTerm(t)}
                 workspaceContext={agentWorkspaceContextForTerm(t, contextAppVersion)}
+                onTasksChanged={() => setTodoNonce((value) => value + 1)}
                 visible={t.id === activeTerm}
                 focusNonce={termFocusNonce[t.id] ?? 0}
                 initialDraft={agentDrafts[t.id]}
@@ -7252,9 +7302,7 @@ export default function App(): JSX.Element {
             defaultOpenProfileId={defaultCaseOpenProfileId}
             onPickRecords={pickRecordsForCase}
             onBrief={briefCaseToClaude}
-            onAskClaudeTodoUpdate={(prompt) =>
-              sendClaude(prompt, { displayText: '할일 변경분을 기준으로 클코 갱신 요청을 보냈습니다.' })
-            }
+            onManageTodos={(rows) => void openGlobalTodoWork(rows)}
           />
         </div>
       )
@@ -7538,6 +7586,7 @@ export default function App(): JSX.Element {
                   caseTabId={t.caseTabId}
                   caseContext={agentCaseContextForTerm(t)}
                 workspaceContext={agentWorkspaceContextForTerm(t, contextAppVersion)}
+                onTasksChanged={() => setTodoNonce((value) => value + 1)}
                   visible={t.id === visibleTermId}
                   focusNonce={termFocusNonce[t.id] ?? 0}
                   initialDraft={agentDrafts[t.id]}

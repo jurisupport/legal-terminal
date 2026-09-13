@@ -46,7 +46,8 @@ import type {
 } from './agent-types'
 import { currentAgentContext, prependAgentContext } from './agentPrompt'
 import type { AgentWorkspaceContext } from '../../shared/agentWorkspaceContext'
-import { listTodos } from '../jurisupport'
+import { listTodos, getAgentMcpConnection, agentMcpAccountEpoch, onAgentMcpAccountChange } from '../jurisupport'
+import { MANAGED_MCP, MANAGED_MCP_ENV, managedToolName, managedToolDecision, managedMcpApproval, managedDisallowedTools, claudeManagedServers, codexManagedConfig, redactManagedSecrets, type ManagedMcpConnection } from './agentMcp'
 import { codexTurnRunStatus, codexWorkStepStatus } from './agentProgress'
 import {
   buildSshArgs as buildAgentSshArgs,
@@ -79,6 +80,7 @@ interface QueuedAgentMessage {
 }
 
 interface CodexPendingRequest {
+  method?: string
   resolve: (value: unknown) => void
   reject: (error: Error) => void
 }
@@ -112,6 +114,12 @@ interface AgentSession {
   ssh?: AgentSshConn
   context?: string
   workspaceContext?: AgentWorkspaceContext
+  managedMcp?: ManagedMcpConnection
+  managedAccountInvalid?: boolean
+  managedMcpReady?: boolean
+  managedSecrets?: Set<string>
+  managedToolIds?: Map<string, string>
+  codexMcpMode?: AgentPermissionMode
   authStatus?: AgentAuthStatus
   commandProbe?: AbortController
   slashCommands?: AgentSlashCommand[]
@@ -168,6 +176,26 @@ interface AgentSession {
 }
 
 const sessions = new Map<string, AgentSession>()
+onAgentMcpAccountChange(() => {
+  for (const session of sessions.values()) {
+    if (!session.managedMcp && !session.workspaceContext?.todoManagement) continue
+    if (!session.managedMcp) {
+      if (session.running) interruptAgentSession(session.id)
+      continue
+    }
+    session.managedAccountInvalid = true
+    if (session.workspaceContext) session.workspaceContext = { ...session.workspaceContext, todoManagement: false }
+    session.managedMcpReady = false
+    interruptAgentSession(session.id)
+    emit(session, { type: 'error', sessionId: session.id, message: 'JuriSupport 계정이 변경되어 할일 연결을 중지했습니다. 새 할일 Agent를 열어 주세요.', recoverable: true })
+  }
+})
+function assertManagedAccount(session: AgentSession): void {
+  if (session.workspaceContext?.todoManagement === false || session.managedAccountInvalid || (session.managedMcp && session.managedMcp.epoch !== agentMcpAccountEpoch())) {
+    throw new Error('JuriSupport 계정이 변경되었습니다. 새 할일 Agent를 열어 주세요.')
+  }
+}
+
 const READ_ONLY_TOOLS = new Set([
   'Read',
   'Grep',
@@ -295,6 +323,7 @@ function remoteClaudeCommand(session: AgentSession): string {
     '--verbose --output-format stream-json --input-format stream-json',
     '--include-partial-messages --include-hook-events',
     '--permission-prompt-tool stdio',
+    session.managedMcp ? '--strict-mcp-config' : '',
     `--permission-mode ${shq(mode)}`,
     session.permissionMode === 'bypassPermissions' ? '--allow-dangerously-skip-permissions' : '',
     shellArgFlag('--resume', session.resumeSessionId).trim(),
@@ -302,7 +331,7 @@ function remoteClaudeCommand(session: AgentSession): string {
     shellArgFlag('--effort', claudeEffort(session.reasoningEffort)).trim(),
     shellListFlag('--tools', session.tools).trim(),
     shellListFlag('--allowedTools', session.allowedTools).trim(),
-    shellListFlag('--disallowedTools', session.disallowedTools).trim()
+    shellListFlag('--disallowedTools', [...(session.disallowedTools ?? []), ...(session.managedMcp ? managedDisallowedTools(session.managedMcp, session.permissionMode) : [])]).trim()
   ]
     .filter(Boolean)
     .join(' ')
@@ -349,7 +378,9 @@ function remoteClaudeUsageCommand(): string {
 }
 
 function remoteCodexCommand(session: AgentSession): string {
-  const launch = session.ssh?.remoteControl
+  const launch = session.managedMcp
+    ? `set +x; IFS= read -r ${MANAGED_MCP_ENV} || exit 1; export ${MANAGED_MCP_ENV}; exec \"$codex_bin\" app-server`
+    : session.ssh?.remoteControl
     ? 'if "$codex_bin" app-server daemon bootstrap --remote-control >/dev/null 2>&1; then exec "$codex_bin" app-server proxy; fi; exec "$codex_bin" app-server'
     : 'exec "$codex_bin" app-server'
   const inner = [
@@ -1210,6 +1241,18 @@ function requestUserDialog(
 }
 
 function emit(session: AgentSession, event: AgentEvent): void {
+  if (session.managedSecrets?.size) event = redactManagedSecrets(event, session.managedSecrets)
+  if (event.type === 'tool:start' && managedToolName(event.name)) {
+    session.managedToolIds ??= new Map()
+    session.managedToolIds.set(event.toolId, `mcp__${MANAGED_MCP}__${managedToolName(event.name)}`)
+  }
+  if (event.type === 'tool:done') {
+    const toolName = session.managedToolIds?.get(event.toolId)
+    if (toolName) {
+      session.managedToolIds?.delete(event.toolId)
+      emit(session, { type: 'process:event', sessionId: session.id, processId: event.toolId, title: 'JuriSupport 할일 도구', toolName, status: event.isError ? 'error' : 'completed', text: event.outputPreview })
+    }
+  }
   for (const [id, webContents] of session.viewers) {
     if (webContents.isDestroyed()) {
       session.viewers.delete(id)
@@ -2489,7 +2532,7 @@ function handleSdkMessage(session: AgentSession, sdkMessage: unknown): void {
 }
 
 function codexApprovalPolicy(mode: AgentPermissionMode): string {
-  return mode === 'bypassPermissions' ? 'never' : 'on-request'
+  return mode === 'bypassPermissions' || mode === 'dontAsk' ? 'never' : 'on-request'
 }
 
 function codexSandboxMode(mode: AgentPermissionMode): string {
@@ -2524,7 +2567,7 @@ function codexRequest(session: AgentSession, method: string, params?: unknown): 
   session.codexRequestSeq = id
   if (!session.codexPending) session.codexPending = new Map()
   return new Promise((resolve, reject) => {
-    session.codexPending!.set(id, { resolve, reject })
+    session.codexPending!.set(id, { resolve, reject, method })
     try {
       codexSend(session, params === undefined ? { id, method } : { id, method, params })
     } catch (error) {
@@ -2569,9 +2612,13 @@ function startCodexProcess(session: AgentSession): void {
       : spawn(codexBin, ['app-server'], {
           cwd: session.cwd,
           windowsHide: true,
-          env: cleanEnv()
+          env: { ...cleanEnv(), ...(session.managedMcp ? { [MANAGED_MCP_ENV]: session.managedMcp.token } : {}) }
         })
   session.codexProcess = proc
+  if (session.managedMcp && session.source === 'ssh') {
+    proc.stdin.write(`${session.managedMcp.token}\n`)
+    if (session.ssh?.remoteControl) emitProcessEvent(session, 'managed-mcp-transport', '할일 전용 연결', '앱 계정 보호를 위해 이 할일 Agent는 전용 원격 연결을 사용합니다.', 'completed')
+  }
   session.codexPending = new Map()
   session.codexStdoutBuffer = ''
 
@@ -2603,11 +2650,25 @@ function startCodexProcess(session: AgentSession): void {
 }
 
 async function ensureCodexThread(session: AgentSession): Promise<string> {
-  if (session.codexThreadId && session.codexProcess) return session.codexThreadId
+  assertManagedAccount(session)
+  if (session.codexThreadId && session.codexProcess && (!session.managedMcp || session.codexMcpMode === session.permissionMode)) return session.codexThreadId
   startCodexProcess(session)
   await ensureCodexInitialized(session)
+  const managedConfig = session.managedMcp ? codexManagedConfig(session.managedMcp, session.permissionMode) : undefined
+  if (managedConfig) {
+    const current = asRecord(await codexRequest(session, 'config/read', { includeLayers: false }))
+    const configuredServers = asRecord(asRecord(current?.config)?.mcp_servers)
+    for (const name of Object.keys(configuredServers ?? {})) {
+      if (name === MANAGED_MCP) continue
+      if (!/^[a-zA-Z0-9_-]+$/.test(name)) throw new Error('기존 MCP 설정 이름을 안전하게 분리할 수 없습니다. 할일 전용 MCP 연결을 시작하지 않았습니다.')
+      managedConfig[`mcp_servers.${name}.enabled`] = false
+    }
+    assertManagedAccount(session)
+  }
   const result = asRecord(
-    await codexRequest(session, 'thread/start', {
+    await codexRequest(session, session.codexThreadId ? 'thread/resume' : 'thread/start', {
+      ...(session.codexThreadId ? { threadId: session.codexThreadId } : {}),
+      ...(managedConfig ? { config: managedConfig } : {}),
       cwd: session.cwd,
       ...codexMaybeModel(session),
       approvalPolicy: codexApprovalPolicy(session.permissionMode),
@@ -2619,6 +2680,9 @@ async function ensureCodexThread(session: AgentSession): Promise<string> {
   const threadId = stringValue(thread?.id) ?? stringValue(result?.threadId)
   if (!threadId) throw new Error('Codex thread를 시작하지 못했습니다.')
   session.codexThreadId = threadId
+  session.codexMcpMode = session.permissionMode
+  if (session.managedMcp) session.managedMcpReady = true
+  assertManagedAccount(session)
   emit(session, {
     type: 'session:init',
     sessionId: session.id,
@@ -2822,10 +2886,34 @@ function handleCodexUserInputRequest(session: AgentSession, id: unknown, params:
   session.pendingDialogs.set(dialogId, pending)
 }
 
+function handleManagedCodexMcpApproval(session: AgentSession, id: unknown, params: Record<string, unknown>): void {
+  const approval = managedMcpApproval(params, session.codexThreadId)
+  const running = session.running
+  if (!approval || !running || running.signal.aborted || session.managedAccountInvalid || session.managedMcp?.epoch !== agentMcpAccountEpoch()) {
+    codexRespond(session, id, { action: 'decline' })
+    return
+  }
+  void requestPermission(session, approval.name, approval.input, {
+    signal: running.signal, toolUseID: String(id), title: approval.title, description: approval.description
+  }).then((result) => {
+    const allowed = result.behavior === 'allow' && session.running === running && !running.signal.aborted &&
+      !session.managedAccountInvalid && session.managedMcp?.epoch === agentMcpAccountEpoch() &&
+      params.threadId === session.codexThreadId && managedToolDecision(approval.name, session.permissionMode) !== 'deny'
+    // Native empty-form approval accepts {}; never persist a broad server/tool grant.
+    codexRespond(session, id, allowed ? { action: 'accept', content: {} } : { action: 'decline' })
+  }).catch((error) => {
+    emit(session, { type: 'error', sessionId: session.id, message: String(error), recoverable: true })
+  })
+}
+
 function handleCodexServerRequest(session: AgentSession, message: Record<string, unknown>): void {
   const method = stringValue(message.method)
   const params = asRecord(message.params) ?? {}
   if (!method) return
+  if (method === 'mcpServer/elicitation/request' && session.workspaceContext?.todoManagement) {
+    handleManagedCodexMcpApproval(session, message.id, params)
+    return
+  }
   if (
     method === 'item/commandExecution/requestApproval' ||
     method === 'item/fileChange/requestApproval' ||
@@ -2955,7 +3043,7 @@ function handleCodexItemStarted(session: AgentSession, item: Record<string, unkn
   }
   if (type === 'mcpToolCall' || type === 'dynamicToolCall') {
     setCodexWork(session, `item:${itemId}`, 'running')
-    const name = [stringValue(item.server), stringValue(item.tool)].filter(Boolean).join('.') || type
+    const name = stringValue(item.server) === MANAGED_MCP ? `mcp__${MANAGED_MCP}__${stringValue(item.tool) ?? ''}` : [stringValue(item.server), stringValue(item.tool)].filter(Boolean).join('.') || type
     emit(session, { type: 'tool:start', sessionId: session.id, toolId: itemId, name, label: name, inputPreview: safeJsonPreview(item.arguments) })
   }
 }
@@ -3012,7 +3100,7 @@ function handleCodexItemCompleted(session: AgentSession, item: Record<string, un
       toolId: itemId,
       outputPreview: safeJsonPreview(item.result ?? item.contentItems ?? item.error),
       elapsedMs: numberValue(item.durationMs),
-      isError: workStatus === 'error' || item.success === false || Boolean(item.error)
+      isError: workStatus === 'error' || item.success === false || Boolean(item.error) || asRecord(item.result)?.isError === true
     })
   }
 }
@@ -3131,7 +3219,8 @@ function handleCodexJsonLine(session: AgentSession, line: string): void {
     return
   }
   if (!message) return
-  emit(session, { type: 'raw', sessionId: session.id, message })
+  // Configuration responses can contain unrelated users' saved credentials; never forward them.
+  if (session.codexPending?.get(Number(message.id))?.method !== 'config/read') emit(session, { type: 'raw', sessionId: session.id, message })
   if (message.id !== undefined && (message.result !== undefined || message.error !== undefined)) {
     const id = numberValue(message.id)
     if (id === undefined) return
@@ -3404,6 +3493,10 @@ function handleRemotePermissionRequest(
     return true
   }
   const input = asRecord(request.input) ?? {}
+  if (managedToolName(toolName) && (session.managedAccountInvalid || session.managedMcp?.epoch !== agentMcpAccountEpoch() || managedToolDecision(toolName, session.permissionMode) === 'deny')) {
+    writeRemoteControlResponse(session, requestId, { behavior: 'deny', message: '이 할일 연결에서 허용되지 않은 작업입니다.' })
+    return true
+  }
   const toolUseId = stringValue(request.tool_use_id) ?? requestId
   const suggestions = Array.isArray(request.permission_suggestions)
     ? (request.permission_suggestions as PermissionUpdate[])
@@ -3547,6 +3640,37 @@ function runRemoteAgentMessage(
     let contextRequestId: string | undefined
     let contextTimer: ReturnType<typeof setTimeout> | undefined
     let sawResult = false
+    let mcpRequestId: string | undefined
+    let mcpStage: 'initialize' | 'mcp_set_servers' | 'mcp_status' = 'initialize'
+    let mcpTimer: NodeJS.Timeout | undefined
+    const mcpRequest = (): void => {
+      mcpRequestId = randomUUID()
+      proc.stdin.write(JSON.stringify({ type: 'control_request', request_id: mcpRequestId, request: { subtype: mcpStage, ...(mcpStage === 'mcp_set_servers' ? { servers: claudeManagedServers(session.managedMcp!, session.permissionMode) } : {}) } }) + '\n')
+    }
+    const handleMcpBootstrap = (message: Record<string, unknown> | null): void => {
+      if (!mcpRequestId || message?.type !== 'control_response') return
+      const response = asRecord(message.response)
+      if (response?.request_id !== mcpRequestId) return
+      try {
+        assertManagedAccount(session)
+        if (response.subtype !== 'success') throw new Error('JuriSupport 연결 제어 요청이 거절되었습니다.')
+        const body = asRecord(response.response)
+        if (mcpStage === 'initialize') { mcpStage = 'mcp_set_servers'; mcpRequest(); return }
+        if (mcpStage === 'mcp_set_servers') {
+          if (Object.keys(asRecord(body?.errors) ?? {}).length) throw new Error('JuriSupport 도구 연결에 실패했습니다.')
+          mcpStage = 'mcp_status'; mcpRequest(); return
+        }
+        const status = mcpStatusesFromUnknown(body?.mcpServers).find((server) => server.name === MANAGED_MCP)
+        if (status?.status !== 'connected') throw new Error('원격 JuriSupport 도구 연결을 확인할 수 없습니다.')
+        mcpRequestId = undefined
+        session.managedMcpReady = true
+        if (mcpTimer) clearTimeout(mcpTimer)
+        proc.stdin.write(`${remotePromptLine(prompt)}\n`)
+      } catch (error) {
+        emit(session, { type: 'error', sessionId: session.id, message: String(error), recoverable: true })
+        proc.kill()
+      }
+    }
 
     const endRemoteInput = (): void => {
       if (contextTimer) clearTimeout(contextTimer)
@@ -3612,6 +3736,7 @@ function runRemoteAgentMessage(
         if (abortController.signal.aborted || session.running !== abortController) return
         if (line.trim()) sawJson = true
         const message = handleRemoteJsonLine(session, line)
+        handleMcpBootstrap(message)
         handleRemoteUsageMessage(message)
       }
     })
@@ -3634,6 +3759,7 @@ function runRemoteAgentMessage(
     })
 
     proc.on('close', (code, signal) => {
+      if (mcpTimer) clearTimeout(mcpTimer)
       if (contextTimer) clearTimeout(contextTimer)
       if (session.remoteProcess === proc) session.remoteProcess = undefined
       abortController.signal.removeEventListener('abort', stopRemote)
@@ -3679,7 +3805,10 @@ function runRemoteAgentMessage(
     proc.stdin.on('error', () => {
       /* SSH may close stdin first on connection errors. The process close handler reports it. */
     })
-    proc.stdin.write(`${remotePromptLine(prompt)}\n`)
+    if (session.managedMcp) {
+      mcpTimer = setTimeout(() => { emit(session, { type: 'error', sessionId: session.id, message: '원격 JuriSupport 도구 연결 시간이 초과되었습니다.', recoverable: true }); proc.kill() }, MCP_STATUS_TIMEOUT_MS)
+      mcpRequest()
+    } else proc.stdin.write(`${remotePromptLine(prompt)}\n`)
   })
 }
 
@@ -3797,6 +3926,8 @@ export function sendAgentAuthInput(sessionId: string, input: AgentAuthInput): Ag
 }
 
 function shouldAutoAllow(session: AgentSession, toolName: string): boolean {
+  const managed = managedToolDecision(toolName, session.permissionMode)
+  if (managed) return managed === 'allow' && !session.managedAccountInvalid && session.managedMcp?.epoch === agentMcpAccountEpoch()
   if (session.permissionMode === 'bypassPermissions') return true
   if (READ_ONLY_TOOLS.has(toolName)) return true
   if (session.permissionMode === 'acceptEdits' && EDIT_TOOLS.has(toolName)) return true
@@ -3818,6 +3949,7 @@ function requestPermission(
     toolUseID: string
   }
 ): Promise<PermissionResult> {
+  if (managedToolName(toolName) && (session.managedAccountInvalid || session.managedMcp?.epoch !== agentMcpAccountEpoch() || managedToolDecision(toolName, session.permissionMode) === 'deny')) return Promise.resolve({ behavior: 'deny', message: '이 할일 연결에서 허용되지 않은 작업입니다.' })
   if (isAskUserQuestionTool(toolName)) {
     return new Promise<PermissionResult>((resolve) => {
       const handled = awaitQuestionPermissionAnswer(
@@ -4343,6 +4475,7 @@ async function runCodexSlashCommand(
   }
 
   try {
+    assertManagedAccount(session)
     if (name === '/status') {
       emitSlash('/status', codexStatusSummary(session))
       return { ok: true }
@@ -4364,6 +4497,7 @@ async function runCodexSlashCommand(
     await ensureCodexInitialized(session)
 
     if (name === '/mcp') {
+      if (session.workspaceContext?.todoManagement) return inspectAgentMcpStatus(session.id)
       const threadId = session.codexThreadId
       const result = await codexRequest(session, 'mcpServerStatus/list', {
         limit: 100,
@@ -4656,6 +4790,10 @@ function startNextQueuedMessage(session: AgentSession): void {
 }
 
 function startAgentTurn(session: AgentSession, input: AgentSendInput): void {
+  if (session.workspaceContext?.todoManagement === false || input.workspaceContext?.todoManagement === false) {
+    emit(session, { type: 'error', sessionId: session.id, message: '종료된 할일 연결입니다. 새 할일 Agent를 열어 주세요.', recoverable: true })
+    return
+  }
   session.commandProbe?.abort()
   session.commandProbe = undefined
   if (input.permissionMode) session.permissionMode = input.permissionMode
@@ -4690,8 +4828,25 @@ function startAgentTurn(session: AgentSession, input: AgentSendInput): void {
     let contextUsageActive = true
     let contextUsagePending = false
     let endClaudeInput: (() => void) | undefined
+    let managedReady: (() => void) | undefined
+    let claudeQuery: ReturnType<typeof query> | undefined
     try {
       await session.usageHydration
+      assertManagedAccount(session)
+      if (workspaceContext?.todoManagement && !session.managedMcp) {
+        const connection = await getAgentMcpConnection()
+        if (!connection) throw new Error('할일 Agent를 사용하려면 앱에서 JuriSupport에 연결해 주세요.')
+        if (!connection.tools.includes('list_tasks') || !connection.tools.includes('get_task')) throw new Error('연결된 서버에서 할일 조회 도구를 찾을 수 없습니다.')
+        session.managedMcp = connection
+        session.managedSecrets ??= new Set()
+        session.managedSecrets.add(connection.token)
+        if (session.provider === 'codex' && session.codexProcess) {
+          const previous = session.codexProcess
+          await new Promise<void>((resolve) => { previous.once('close', () => resolve()); previous.kill() })
+          session.codexMcpMode = undefined
+        }
+        assertManagedAccount(session)
+      }
       if (abortController.signal.aborted || session.running !== abortController) return
       const context = workspaceContext
         ? await currentAgentContext(workspaceContext, (caseId) => listTodos({ caseId, openOnly: true, enrichCaseDetails: false }), abortController.signal)
@@ -4707,26 +4862,33 @@ function startAgentTurn(session: AgentSession, input: AgentSendInput): void {
         await runCodexAgentMessage(session, prompt, abortController)
         return
       }
+      if (session.managedMcp) session.managedMcpReady = false
       if (session.source === 'ssh') {
         await runRemoteAgentMessage(session, prompt, abortController)
         return
       }
       // String prompts close the SDK input on the first result, even with live child tasks.
       const inputFinished = new Promise<void>((resolve) => { endClaudeInput = resolve })
+      let setupSucceeded = false
+      const ready = new Promise<void>((resolve) => { managedReady = resolve })
       const response = query({
         prompt: (async function* () {
+          await ready
+          if (abortController.signal.aborted || !setupSucceeded) return
+          assertManagedAccount(session)
           yield { type: 'user' as const, session_id: '', parent_tool_use_id: null, message: { role: 'user' as const, content: prompt } }
           await inputFinished
         })(),
         options: {
           abortController,
+          ...(session.managedMcp ? { strictMcpConfig: true } : {}),
           cwd: session.cwd,
           resume: session.resumeSessionId,
           model: claudeModel(session),
           effort: claudeEffort(session.reasoningEffort),
           tools: session.tools,
           allowedTools: session.allowedTools,
-          disallowedTools: session.disallowedTools,
+          disallowedTools: [...(session.disallowedTools ?? []), ...(session.managedMcp ? managedDisallowedTools(session.managedMcp, session.permissionMode) : [])],
           pathToClaudeCodeExecutable: packagedClaudeAgentSdkExecutable(),
           permissionMode: sdkPermissionMode(session.permissionMode),
           allowDangerouslySkipPermissions: session.permissionMode === 'bypassPermissions',
@@ -4742,6 +4904,19 @@ function startAgentTurn(session: AgentSession, input: AgentSendInput): void {
           env: cleanEnv()
         }
       })
+      claudeQuery = response
+      if (session.managedMcp) {
+        await withTimeout(response.initializationResult(), '할일 Agent 초기화')
+        assertManagedAccount(session)
+        const configured = await withTimeout(response.setMcpServers(claudeManagedServers(session.managedMcp, session.permissionMode)), 'JuriSupport 도구 연결')
+        if (Object.keys(configured.errors).length) throw new Error('JuriSupport 도구 연결 실패: ' + Object.values(configured.errors).join('; '))
+        const status = (await withTimeout(response.mcpServerStatus(), 'JuriSupport 연결 확인')).find((server) => server.name === MANAGED_MCP)
+        if (status?.status !== 'connected') throw new Error('JuriSupport 도구 연결을 확인할 수 없습니다.')
+        assertManagedAccount(session)
+        session.managedMcpReady = true
+      }
+      setupSucceeded = true
+      managedReady?.()
       const pollContextUsage = (): void => {
         if (contextUsagePending || abortController.signal.aborted || !contextUsageActive) return
         contextUsagePending = true
@@ -4785,6 +4960,8 @@ function startAgentTurn(session: AgentSession, input: AgentSendInput): void {
       }
     } finally {
       contextUsageActive = false
+      managedReady?.()
+      claudeQuery?.close()
       endClaudeInput?.()
       if (contextUsageTimer) clearInterval(contextUsageTimer)
       if (session.running === abortController) {
@@ -4856,6 +5033,14 @@ export function sendAgentMessage(sessionId: string, input: AgentSendInput): Agen
 export function inspectAgentMcpStatus(sessionId: string): AgentCommandResult {
   const session = sessions.get(sessionId)
   if (!session) return { ok: false, error: 'Agent 세션을 찾을 수 없습니다.' }
+  if (session.workspaceContext?.todoManagement === false) return { ok: false, error: '종료된 할일 연결입니다. 새 할일 Agent를 열어 주세요.' }
+  if (session.workspaceContext?.todoManagement) {
+    if (session.managedAccountInvalid) return { ok: false, error: '계정이 변경되었습니다. 새 할일 Agent를 열어 주세요.' }
+    emitProcessEvent(session, 'managed-mcp-status', '앱 JuriSupport 연결', session.managedMcpReady
+      ? '최근 할일 요청에서 앱 계정의 도구 연결을 확인했습니다. 다음 요청도 같은 앱 계정으로 연결합니다.'
+      : '할일 요청을 보내면 앱 계정으로 도구를 연결하고 연결 성공 후 실행합니다.', 'completed')
+    return { ok: true }
+  }
   if (session.provider !== 'claude') {
     return { ok: false, error: 'Codex Agent의 MCP 상태 확인은 아직 지원하지 않습니다.' }
   }

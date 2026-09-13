@@ -65,6 +65,8 @@ jobs:
           npm run verify:todo-summary
           npm run verify:todo-files
           npm run verify:agent-case-context
+          npm run verify:agent-mcp
+          npm run verify:agent-todo
 
       - name: Verify native terminal binary
         run: npm run verify:node-pty
@@ -108,6 +110,8 @@ jobs:
           npm run verify:todo-summary
           npm run verify:todo-files
           npm run verify:agent-case-context
+          npm run verify:agent-mcp
+          npm run verify:agent-todo
 
       - name: Build renderer/main (electron-vite)
         run: npm run build

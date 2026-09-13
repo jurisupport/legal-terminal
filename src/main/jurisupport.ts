@@ -20,6 +20,12 @@ export type { JsCase, JsHearing, JsParty } from './jurisupportNormalize'
 // 응답은 SSE 한 건("event: message\ndata: {json}"), result.content[0].text = JSON 문자열.
 const MCP_URL = 'https://api.jurisupport.com/mcp'
 
+const agentAccountListeners = new Set<() => void>()
+export function onAgentMcpAccountChange(listener: () => void): () => void {
+  agentAccountListeners.add(listener)
+  return () => { agentAccountListeners.delete(listener) }
+}
+export function agentMcpAccountEpoch(): number { return accountEpoch }
 let accountEpoch = 0
 let sessionId: string | null = null
 let toolQueue: Promise<void> = Promise.resolve()
@@ -40,6 +46,7 @@ const todoCaseCache = new Map<string, JsCase | null>()
 // ── 토큰 저장/조회 (safeStorage 암호화, 불가 시 평문 폴백) ──
 export async function setToken(token: string): Promise<void> {
   accountEpoch++
+  for (const listener of agentAccountListeners) listener()
   let enc: string
   if (token && safeStorage.isEncryptionAvailable()) {
     enc = 'v1:' + safeStorage.encryptString(token).toString('base64')
@@ -65,6 +72,21 @@ async function getToken(): Promise<string | null> {
   }
   if (enc.startsWith('plain:')) return enc.slice(6)
   return null
+}
+
+/** Main-process only; never expose this connection through IPC or renderer state. */
+export async function getAgentMcpConnection(): Promise<{ token: string; epoch: number; tools: string[] } | null> {
+  const epoch = accountEpoch
+  const token = await getToken()
+  if (!token) return null
+  if (/[\x00-\x1f\x7f]/.test(token)) throw new Error('JuriSupport 토큰 형식을 확인해 주세요.')
+  try {
+    const tools = await listMcpTools()
+    if (epoch !== accountEpoch) throw new Error('JuriSupport 계정이 변경되었습니다.')
+    return { token, epoch, tools: tools.map((tool) => tool.name) }
+  } catch (error) {
+    throw new Error(String(error instanceof Error ? error.message : error).split(token).join('[token redacted]'))
+  }
 }
 
 export async function hasToken(): Promise<boolean> {

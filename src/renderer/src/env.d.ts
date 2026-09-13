@@ -82,6 +82,7 @@ export interface PtyCreateOpts {
 
 export interface TerminalTabPayload {
   contextKind?: 'case' | 'global' | 'folder'
+  todoManagement?: boolean
   id: string
   title: string
   kind?: 'terminal' | 'agent'
@@ -790,6 +791,7 @@ export interface LtApi {
   app: {
     info: () => Promise<{
       version: string
+      homeDirectory: string
       platform: string
       versions: { electron: string; node: string; chrome: string }
     }>

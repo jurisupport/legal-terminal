@@ -23,81 +23,6 @@ const STATUS_OPTIONS = [
   { value: 'all', label: '전체' }
 ]
 
-const PATCH_STATUSES = new Set(['pending', 'in_progress', 'completed', 'closed'])
-const PATCH_PRIORITIES = new Set(['low', 'medium', 'high'])
-
-interface RelatedTodoDraft {
-  id: string
-  text: string
-  createdAt: string
-  createdTodoId?: string
-}
-
-interface TodoSnapshot {
-  id: string
-  title: string
-  status: string
-  priority?: string | null
-  dueDate?: string | null
-  court?: string | null
-  caseNumber?: string | null
-  caseName?: string | null
-  client?: string | null
-  opponent?: string | null
-  partyNames?: string | null
-  recentProgress?: string | null
-}
-
-interface TodoChangeEntry {
-  snapshot: TodoSnapshot
-  progressTexts: string[]
-  status?: string
-  created?: boolean
-  relatedDrafts: RelatedTodoDraft[]
-  updatedAt: string
-}
-
-interface TodoPatch {
-  changeSetId?: string
-  operations: TodoPatchOperation[]
-}
-
-type TodoPatchOperation =
-  | { type: 'append_progress'; todoId: string; text: string }
-  | { type: 'set_status'; todoId: string; status: string }
-  | {
-      type: 'create_related_todo'
-      sourceTodoId: string
-      title: string
-      dueDate?: string | null
-      priority?: string
-      notes?: string
-    }
-  | {
-      type: 'update_todo'
-      todoId: string
-      title?: string
-      dueDate?: string | null
-      priority?: string
-    }
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return !!value && typeof value === 'object' && !Array.isArray(value)
-}
-
-function randomId(prefix: string): string {
-  return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
-}
-
-function stringValue(value: unknown): string | undefined {
-  return typeof value === 'string' && value.trim() ? value.trim() : undefined
-}
-
-function nullableStringValue(value: unknown): string | null | undefined {
-  if (value === null) return null
-  return stringValue(value)
-}
-
 function isImeComposing(e: KeyboardEvent<HTMLInputElement>): boolean {
   return e.nativeEvent.isComposing || e.keyCode === 229
 }
@@ -185,156 +110,6 @@ function todoCaseTitle(todo: JsTodo): string {
     .join(' · ')
 }
 
-function snapshotTodo(todo: JsTodo): TodoSnapshot {
-  const recent = todo.progress?.[todo.progress.length - 1]
-  return {
-    id: todo.id,
-    title: todo.title,
-    status: todo.status,
-    priority: todo.priority,
-    dueDate: todo.dueDate,
-    court: todo.court,
-    caseNumber: todo.caseNumber,
-    caseName: todo.caseName,
-    client: todo.client,
-    opponent: todo.opponent,
-    partyNames: todo.partyNames,
-    recentProgress: recent?.text ?? null
-  }
-}
-
-function buildClaudeTodoPrompt(changeSetId: string, changes: TodoChangeEntry[]): string {
-  const promptTodos = changes.map((entry) => {
-    const { relatedDrafts, ...rest } = entry
-    return {
-      ...rest,
-      relatedTodos: relatedDrafts
-        .filter((draft) => !draft.createdTodoId)
-        .map((draft) => ({
-          text: draft.text,
-          createdAt: draft.createdAt
-        }))
-    }
-  })
-  const payload = {
-    changeSetId,
-    generatedAt: new Date().toISOString(),
-    scope: 'changed_todos_only',
-    todos: promptTodos
-  }
-  return [
-    'JuriSupport 할일 갱신 요청입니다.',
-    '',
-    '중요:',
-    '- 전체 할일을 조회하지 말고 아래 changeSet에 포함된 할일만 기준으로 판단해줘.',
-    '- progressTexts는 이미 JuriSupport 할일 본문에 저장된 오늘 진행 기록이므로 같은 내용을 다시 append_progress 하지 마.',
-    '- relatedTodos는 아직 저장되지 않은 관련 추가할일이야. 필요하면 create_related_todo 작업으로 만들어줘.',
-    '- 사건 식별은 법원, 사건번호, 사건명, 당사자 이름만 사용해. UUID나 내부 사건 id를 새 할일 제목/본문에 넣지 마.',
-    '',
-    '반환 형식:',
-    '- 설명 없이 JSON fenced block 하나만 반환해.',
-    '- 허용 작업은 append_progress, set_status, create_related_todo, update_todo 뿐이야.',
-    '- replace_content 같은 본문 전체 교체 작업은 사용하지 마.',
-    '',
-    '예시:',
-    '```json',
-    JSON.stringify(
-      {
-        changeSetId,
-        operations: [
-          { type: 'set_status', todoId: 'todo-id', status: 'in_progress' },
-          {
-            type: 'create_related_todo',
-            sourceTodoId: 'todo-id',
-            title: '추가 확인사항 정리',
-            dueDate: '2026-06-09',
-            priority: 'medium',
-            notes: '필요한 보충 메모'
-          }
-        ]
-      },
-      null,
-      2
-    ),
-    '```',
-    '',
-    'changeSet:',
-    '```json',
-    JSON.stringify(payload, null, 2),
-    '```'
-  ].join('\n')
-}
-
-function parsePatchOperation(value: unknown): TodoPatchOperation | null {
-  if (!isRecord(value)) return null
-  const type = stringValue(value.type)
-  if (type === 'append_progress') {
-    const todoId = stringValue(value.todoId)
-    const text = stringValue(value.text)
-    return todoId && text ? { type, todoId, text } : null
-  }
-  if (type === 'set_status') {
-    const todoId = stringValue(value.todoId)
-    const nextStatus = stringValue(value.status)
-    return todoId && nextStatus && PATCH_STATUSES.has(nextStatus)
-      ? { type, todoId, status: nextStatus }
-      : null
-  }
-  if (type === 'create_related_todo') {
-    const sourceTodoId = stringValue(value.sourceTodoId)
-    const title = stringValue(value.title)
-    if (!sourceTodoId || !title) return null
-    const priority = stringValue(value.priority)
-    return {
-      type,
-      sourceTodoId,
-      title,
-      dueDate: nullableStringValue(value.dueDate),
-      priority: priority && PATCH_PRIORITIES.has(priority) ? priority : undefined,
-      notes: stringValue(value.notes)
-    }
-  }
-  if (type === 'update_todo') {
-    const todoId = stringValue(value.todoId)
-    if (!todoId) return null
-    const priority = stringValue(value.priority)
-    const op: TodoPatchOperation = {
-      type,
-      todoId,
-      title: stringValue(value.title),
-      dueDate: nullableStringValue(value.dueDate),
-      priority: priority && PATCH_PRIORITIES.has(priority) ? priority : undefined
-    }
-    return op.title !== undefined || op.dueDate !== undefined || op.priority !== undefined ? op : null
-  }
-  return null
-}
-
-function parseClaudePatch(raw: string): TodoPatch {
-  const fenced = raw.match(/```(?:json)?\s*([\s\S]*?)```/i)
-  const text = (fenced?.[1] ?? raw).trim()
-  const parsed = JSON.parse(text) as unknown
-  const root = Array.isArray(parsed) ? { operations: parsed } : parsed
-  if (!isRecord(root) || !Array.isArray(root.operations)) throw new Error('operations 배열이 없습니다.')
-  const operations = root.operations.map(parsePatchOperation)
-  if (operations.some((op) => !op)) throw new Error('지원하지 않는 패치 작업이 있습니다.')
-  return {
-    changeSetId: stringValue(root.changeSetId),
-    operations: operations as TodoPatchOperation[]
-  }
-}
-
-function caseNotesForRelated(source: TodoSnapshot, notes?: string): string {
-  return [
-    '[관련 할일]',
-    `원 할일: ${source.title || '(제목 없음)'}`,
-    notes?.trim() ? '' : undefined,
-    notes?.trim()
-  ]
-    .filter((line): line is string => line !== undefined)
-    .join('\n')
-}
-
 function TodosDashboardContent({
   nonce = 0,
   onChanged,
@@ -345,7 +120,7 @@ function TodosDashboardContent({
   defaultOpenProfileId,
   onPickRecords,
   onBrief,
-  onAskClaudeTodoUpdate,
+  onManageTodos,
   onOpenEvidenceFile,
   snapshot, initialFilter = 'open', filterNonce = 0, onGlobalWork
 }: {
@@ -362,7 +137,7 @@ function TodosDashboardContent({
   defaultOpenProfileId?: string
   onPickRecords?: (c: JsCase) => void | Promise<void>
   onBrief?: (c: JsCase) => void
-  onAskClaudeTodoUpdate?: (prompt: string) => void
+  onManageTodos?: (todos: JsTodo[]) => void
   onOpenEvidenceFile?: (path: string, label?: string) => void | Promise<void>
 }): JSX.Element {
   const tokenReady = snapshot.hasToken
@@ -386,12 +161,6 @@ function TodosDashboardContent({
   const [newTitle, setNewTitle] = useState('')
   const [progressDrafts, setProgressDrafts] = useState<Record<string, string>>({})
   const [relatedInputs, setRelatedInputs] = useState<Record<string, string>>({})
-  const [todoChanges, setTodoChanges] = useState<Record<string, TodoChangeEntry>>({})
-  const [changeSetId, setChangeSetId] = useState(() => randomId('todo-cs'))
-  const [patchOpen, setPatchOpen] = useState(false)
-  const [patchText, setPatchText] = useState('')
-  const [patchStatus, setPatchStatus] = useState('')
-  const [applyingPatch, setApplyingPatch] = useState(false)
   const [menu, setMenu] = useState<CaseContextMenuState | null>(null)
   const defaultOpenProfile = defaultOpenProfileId
     ? sshProfiles.find((p) => p.id === defaultOpenProfileId)
@@ -407,20 +176,6 @@ function TodosDashboardContent({
     for (const todo of filteredTodos) { const key = todo.caseId || ''; result.set(key, [...(result.get(key) ?? []), todo]) }
     return [...result.entries()]
   }, [filteredTodos])
-  const changeEntries = useMemo(() => Object.values(todoChanges), [todoChanges])
-  const actionableChangeEntries = useMemo(
-    () =>
-      changeEntries.filter(
-        (entry) =>
-          entry.progressTexts.length > 0 ||
-          !!entry.status ||
-          !!entry.created ||
-          entry.relatedDrafts.some((draft) => !draft.createdTodoId)
-      ),
-    [changeEntries]
-  )
-  const changeCount = actionableChangeEntries.length
-
   const openDefault = (todo: JsTodo): void => {
     const c = todoToCase(todo)
     if (!c) return
@@ -469,41 +224,6 @@ function TodosDashboardContent({
     if (!['open', 'pending', 'in_progress'].includes(status)) load()
   }
 
-  const recordTodoChange = (
-    todo: JsTodo,
-    patch: Partial<Pick<TodoChangeEntry, 'status' | 'created'>> & {
-      progressText?: string
-      relatedDraft?: RelatedTodoDraft
-    }
-  ): void => {
-    const snapshot = snapshotTodo(todo)
-    setTodoChanges((prev) => {
-      const current: TodoChangeEntry =
-        prev[todo.id] ?? {
-          snapshot,
-          progressTexts: [],
-          relatedDrafts: [],
-          updatedAt: new Date().toISOString()
-        }
-      return {
-        ...prev,
-        [todo.id]: {
-          ...current,
-          snapshot: { ...current.snapshot, ...snapshot, status: patch.status ?? snapshot.status },
-          progressTexts: patch.progressText
-            ? [...current.progressTexts, patch.progressText]
-            : current.progressTexts,
-          relatedDrafts: patch.relatedDraft
-            ? [...current.relatedDrafts, patch.relatedDraft]
-            : current.relatedDrafts,
-          status: patch.status ?? current.status,
-          created: patch.created ?? current.created,
-          updatedAt: new Date().toISOString()
-        }
-      }
-    })
-  }
-
   const addTodo = (): void => {
     const title = newTitle.trim()
     if (!title) return
@@ -513,7 +233,6 @@ function TodosDashboardContent({
         setErr(r.error ?? '추가 실패')
         return
       }
-      if (r.todo) recordTodoChange(r.todo, { created: true })
       setNewTitle(''); setNewDue(''); setNewReview('')
       changed()
     })
@@ -525,7 +244,6 @@ function TodosDashboardContent({
     void runMutation(todo.id, async () => { const r = await window.lt.todo.update(todo.id, { status: 'pending' })
       if (!r.ok) setErr(r.error ?? '예정 변경 실패')
       else {
-        recordTodoChange(r.todo ?? { ...todo, status: 'pending' }, { status: 'pending' })
         changed()
       }
     })
@@ -535,7 +253,6 @@ function TodosDashboardContent({
     void runMutation(todo.id, async () => { const r = await window.lt.todo.update(todo.id, { status: 'in_progress' })
       if (!r.ok) setErr(r.error ?? '진행중 변경 실패')
       else {
-        recordTodoChange(r.todo ?? { ...todo, status: 'in_progress' }, { status: 'in_progress' })
         changed()
       }
     })
@@ -551,148 +268,33 @@ function TodosDashboardContent({
         setErr(r.error ?? '진행 기록 실패')
         return
       }
-      recordTodoChange(r.todo ?? todo, { progressText: text })
       setProgressDrafts((drafts) => ({ ...drafts, [todo.id]: '' }))
       changed()
     })
   }
 
-  const addRelatedDraft = (todo: JsTodo): void => {
+  const addRelatedTodo = (todo: JsTodo): void => {
     const text = relatedInputs[todo.id]?.trim()
     if (!text) return
-    const currentDrafts = todoChanges[todo.id]?.relatedDrafts ?? []
-    if (currentDrafts.some((draft) => draft.text === text)) return
-    const source = snapshotTodo(todo)
     void runMutation(todo.id, async () => { const r = await window.lt.todo.create({
       title: text,
       caseId: todo.caseId || undefined,
       ...(capabilities?.createFields.includes('parentId') ? { parentId: todo.id } : {}),
-      court: source.court ?? undefined,
-      caseNumber: source.caseNumber ?? undefined,
-      caseName: source.caseName ?? undefined,
-      client: source.client ?? undefined,
-      opponent: source.opponent ?? undefined,
-      partyNames: source.partyNames ?? undefined,
-      notes: caseNotesForRelated(source)
+      court: todo.court ?? undefined,
+      caseNumber: todo.caseNumber ?? undefined,
+      caseName: todo.caseName ?? undefined,
+      client: todo.client ?? undefined,
+      opponent: todo.opponent ?? undefined,
+      partyNames: todo.partyNames ?? undefined,
+      notes: `[관련 할일]\n원 할일: ${todo.title || '(제목 없음)'}`
     })
       if (!r.ok || !r.todo) {
         setErr(r.error ?? '관련 할일 생성 실패')
         return
       }
-      recordTodoChange(todo, {
-        relatedDraft: { id: randomId('draft'), text, createdAt: new Date().toISOString(), createdTodoId: r.todo.id }
-      })
       setRelatedInputs((drafts) => ({ ...drafts, [todo.id]: '' }))
       changed()
     })
-  }
-
-  const removeRelatedDraft = (todo: JsTodo, draftId: string): void => {
-    setTodoChanges((prev) => {
-      const current = prev[todo.id]
-      if (!current) return prev
-      const nextDrafts = current.relatedDrafts.filter((draft) => draft.id !== draftId)
-      if (
-        nextDrafts.length === 0 &&
-        current.progressTexts.length === 0 &&
-        !current.status &&
-        !current.created
-      ) {
-        const { [todo.id]: _removed, ...rest } = prev
-        return rest
-      }
-      return {
-        ...prev,
-        [todo.id]: { ...current, relatedDrafts: nextDrafts, updatedAt: new Date().toISOString() }
-      }
-    })
-  }
-
-  const askClaudeTodoUpdate = (): void => {
-    if (!actionableChangeEntries.length) return
-    setPatchOpen(true)
-    setPatchStatus('클코 응답 JSON을 붙여넣으면 적용할 수 있습니다.')
-    onAskClaudeTodoUpdate?.(buildClaudeTodoPrompt(changeSetId, actionableChangeEntries))
-  }
-
-  const applyPatchOperation = async (op: TodoPatchOperation): Promise<void> => {
-    if (op.type === 'append_progress') {
-      const r = await window.lt.todo.appendProgress(op.todoId, op.text)
-      if (!r.ok) throw new Error(r.error ?? '진행 기록 실패')
-      return
-    }
-    if (op.type === 'set_status') {
-      const r = await window.lt.todo.update(op.todoId, { status: op.status })
-      if (!r.ok) throw new Error(r.error ?? '상태 변경 실패')
-      return
-    }
-    if (op.type === 'update_todo') {
-      const patch = {
-        title: op.title,
-        dueDate: op.dueDate,
-        priority: op.priority
-      }
-      const r = await window.lt.todo.update(op.todoId, patch)
-      if (!r.ok) throw new Error(r.error ?? '할일 수정 실패')
-      return
-    }
-    const source =
-      (todos ?? []).find((todo) => todo.id === op.sourceTodoId) ??
-      (todoChanges[op.sourceTodoId]
-        ? ({ ...todoChanges[op.sourceTodoId].snapshot } as JsTodo)
-        : null)
-    if (!source) throw new Error(`원 할일을 찾을 수 없습니다: ${op.sourceTodoId}`)
-    const sourceSnapshot = snapshotTodo(source)
-    const r = await window.lt.todo.create({
-      title: op.title,
-      caseId: source.caseId || undefined,
-      dueDate: op.dueDate ?? undefined,
-      priority: op.priority,
-      court: sourceSnapshot.court ?? undefined,
-      caseNumber: sourceSnapshot.caseNumber ?? undefined,
-      caseName: sourceSnapshot.caseName ?? undefined,
-      client: sourceSnapshot.client ?? undefined,
-      opponent: sourceSnapshot.opponent ?? undefined,
-      partyNames: sourceSnapshot.partyNames ?? undefined,
-      notes: caseNotesForRelated(sourceSnapshot, op.notes)
-    })
-    if (!r.ok) throw new Error(r.error ?? '관련 할일 생성 실패')
-  }
-
-  const applyClaudePatch = (): void => {
-    setErr('')
-    setPatchStatus('')
-    let patch: TodoPatch
-    try {
-      patch = parseClaudePatch(patchText)
-      if (patch.changeSetId && patch.changeSetId !== changeSetId) {
-        setPatchStatus('changeSetId가 현재 변경분과 다릅니다.')
-        return
-      }
-    } catch (error) {
-      setPatchStatus(error instanceof Error ? error.message : String(error))
-      return
-    }
-    if (!patch.operations.length) {
-      setPatchStatus('적용할 작업이 없습니다.')
-      return
-    }
-    setApplyingPatch(true)
-    void (async () => {
-      try {
-        for (const op of patch.operations) await applyPatchOperation(op)
-        setTodoChanges({})
-        setChangeSetId(randomId('todo-cs'))
-        setPatchText('')
-        setPatchOpen(false)
-        setPatchStatus(`${patch.operations.length}개 작업을 적용했습니다.`)
-        changed()
-      } catch (error) {
-        setPatchStatus(error instanceof Error ? error.message : String(error))
-      } finally {
-        setApplyingPatch(false)
-      }
-    })()
   }
 
   return (
@@ -710,17 +312,9 @@ function TodosDashboardContent({
         <button className="dash-btn todo-refresh" title="검색" onClick={() => load()}>
           검색
         </button>
-        <button
-          className="dash-btn todo-rebuild"
-          title="할일 다시 만들기"
-          onClick={askClaudeTodoUpdate}
-          disabled={!changeCount}
-        >
-          할일 다시 만들기{changeCount ? ` ${changeCount}` : ''}
-        </button>
-        <button className="dash-btn todo-patch-toggle" title="패치 적용" onClick={() => setPatchOpen(true)}>
-          패치 적용
-        </button>
+        {onManageTodos && <button className="todo-primary" title={`표시된 ${filteredTodos.length}개 할일을 오른쪽 에이전트로 전달`} onClick={() => onManageTodos(filteredTodos)} disabled={!filteredTodos.length || !!busyId}>
+          오른쪽 에이전트로 정리
+        </button>}
       </div>
 
       <fieldset className="todo-create" disabled={!!busyId}>
@@ -761,30 +355,6 @@ function TodosDashboardContent({
       {['open', 'pending', 'in_progress'].includes(status) && <div className="todo-filters" aria-label="열린 할일 필터">{FILTERS.map((option) => <button key={option.value} className={`todo-tab ${filter === option.value ? 'on' : ''}`} aria-pressed={filter === option.value} onClick={() => setFilter(option.value)}>{option.label}</button>)}</div>}
       <div className="todo-filter-count">표시 {filteredTodos.length}건 {onGlobalWork && <button className="todo-small" onClick={onGlobalWork}>전체 할일 정리 시작</button>}</div>
       <TodoSnapshotState snapshot={snapshot} />
-      {(patchOpen || patchStatus) && (
-        <div className="todo-patch-panel">
-          <textarea
-            className="todo-patch-input"
-            placeholder="클코 JSON 패치"
-            value={patchText}
-            onChange={(e) => setPatchText(e.target.value)}
-          />
-          <div className="todo-patch-actions">
-            <span className="todo-patch-status">{patchStatus}</span>
-            <button className="todo-small" onClick={() => setPatchOpen(false)}>
-              닫기
-            </button>
-            <button
-              className="todo-primary"
-              onClick={applyClaudePatch}
-              disabled={!patchText.trim() || applyingPatch}
-            >
-              패치 적용
-            </button>
-          </div>
-        </div>
-      )}
-
       {tokenReady === false && (
         <p className="dash-err pad">오류: {err || 'JuriSupport 연결이 필요합니다.'}</p>
       )}
@@ -801,7 +371,6 @@ function TodosDashboardContent({
           const recent = todo.progress?.[todo.progress.length - 1]
           const progressDraft = progressDrafts[todo.id] ?? ''
           const relatedInput = relatedInputs[todo.id] ?? ''
-          const relatedDrafts = todoChanges[todo.id]?.relatedDrafts ?? []
           const caseContext = todoToCase(todo)
           const caseTitle = todoCaseTitle(todo)
           return (
@@ -861,26 +430,17 @@ function TodosDashboardContent({
                     setRelatedInputs((drafts) => ({ ...drafts, [todo.id]: e.target.value }))
                   }
                   onKeyDown={(e) => {
-                    if (shouldSubmitInput(e)) addRelatedDraft(todo)
+                    if (shouldSubmitInput(e)) addRelatedTodo(todo)
                   }}
                 />
-                <button className="todo-small" onClick={() => addRelatedDraft(todo)} disabled={!relatedInput.trim()}>
+                <button className="todo-small" onClick={() => addRelatedTodo(todo)} disabled={!relatedInput.trim()}>
                   {capabilities?.createFields.includes('parentId') ? '자식 추가' : '추가'}
                 </button>
               </div>
               {relatedInput && <p className="todo-warning">추가할 할일에는 기한이 없습니다. 다른 기한·산출물은 별도 할일로 추가하세요.</p>}
               <TodoDetails todo={todo} parentTitle={snapshot.todos?.find((parent) => parent.id === todo.parentId)?.title} capabilities={capabilities} onOpenEvidenceFile={onOpenEvidenceFile} onChanged={changed} onComplete={() => completeTodo(todo)} />
-              {relatedDrafts.length > 0 && (
-                <div className="todo-related-list" onClick={(e) => e.stopPropagation()}>
-                  {relatedDrafts.map((draft) => (
-                    <span key={draft.id} className="todo-related-pill">
-                      {draft.text}
-                      <button onClick={() => removeRelatedDraft(todo, draft.id)}>×</button>
-                    </span>
-                  ))}
-                </div>
-              )}
               <div className="todo-actions" onClick={(e) => e.stopPropagation()}>
+                {onManageTodos && <button className="todo-small" onClick={() => onManageTodos([todo])}>에이전트로 정리</button>}
                 {todo.status === 'completed' || todo.status === 'done' ? (
                   <button className="todo-small" onClick={() => reopenTodo(todo)}>
                     예정으로
@@ -908,9 +468,7 @@ function TodosDashboardContent({
         })}</div>}</section>)}
       </div>
 
-      {resolution && <TodoResolution todo={resolution.todo} action={resolution.action} progressText={progressDrafts[resolution.todo.id]?.trim() || undefined} onClose={() => setResolution(null)} onSaved={(saved) => {
-        const nextStatus = resolution.action === 'complete' ? 'completed' : 'closed'
-        recordTodoChange(saved ?? { ...resolution.todo, status: nextStatus }, { status: nextStatus, progressText: progressDrafts[resolution.todo.id]?.trim() })
+      {resolution && <TodoResolution todo={resolution.todo} action={resolution.action} progressText={progressDrafts[resolution.todo.id]?.trim() || undefined} onClose={() => setResolution(null)} onSaved={() => {
         setProgressDrafts((drafts) => ({ ...drafts, [resolution.todo.id]: '' })); setResolution(null); changed()
       }} />}
       {caseReview && <CaseTaskReview closureSupported={capabilities?.caseClosure ?? false} caseId={caseReview.id} title={caseReview.title} onClose={() => setCaseReview(null)} onChanged={changed} />}

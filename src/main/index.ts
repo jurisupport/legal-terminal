@@ -675,6 +675,7 @@ ipcMain.handle('app:openHtml', async (_e, path: string) => {
 
 ipcMain.handle('app:info', () => ({
   version: app.getVersion(),
+  homeDirectory: app.getPath('home'),
   platform: process.platform,
   versions: {
     electron: process.versions.electron,

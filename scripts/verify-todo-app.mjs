@@ -25,7 +25,7 @@ function runApp({ root, temp, chosenDir, screenshot }) {
     { id: 'undated', type: 'todo', title: '통합 검증 기한 없는 할일', status: 'in_progress', createdAt: '2020-01-01', updatedAt: '2020-01-01', version: 1 },
     { id: 'review', type: 'todo', title: '통합 검증 재확인 할일', status: 'pending', dueDate: '2099-01-01', reviewAt: '2020-01-01', createdAt: '2020-01-01', version: 1 }
   ]
-  const settings = { sshProfiles: [], agentDefaultProvider: 'codex', agentDefaultPermissionMode: 'ask', notifyDone: false }
+  const settings = { draftsRoot: chosenDir, sshProfiles: [], agentDefaultProvider: 'codex', agentDefaultPermissionMode: 'ask', notifyDone: false }
   app.setPath('userData', require('node:path').join(temp, 'profile'))
   BrowserWindow.prototype.show = function () {}
   global.fetch = async () => { throw Error('Smoke test blocked external fetch') }
@@ -69,7 +69,16 @@ function runApp({ root, temp, chosenDir, screenshot }) {
     }
     if (channel === 'agent:snapshot') return { ok: true, session: sessions.get(args[0]) }
     if (channel === 'agent:models') return { ok: true, models: [{ id: 'synthetic', model: 'synthetic', displayName: '검증용 모델', isDefault: true }] }
-    if (channel === 'agent:send' || channel === 'agent:close') return { ok: true }
+    if (channel === 'agent:send') {
+      if (args[0].input.text.includes('도과 할일 완료')) {
+        rows[0].status = 'completed'
+        event.sender.send('agent:event', { type:'status', sessionId:args[0].sessionId, status:'working' })
+        event.sender.send('agent:event', { type:'process:event', sessionId:args[0].sessionId, processId:'managed-write-1', title:'할일 상태 변경', toolName:'mcp__legal_terminal_jurisupport__update_task_status', status:'completed' })
+        event.sender.send('agent:event', { type:'status', sessionId:args[0].sessionId, status:'done' })
+      }
+      return { ok: true }
+    }
+    if (channel === 'agent:close') return {ok:true}
     if (channel === 'fs:mkdir' || channel.startsWith('pty:')) throw Error(`Forbidden smoke-test side effect: ${channel}`)
     unexpected.push(channel)
     throw Error(`Unmocked smoke-test IPC: ${channel}`)
@@ -112,22 +121,32 @@ function runApp({ root, temp, chosenDir, screenshot }) {
       const created = calls.find((call) => call.channel === 'agent:create').args[0]
       assert.equal(created.cwd, chosenDir)
       assert.equal(created.workspaceContext?.kind, 'global')
+      assert.equal(created.workspaceContext?.todoManagement, true)
+      assert.equal(calls.filter(call => call.channel === 'agent:create').length, 1, 'task view and open button reuse the same right agent')
       assert.match(created.context, /"contextKind": "global"/)
-      assert.equal(calls.filter((call) => call.channel === 'dialog:pickFolder').length, 1)
+      assert.equal(calls.filter((call) => call.channel === 'dialog:pickFolder').length, 0)
       assert.equal(calls.some((call) => call.channel === 'fs:mkdir'), false)
       assert.deepEqual(fs.readdirSync(chosenDir), ['existing.txt'])
+      await evaluate(`smoke.textButton('오른쪽 에이전트로 정리')`)
+      await wait(() => evaluate(`document.querySelector('.agent-composer textarea')?.value.includes('첨부한 선택 할일')`), 'Selected tasks reach right composer')
       await wait(() => evaluate(`!!document.querySelector('.agent-send-btn:not([disabled])')`), 'Global prompt ready')
       await evaluate(`smoke.check(document.querySelector('.workspace-todo-header').textContent.includes('기한 도과 1'), 'Header remains after global task'); smoke.click('.agent-send-btn')`)
       await wait(() => calls.some((call) => call.channel === 'agent:send'), 'Global Agent send')
       const sent = calls.find((call) => call.channel === 'agent:send').args[0]
       assert.equal(sent.input.workspaceContext?.kind, 'global')
-      assert.match(sent.input.text, /전체 열린 할일/)
+      assert.match(sent.input.text, /첨부한 선택 할일/)
+      assert.equal(sent.input.workspaceContext.todoManagement, true)
+      assert.equal(sent.input.attachments.length, 1)
+      const selected = JSON.parse(sent.input.attachments[0].text.match(/<selected-tasks>(.*)<\/selected-tasks>/s)[1])
+      assert.deepEqual([...selected.taskIds].sort(), ['overdue','review','undated'])
+      assert.equal(calls.filter(call => call.channel === 'agent:create').length, 1)
       await evaluate(`smoke.click('button[title="현재 작업환경 저장"]')`)
       await wait(() => calls.some((call) => call.channel === 'workspace:save' && call.result?.ok), 'Actual workspace save')
       const saved = calls.find((call) => call.channel === 'workspace:save').result
       assert.ok(saved.path.startsWith(app.getPath('userData')))
       const snapshot = JSON.parse(fs.readFileSync(saved.path, 'utf8'))
       assert.equal(snapshot.terminals[0].contextKind, 'global')
+      assert.equal(snapshot.terminals[0].todoManagement, true)
       assert.equal(snapshot.terminals[0].cwd, chosenDir)
       assert.equal(snapshot.caseTabs[0].meta.contextKind, 'global')
       const beforeReload = calls.filter((call) => call.channel === 'agent:create').length
@@ -141,6 +160,7 @@ function runApp({ root, temp, chosenDir, screenshot }) {
       await wait(() => calls.filter((call) => call.channel === 'agent:create').length > beforeReload, 'Restored global Agent')
       const restored = calls.filter((call) => call.channel === 'agent:create').at(-1).args[0]
       assert.equal(restored.workspaceContext?.kind, 'global')
+      assert.equal(restored.workspaceContext?.todoManagement, true)
       assert.equal(restored.cwd, chosenDir)
       await evaluate(`const input = document.querySelector('.agent-panel textarea') || document.querySelector('.term-pane textarea'); if (!input) throw Error('Restored Agent input missing'); Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set.call(input, '복원된 전체 할일 검토'); input.dispatchEvent(new Event('input', { bubbles: true }));`)
       await wait(() => evaluate(`!!document.querySelector('.agent-send-btn:not([disabled])')`), 'Restored global prompt ready')
@@ -150,12 +170,26 @@ function runApp({ root, temp, chosenDir, screenshot }) {
       assert.equal(calls.filter((call) => call.channel === 'agent:send').at(-1).args[0].input.workspaceContext?.kind, 'global')
       await wait(() => evaluate(`document.querySelector('.term-pane textarea')?.value === ''`), 'Restored send clears input')
       assert.equal(await evaluate(`document.querySelector('.workspace-todo-header')?.textContent.includes('기한 도과 1')`), true)
-      assert.equal(calls.filter((call) => call.channel === 'dialog:pickFolder').length, 1)
+      const readsBeforeMutation = calls.filter(call => call.channel === 'todo:list').length
+      await evaluate(`const box=document.querySelector('.agent-composer textarea');Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value').set.call(box,'도과 할일 완료');box.dispatchEvent(new Event('input',{bubbles:true}))`)
+      await wait(() => evaluate(`!!document.querySelector('.agent-send-btn:not([disabled])')`), 'Mutation prompt ready')
+      await evaluate(`document.querySelector('.agent-send-btn').click()`)
+      await wait(() => evaluate(`document.querySelector('.workspace-todo-header').textContent.includes('기한 도과 0')`), 'Managed write refreshes header')
+      assert.ok(calls.filter(call => call.channel === 'todo:list').length > readsBeforeMutation)
+      assert.equal(await evaluate(`document.body.innerText.includes('클코 응답 JSON') || !!document.querySelector('.todo-patch-input')`), false)
+      assert.equal(calls.filter((call) => call.channel === 'dialog:pickFolder').length, 0)
       assert.deepEqual(fs.readdirSync(chosenDir), ['existing.txt'])
+      // A token change in another window retires the native session even before this renderer hears it.
+      sessions.get(restored.id).workspaceContext.todoManagement = false
+      const savesBeforeRetirement = calls.filter(call => call.channel === 'workspace:save').length
+      await evaluate(`document.querySelector('button[title="현재 작업환경 저장"]').click()`)
+      await wait(() => calls.filter(call => call.channel === 'workspace:save' && call.result?.ok).length > savesBeforeRetirement, 'Retired native snapshot saved')
+      const retired = calls.filter(call => call.channel === 'workspace:save').at(-1).result
+      assert.equal(JSON.parse(fs.readFileSync(retired.path,'utf8')).terminals[0].todoManagement, false, 'runtime retirement must survive stale renderer snapshots')
       assert.deepEqual([...new Set(unexpected)], [])
       assert.deepEqual(rendererErrors, [])
       await capture()
-      console.log('TODO_APP_RESULT ' + JSON.stringify({ checks: 20, ipcCalls: calls.length, actualWorkspaceSaveReload: true, rendererErrors, screenshot }))
+      console.log('TODO_APP_RESULT ' + JSON.stringify({ checks: 32, ipcCalls: calls.length, actualWorkspaceSaveReload: true, rendererErrors, screenshot }))
       app.exit(0)
     } catch (error) {
       await capture()

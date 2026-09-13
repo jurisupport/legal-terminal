@@ -1,4 +1,5 @@
 import type { AgentWorkspaceContext } from '../../../shared/agentWorkspaceContext'
+import { isAgentTaskMutation } from '../../../shared/agentTodo'
 import {
   startTransition,
   useCallback,
@@ -134,6 +135,7 @@ interface AgentPanelProps {
   caseTabId?: string
   caseContext?: string
   workspaceContext?: AgentWorkspaceContext
+  onTasksChanged?: () => void
   visible: boolean
   focusNonce?: number
   initialDraft?: AgentDraftState
@@ -1861,6 +1863,7 @@ export default function AgentPanel({
   caseTabId,
   caseContext,
   workspaceContext,
+  onTasksChanged,
   visible,
   focusNonce = 0,
   initialDraft,
@@ -1882,6 +1885,10 @@ export default function AgentPanel({
   const usesClaudeRemoteAuth = Boolean(ssh) && provider === 'claude'
   const usesAgentAuth = usesClaudeRemoteAuth || provider === 'codex'
   const [items, setItems] = useState<TimelineItem[]>([])
+  const taskChangesRef = useRef(onTasksChanged)
+  taskChangesRef.current = onTasksChanged
+  const changedTaskCalls = useRef(new Set<string>())
+  const taskTurnRunning = useRef(false)
   const [input, setInput] = useState(() => initialDraft?.input ?? '')
   const [quotedMessage, setQuotedMessage] = useState<PendingAgentQuote | null>(null)
   const [mode, setMode] = useState<AgentPermissionMode>(DEFAULT_AGENT_PERMISSION_MODE)
@@ -2178,6 +2185,21 @@ export default function AgentPanel({
   useEffect(() => {
     const off = window.lt.agent.onEvent((event) => {
       if (eventSessionId(event) !== id) return
+      if (event.type === 'process:event' && isAgentTaskMutation(stringValue(event.toolName) ?? '') &&
+        ['done', 'completed', 'error', 'failed', 'denied'].includes(stringValue(event.status) ?? '')) {
+        const key = stringValue(event.processId)
+        if (key && !changedTaskCalls.current.has(key)) {
+          changedTaskCalls.current.add(key)
+          taskChangesRef.current?.()
+        }
+      }
+      if (event.type === 'status' && workspaceContext?.todoManagement) {
+        if (event.status === 'working') taskTurnRunning.current = true
+        else if (taskTurnRunning.current && ['done', 'error', 'idle'].includes(stringValue(event.status) ?? '')) {
+          taskTurnRunning.current = false
+          taskChangesRef.current?.()
+        }
+      }
       if (event.type === 'session:init' && event.slashCommands) {
         setRuntimeSlashCommands(runtimeSlashCommandsFromEvent(event.slashCommands))
       }
@@ -2255,7 +2277,7 @@ export default function AgentPanel({
       }
     })
     return off
-  }, [agentLabel, cwd, id, onStatus, profileId, ssh])
+  }, [agentLabel, cwd, id, onStatus, profileId, ssh, workspaceContext?.todoManagement])
 
   useEffect(() => {
     if (!settingsLoaded) return
@@ -2471,7 +2493,9 @@ export default function AgentPanel({
   const authChecking = usesAgentAuth && authStatus === 'checking'
   const needsLogin = usesAgentAuth && authStatus !== 'authenticated' && (authStatus === 'unauthenticated' || needsAuth)
   const sendBlockedReason =
-    !settingsLoaded
+    workspaceContext?.todoManagement === false
+      ? '연결이 변경된 이전 할일 대화입니다. 할일 화면에서 새 대화를 열어주세요.'
+      : !settingsLoaded
       ? 'Agent 설정 로드 중'
       : authActive
         ? `${agentLabel} 로그인 진행 중`
@@ -4256,6 +4280,7 @@ export default function AgentPanel({
         </div>
       )}
       {error && <div className="agent-error">{error}</div>}
+      {workspaceContext?.todoManagement === false && <div className="agent-error" role="status">{sendBlockedReason}</div>}
       {copyFeedback && <div className="agent-copy-feedback">{copyFeedback}</div>}
       {selectionMenu && (
         <div
