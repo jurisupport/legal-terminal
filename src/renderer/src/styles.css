@@ -7126,6 +7126,29 @@ button.agent-attachment-chip {
 /* rclone 동기화 모달 */
 .sync-modal {
   width: 600px;
+  overflow-y: auto;
+}
+.sync-status.sync-background {
+  position: fixed;
+  right: 16px;
+  bottom: 34px;
+  z-index: 1000;
+  max-width: calc(100vw - 32px);
+  margin: 0;
+  background: var(--bg);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35);
+}
+.sync-background .sync-status-main > div {
+  min-width: 0;
+}
+.sync-background .sync-status-main span:not(.sync-spinner) {
+  max-width: 320px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sync-background button {
+  flex-shrink: 0;
 }
 .sync-field {
   display: flex;

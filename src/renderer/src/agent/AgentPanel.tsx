@@ -2034,6 +2034,7 @@ export default function AgentPanel({
           : undefined
       const target = selected ?? source
       if (!target) return
+      timelineUserScrollRef.current = false
       shouldFollowTimelineRef.current = false
       target.scrollIntoView({
         behavior: 'smooth',
@@ -2117,6 +2118,15 @@ export default function AgentPanel({
     [focusPrompt, input]
   )
 
+  const timelineTurns = useMemo(() => {
+    const turns: TimelineItem[][] = []
+    for (const item of items) {
+      if (item.kind === 'user' || turns.length === 0) turns.push([])
+      turns[turns.length - 1].push(item)
+    }
+    return turns
+  }, [items])
+
   const latestOutputPreview = useMemo(
     () => (showNewOutputNotice ? latestGeneratedPreview(items) : ''),
     [items, showNewOutputNotice]
@@ -2157,6 +2167,7 @@ export default function AgentPanel({
     shouldFollowTimelineRef.current = true
     setNewOutputNotice(false)
     const scroll = (): void => {
+      if (!shouldFollowTimelineRef.current) return
       const timeline = scrollRef.current
       timeline?.scrollTo({ top: timeline.scrollHeight })
     }
@@ -3293,16 +3304,19 @@ export default function AgentPanel({
   }
 
   const chooseModel = async (model?: string, reasoningEffort?: string): Promise<void> => {
-    const sessionModel = !model && resumeSessionId
+    const sessionModel = !model && (resumeSessionId || provider === 'codex')
       ? (accountDefaultOption?.model ?? (provider === 'claude' ? 'default' : undefined))
       : model
-    const result = await window.lt.agent.setModel(id, sessionModel, reasoningEffort)
+    const sessionEffort = !model && provider === 'codex'
+      ? accountDefaultOption?.defaultReasoningEffort
+      : reasoningEffort
+    const result = await window.lt.agent.setModel(id, sessionModel, sessionEffort)
     if (!result.ok) {
       setError(result.error ?? `${agentLabel} 모델을 선택할 수 없습니다.`)
       return
     }
     setSelectedModel(sessionModel)
-    setSelectedReasoningEffort(reasoningEffort)
+    setSelectedReasoningEffort(sessionEffort)
     const nextDefaultModels = { ...defaultModels }
     if (model) nextDefaultModels[provider] = model
     else delete nextDefaultModels[provider]
@@ -3661,7 +3675,9 @@ export default function AgentPanel({
               </div>
             </div>
           )}
-          {items.map((item) => {
+          {timelineTurns.map((turn) => (
+            <div className="agent-turn" key={turn[0].id}>
+          {turn.map((item) => {
             if (item.kind === 'process') {
               const steps = item.processSteps ?? []
               return (
@@ -4149,6 +4165,8 @@ export default function AgentPanel({
             </section>
           )
         })}
+            </div>
+          ))}
         </div>
         {showNewOutputNotice && (
           <button
@@ -4213,7 +4231,7 @@ export default function AgentPanel({
                 <span>계정 기본값</span>
                 <small>{agentLabel} 계정이 지정한 기본 모델을 현재 및 새 세션에 적용</small>
               </button>
-              {modelOptions.filter((model) => !model.isDefault).map((model) => {
+              {modelOptions.filter((model) => provider === 'codex' || !model.isDefault).map((model) => {
                 const efforts = model.supportedReasoningEfforts ?? []
                 return (
                   <div

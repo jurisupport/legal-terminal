@@ -226,4 +226,88 @@ closeTab(
 )
 assert.equal(active, last.id, 'closing an agent must still activate its same-case neighbor')
 
+for (const scenario of ['active', 'last', 'background', 'cancel-dirty', 'cancel-working', 'switch-during-save']) {
+  const closing = { id: 'closing', drafts: '/closing', name: '닫을 사건' }
+  const other = { id: 'other', drafts: '/other', name: '다른 사건' }
+  const state = {
+    caseTabs: scenario === 'last' ? [closing] : [closing, other],
+    docTabs: [{ id: 'draft', caseTabId: closing.id }],
+    termTabs: [{ id: 'agent', caseTabId: closing.id, kind: 'agent' }],
+    dirtyDocs: new Set(scenario === 'cancel-dirty' ? ['draft'] : []),
+    termStatus: new Map(scenario === 'cancel-working' ? [['agent', 'working']] : []),
+    activeCaseTabId: scenario === 'background' ? other.id : closing.id,
+    activeDoc: 'draft', activeTerm: 'agent', activeWork: { left: 'doc:draft', right: 'terminal:agent' },
+    currentCase: closing, folderRecord: {}, pdfRecord: {},
+    caseTabsOpen: true, newCaseOpen: false, mode: 'viewer',
+    pdfStatus: {}, agentAttachmentRequests: {}, agentDrafts: {}, agentDraftClearNonce: {},
+    termAttention: new Set(), termBracketedPasteMode: {}, caseTabContextMenu: {}
+  }
+  if (scenario !== 'last') {
+    state.docTabs.push({ id: 'other-draft', caseTabId: other.id })
+    state.termTabs.push({ id: 'other-agent', caseTabId: other.id, kind: 'agent' })
+  }
+  const closedAgents = []
+  const context = { ...state, docOnly: false, termOnly: false }
+  for (const [key, value] of Object.entries(state)) {
+    context[`${key}Ref`] = { current: value }
+    context[`set${key[0].toUpperCase()}${key.slice(1)}`] = (update) => {
+      state[key] = typeof update === 'function' ? update(state[key]) : update
+      context[key] = state[key]
+      context[`${key}Ref`].current = state[key]
+    }
+  }
+  Object.assign(context, {
+    window: { lt: {
+      dialog: { confirm: async () => false },
+      agent: { close: (id) => { closedAgents.push(id) } }
+    } },
+    caseIdForDoc: (doc) => doc.caseTabId, caseIdForTerm: (term) => term.caseTabId,
+    isAgentTab: (term) => term.kind === 'agent',
+    currentCaseFromCaseTab: actual.currentCaseFromCaseTab,
+    workspaceLocationKey: (source) => source.drafts,
+    autoSaveEligibleRef: { current: new Set() }, autoRestoreDoneRef: { current: new Set() },
+    saveCaseWorkspace: async () => {
+      if (scenario === 'switch-during-save') context.setActiveCaseTabId(other.id)
+    },
+    openCaseTab: () => assert.fail('closing a case must not automatically open another case')
+  })
+  const closingHandlers = loadHandlers([
+    'isSharedDocTab', 'visibleInActiveCase', 'openNewCaseLauncher', 'closeCaseTab'
+  ], context)
+  await closingHandlers.closeCaseTab(closing.id)
+  const cancelled = scenario.startsWith('cancel-')
+  const opensLauncher = scenario === 'active' || scenario === 'last'
+  assert.equal(state.newCaseOpen, opensLauncher, `${scenario}: open the launcher only after closing the active case`)
+  assert.equal(state.caseTabs.some((tab) => tab.id === closing.id), cancelled)
+  assert.deepEqual(closedAgents, cancelled ? [] : ['agent'])
+  assert.equal(state.docTabs.some((tab) => tab.id === 'draft'), cancelled)
+  if (scenario !== 'last') {
+    assert.ok(state.caseTabs.some((tab) => tab.id === other.id))
+    assert.ok(state.docTabs.some((tab) => tab.id === 'other-draft'))
+    assert.ok(state.termTabs.some((tab) => tab.id === 'other-agent'))
+  }
+  if (opensLauncher) {
+    assert.equal(state.activeCaseTabId, '')
+    assert.equal(state.activeDoc, '')
+    assert.equal(state.activeTerm, '')
+    assert.equal(state.currentCase, null)
+    assert.equal(state.folderRecord, null)
+    assert.equal(state.pdfRecord, null)
+    assert.equal(state.caseTabsOpen, false)
+    assert.equal(state.mode, 'explorer')
+    context.setNewCaseOpen(false)
+    assert.equal(closingHandlers.visibleInActiveCase(other.id), false, 'dismissing the launcher must not reveal another case')
+    assert.equal(closingHandlers.visibleInActiveCase(undefined), true, 'unassigned tabs remain available')
+  } else {
+    assert.equal(state.activeCaseTabId, cancelled ? closing.id : other.id)
+  }
+}
+
+for (const detached of ['docOnly', 'termOnly']) {
+  const { visibleInActiveCase } = loadHandlers(['visibleInActiveCase'], {
+    docOnly: false, termOnly: false, [detached]: true, activeCaseTabId: ''
+  })
+  assert.equal(visibleInActiveCase('other'), true, `${detached}: detached work remains visible`)
+}
+
 console.log('case tab selection ok')

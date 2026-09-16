@@ -541,6 +541,7 @@ export default function HearingRecordPanel({
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const latestEntryRef = useRef<HTMLDivElement>(null)
   const saveTimer = useRef<number | null>(null)
+  const pendingSaveRef = useRef(Promise.resolve())
   const loadedPathRef = useRef<string | undefined>(undefined)
   const latestRecordRef = useRef(record)
   const latestDraftRef = useRef(draft)
@@ -556,6 +557,7 @@ export default function HearingRecordPanel({
   const heardAudioRef = useRef(false)
   const dictationStartingRef = useRef(false)
   const pendingDictationsRef = useRef(new Set<string>())
+  const deletedEntryIdsRef = useRef(new Set<string>())
   const dictationSelectionRef = useRef({ value: '', start: 0, end: 0, message: '전사 중...' })
   // onSavedPath는 부모가 인라인으로 넘겨 렌더마다 바뀌므로 ref로 받아
   // saveRecord/flushAutoSave의 useCallback 재생성(→ 렌더마다 저장 루프)을 막는다.
@@ -846,6 +848,11 @@ export default function HearingRecordPanel({
 
   const saveRecord = useCallback(
     async (targetRecord = latestRecordRef.current): Promise<string> => {
+      // 늦게 끝난 이전 저장이 최신 수정·삭제 내용을 덮어쓰지 않도록 순서대로 저장한다.
+      const previousSave = pendingSaveRef.current
+      let finishSave!: () => void
+      pendingSaveRef.current = new Promise<void>((resolve) => { finishSave = resolve })
+      await previousSave
       setSaveStatus('saving')
       setSaveMessage('자동저장 중')
       try {
@@ -880,6 +887,8 @@ export default function HearingRecordPanel({
         setSaveStatus('error')
         setSaveMessage(error instanceof Error ? error.message : String(error))
         throw error
+      } finally {
+        finishSave()
       }
     },
     [draftsDir, ensureRecordDir, recordPath]
@@ -889,6 +898,7 @@ export default function HearingRecordPanel({
     async (path: string): Promise<void> => {
       const previousPath = loadedPathRef.current
       const keepPending = shouldKeepPendingRecord(previousPath, path)
+      if (!keepPending) deletedEntryIdsRef.current.clear()
       loadedPathRef.current = path
       updateLoadState('loading')
       const stat = await window.lt.fs
@@ -899,7 +909,7 @@ export default function HearingRecordPanel({
         // 파일이 아직 없다 → 새 기록으로 시작
         const pending = latestRecordRef.current
         const base = createInitialRecord(initialCase, initialHearing)
-        const hasPending = keepPending && recordHasContent(pending)
+        const hasPending = keepPending && (recordHasContent(pending) || deletedEntryIdsRef.current.size > 0)
         const next = hasPending
           ? {
               ...pending,
@@ -926,8 +936,9 @@ export default function HearingRecordPanel({
         if (loadedPathRef.current !== path) return
         const parsed = JSON.parse(read.text) as unknown
         const loaded = sanitizeRecord(parsed, initialCase, initialHearing, pendingDictationsRef.current)
+        loaded.entries = loaded.entries.filter((entry) => !deletedEntryIdsRef.current.has(entry.id))
         const pending = latestRecordRef.current
-        const hasPending = keepPending && recordHasContent(pending)
+        const hasPending = keepPending && (recordHasContent(pending) || deletedEntryIdsRef.current.size > 0)
         const next = hasPending ? mergePendingRecord(loaded, pending) : loaded
         lastSavedSourceStampRef.current = hasPending ? '' : next.updatedAt
         latestRecordRef.current = next
@@ -973,7 +984,7 @@ export default function HearingRecordPanel({
 
   useEffect(() => {
     if (loadState !== 'idle') return
-    if (!hasContent || (!draftsDir && !recordPath)) return
+    if ((!hasContent && deletedEntryIdsRef.current.size === 0) || (!draftsDir && !recordPath)) return
     if (lastSavedSourceStampRef.current === record.updatedAt) return
     if (saveTimer.current) window.clearTimeout(saveTimer.current)
     setSaveStatus('idle')
@@ -987,16 +998,23 @@ export default function HearingRecordPanel({
     }
   }, [draftsDir, hasContent, loadState, record, recordPath, saveRecord])
 
-  const flushAutoSave = useCallback((): void => {
+  const flushAutoSave = useCallback(async (): Promise<boolean> => {
     if (saveTimer.current) {
       window.clearTimeout(saveTimer.current)
       saveTimer.current = null
     }
-    if (loadStateRef.current !== 'idle') return
-    if (!hasContentRef.current || (!draftsDir && !recordPath)) return
+    if (loadStateRef.current !== 'idle') return true
+    if ((!hasContentRef.current && deletedEntryIdsRef.current.size === 0) || (!draftsDir && !recordPath)) return true
     // 변경 없으면 다시 쓰지 않는다 (렌더마다 flush가 호출되어도 무해하도록)
-    if (lastSavedSourceStampRef.current === latestRecordRef.current.updatedAt) return
-    void saveRecord(latestRecordRef.current).catch(() => {})
+    try {
+      if (lastSavedSourceStampRef.current !== latestRecordRef.current.updatedAt) {
+        await saveRecord(latestRecordRef.current)
+      }
+      await pendingSaveRef.current
+      return true
+    } catch {
+      return false
+    }
   }, [draftsDir, recordPath, saveRecord])
 
   useEffect(() => {
@@ -1015,10 +1033,7 @@ export default function HearingRecordPanel({
   // 이어서 열린 이전 기록 대신 오늘 날짜의 새 기록을 시작한다.
   // 같은 날짜의 기록이 이미 있으면 덮어쓰지 않도록 -2, -3… 순번을 붙인다.
   const startNewRecord = useCallback(async (): Promise<void> => {
-    if (saveTimer.current) {
-      window.clearTimeout(saveTimer.current)
-      saveTimer.current = null
-    }
+    if (!await flushAutoSave()) return
     const next = createInitialRecord(initialCase, initialHearing)
     let nextPath: string | undefined
     if (draftsDir) {
@@ -1034,6 +1049,7 @@ export default function HearingRecordPanel({
         nextPath = pathJoin(dir, `${date}-${seq}_${caseNo}.hearing.json`)
       }
     }
+    deletedEntryIdsRef.current.clear()
     lastSavedSourceStampRef.current = ''
     if (nextPath) loadedPathRef.current = nextPath
     setRecord(next)
@@ -1048,7 +1064,7 @@ export default function HearingRecordPanel({
       onSavedPathRef.current?.(nextPath, buildHearingRecordTitle(next.case, next.hearing))
     }
     focusInput()
-  }, [draftsDir, focusInput, initialCase, initialHearing, updateLoadState])
+  }, [draftsDir, flushAutoSave, focusInput, initialCase, initialHearing, updateLoadState])
 
   const setActiveSpeaker = (speakerId: string): void => {
     touch((current) => ({ ...current, activeSpeakerId: speakerId }))
@@ -1132,6 +1148,14 @@ export default function HearingRecordPanel({
       entries: current.entries.map((entry) =>
         entry.id === entryId ? { ...entry, ...patch } : entry
       )
+    }))
+  }
+
+  const removeEntry = (entryId: string): void => {
+    deletedEntryIdsRef.current.add(entryId)
+    touch((current) => ({
+      ...current,
+      entries: current.entries.filter((entry) => entry.id !== entryId)
     }))
   }
 
@@ -1507,17 +1531,10 @@ export default function HearingRecordPanel({
                   key={item.path}
                   className="hearing-reader-item"
                   disabled={dictationBusy}
-                  onClick={() => {
-                    loadedPathRef.current = item.path
-                    lastSavedSourceStampRef.current = item.data.updatedAt
-                    updateLoadState('idle')
-                    setRecord(item.data)
-                    setRecordPath(item.path)
+                  onClick={async () => {
+                    if (!await flushAutoSave()) return
+                    await loadFromPath(item.path)
                     setReaderOpen(false)
-                    setSaveStatus('saved')
-                    setSaveMessage('불러옴')
-                    setLastSavedAt(item.data.updatedAt)
-                    onSavedPath?.(item.path, item.title)
                     focusInput()
                   }}
                 >
@@ -1641,6 +1658,14 @@ export default function HearingRecordPanel({
                           </option>
                         ))}
                       </select>
+                      <button
+                        type="button"
+                        className="hearing-small-btn"
+                        aria-label="진행 메모 삭제"
+                        onClick={() => removeEntry(entry.id)}
+                      >
+                        삭제
+                      </button>
                     </div>
                     <textarea
                       className="hearing-message-bubble"

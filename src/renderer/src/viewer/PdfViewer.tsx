@@ -57,13 +57,6 @@ function wheelDeltaPixels(e: WheelEvent): { x: number; y: number } {
   return { x: e.deltaX * unit, y: e.deltaY * unit }
 }
 
-function createPdfWorker(): pdfjs.PDFWorker {
-  const port = new PdfJsWorker({ name: 'pdfjs-worker' })
-  return new pdfjs.PDFWorker({
-    port
-  } as unknown as ConstructorParameters<typeof pdfjs.PDFWorker>[0])
-}
-
 /**
  * 전자소송기록 PDF 뷰어 (viewer-windows pdf_frame.py 포팅).
  * 배율: 쪽맞춤/폭맞춤/프리셋·회전·Ctrl 줌. 입력: 휠=페이지넘김, Ctrl+휠=줌,
@@ -109,6 +102,7 @@ export default function PdfViewer({
   const prevDocRef = useRef<(() => void) | undefined>(onPrevDoc)
   const initialStatusRef = useRef<PdfViewStatus | undefined>(initialStatus)
   const passwordCallbackRef = useRef<((password: string) => void) | null>(null)
+  const cancelLoadRef = useRef<(() => void) | null>(null)
   const wrapSizeRef = useRef('')
   const pageCacheRef = useRef<Map<string, PageBitmapEntry>>(new Map())
 
@@ -123,6 +117,7 @@ export default function PdfViewer({
   const [reloadNonce, setReloadNonce] = useState(0)
   const [err, setErr] = useState('')
   const [loading, setLoading] = useState(true)
+  const [loadCancelled, setLoadCancelled] = useState(false)
   const [loadingSeconds, setLoadingSeconds] = useState(0)
   const [passwordPrompt, setPasswordPrompt] = useState<PasswordPrompt | null>(null)
   const [passwordValue, setPasswordValue] = useState('')
@@ -189,14 +184,14 @@ export default function PdfViewer({
   }, [])
 
   useEffect(() => {
-    if (!isRemotePath(path)) return
+    if (!isRemotePath(path) || loadCancelled) return
     let alive = true
     let lastSig = ''
     const tick = (): void => {
       window.lt.fs
         .stat(path)
         .then((s) => {
-          if (!alive || !s.ok) return
+          if (!alive || !s.ok || !cancelLoadRef.current) return
           const sig = `${s.size}:${s.mtimeMs ?? 0}`
           if (lastSig && sig !== lastSig) setReloadNonce((n) => n + 1)
           lastSig = sig
@@ -209,7 +204,7 @@ export default function PdfViewer({
       alive = false
       clearInterval(timer)
     }
-  }, [path])
+  }, [path, loadCancelled])
 
   // 문서 로드
   useEffect(() => {
@@ -225,6 +220,7 @@ export default function PdfViewer({
     clearPageCache() // 캐시 키에 경로가 없으므로 문서가 바뀌면 반드시 비운다
     setErr('')
     setLoading(true)
+    setLoadCancelled(false)
     setNumPages(0)
     setPage(initialPage)
     setRotation(initialRotation)
@@ -233,10 +229,31 @@ export default function PdfViewer({
     setPasswordBusy(false)
     passwordCallbackRef.current = null
     let loadingTask: ReturnType<typeof pdfjs.getDocument> | null = null
+    let worker: pdfjs.PDFWorker | null = null
+    let workerPort: Worker | null = null
+    const cancel = (): void => {
+      if (cancelled) return
+      cancelled = true
+      cancelLoadRef.current = null
+      taskRef.current?.cancel()
+      void loadingTask?.destroy().catch(() => {})
+      worker?.destroy()
+      workerPort?.terminate()
+      docRef.current = null
+      passwordCallbackRef.current = null
+      clearPageCache()
+    }
+    cancelLoadRef.current = cancel
     window.lt.fs
       .readBytes(path)
       .then(async (ab) => {
-        loadingTask = pdfjs.getDocument({ data: new Uint8Array(ab), worker: createPdfWorker() })
+        // ponytail: IPC 읽기는 계속될 수 있다. 전송 중단이 필요하면 요청별 IPC 취소를 연결한다.
+        if (cancelled) return
+        workerPort = new PdfJsWorker({ name: 'pdfjs-worker' })
+        worker = new pdfjs.PDFWorker({
+          port: workerPort
+        } as unknown as ConstructorParameters<typeof pdfjs.PDFWorker>[0])
+        loadingTask = pdfjs.getDocument({ data: new Uint8Array(ab), worker })
         loadingTask.onPassword = (updatePassword: (password: string) => void, reason: number) => {
           if (cancelled) return
           passwordCallbackRef.current = (password: string): void => {
@@ -252,7 +269,7 @@ export default function PdfViewer({
         }
         const doc = await loadingTask.promise
         if (cancelled) {
-          doc.destroy()
+          void doc.destroy().catch(() => {})
           return
         }
         docRef.current = doc
@@ -272,6 +289,7 @@ export default function PdfViewer({
       })
       .catch((e) => {
         if (!cancelled) {
+          cancel()
           setErr(cleanPdfError(e))
           setLoading(false)
           setPasswordPrompt(null)
@@ -279,15 +297,7 @@ export default function PdfViewer({
           passwordCallbackRef.current = null
         }
       })
-    return () => {
-      cancelled = true
-      void loadingTask?.destroy()
-      taskRef.current?.cancel()
-      docRef.current?.destroy()
-      docRef.current = null
-      passwordCallbackRef.current = null
-      clearPageCache()
-    }
+    return cancel
   }, [path, reloadNonce]) // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
@@ -695,12 +705,15 @@ export default function PdfViewer({
     passwordCallbackRef.current(password)
   }
 
-  if (err)
-    return (
-      <div className="welcome">
-        <p className="muted">PDF 열기 실패: {err}</p>
-      </div>
-    )
+  const cancelLoading = (): void => {
+    cancelLoadRef.current?.()
+    setLoading(false)
+    setLoadCancelled(true)
+    setNumPages(0)
+    setPasswordPrompt(null)
+    setPasswordValue('')
+    setPasswordBusy(false)
+  }
 
   return (
     <div className="pdf-viewer">
@@ -826,7 +839,16 @@ export default function PdfViewer({
         onKeyDown={onKeyDown}
         onMouseDown={() => wrapRef.current?.focus()}
       >
-        {passwordPrompt ? (
+        {loadCancelled || err ? (
+          <div className="pdf-loading" role="status">
+            <p className="muted pad">
+              {loadCancelled ? 'PDF 불러오기를 취소했습니다.' : `PDF 열기 실패: ${err}`}
+            </p>
+            <button className="tb-btn" type="button" onClick={() => setReloadNonce((n) => n + 1)}>
+              다시 시도
+            </button>
+          </div>
+        ) : passwordPrompt ? (
           <form className="pdf-password" onSubmit={submitPassword}>
             <div className="pdf-password-title">암호가 필요한 PDF입니다</div>
             <div className="pdf-password-sub">
@@ -851,6 +873,9 @@ export default function PdfViewer({
               >
                 열기
               </button>
+              <button className="tb-btn" type="button" onClick={cancelLoading}>
+                취소
+              </button>
             </div>
           </form>
         ) : loading ? (
@@ -862,6 +887,9 @@ export default function PdfViewer({
                   : 'OneDrive PDF를 내려받는 중…'
                 : 'PDF 불러오는 중…'}
             </p>
+            <button className="tb-btn" type="button" onClick={cancelLoading}>
+              취소
+            </button>
             {(isRemotePath(path) || isLocalCloudPath(path)) && loadingSeconds >= 10 && (
               <p className="muted pad small">
                 {isRemotePath(path)

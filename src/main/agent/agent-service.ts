@@ -4388,6 +4388,21 @@ export async function listAgentModels(sessionId: string): Promise<AgentModelList
       cursor = stringValue(result?.nextCursor)
       if (!cursor) break
     }
+    const configResult = asRecord(await codexRequest(session, 'config/read', {
+      cwd: session.cwd,
+      includeLayers: false
+    }).catch(() => undefined))
+    const config = asRecord(configResult?.config)
+    const configuredModel = stringValue(config?.model)
+    if (configuredModel) {
+      if (!models.some((model) => model.model === configuredModel)) {
+        models.push({ id: configuredModel, model: configuredModel, displayName: configuredModel })
+      }
+      for (const model of models) model.isDefault = model.model === configuredModel
+    }
+    const defaultOption = models.find((model) => model.isDefault)
+    const configuredEffort = stringValue(config?.model_reasoning_effort)
+    if (defaultOption && configuredEffort) defaultOption.defaultReasoningEffort = configuredEffort
     return { ok: true, models, selectedModel: session.model, selectedReasoningEffort: session.reasoningEffort }
   } catch (error) {
     return { ok: false, error: error instanceof Error ? error.message : String(error) }

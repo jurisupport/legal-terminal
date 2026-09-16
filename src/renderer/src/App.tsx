@@ -1670,6 +1670,7 @@ export default function App(): JSX.Element {
     source?: CurrentCase
   } | null>(null)
   const [syncInit, setSyncInit] = useState<SyncModalInit | null>(null)
+  const [syncMinimized, setSyncMinimized] = useState(false)
   const [workspacePick, setWorkspacePick] = useState<{
     loading: boolean
     entries: WorkspaceEntry[]
@@ -2561,7 +2562,7 @@ export default function App(): JSX.Element {
   const currentCaseTabIdForNewTab = (source?: TermTab): string | undefined =>
     source?.caseTabId || activeCaseTabId || (currentCase ? resolveCaseTabId(currentCase) : undefined)
   const visibleInActiveCase = (caseTabIdValue?: string): boolean =>
-    !activeCaseTabId || caseTabIdValue === activeCaseTabId
+    docOnly || termOnly || (caseTabIdValue ?? '') === activeCaseTabId
   const isSharedDocTab = (tab: DocTab): boolean => tab.kind === 'settings'
   const isDocVisibleInActiveCase = (tab: DocTab): boolean =>
     isSharedDocTab(tab) || visibleInActiveCase(caseIdForDoc(tab))
@@ -3112,6 +3113,10 @@ export default function App(): JSX.Element {
 
   // rclone 동기화 모달 열기 — 맥의 작성서류 폴더(원격 경로)를 추정해 프리필.
   // (클라우드 경유 모델: 맥에서 rclone 실행 → 맥 폴더 ↔ OneDrive 클라우드)
+  const showSync = (init: SyncModalInit): void => {
+    setSyncInit((current) => current ?? init)
+    setSyncMinimized(false)
+  }
   const openSync = (): void => {
     if (sshProfiles.length === 0) {
       void window.lt.dialog.alert('먼저 설정에서 SSH 접속 프로필을 추가하세요.')
@@ -3121,12 +3126,12 @@ export default function App(): JSX.Element {
     if (remote) {
       // 활성 터미널이 없어도 탐색기에 지정된 원격 경로를 그대로 사용
       const profile = syncProfileForRemote(remote.profileId)
-      setSyncInit({ profile, macFolder: remote.path })
+      showSync({ profile, macFolder: remote.path })
     } else {
       // 활성 사건이 로컬 → 첫 프로필의 원격 작성서류 루트 하위 동일 폴더명으로 추정
       const localPath = activeDraftsFolder ?? ''
       const profile = sshProfiles[0]
-      setSyncInit({
+      showSync({
         profile,
         macFolder: localMirrorPathForSync(localPath, profile, profile.draftsRoot)
       })
@@ -3165,7 +3170,7 @@ export default function App(): JSX.Element {
       return
     }
 
-    setSyncInit({
+    showSync({
       profile,
       macFolder: macFilePath,
       folderLabel: name || '파일',
@@ -3186,7 +3191,7 @@ export default function App(): JSX.Element {
     }
     const remote = parseRemoteUri(activeRecordsFolder)
     if (remote) {
-      setSyncInit({
+      showSync({
         profile: syncProfileForRemote(remote.profileId),
         macFolder: remote.path,
         folderLabel: '소송기록 폴더',
@@ -3195,7 +3200,7 @@ export default function App(): JSX.Element {
       return
     }
     const profile = sshProfiles[0]
-    setSyncInit({
+    showSync({
       profile,
       macFolder: localMirrorPathForSync(activeRecordsFolder, profile, profile.recordsRoot),
       folderLabel: '소송기록 폴더',
@@ -6137,8 +6142,6 @@ export default function App(): JSX.Element {
       if (isAgentTab(term)) void window.lt.agent.close(term.id)
       else window.lt.pty.kill(term.id)
     }
-    const remainingCaseTabs = caseTabsRef.current.filter((item) => item.id !== tabId)
-
     setDocTabs((tabs) => tabs.filter((doc) => !docIds.has(doc.id)))
     setTermTabs((tabs) => tabs.filter((term) => !termIds.has(term.id)))
     setDirtyDocs((ids) => {
@@ -6188,11 +6191,6 @@ export default function App(): JSX.Element {
     autoSaveEligibleRef.current.delete(tabId)
 
     if (activeCaseTabIdRef.current !== tabId) return
-    const nextTab = remainingCaseTabs[0]
-    if (nextTab) {
-      openCaseTab(nextTab)
-      return
-    }
     setActiveCaseTabId('')
     setCurrentCase(null)
     setActiveDoc('')
@@ -6200,9 +6198,11 @@ export default function App(): JSX.Element {
     setActiveWork({ left: '', right: '' })
     setFolderRecord(null)
     setPdfRecord(null)
+    setMode('explorer')
+    openNewCaseLauncher()
   }
   closeActiveCaseTabRef.current = (): void => {
-    const tabId = activeCaseTabId || caseTabRows.find((row) => row.active)?.tab.id || caseTabs[0]?.id
+    const tabId = activeCaseTabId || caseTabRows.find((row) => row.active)?.tab.id
     if (tabId) void closeCaseTab(tabId)
   }
 
@@ -7000,7 +7000,7 @@ export default function App(): JSX.Element {
           />
         ))}
       {tab?.kind === 'diff' && <DiffPreview diff={agentDiffs[tab.diffId ?? '']?.diff} alwaysExpanded />}
-      {tab?.kind === 'settings' && <SettingsView />}
+      {tab?.kind === 'settings' && <SettingsView onSync={showSync} />}
     </>
   )
 
@@ -8273,6 +8273,7 @@ export default function App(): JSX.Element {
       {remotePick && (
         <RemoteFolderPicker
           profile={remotePick}
+          onSync={showSync}
           onCancel={() => setRemotePick(null)}
           onPick={async (remotePath) => {
             const prof = remotePick
@@ -8287,6 +8288,7 @@ export default function App(): JSX.Element {
       {draftsPick && (
         <RemoteFolderPicker
           profile={draftsPick.profile}
+          onSync={showSync}
           title="작성서류 폴더 선택"
           confirmLabel="이 폴더로 지정"
           startPath={draftsPick.startPath}
@@ -8314,6 +8316,7 @@ export default function App(): JSX.Element {
       {remoteCasePick && (
         <RemoteFolderPicker
           profile={remoteCasePick.profile}
+          onSync={showSync}
           title={`「${remoteCasePick.name}」 작성서류 폴더 선택`}
           onCancel={() => setRemoteCasePick(null)}
           onPick={async (remotePath) => {
@@ -8337,6 +8340,14 @@ export default function App(): JSX.Element {
         <SyncModal
           profiles={sshProfiles}
           init={syncInit}
+          minimized={syncMinimized}
+          onMinimize={() => setSyncMinimized(true)}
+          onRestore={() => setSyncMinimized(false)}
+          onFinished={() => {
+            void window.lt.ssh.clearDirCache()
+              .catch(() => {})
+              .finally(() => setTreeRefresh((n) => n + 1))
+          }}
           onClose={() => {
             setSyncInit(null)
             setTreeRefresh((n) => n + 1)
@@ -8348,6 +8359,7 @@ export default function App(): JSX.Element {
       {recordsPick && (
         <RemoteFolderPicker
           profile={recordsPick.profile}
+          onSync={showSync}
           title="소송기록 폴더 선택"
           confirmLabel="이 폴더로 지정"
           startPath={recordsPick.startPath}
@@ -11163,7 +11175,7 @@ type UpdateUiState =
   | { status: 'available'; latestVersion: string }
   | { status: 'error'; message: string }
 
-function SettingsView(): JSX.Element {
+function SettingsView({ onSync }: { onSync: (init: SyncModalInit) => void }): JSX.Element {
   const [s, setS] = useState<AppSettings>({})
   const [loaded, setLoaded] = useState(false)
   const [appVersion, setAppVersion] = useState('확인 중...')
@@ -11902,7 +11914,7 @@ function SettingsView(): JSX.Element {
           SSH 접속 프로필{' '}
           <span className="muted small">— 원격 서버에서 사건·claude 실행 (사건 열기 → 접속 선택)</span>
         </div>
-        <SshProfilesEditor />
+        <SshProfilesEditor onSync={onSync} />
       </section>
 
       <p className="muted small">
@@ -11915,7 +11927,7 @@ function SettingsView(): JSX.Element {
 // 설정 화면의 SSH 프로필 목록 편집기 (추가/수정/삭제 즉시 저장)
 type SshTestResult = { busy?: boolean; ok?: boolean; message: string }
 
-function SshProfilesEditor(): JSX.Element {
+function SshProfilesEditor({ onSync }: { onSync: (init: SyncModalInit) => void }): JSX.Element {
   const [profiles, setProfiles] = useState<SshProfile[]>([])
   const [testResults, setTestResults] = useState<Record<string, SshTestResult>>({})
   // 루트 '찾아보기' — 해당 ssh에 접속해 원격 폴더를 탐색·선택
@@ -12112,6 +12124,7 @@ function SshProfilesEditor(): JSX.Element {
       {picking && (
         <RemoteFolderPicker
           profile={picking.profile}
+          onSync={onSync}
           title={picking.field === 'draftsRoot' ? '작성서류 루트 선택' : '소송기록 루트 선택'}
           confirmLabel="이 폴더로 지정"
           startPath={
@@ -12587,6 +12600,7 @@ function RemoteFolderPicker({
   title = '사건(작성서류) 폴더 선택',
   startPath,
   confirmLabel = '이 폴더로 사건 열기',
+  onSync,
   onPick,
   onCancel
 }: {
@@ -12594,6 +12608,7 @@ function RemoteFolderPicker({
   title?: string
   startPath?: string
   confirmLabel?: string
+  onSync: (init: SyncModalInit) => void
   onPick: (remotePath: string) => void
   onCancel: () => void
 }): JSX.Element {
@@ -12606,11 +12621,6 @@ function RemoteFolderPicker({
   const [quickStartPaths, setQuickStartPaths] = useState<string[]>(() =>
     normalizeRemoteQuickStartPaths(profile.quickStartPaths)
   )
-  const [syncOpen, setSyncOpen] = useState<{
-    macFolder: string
-    reloadPath: string
-    folderLabel: string
-  } | null>(null)
   const [sortMode, setSortMode] = useState<SortMode>(DEFAULT_SORT_MODE)
   const [folderQuery, setFolderQuery] = useState('')
   const [folderSearching, setFolderSearching] = useState(false)
@@ -12701,11 +12711,6 @@ function RemoteFolderPicker({
   const folderQueryText = folderQuery.trim()
   const canCreateFolder = !loading && !err && !!cwd.trim() && !!newFolderName.trim() && !creatingFolder
   const canPickCurrentFolder = !loading && !folderSearching && !err && !!cwd.trim()
-  const closeSync = (): void => {
-    const reloadPath = syncOpen?.reloadPath
-    setSyncOpen(null)
-    if (reloadPath) load(reloadPath, { refresh: true })
-  }
   const clearFolderSearch = (): void => {
     folderSearchSeq.current++
     setFolderQuery('')
@@ -12858,13 +12863,17 @@ function RemoteFolderPicker({
                   ? '현재 OneDrive 위치를 rclone으로 클라우드에서 최신화'
                   : 'OneDrive 또는 CloudStorage/OneDrive 폴더로 이동한 뒤 사용하세요'
               }
-              onClick={() =>
-                setSyncOpen({
+              onClick={() => {
+                onSync({
+                  profile,
                   macFolder: syncPath,
-                  reloadPath: syncPath,
-                  folderLabel: syncFolderLabel
+                  folderLabel: syncFolderLabel,
+                  directions: 'pull-only',
+                  initialMode: 'folders',
+                  lockMode: true
                 })
-              }
+                onCancel()
+              }}
             >
               OneDrive 최신화
             </button>
@@ -13019,20 +13028,6 @@ function RemoteFolderPicker({
           </div>
         </div>
       </div>
-      {syncOpen && (
-        <SyncModal
-          profiles={[profile]}
-          init={{
-            profile,
-            macFolder: syncOpen.macFolder,
-            folderLabel: syncOpen.folderLabel,
-            directions: 'pull-only',
-            initialMode: 'folders',
-            lockMode: true
-          }}
-          onClose={closeSync}
-        />
-      )}
     </>
   )
 }
@@ -13042,10 +13037,18 @@ function RemoteFolderPicker({
 function SyncModal({
   profiles,
   init,
+  minimized,
+  onMinimize,
+  onRestore,
+  onFinished,
   onClose
 }: {
   profiles: SshProfile[]
   init: SyncModalInit
+  minimized: boolean
+  onMinimize: () => void
+  onRestore: () => void
+  onFinished: () => void
   onClose: () => void
 }): JSX.Element {
   const [profileId, setProfileId] = useState(init.profile.id)
@@ -13066,6 +13069,8 @@ function SyncModal({
     items: { path: string; action: string }[]
   } | null>(null)
   const [needResync, setNeedResync] = useState(false)
+  const [result, setResult] = useState('')
+  const cancelRequested = useRef(false)
   const logRef = useRef<HTMLPreElement>(null)
   const profile = profiles.find((p) => p.id === profileId) ?? init.profile
   const running = runningDirection !== null
@@ -13086,7 +13091,7 @@ function SyncModal({
   useEffect(() => {
     const el = logRef.current
     if (el) el.scrollTop = el.scrollHeight
-  }, [log])
+  }, [log, minimized])
 
   // 프로필 바뀌면 맥 rclone 정보(설치/리모트) 다시 조회
   const probe = (): void => {
@@ -13117,6 +13122,8 @@ function SyncModal({
     const modeLabel = syncMode === 'folders' ? '폴더명만' : syncMode === 'file' ? '파일 1개' : '전체'
     setPreview(null)
     setNeedResync(false)
+    setResult('')
+    cancelRequested.current = false
     setRunningDirection(direction)
     // 전체/파일 복사는 dry-run으로 변경 목록을 먼저 보여주고 확인 후 실행한다.
     // 폴더명만 모드는 파일을 건드리지 않고, 양방향은 bisync 자체 안전장치(충돌 보존)에 맡긴다.
@@ -13127,17 +13134,22 @@ function SyncModal({
         .run({ profile, direction, mode: syncMode, macFolder, dest, dryRun: true })
         .then((r) => {
           if (!r.ok) {
+            setResult(cancelRequested.current ? '동기화 중단됨' : '미리보기 실패 · 결과 확인')
             if (r.error) setLog((l) => [...l, '오류: ' + r.error])
             return
           }
           const items = r.changes ?? []
           if (items.length === 0) {
+            setResult('이미 최신 상태입니다')
             setLog((l) => [...l, '이미 최신 상태입니다. 복사할 파일이 없습니다.'])
             return
           }
           setPreview({ direction, items })
         })
-        .catch((e) => setLog((l) => [...l, '오류: ' + String(e)]))
+        .catch((e) => {
+          setResult('미리보기 실패 · 결과 확인')
+          setLog((l) => [...l, '오류: ' + String(e)])
+        })
         .finally(() => {
           setPreviewing(false)
           setRunningDirection(null)
@@ -13148,24 +13160,75 @@ function SyncModal({
     window.lt.sync
       .run({ profile, direction, mode: syncMode, macFolder, dest, resync: extra?.resync })
       .then((r) => {
+        setResult(
+          r.ok ? '동기화 완료' : cancelRequested.current ? '동기화 중단됨' : '동기화 실패 · 결과 확인'
+        )
         if (!r.ok && r.error) {
           setLog((l) => [...l, '오류: ' + r.error])
           // bisync 최초 실행은 기준 상태(--resync)가 없어 실패한다 → 안내 후 원클릭 재실행
           if (direction === 'bi' && /resync/i.test(r.error)) setNeedResync(true)
         }
       })
-      .catch((e) => setLog((l) => [...l, '오류: ' + String(e)]))
-      .finally(() => setRunningDirection(null))
+      .catch((e) => {
+        setResult('동기화 실패 · 결과 확인')
+        setLog((l) => [...l, '오류: ' + String(e)])
+      })
+      .finally(() => {
+        setRunningDirection(null)
+        onFinished()
+      })
   }
   const cancelRun = (): void => {
     if (!running) return
+    cancelRequested.current = true
     setLog((l) => [...l, `${runningLabel} 중단 요청...`])
     window.lt.sync.cancel()
   }
 
+  if (minimized) {
+    return (
+      <div className="sync-status sync-background" aria-label="OneDrive 동기화">
+        <div className="sync-status-main" role="status" aria-live="polite">
+          {running && <span className="sync-spinner" aria-hidden="true" />}
+          <div>
+            <b>
+              {running
+                ? `${runningLabel} ${previewing ? '미리보기' : '진행'} 중…`
+                : preview
+                  ? '변경 목록 확인 필요'
+                  : needResync
+                    ? '첫 동기화 설정 필요'
+                    : result || '동기화 대기'}
+            </b>
+            <span title={macFolder}>{folderLabel} · {macFolder}</span>
+          </div>
+        </div>
+        <button className="header-btn" onClick={onRestore}>
+          진행 상황 보기
+        </button>
+        {running ? (
+          <button className="header-btn danger" onClick={cancelRun}>
+            중단
+          </button>
+        ) : (
+          <button className="header-btn" onClick={onClose}>
+            닫기
+          </button>
+        )}
+      </div>
+    )
+  }
+
   return (
-    <div className="modal-overlay" onMouseDown={running ? undefined : onClose}>
-      <div className="modal sync-modal" aria-busy={running} onMouseDown={(e) => e.stopPropagation()}>
+    <div className="modal-overlay" onMouseDown={running ? onMinimize : onClose}>
+      <div
+        className="modal sync-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-label="OneDrive 동기화"
+        aria-busy={running}
+        onMouseDown={(e) => e.stopPropagation()}
+      >
         <div className="modal-title">
           ⇅ 동기화 (맥미니 rclone · {folderLabel}
           {pullOnly ? ' ← OneDrive 클라우드' : ' ↔ OneDrive 클라우드'})
@@ -13176,6 +13239,7 @@ function SyncModal({
           <select
             className="setting-select"
             value={profileId}
+            disabled={running}
             onChange={(e) => setProfileId(e.target.value)}
           >
             {profiles.map((p) => (
@@ -13209,6 +13273,7 @@ function SyncModal({
               <select
                 className="setting-select"
                 value={remoteName}
+                disabled={running}
                 onChange={(e) => setRemoteName(e.target.value)}
               >
                 {info.remotes.length === 0 && <option value="">(설정된 리모트 없음)</option>}
@@ -13224,6 +13289,7 @@ function SyncModal({
               <input
                 className="setting-input"
                 value={macFolder}
+                disabled={running}
                 placeholder={
                   syncMode === 'file'
                     ? '/Users/me/Library/CloudStorage/OneDrive/진행중사건/사건폴더/서면.pdf'
@@ -13242,6 +13308,7 @@ function SyncModal({
               <input
                 className="setting-input"
                 value={cloudPath}
+                disabled={running}
                 placeholder={
                   syncMode === 'file'
                     ? '진행중사건/사건폴더/서면.pdf'
@@ -13393,7 +13460,7 @@ function SyncModal({
                   <span className="sync-spinner" aria-hidden="true" />
                   <div>
                     <b>{runningLabel} 진행 중...</b>
-                    <span>완료될 때까지 동기화 버튼은 비활성화됩니다.</span>
+                    <span>백그라운드에서 계속하면 다른 탭에서 작업할 수 있습니다.</span>
                   </div>
                 </div>
                 <button className="header-btn danger" onClick={cancelRun}>
@@ -13412,6 +13479,9 @@ function SyncModal({
         {!info && <p className="muted pad small">맥미니 rclone 확인 중…</p>}
 
         <div className="modal-actions">
+          <button className="header-btn" onClick={onMinimize}>
+            {running ? '백그라운드에서 계속' : '접어두기'}
+          </button>
           <button className="header-btn" onClick={onClose} disabled={running}>
             닫기
           </button>
