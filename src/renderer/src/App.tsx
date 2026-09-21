@@ -6199,7 +6199,7 @@ export default function App(): JSX.Element {
     setFolderRecord(null)
     setPdfRecord(null)
     setMode('explorer')
-    openNewCaseLauncher()
+    setCaseTabsOpen(false)
   }
   closeActiveCaseTabRef.current = (): void => {
     const tabId = activeCaseTabId || caseTabRows.find((row) => row.active)?.tab.id

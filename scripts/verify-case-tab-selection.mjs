@@ -276,8 +276,8 @@ for (const scenario of ['active', 'last', 'background', 'cancel-dirty', 'cancel-
   ], context)
   await closingHandlers.closeCaseTab(closing.id)
   const cancelled = scenario.startsWith('cancel-')
-  const opensLauncher = scenario === 'active' || scenario === 'last'
-  assert.equal(state.newCaseOpen, opensLauncher, `${scenario}: open the launcher only after closing the active case`)
+  const closesActiveCase = scenario === 'active' || scenario === 'last'
+  assert.equal(state.newCaseOpen, false, `${scenario}: closing a case must not open the new-case launcher`)
   assert.equal(state.caseTabs.some((tab) => tab.id === closing.id), cancelled)
   assert.deepEqual(closedAgents, cancelled ? [] : ['agent'])
   assert.equal(state.docTabs.some((tab) => tab.id === 'draft'), cancelled)
@@ -286,7 +286,7 @@ for (const scenario of ['active', 'last', 'background', 'cancel-dirty', 'cancel-
     assert.ok(state.docTabs.some((tab) => tab.id === 'other-draft'))
     assert.ok(state.termTabs.some((tab) => tab.id === 'other-agent'))
   }
-  if (opensLauncher) {
+  if (closesActiveCase) {
     assert.equal(state.activeCaseTabId, '')
     assert.equal(state.activeDoc, '')
     assert.equal(state.activeTerm, '')
@@ -295,12 +295,14 @@ for (const scenario of ['active', 'last', 'background', 'cancel-dirty', 'cancel-
     assert.equal(state.pdfRecord, null)
     assert.equal(state.caseTabsOpen, false)
     assert.equal(state.mode, 'explorer')
-    context.setNewCaseOpen(false)
-    assert.equal(closingHandlers.visibleInActiveCase(other.id), false, 'dismissing the launcher must not reveal another case')
+    assert.equal(closingHandlers.visibleInActiveCase(other.id), false, 'closing the active case must not reveal another case')
     assert.equal(closingHandlers.visibleInActiveCase(undefined), true, 'unassigned tabs remain available')
   } else {
     assert.equal(state.activeCaseTabId, cancelled ? closing.id : other.id)
   }
+  closingHandlers.openNewCaseLauncher()
+  assert.equal(state.newCaseOpen, true, 'explicitly adding a new case must still open the launcher')
+  assert.equal(state.caseTabsOpen, false)
 }
 
 for (const detached of ['docOnly', 'termOnly']) {

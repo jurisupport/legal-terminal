@@ -95,12 +95,9 @@ curl -fsSL https://github.com/jurisupport/legal-terminal/releases/latest/downloa
 
 ## 이번 업데이트
 
-최신 릴리스: [v0.1.231](https://github.com/jurisupport/legal-terminal/releases/tag/v0.1.231)
+최신 릴리스: [v0.1.232](https://github.com/jurisupport/legal-terminal/releases/tag/v0.1.232)
 
-- **동기화 중 작업 유지**: OneDrive 동기화 창을 접고 문서 작업을 계속할 수 있으며, 중복 실행을 방지합니다.
-- **PDF 불러오기 취소**: 오래 걸리는 PDF 불러오기와 암호 입력을 취소하고 다시 시도할 수 있습니다.
-- **기일 메모 삭제**: 진행 메모를 삭제할 수 있으며, 늦게 끝난 저장이나 새로고침으로 삭제한 메모가 되살아나는 문제를 방지합니다.
-- **사건·Agent 화면 개선**: 사건을 닫으면 새 사건 화면으로 돌아가고, 질문 표시와 인용 동작을 개선했습니다. Codex 모델 선택에 사용자 설정을 반영합니다.
+- **사건 탭 닫기 수정**: 사건 탭을 닫을 때 새 사건 입력 창이 자동으로 열리는 문제를 수정했습니다. 새 사건은 ‘새 사건 추가’ 버튼이나 기존 단축키로 열 수 있습니다.
 
 ## 처음 쓰는 순서
 
