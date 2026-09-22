@@ -1637,11 +1637,13 @@ function reduceTimeline(items: TimelineItem[], event: AgentEvent, agentLabel: st
   }
   if (event.type === 'diff:proposed') {
     const proposal = asRecord(event.proposal)
-    const id = stringValue(proposal?.proposalId) ?? `diff-${Date.now()}`
+    const turnStart = items.map((item) => item.kind).lastIndexOf('user')
+    const id = `${items[turnStart]?.id ?? 'session'}:diff:${stringValue(proposal?.proposalId) ?? Date.now()}`
     const filePath = stringValue(proposal?.filePath)
     const oldString = stringValue(proposal?.oldString)
     const newString = stringValue(proposal?.newString)
     const diff = diffViewFromRecord(proposal)
+    const fallbackText = diffFallbackText(oldString, newString) ?? stringValue(asRecord(proposal?.gitDiff)?.diff)
     return upsertItem(
       items,
       id,
@@ -1650,28 +1652,30 @@ function reduceTimeline(items: TimelineItem[], event: AgentEvent, agentLabel: st
         kind: 'diff',
         title: diffTitle('변경 제안', filePath),
         filePath,
-        text: diff ? undefined : diffFallbackText(oldString, newString),
+        text: diff ? undefined : fallbackText,
         diff
       }),
       (item) => ({
         ...item,
         title: diffTitle('변경 제안', filePath),
         filePath: filePath ?? item.filePath,
-        text: diff ? undefined : diffFallbackText(oldString, newString) ?? item.text,
+        text: diff ? undefined : fallbackText ?? item.text,
         diff: diff ?? item.diff
       })
     )
   }
   if (event.type === 'diff:applied') {
-    const id = stringValue(event.proposalId)
-    if (!id) return items
+    const proposalId = stringValue(event.proposalId)
+    if (!proposalId) return items
+    const turnStart = items.map((item) => item.kind).lastIndexOf('user')
+    const id = `${items[turnStart]?.id ?? 'session'}:diff:${proposalId}`
     const filePath = stringValue(event.filePath)
     const oldString = stringValue(event.oldString)
     const newString = stringValue(event.newString)
     const diff = diffViewFromRecord(event)
-    const fallbackText = diffFallbackText(oldString, newString)
+    const fallbackText = diffFallbackText(oldString, newString) ?? stringValue(asRecord(event.gitDiff)?.diff)
     const appliedIndex = filePath
-      ? items.findIndex((item) => item.kind === 'diff' && item.status === 'applied' && item.filePath === filePath)
+      ? items.findIndex((item, index) => index > turnStart && item.kind === 'diff' && item.status === 'applied' && item.filePath === filePath)
       : -1
     const idIndex = items.findIndex((item) => item.id === id)
     const index = appliedIndex >= 0 ? appliedIndex : idIndex
@@ -1775,6 +1779,18 @@ function reduceTimeline(items: TimelineItem[], event: AgentEvent, agentLabel: st
     )
   }
   return items
+}
+
+function currentChangedDocuments(items: TimelineItem[]): TimelineItem[] {
+  const turnStart = items.map((item) => item.kind).lastIndexOf('user')
+  const documents = new Map<string, TimelineItem>()
+  for (const item of items.slice(turnStart + 1)) {
+    const path = item.filePath ?? item.diff?.filePath
+    if (item.kind === 'diff' && path && (item.status === 'applied' || item.status === 'reverted')) {
+      documents.set(path, item)
+    }
+  }
+  return [...documents.values()]
 }
 
 function transcriptToTimeline(transcript: SessionTranscript, agentLabel: string): TimelineItem[] {
@@ -2126,6 +2142,7 @@ export default function AgentPanel({
     }
     return turns
   }, [items])
+  const changedDocuments = useMemo(() => currentChangedDocuments(items), [items])
 
   const latestOutputPreview = useMemo(
     () => (showNewOutputNotice ? latestGeneratedPreview(items) : ''),
@@ -3050,12 +3067,24 @@ export default function AgentPanel({
     [cwd, onOpenFile, profileId, ssh]
   )
 
+  const reviewChangedDocument = (item: TimelineItem): void => {
+    if (item.diff && onOpenDiff) {
+      openDiffFromItem(item)
+      return
+    }
+    setExpandedProcessIds((current) => new Set(current).add(`diff:${item.id}`))
+    shouldFollowTimelineRef.current = false
+    window.requestAnimationFrame(() => {
+      document.getElementById(`agent-change-${id}-${item.id}`)?.scrollIntoView({ block: 'center' })
+    })
+  }
+
   const canRevertDiff = (diff: DiffView | undefined): boolean =>
     !!diff?.filePath && (diff.revertEdits?.length ?? 0) > 0
 
   const revertDiffItem = useCallback(
     async (item: TimelineItem): Promise<void> => {
-      if (!item.diff || !canRevertDiff(item.diff)) return
+      if (status === 'working' || !item.diff || !canRevertDiff(item.diff)) return
       const path = agentFilePathForApp(item.diff.filePath, cwd, profileId, ssh)
       const edits = item.diff.revertEdits ?? []
       if (!path || edits.length === 0) return
@@ -3075,6 +3104,9 @@ export default function AgentPanel({
           }
           const index = next.indexOf(edit.newString)
           if (index < 0) throw new Error('현재 파일에서 되돌릴 변경 내용을 찾지 못했습니다.')
+          if (next.indexOf(edit.newString, index + 1) >= 0) {
+            throw new Error('같은 내용이 여러 곳에 있어 자동으로 되돌릴 수 없습니다. 변경 비교에서 위치를 확인해 주세요.')
+          }
           next = `${next.slice(0, index)}${edit.oldString}${next.slice(index + edit.newString.length)}`
         }
         const result = await window.lt.fs.writeText(path, next)
@@ -3095,7 +3127,7 @@ export default function AgentPanel({
         })
       }
     },
-    [cwd, profileId, ssh]
+    [cwd, profileId, ssh, status]
   )
 
   const resolvePermission = useCallback(
@@ -3630,6 +3662,38 @@ export default function AgentPanel({
       </header>
 
       <div className="agent-timeline-wrap">
+        {changedDocuments.length > 0 && (
+          <details className="agent-changed-documents" key={timelineTurns.at(-1)?.[0].id} open>
+            <summary title="마지막 요청 이후 앱에서 확인한 변경입니다.">
+              이번 작업 변경 문서 <span>{changedDocuments.length}개</span>
+            </summary>
+            <ul>
+              {changedDocuments.map((item) => {
+                const path = item.filePath ?? item.diff?.filePath ?? ''
+                const reverting = revertingDiffIds.has(item.id)
+                return (
+                  <li key={path}>
+                    <button type="button" className="agent-changed-document-name" title={`${path}\n변경 비교 열기`}
+                      onClick={() => reviewChangedDocument(item)}>
+                      <strong>{fileNameFromPath(path)}</strong>
+                      <span>{path}</span>
+                    </button>
+                    <span className="agent-changed-document-status">{item.status === 'reverted' ? '되돌림' : '적용됨'}</span>
+                    <div className="agent-card-actions">
+                      {onOpenFile && <button type="button" onClick={() => openFileFromItem(item)}>문서 열기</button>}
+                      {item.status === 'applied' && canRevertDiff(item.diff) && (
+                        <button type="button" className="danger" disabled={reverting || status === 'working'}
+                          onClick={() => void revertDiffItem(item)}>
+                          {reverting ? '되돌리는 중' : '되돌리기'}
+                        </button>
+                      )}
+                    </div>
+                  </li>
+                )
+              })}
+            </ul>
+          </details>
+        )}
         <div
           className="agent-timeline"
           ref={scrollRef}
@@ -3936,7 +4000,7 @@ export default function AgentPanel({
             const dotStatus =
               item.status === 'applied' ? 'done' : item.status === 'reverted' ? 'cancelled' : ''
             return (
-              <div key={item.id} className="agent-tools">
+              <div key={item.id} id={`agent-change-${id}-${item.id}`} className="agent-tools">
                 <div className={`agent-tool-row diff ${item.status ?? ''}`}>
                   <button
                     type="button"
@@ -3965,7 +4029,8 @@ export default function AgentPanel({
             )
           }
           return (
-            <section key={item.id} className={`agent-card ${item.kind} ${item.status ?? ''}`}>
+            <section key={item.id} id={item.kind === 'diff' ? `agent-change-${id}-${item.id}` : undefined}
+              className={`agent-card ${item.kind} ${item.status ?? ''}`}>
               <div className="agent-card-head">
                 {item.kind === 'diff' ? (
                   <button
@@ -4051,7 +4116,7 @@ export default function AgentPanel({
                     <button
                       type="button"
                       className="danger"
-                      disabled={revertingDiff}
+                      disabled={revertingDiff || status === 'working'}
                       title="이 변경을 적용 전 텍스트로 되돌리기"
                       onClick={() => void revertDiffItem(item)}
                     >

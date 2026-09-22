@@ -3054,9 +3054,11 @@ body {
   min-width: 0;
   position: relative;
   overflow: hidden;
+  display: flex;
+  flex-direction: column;
 }
 .agent-timeline {
-  height: 100%;
+  flex: 1;
   min-height: 0;
   min-width: 0;
   overflow-y: auto;
@@ -3065,6 +3067,47 @@ body {
   -webkit-user-select: text;
   user-select: text;
 }
+.agent-changed-documents {
+  flex: 0 1 auto;
+  max-height: 35%;
+  overflow: auto;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg);
+  font-size: var(--agent-small-font-size);
+}
+.agent-changed-documents summary {
+  padding: 8px 10px;
+  cursor: pointer;
+}
+.agent-changed-documents summary span { color: var(--fg-muted); }
+.agent-changed-documents ul { margin: 0; padding: 0 10px 8px; list-style: none; }
+.agent-changed-documents li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+  padding: 6px 0;
+}
+.agent-changed-document-name {
+  flex: 1 1 140px;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--fg);
+  text-align: left;
+  cursor: pointer;
+}
+.agent-changed-document-name strong,
+.agent-changed-document-name span {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.agent-changed-document-name span,
+.agent-changed-document-status { color: var(--fg-muted); }
+.agent-changed-documents .agent-card-actions { margin: 0; }
 .agent-new-output-button {
   position: absolute;
   left: 50%;
