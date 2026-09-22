@@ -9,6 +9,7 @@ import type {
 } from '../env'
 import { formatHearingLabel, isActiveHearing } from './hearings'
 import CaseContextMenu, { type CaseContextMenuState } from './CaseContextMenu'
+import CaseTaskReview from './CaseTaskReview'
 import CaseActivityTimeline from './CaseActivityTimeline'
 import WorkLogView from './WorkLogView'
 import { agoLabel, fmtDate, nextHearing, partyNames } from './caseUtils'
@@ -110,6 +111,7 @@ export default function CasesDashboard({
   }
   const [tokenInput, setTokenInput] = useState('')
   const [menu, setMenu] = useState<CaseContextMenuState | null>(null)
+  const [caseReview, setCaseReview] = useState<JsCase | null>(null)
   const [detail, setDetail] = useState<Record<string, JsCase>>({}) // 펼친 사건 상세
   const [activity, setActivity] = useState<Record<string, CaseActivity>>({}) // 사건별 최근 작업
   const [folders, setFolders] = useState<FolderActivity[]>([]) // 사건 미연결 폴더 작업
@@ -420,6 +422,9 @@ export default function CasesDashboard({
                   <span className="case-hdate">{h.when}</span> {h.note}
                 </div>
               )}
+              <button className="todo-small" onClick={(e) => { e.stopPropagation(); setCaseReview(c) }}>
+                {c.status === 'active' ? '사건 종결' : '사건 상태 변경'}
+              </button>
               {act && act.sessions.length > 0 && (
                 <div className="case-activity">
                   {act.sessions.slice(0, 2).map((s) => (
@@ -515,6 +520,7 @@ export default function CasesDashboard({
         </>
       )}
 
+      {caseReview && <CaseTaskReview caseId={caseReview.id} title={[caseReview.caseNumber, caseReview.caseName].filter(Boolean).join(' · ') || '사건'} onClose={() => setCaseReview(null)} onChanged={refreshCases} />}
       {menu && (
         <CaseContextMenu
           menu={menu}
@@ -528,6 +534,7 @@ export default function CasesDashboard({
           onHearingRecord={onHearingRecord}
           onActivity={(target) => toggleHistory(target.id)}
           onDetail={toggleDetail}
+          onManageCase={setCaseReview}
         />
       )}
     </div>

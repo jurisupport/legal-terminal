@@ -95,9 +95,11 @@ curl -fsSL https://github.com/jurisupport/legal-terminal/releases/latest/downloa
 
 ## 이번 업데이트
 
-최신 릴리스: [v0.1.232](https://github.com/jurisupport/legal-terminal/releases/tag/v0.1.232)
+최신 릴리스: [v0.1.233](https://github.com/jurisupport/legal-terminal/releases/tag/v0.1.233)
 
-- **사건 탭 닫기 수정**: 사건 탭을 닫을 때 새 사건 입력 창이 자동으로 열리는 문제를 수정했습니다. 새 사건은 ‘새 사건 추가’ 버튼이나 기존 단축키로 열 수 있습니다.
+- **사건 종결**: 사건 카드와 우클릭 메뉴에서 ‘사건 종결’을 선택할 수 있습니다. 열린 할일이 없는 사건도 바로 검토하고 종결할 수 있습니다.
+- **종결 전 할일 검토**: 남은 할일의 완료·종료·유지·이관을 확인한 뒤 사건 상태를 저장합니다.
+- **사건 다시 진행**: 종결 탭의 ‘사건 상태 변경’에서 진행 상태로 되돌릴 수 있습니다.
 
 ## 처음 쓰는 순서
 
