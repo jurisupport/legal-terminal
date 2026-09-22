@@ -45,7 +45,7 @@ const serviceModule = { exports: {} }
 let queryMessages = []
 let inputStates = []
 let remoteProcess
-runInNewContext(ts.transpileModule(`${serviceSource}\nexport const progressCheck = { handleSdkMessage, handleRemoteJsonLine, currentSessionStatus, startAgentTurn, runRemoteAgentMessage };`, {
+runInNewContext(ts.transpileModule(`${serviceSource}\nexport const progressCheck = { sessions, handleSdkMessage, handleRemoteJsonLine, currentSessionStatus, startAgentTurn, runRemoteAgentMessage };`, {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 }
 }).outputText, {
   exports: serviceModule.exports, process, Buffer, AbortController, setTimeout, clearTimeout, setInterval, clearInterval,
@@ -59,6 +59,7 @@ runInNewContext(ts.transpileModule(`${serviceSource}\nexport const progressCheck
       const input = prompt[Symbol.asyncIterator]()
       let ended = false
       return {
+        close: () => {},
         getContextUsage: async () => ({}),
         async *[Symbol.asyncIterator]() {
           await input.next()
@@ -72,12 +73,14 @@ runInNewContext(ts.transpileModule(`${serviceSource}\nexport const progressCheck
       }
     } }
     if (name === './agentPrompt') return { prependAgentContext: (_context, prompt) => prompt }
+    if (name === '../jurisupport') return { onAgentMcpAccountChange: () => {} }
+    if (name === './agentMcp') return { managedToolName: () => undefined }
     if (name === '../sshOptions') return { buildSshArgs: () => [] }
     if (name.startsWith('.')) return {}
     return require(name)
   }
 })
-const { handleSdkMessage, handleRemoteJsonLine, currentSessionStatus, startAgentTurn, runRemoteAgentMessage } = serviceModule.exports.progressCheck
+const { sessions, handleSdkMessage, handleRemoteJsonLine, currentSessionStatus, startAgentTurn, runRemoteAgentMessage } = serviceModule.exports.progressCheck
 
 const panelSource = readFileSync(new URL('../src/renderer/src/agent/AgentPanel.tsx', import.meta.url), 'utf8')
 const panelAst = ts.createSourceFile('AgentPanel.tsx', panelSource, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX)
@@ -173,6 +176,7 @@ const endedSession = {
   assistantMessages: new Set(), assistantText: new Map(), assistantStreamed: new Set(), startedTools: new Set(),
   viewers: new Map([[1, { isDestroyed: () => false, send: (_channel, event) => endedEvents.push(event) }]])
 }
+sessions.set(endedSession.id, endedSession)
 queryMessages = [{ type: 'system', subtype: 'task_started', task_id: 'unfinished', task_type: 'local_agent' }]
 startAgentTurn(endedSession, { text: 'Track unfinished child' })
 for (let i = 0; i < 10 && endedSession.running; i++) await new Promise((resolve) => setImmediate(resolve))

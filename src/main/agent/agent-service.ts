@@ -2003,7 +2003,7 @@ function handleUserMessage(session: AgentSession, message: Record<string, unknow
       isError: block.is_error === true
     })
 
-    if (result?.structuredPatch || result?.gitDiff) {
+    if (block.is_error !== true && result?.staged !== true && (result?.structuredPatch || result?.gitDiff)) {
       const gitDiff = asRecord(result.gitDiff)
       emit(session, {
         type: 'diff:applied',
@@ -2931,14 +2931,23 @@ function handleCodexServerRequest(session: AgentSession, message: Record<string,
   codexRespondError(session, message.id, `${method} 요청은 아직 지원하지 않습니다.`)
 }
 
-function codexFileChangeText(item: Record<string, unknown>): { filePath?: string; text?: string } {
-  const changes = unknownArray(item.changes).map(asRecord).filter((change): change is Record<string, unknown> => Boolean(change))
-  const filePath = stringValue(changes[0]?.path)
-  const text = changes
-    .map((change) => [stringValue(change.path), stringValue(change.diff)].filter(Boolean).join('\n'))
-    .filter(Boolean)
-    .join('\n\n')
-  return { filePath, text: text || undefined }
+function codexFileChanges(item: Record<string, unknown>, itemId: string) {
+  return unknownArray(item.changes).flatMap((value) => {
+    const change = asRecord(value)
+    const path = stringValue(change?.path)
+    if (!path) return []
+    const kind = asRecord(change?.kind)
+    const diff = stringValue(change?.diff)
+    const filePath = stringValue(kind?.move_path) || path
+    return [{
+      proposalId: `${itemId}:${path}`,
+      filePath,
+      // Codex sends full content for add/delete, and a unified diff for update.
+      oldString: kind?.type === 'delete' ? diff : undefined,
+      newString: kind?.type === 'add' ? diff : undefined,
+      gitDiff: { filename: filePath, diff, kind }
+    }]
+  })
 }
 
 function setCodexWork(session: AgentSession, id: string, status: ReturnType<typeof codexWorkStepStatus>): void {
@@ -3028,17 +3037,12 @@ function handleCodexItemStarted(session: AgentSession, item: Record<string, unkn
     return
   }
   if (type === 'fileChange') {
-    const { filePath, text } = codexFileChangeText(item)
-    emit(session, {
-      type: 'diff:proposed',
-      proposal: {
-        proposalId: itemId,
-        sessionId: session.id,
-        toolUseId: itemId,
-        filePath,
-        newString: text
-      }
-    })
+    for (const change of codexFileChanges(item, itemId)) {
+      emit(session, {
+        type: 'diff:proposed',
+        proposal: { ...change, sessionId: session.id, toolUseId: itemId }
+      })
+    }
     return
   }
   if (type === 'mcpToolCall' || type === 'dynamicToolCall') {
@@ -3077,14 +3081,10 @@ function handleCodexItemCompleted(session: AgentSession, item: Record<string, un
     return
   }
   if (type === 'fileChange') {
-    const { filePath, text } = codexFileChangeText(item)
-    emit(session, {
-      type: 'diff:applied',
-      sessionId: session.id,
-      proposalId: itemId,
-      filePath,
-      newString: text
-    })
+    if (item.status !== 'completed') return
+    for (const change of codexFileChanges(item, itemId)) {
+      emit(session, { type: 'diff:applied', sessionId: session.id, ...change })
+    }
     return
   }
   if (type === 'mcpToolCall' || type === 'dynamicToolCall') {
@@ -3109,11 +3109,14 @@ function handleCodexNotification(session: AgentSession, message: Record<string, 
   const method = stringValue(message.method)
   const params = asRecord(message.params)
   if (!method || !params) return
-  if (method === 'thread/started') {
-    const threadId = stringValue(asRecord(params.thread)?.id)
-    if (threadId) session.codexThreadId = threadId
-    return
-  }
+  // thread/start and thread/resume responses own the parent ID; notifications also include children.
+  if (method === 'thread/started') return
+  const threadId = stringValue(params.threadId)
+  if (threadId && threadId !== session.codexThreadId) return
+  const turnId = stringValue(params.turnId)
+  const itemType = stringValue(asRecord(params.item)?.type)
+  if (turnId && turnId !== session.codexTurnWaiter?.turnId && method.startsWith('item/') &&
+    itemType !== 'collabAgentToolCall' && itemType !== 'subAgentActivity') return
   if (method === 'thread/settings/updated') {
     const settings = asRecord(params.threadSettings)
     const model = stringValue(settings?.model)
@@ -3132,7 +3135,9 @@ function handleCodexNotification(session: AgentSession, message: Record<string, 
   }
   if (method === 'turn/started') {
     const turnId = stringValue(asRecord(params.turn)?.id)
-    if (session.codexTurnWaiter) session.codexTurnWaiter.turnId = turnId
+    const waiter = session.codexTurnWaiter
+    if (!waiter || !turnId || (waiter.turnId && waiter.turnId !== turnId)) return
+    waiter.turnId = turnId
     emit(session, { type: 'status', sessionId: session.id, status: 'working' })
     return
   }
@@ -3189,6 +3194,8 @@ function handleCodexNotification(session: AgentSession, message: Record<string, 
   }
   if (method === 'turn/completed') {
     const turn = asRecord(params.turn)
+    const waiter = session.codexTurnWaiter
+    if (!waiter || !waiter.turnId || waiter.turnId !== stringValue(turn?.id)) return
     const status = stringValue(turn?.status)
     if (session.turnAssistantMessageId) completeAssistant(session, session.turnAssistantMessageId)
     emit(session, {
@@ -3196,7 +3203,6 @@ function handleCodexNotification(session: AgentSession, message: Record<string, 
       sessionId: session.id,
       status: codexTurnRunStatus(status, session.codexActiveWork?.size ?? 0)
     })
-    const waiter = session.codexTurnWaiter
     session.codexTurnWaiter = undefined
     if (status === 'failed') {
       const error = asRecord(turn?.error)
@@ -3272,6 +3278,9 @@ async function runCodexAgentMessage(
       ...codexMaybeModel(session, true),
       approvalPolicy: codexApprovalPolicy(session.permissionMode),
       sandboxPolicy: codexSandboxPolicy(session.permissionMode, session.cwd)
+    }).then((result) => {
+      if (settled) return
+      waiter.turnId ??= stringValue(asRecord(asRecord(result)?.turn)?.id)
     }).catch((error) => finish(error instanceof Error ? error : new Error(String(error))))
   })
 }
