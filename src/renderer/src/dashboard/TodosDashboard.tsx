@@ -7,6 +7,7 @@ import type { TodoSnapshot as SharedTodoSnapshot } from './useTodoSnapshot'
 import { TodoSnapshotState } from './TodoSummary'
 import TodoDetails, { TodoResolution } from './TodoDetails'
 import CaseTaskReview from './CaseTaskReview'
+import BulkTodoClosure from './BulkTodoClosure'
 
 const FILTERS: { value: TodoFilter; label: string }[] = [
   { value: 'open', label: '전체 열린 할일' }, { value: 'overdue', label: '기한 도과' },
@@ -20,6 +21,7 @@ const STATUS_OPTIONS = [
   { value: 'pending', label: '예정' },
   { value: 'in_progress', label: '진행중' },
   { value: 'completed', label: '완료' },
+  { value: 'closed', label: '종료' },
   { value: 'all', label: '전체' }
 ]
 
@@ -141,7 +143,7 @@ function TodosDashboardContent({
   onOpenEvidenceFile?: (path: string, label?: string) => void | Promise<void>
 }): JSX.Element {
   const tokenReady = snapshot.hasToken
-  const [history, setHistory] = useState<JsTodo[] | null>(null)
+  const [history, setHistory] = useState<{ status: string; todos: JsTodo[] } | null>(null)
   const [err, setErr] = useState('')
   const [loading, setLoading] = useState(false)
   const [search, setSearch] = useState('')
@@ -153,11 +155,12 @@ function TodosDashboardContent({
   const [newReview, setNewReview] = useState('')
   const [newPriority, setNewPriority] = useState('medium')
   const [resolution, setResolution] = useState<{ todo: JsTodo; action: 'complete' | 'close' } | null>(null)
+  const [bulkTodos, setBulkTodos] = useState<JsTodo[] | null>(null)
   const [caseReview, setCaseReview] = useState<{ id: string; title: string } | null>(null)
   const [busyId, setBusyId] = useState('')
   const busyRef = useRef(false)
   const requestId = useRef(0)
-  const todos = status === 'open' || status === 'pending' || status === 'in_progress' ? snapshot.todos : history
+  const todos = status === 'open' || status === 'pending' || status === 'in_progress' ? snapshot.todos : history?.status === status ? history.todos : null
   const [newTitle, setNewTitle] = useState('')
   const [progressDrafts, setProgressDrafts] = useState<Record<string, string>>({})
   const [relatedInputs, setRelatedInputs] = useState<Record<string, string>>({})
@@ -169,7 +172,10 @@ function TodosDashboardContent({
   const filteredTodos = useMemo(() => {
     const source = ['open', 'pending', 'in_progress'].includes(status) ? filterTodos(todos ?? [], filter).filter((todo) => status === 'open' || todo.status === status) : todos ?? []
     const q = search.trim().toLocaleLowerCase()
-    return source.filter((todo) => !q || [todo.title, todo.caseNumber, todo.caseName, todo.client, todo.opponent, todo.partyNames].filter(Boolean).join(' ').toLocaleLowerCase().includes(q)).slice().sort(compareTodos)
+    return source.filter((todo) => (!todo.type || todo.type === 'todo') &&
+      (status !== 'completed' || ['completed', 'done'].includes(todo.status)) &&
+      (status !== 'closed' || ['closed', 'archived'].includes(todo.status)) &&
+      (!q || [todo.title, todo.caseNumber, todo.caseName, todo.client, todo.opponent, todo.partyNames].filter(Boolean).join(' ').toLocaleLowerCase().includes(q))).slice().sort(compareTodos)
   }, [todos, filter, status, search])
   const groups = useMemo(() => {
     const result = new Map<string, JsTodo[]>()
@@ -193,13 +199,13 @@ function TodosDashboardContent({
     if (['open', 'pending', 'in_progress'].includes(s)) { snapshot.refresh(); return }
     const id = ++requestId.current
     setLoading(true); setErr('')
-    void window.lt.todo.list({ status: s === 'all' ? undefined : s, includeArchived: s === 'all' }).then((r) => {
+    void window.lt.todo.list({ status: s === 'all' ? undefined : s, includeArchived: s === 'all' || s === 'closed' }).then((r) => {
       if (id !== requestId.current) return
       if (!r.ok) throw new Error(r.error || '불러오기 실패')
-      setHistory(r.todos ?? [])
+      setHistory({ status: s, todos: r.todos ?? [] })
     }).catch((e) => { if (id === requestId.current) setErr(String(e)) }).finally(() => { if (id === requestId.current) setLoading(false) })
   }
-  useEffect(() => { setStatus('open'); setFilter(initialFilter) }, [initialFilter, filterNonce])
+  useEffect(() => { requestId.current++; setHistory(null); setLoading(false); setStatus('open'); setFilter(initialFilter) }, [initialFilter, filterNonce])
   useEffect(() => { if (!['open', 'pending', 'in_progress'].includes(status) && tokenReady) load() }, [status, nonce, tokenReady])
   useEffect(() => { if (tokenReady === false) { requestId.current++; setHistory(null); setCapabilities(null) } else if (tokenReady) void window.lt.todo.capabilities().then((r) => setCapabilities(r.ok ? r.capabilities ?? null : null)).catch(() => setCapabilities(null)) }, [tokenReady])
   const runMutation = async (id: string, fn: () => Promise<void>): Promise<void> => {
@@ -343,6 +349,10 @@ function TodosDashboardContent({
             aria-pressed={status === option.value}
             className={`todo-tab ${status === option.value ? 'on' : ''}`}
             onClick={() => {
+              if (option.value === status) return
+              requestId.current++
+              setHistory(null)
+              setLoading(false)
               setStatus(option.value)
               setErr('')
             }}
@@ -351,6 +361,11 @@ function TodosDashboardContent({
           </button>
         ))}
       </div>
+
+      {status === 'completed' && <div className="todo-filters">
+        <button className="todo-primary" disabled={!tokenReady || !todos || loading || !!err || !!busyId || !filteredTodos.length} onClick={() => setBulkTodos(filteredTodos)}>완료된 할일 일괄 종료</button>
+        <span className="muted small">현재 표시된 완료 할일 {filteredTodos.length}건</span>
+      </div>}
 
       {['open', 'pending', 'in_progress'].includes(status) && <div className="todo-filters" aria-label="열린 할일 필터">{FILTERS.map((option) => <button key={option.value} className={`todo-tab ${filter === option.value ? 'on' : ''}`} aria-pressed={filter === option.value} onClick={() => setFilter(option.value)}>{option.label}</button>)}</div>}
       <div className="todo-filter-count">표시 {filteredTodos.length}건 {onGlobalWork && <button className="todo-small" onClick={onGlobalWork}>전체 할일 정리 시작</button>}</div>
@@ -472,6 +487,7 @@ function TodosDashboardContent({
         setProgressDrafts((drafts) => ({ ...drafts, [resolution.todo.id]: '' })); setResolution(null); changed()
       }} />}
       {caseReview && <CaseTaskReview closureSupported={capabilities?.caseClosure ?? false} caseId={caseReview.id} title={caseReview.title} onClose={() => setCaseReview(null)} onChanged={changed} />}
+      {bulkTodos && <BulkTodoClosure todos={bulkTodos} onClose={() => setBulkTodos(null)} onChanged={changed} />}
       {menu && onOpenWorkspace && (
         <CaseContextMenu
           menu={menu}

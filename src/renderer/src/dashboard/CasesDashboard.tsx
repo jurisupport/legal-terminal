@@ -9,8 +9,6 @@ import type {
 } from '../env'
 import { formatHearingLabel, isActiveHearing } from './hearings'
 import CaseContextMenu, { type CaseContextMenuState } from './CaseContextMenu'
-import CaseTaskReview from './CaseTaskReview'
-import BulkCaseClosure from './BulkCaseClosure'
 import CaseActivityTimeline from './CaseActivityTimeline'
 import WorkLogView from './WorkLogView'
 import { agoLabel, fmtDate, nextHearing, partyNames } from './caseUtils'
@@ -112,9 +110,6 @@ export default function CasesDashboard({
   }
   const [tokenInput, setTokenInput] = useState('')
   const [menu, setMenu] = useState<CaseContextMenuState | null>(null)
-  const [caseReview, setCaseReview] = useState<JsCase | null>(null)
-  const [selectedIds, setSelectedIds] = useState<string[]>([])
-  const [bulkCases, setBulkCases] = useState<JsCase[] | null>(null)
   const [detail, setDetail] = useState<Record<string, JsCase>>({}) // 펼친 사건 상세
   const [activity, setActivity] = useState<Record<string, CaseActivity>>({}) // 사건별 최근 작업
   const [folders, setFolders] = useState<FolderActivity[]>([]) // 사건 미연결 폴더 작업
@@ -172,8 +167,6 @@ export default function CasesDashboard({
     window.lt.js.tokenStatus().then((st) => applyTokenStatus(st, false))
     // 설정창에서 토큰을 바꾸면 즉시 반영
     const onTokenUpdated = (): void => {
-      setSelectedIds([])
-      setBulkCases(null)
       void window.lt.js.tokenStatus().then((st) => applyTokenStatus(st, true))
     }
     window.addEventListener(JS_TOKEN_UPDATED_EVENT, onTokenUpdated)
@@ -204,8 +197,6 @@ export default function CasesDashboard({
   }
 
   const onSearchChange = (v: string): void => {
-    setSelectedIds([])
-    setLoading(true)
     setSearch(v)
     if (searchTimer.current) clearTimeout(searchTimer.current)
     searchTimer.current = setTimeout(() => load(v.trim()), 350)
@@ -238,8 +229,6 @@ export default function CasesDashboard({
 
   // 서버가 status 필터를 무시해도 화면은 선택한 상태만 보이게 한다.
   const visibleCases = cases && status !== 'all' ? cases.filter((c) => c.status === status) : cases
-  const selectableCases = (visibleCases ?? []).filter((c) => c.status === 'active')
-  const selectedCases = selectableCases.filter((c) => selectedIds.includes(c.id))
 
   // 작업일지 행 클릭 → 사건번호(없으면 사건명)로 사건을 찾아 이어하기, 사건이 없으면 폴더째 이어하기
   const norm = (v?: string | null): string => (v ?? '').normalize('NFKC').toLowerCase().replace(/\s+/g, '')
@@ -325,8 +314,6 @@ export default function CasesDashboard({
           title="토큰 재설정"
           onClick={() => {
             clearCaseListCache()
-            setSelectedIds([])
-            setBulkCases(null)
             setTokenReady(false)
             setCases(null)
           }}
@@ -348,19 +335,12 @@ export default function CasesDashboard({
             className={`todo-tab ${status === option.value ? 'on' : ''}`}
             onClick={() => {
               setStatus(option.value)
-              setSelectedIds([])
               load(search.trim(), false, option.value)
             }}
           >
             {option.label}
           </button>
         ))}
-      </div>
-
-      <div className="todo-tabs" style={{ flexWrap: 'wrap', alignItems: 'center' }} aria-label="사건 일괄 종결">
-        <label className="todo-small"><input type="checkbox" aria-label="현재 목록 전체 선택" disabled={loading || !selectableCases.length} checked={!!selectableCases.length && selectedCases.length === selectableCases.length} onChange={(e) => setSelectedIds(e.target.checked ? selectableCases.map((c) => c.id) : [])} /> 현재 목록 전체 선택</label>
-        <span className="muted small">{selectedCases.length}건 선택</span>
-        <button className="todo-primary" disabled={loading || !selectedCases.length} onClick={() => setBulkCases(selectedCases)}>선택 사건 일괄 종결</button>
       </div>
 
       <div className="dash-scroll">
@@ -413,10 +393,7 @@ export default function CasesDashboard({
               title="클릭 → 작업환경 열기 · 우클릭 → 메뉴"
             >
               <div className="case-top">
-                <span className="case-no">
-                  {c.status === 'active' && <input type="checkbox" aria-label={`${c.caseNumber || c.caseName || '사건'} 종결 선택`} disabled={loading} checked={selectedIds.includes(c.id)} onClick={(e) => e.stopPropagation()} onChange={(e) => setSelectedIds((ids) => e.target.checked ? [...ids, c.id] : ids.filter((id) => id !== c.id))} />}{' '}
-                  {c.caseNumber || '(사건번호 미정)'}
-                </span>
+                <span className="case-no">{c.caseNumber || '(사건번호 미정)'}</span>
                 <span className={`case-status st-${c.status}`}>{statusKo(c.status)}</span>
               </div>
               <div className="case-name">{c.caseName || '(사건명 없음)'}</div>
@@ -443,9 +420,6 @@ export default function CasesDashboard({
                   <span className="case-hdate">{h.when}</span> {h.note}
                 </div>
               )}
-              <button className="todo-small" onClick={(e) => { e.stopPropagation(); setCaseReview(c) }}>
-                {c.status === 'active' ? '사건 종결' : '사건 상태 변경'}
-              </button>
               {act && act.sessions.length > 0 && (
                 <div className="case-activity">
                   {act.sessions.slice(0, 2).map((s) => (
@@ -541,8 +515,6 @@ export default function CasesDashboard({
         </>
       )}
 
-      {caseReview && <CaseTaskReview caseId={caseReview.id} title={[caseReview.caseNumber, caseReview.caseName].filter(Boolean).join(' · ') || '사건'} onClose={() => setCaseReview(null)} onChanged={refreshCases} />}
-      {bulkCases && <BulkCaseClosure cases={bulkCases} onClose={() => setBulkCases(null)} onChanged={refreshCases} />}
       {menu && (
         <CaseContextMenu
           menu={menu}
@@ -556,7 +528,6 @@ export default function CasesDashboard({
           onHearingRecord={onHearingRecord}
           onActivity={(target) => toggleHistory(target.id)}
           onDetail={toggleDetail}
-          onManageCase={setCaseReview}
         />
       )}
     </div>
