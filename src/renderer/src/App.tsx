@@ -6184,6 +6184,8 @@ export default function App(): JSX.Element {
       for (const id of termIds) delete next[id]
       return next
     })
+    const closingIndex = caseTabsRef.current.findIndex((item) => item.id === tabId)
+    const nextCaseTab = caseTabsRef.current[closingIndex + 1] ?? caseTabsRef.current[closingIndex - 1]
     setCaseTabs((tabs) => tabs.filter((item) => item.id !== tabId))
     setCaseTabContextMenu(null)
     const sourceKey = workspaceLocationKey(currentCaseFromCaseTab(tab))
@@ -6191,6 +6193,7 @@ export default function App(): JSX.Element {
     autoSaveEligibleRef.current.delete(tabId)
 
     if (activeCaseTabIdRef.current !== tabId) return
+    setDocTabs((tabs) => tabs.filter((doc) => doc.kind !== 'welcome'))
     setActiveCaseTabId('')
     setCurrentCase(null)
     setActiveDoc('')
@@ -6200,6 +6203,7 @@ export default function App(): JSX.Element {
     setPdfRecord(null)
     setMode('explorer')
     setCaseTabsOpen(false)
+    if (nextCaseTab) openCaseTab(nextCaseTab)
   }
   closeActiveCaseTabRef.current = (): void => {
     const tabId = activeCaseTabId || caseTabRows.find((row) => row.active)?.tab.id
