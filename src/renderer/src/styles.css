@@ -6321,6 +6321,39 @@ button.agent-attachment-chip {
   box-shadow: 0 2px 12px rgba(0, 0, 0, 0.55);
   white-space: nowrap;
 }
+::highlight(inline-command-source) { background-color: rgba(98, 170, 245, 0.35); }
+.inline-selection-command {
+  position: fixed;
+  z-index: 1200;
+  max-width: calc(100vw - 16px);
+  max-height: calc(100vh - 16px);
+  overflow-y: auto;
+  padding: 10px 14px;
+  border: 1px solid #80b8dc;
+  border-radius: 9px;
+  background: var(--bg-alt);
+  color: var(--fg);
+  box-shadow: 0 5px 18px rgba(0, 0, 0, 0.3);
+  font-size: 13px;
+}
+.inline-selection-head, .inline-selection-actions, .inline-selection-hints { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; }
+.inline-selection-head strong { font-weight: 500; color: #80b8dc; white-space: nowrap; }
+.inline-selection-source { flex: 1; min-width: 90px; color: var(--fg-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
+.inline-selection-target { min-width: 0; max-width: min(150px, 100%); padding: 2px 0; color: var(--fg-muted); background: var(--bg-alt); border: 0; font: 12px var(--font-ui); text-overflow: ellipsis; }
+.inline-selection-entry { position: relative; margin: 14px 0 8px; }
+.inline-selection-entry textarea, .inline-selection-ghost { width: 100%; padding: 0; font: 14px/1.6 var(--font-ui); white-space: pre-wrap; overflow-wrap: anywhere; }
+.inline-selection-entry textarea { position: relative; display: block; resize: none; min-height: 54px; border: 0; outline: none; background: transparent; color: var(--fg); }
+.inline-selection-command:focus-within { border-color: #9bd0f1; }
+.inline-selection-ghost { position: absolute; inset: 0; pointer-events: none; overflow: hidden; color: var(--fg-muted); }
+.inline-selection-ghost span { color: transparent; }
+.inline-selection-actions { justify-content: space-between; font-size: 12px; color: var(--fg-muted); }
+.inline-selection-command kbd { font: inherit; border: 1px solid var(--border); border-radius: 3px; padding: 0 4px; }
+.inline-selection-command button { padding: 3px 6px; color: inherit; font: inherit; border: 1px solid var(--border); border-radius: 4px; background: transparent; cursor: pointer; }
+.inline-selection-command .inline-selection-close { margin-left: auto; padding: 0 3px; border: 0; font-size: 17px; }
+.inline-selection-command .inline-selection-send { padding: 3px 8px; color: #80b8dc; background: #233744; }
+.inline-selection-command button:disabled { opacity: 0.5; cursor: default; }
+.inline-selection-error { margin-top: 8px; font-size: 12px; color: var(--fg-muted); }
+.inline-selection-error[role="alert"] { color: #e6a1a1; }
 .sel-actions button {
   background: var(--accent);
   color: var(--accent-fg);

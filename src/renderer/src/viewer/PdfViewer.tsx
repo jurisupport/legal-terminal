@@ -78,7 +78,7 @@ export default function PdfViewer({
 }: {
   path: string
   onOutline?: (path: string, parsed: ParsedRecord) => void
-  jumpTo?: { page: number; nonce: number }
+  jumpTo?: { path: string; page: number; nonce: number }
   onNextDoc?: () => void // 마지막 페이지에서 다음 문서로
   onPrevDoc?: () => void // 첫 페이지에서 이전 문서로
   cropOn: boolean // 여백 자르기 (앱 전역 유지)
@@ -276,7 +276,7 @@ export default function PdfViewer({
         passwordCallbackRef.current = null
         setPasswordPrompt(null)
         setPasswordBusy(false)
-        setPage(Math.min(initialPage, doc.numPages))
+        setPage((current) => Math.min(current, doc.numPages))
         setNumPages(doc.numPages)
         setLoading(false)
         if (onOutline) {
@@ -457,6 +457,8 @@ export default function PdfViewer({
       const tl = textLayerRef.current
       if (tl && !cancelled) {
         tl.replaceChildren()
+        tl.dataset.pdfPage = String(page)
+        tl.dataset.pdfPath = path
         tl.style.setProperty('--scale-factor', String(scale))
         tl.style.width = `${Math.floor(viewport.width)}px`
         tl.style.height = `${Math.floor(viewport.height)}px`
@@ -499,9 +501,9 @@ export default function PdfViewer({
 
   // 외부 페이지 점프
   useEffect(() => {
-    if (jumpTo && jumpTo.page > 0)
+    if (jumpTo?.path === path && Number.isSafeInteger(jumpTo.page) && jumpTo.page > 0)
       setPage(Math.min(Math.max(1, jumpTo.page), numPagesRef.current || jumpTo.page))
-  }, [jumpTo?.nonce]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [jumpTo?.nonce, path]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // 맞춤 모드에서 줌을 시작하면 화면에 보이는 실효 배율에서 이어간다.
   // (이전엔 내부 customScale(기본 100%)에서 시작해, 쪽맞춤 배율이 100%를 넘는

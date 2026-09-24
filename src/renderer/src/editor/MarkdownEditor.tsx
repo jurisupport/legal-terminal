@@ -57,6 +57,8 @@ export interface MarkdownRevealRequest {
 export interface TextSelectionOverlayDetail {
   x: number
   y: number
+  bottom?: number
+  domRange?: Range
   text: string
   markdown?: string
   editorDraftId?: string
@@ -316,9 +318,13 @@ function editorSelectionOverlay(view: EditorView, editorDraftId: string): TextSe
   const editorRect = view.scrollDOM.getBoundingClientRect()
   const sameLine = !!start && !!end && Math.abs(start.top - end.top) < 4
   const rawX = sameLine && start && end ? (start.left + end.right) / 2 : first.left + 16
+  const selection = view.dom.ownerDocument.getSelection()
+  const domRange = selection?.rangeCount ? selection.getRangeAt(0) : undefined
   return {
     x: Math.min(Math.max(rawX, editorRect.left + 8), editorRect.right - 8),
     y: first.top - 6,
+    bottom: Math.min(end?.bottom ?? first.bottom, editorRect.bottom),
+    domRange: domRange && view.contentDOM.contains(domRange.commonAncestorContainer) ? domRange.cloneRange() : undefined,
     text,
     markdown: text,
     editorDraftId,

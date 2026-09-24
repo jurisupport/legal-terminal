@@ -34,6 +34,8 @@
     "verify:agent-case-context": "node --experimental-strip-types --no-warnings scripts/verify-agent-case-context.mjs",
     "verify:agent-session-search": "node --experimental-strip-types --no-warnings scripts/verify-agent-session-search.mjs",
     "verify:agent-quote": "node --experimental-strip-types --no-warnings scripts/verify-agent-quote.mjs",
+    "verify:inline-selection": "node scripts/verify-inline-agent-submit.mjs && node scripts/verify-inline-selection-routing.mjs && node scripts/verify-inline-pdf-source.mjs",
+    "verify:inline-selection-ui": "node scripts/verify-inline-selection-ui.mjs",
     "verify:agent-slash-autocomplete": "node --experimental-strip-types --no-warnings scripts/verify-agent-slash-autocomplete.mjs",
     "verify:ssh-options": "node --experimental-strip-types --no-warnings scripts/verify-ssh-options.mjs",
     "verify:remote-quick-start": "node --experimental-strip-types --no-warnings scripts/verify-remote-quick-start.mjs",

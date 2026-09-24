@@ -16,8 +16,10 @@ import AgentPanel, {
   type AgentAttachmentRequest,
   type AgentDraftState,
   type AgentDiffOpenRequest,
-  type AgentProviderHandoff
+  type AgentProviderHandoff,
+  type AgentInlineActions
 } from './agent/AgentPanel'
+import InlineSelectionCommand from './agent/InlineSelectionCommand'
 import { preloadSessionTranscripts } from './agent/transcriptCache'
 import {
   expandSessionSearchLimit,
@@ -600,13 +602,27 @@ interface ClaudeSelectionSource {
   docPath?: string
   docTitle?: string
   text?: string
-  range?: MarkdownSelectionRange
+  range?: NonNullable<AgentAttachment['source']>['range']
 }
 interface ClaudeAskOptions extends ClaudeDraftPromptOptions {
   docPath?: string | null
   sourceLabel?: string
   selectionSource?: ClaudeSelectionSource
   agentQuoteMessageId?: string
+}
+
+interface InlineSelectionContext {
+  key: string
+  caseId: string
+  caseName: string
+  source: ClaudeSelectionSource
+  sourceSide: DockSide
+  text: string
+  x: number
+  y: number
+  domRange?: Range
+  sourceElement?: HTMLElement
+  targetId: string
 }
 
 type CaseWorkspaceTab = WorkspaceCaseTabPayload
@@ -1601,6 +1617,20 @@ export default function App(): JSX.Element {
   } | null>(null)
   const [agentAttachmentRequests, setAgentAttachmentRequests] = useState<Record<string, AgentAttachmentRequest[]>>({})
   const [agentDrafts, setAgentDrafts] = useState<Record<string, AgentDraftState>>({})
+  const [inlineSelection, setInlineSelection] = useState<InlineSelectionContext | null>(null)
+  const inlineActionsRef = useRef(new Map<string, AgentInlineActions>())
+  const [inlineReadyIds, setInlineReadyIds] = useState<Set<string>>(new Set())
+  const registerInlineActions = useCallback((id: string, actions: AgentInlineActions | null): void => {
+    if (actions) inlineActionsRef.current.set(id, actions)
+    else inlineActionsRef.current.delete(id)
+    setInlineReadyIds((current) => {
+      if (current.has(id) === Boolean(actions)) return current
+      const next = new Set(current)
+      if (actions) next.add(id)
+      else next.delete(id)
+      return next
+    })
+  }, [])
   const [agentDraftClearNonce, setAgentDraftClearNonce] = useState<Record<string, number>>({})
   const [termFocusNonce, setTermFocusNonce] = useState<Record<string, number>>({})
   const [termBracketedPasteMode, setTermBracketedPasteMode] = useState<Record<string, boolean>>({})
@@ -1683,7 +1713,7 @@ export default function App(): JSX.Element {
   const [pdfRecord, setPdfRecord] = useState<{ path: string; parsed: ParsedRecord } | null>(null)
   const [pdfStatus, setPdfStatus] = useState<Record<string, PdfViewStatus>>({})
   const [docScrollPositions, setDocScrollPositions] = useState<Record<string, DocScrollPosition>>({})
-  const [pdfJump, setPdfJump] = useState<{ page: number; nonce: number } | undefined>()
+  const [pdfJump, setPdfJump] = useState<{ docId: string; path: string; page: number; nonce: number } | undefined>()
   const jumpNonce = useRef(0)
 
 
@@ -2460,8 +2490,12 @@ export default function App(): JSX.Element {
   const openAgentAttachmentSource = (attachment: AgentAttachment): void => {
     const source = attachment.source
     if (!source) return
+    const page = source.range?.startPage
+    const isPdfQuote = typeof page === 'number' && Number.isSafeInteger(page) && page > 0
     const existing =
-      (source.docId ? docTabsRef.current.find((tab) => tab.id === source.docId) : undefined) ??
+      (source.docId ? docTabsRef.current.find((tab) =>
+        tab.id === source.docId && (!isPdfQuote || !source.path || tab.path === source.path)
+      ) : undefined) ??
       (source.path ? docTabsRef.current.find((tab) => tab.path === source.path) : undefined)
     let docId: string | undefined
     if (existing) {
@@ -2471,6 +2505,11 @@ export default function App(): JSX.Element {
       docId = openFile(source.path, source.title ?? fileNameFromPath(source.path), 'left')
     }
     if (!docId) return
+    const path = source.path ?? existing?.path
+    if (isPdfQuote && path) {
+      setPdfJump({ docId, path, page, nonce: ++jumpNonce.current })
+      return
+    }
     const range = markdownRangeFromAttachmentSource(source)
     if (!range && !source.text) return
     setMarkdownRevealRequests((current) => ({
@@ -4134,8 +4173,10 @@ export default function App(): JSX.Element {
 
   const onOutline = (path: string, parsed: ParsedRecord): void => setPdfRecord({ path, parsed })
   const jumpToPage = (page: number): void => {
+    const doc = docTabsRef.current.find((tab) => tab.id === activeDoc)
+    if (!doc?.path) return
     jumpNonce.current += 1
-    setPdfJump({ page, nonce: jumpNonce.current })
+    setPdfJump({ docId: doc.id, path: doc.path, page, nonce: jumpNonce.current })
   }
 
   // 마지막으로 연 사건 컨텍스트 — 터미널을 모두 닫아도 유지(탐색기·뷰어·새 터미널 기준)
@@ -4360,9 +4401,14 @@ export default function App(): JSX.Element {
     const trimmed = text.trim()
     const readablePath = opts.docPath ? claudeReadablePath(opts.docPath, term) : undefined
     const sourceLabel = opts.sourceLabel ?? opts.docName
+    const page = opts.selectionSource?.range?.startPage
+    const pageLabel = typeof page === 'number' && Number.isSafeInteger(page) && page > 0
+      ? `PDF ${page}쪽`
+      : undefined
     const body = [
       sourceLabel ? `${opts.docPath ? '문서' : '출처'}: ${sourceLabel}` : undefined,
       readablePath ? `문서 경로: ${readablePath}` : undefined,
+      pageLabel ? `인용 위치: ${pageLabel} (파일의 실제 쪽번호)` : undefined,
       `선택 길이: ${formatCharCount(trimmed.length)}자`,
       '',
       trimmed
@@ -4371,7 +4417,7 @@ export default function App(): JSX.Element {
       .join('\n')
     return {
       kind: 'selection',
-      label: selectionAttachmentLabel(sourceLabel),
+      label: selectionAttachmentLabel([sourceLabel, pageLabel].filter(Boolean).join(' · ')),
       path: readablePath,
       source: opts.selectionSource
         ? {
@@ -4388,6 +4434,87 @@ export default function App(): JSX.Element {
 
   const agentSelectionInputText = (attachment: AgentAttachment): string =>
     `「${attachment.label}」 선택 부분에 대해 `
+
+  const inlineTargetsForCase = (caseId: string, sourceSide: DockSide): TermTab[] =>
+    termTabsRef.current.filter((term) => isAgentTab(term) && caseIdForTerm(term) === caseId && termSide(term) !== sourceSide)
+
+  const createInlineAgent = (caseId: string, sourceSide: DockSide): TermTab => {
+    const tab = caseTabsRef.current.find((item) => item.id === caseId)
+    if (!tab) throw new Error('원문 사건이 닫혔습니다. 사건을 다시 열어 주세요.')
+    const source = currentCaseFromCaseTab(tab)
+    const side = otherSide(sourceSide)
+    if (source.ssh) {
+      const profile = sshProfiles.find((item) => item.id === source.profileId)
+      if (!profile || !source.remotePath) throw new Error('원문 사건의 원격 연결 설정을 확인해 주세요.')
+      return createRemoteCase(profile, source.remotePath, source.name, source.meta, source.records, side, 'agent')
+    }
+    return createCase(source.drafts, source.name, source.records, source.suggestedRecords, source.meta, side, source.suggestedRecordOptions)
+  }
+
+  const openInlineSelection = (box: SelectionActionBox): void => {
+    const captured = box.askOpts?.selectionSource
+    const doc = docTabsRef.current.find((item) => item.id === captured?.docId)
+    const caseId = doc ? caseIdForDoc(doc) : undefined
+    const caseTab = caseTabsRef.current.find((item) => item.id === caseId)
+    if (!doc || !caseTab || !box.text.trim()) {
+      void window.lt.dialog.alert('사건 폴더에서 문서를 연 뒤 선택한 부분에 지시해 주세요.')
+      return
+    }
+    const sourceSide = docSide(doc)
+    const candidates = inlineTargetsForCase(caseTab.id, sourceSide)
+    const sourcePath = captured?.docPath ?? doc.path
+    const sourceTitle = captured?.docTitle ?? (sourcePath && sourcePath !== doc.path ? fileNameFromPath(sourcePath) : doc.title)
+    try {
+      const target = candidates.find((item) => item.id === activeTerm) ?? candidates[0] ?? createInlineAgent(caseTab.id, sourceSide)
+      setMountedTermIds((current) => current.has(target.id) ? current : new Set(current).add(target.id))
+      setInlineSelection({
+        key: newId(), caseId: caseTab.id, caseName: caseTabTitle(caseTab), sourceSide,
+        source: { ...captured, docId: doc.id, docPath: sourcePath, docTitle: sourceTitle, text: box.text },
+        text: box.text, x: box.x, y: box.bottom ?? box.y + 12,
+        domRange: box.domRange, sourceElement: box.sourceElement, targetId: target.id
+      })
+    } catch (error) {
+      void window.lt.dialog.alert(error instanceof Error ? error.message : String(error))
+    }
+  }
+
+  const changeInlineTarget = (id: string): void => {
+    if (!inlineSelection) return
+    try {
+      const target = id === '__new__'
+        ? createInlineAgent(inlineSelection.caseId, inlineSelection.sourceSide)
+        : inlineTargetsForCase(inlineSelection.caseId, inlineSelection.sourceSide).find((item) => item.id === id)
+      if (target) {
+        setMountedTermIds((current) => current.has(target.id) ? current : new Set(current).add(target.id))
+        setInlineSelection((current) => current ? { ...current, targetId: target.id } : null)
+      }
+    } catch (error) {
+      void window.lt.dialog.alert(error instanceof Error ? error.message : String(error))
+    }
+  }
+
+  const submitInlineSelection = async (text: string): Promise<{ ok: boolean; error?: string }> => {
+    const selection = inlineSelection
+    if (!selection) return { ok: false, error: '선택한 원문을 다시 확인해 주세요.' }
+    if (activeCaseTabIdRef.current !== selection.caseId) return { ok: false, error: `${selection.caseName} 사건으로 돌아와 전송해 주세요. 입력한 지시는 유지됩니다.` }
+    const target = inlineTargetsForCase(selection.caseId, selection.sourceSide).find((item) => item.id === selection.targetId)
+    const actions = target && inlineActionsRef.current.get(target.id)
+    if (!target || !actions) return { ok: false, error: '선택한 Agent 세션이 닫혔거나 아직 준비 중입니다. 보낼 곳을 확인해 주세요.' }
+    const path = selection.source.docPath
+    if (path && !await confirmCaseFileScope(target, path, selection.source.docTitle)) return { ok: false, error: '전송을 취소했습니다. 입력한 지시는 유지됩니다.' }
+    if (activeCaseTabIdRef.current !== selection.caseId ||
+      !inlineTargetsForCase(selection.caseId, selection.sourceSide).some((item) => item.id === target.id) ||
+      inlineActionsRef.current.get(target.id) !== actions) return { ok: false, error: '사건 또는 세션이 변경되었습니다. 보낼 곳을 다시 확인해 주세요.' }
+    const attachment = selectionAttachmentForAgent(selection.text, {
+      docPath: path, docName: selection.source.docTitle, selectionSource: selection.source
+    }, target)
+    const result = await actions.submit({ text, attachment })
+    if (result.ok && activeCaseTabIdRef.current === selection.caseId && termTabsRef.current.some((item) => item.id === target.id)) {
+      setActiveTerm(target.id)
+      setWorkActive(termSide(target), termKeyOf(target.id))
+    }
+    return result
+  }
 
   const buildWorkspaceSnapshot = async (onlyCaseTabId?: string): Promise<WorkspaceSnapshot> => {
     const sourceDocs = onlyCaseTabId
@@ -6975,6 +7102,7 @@ export default function App(): JSX.Element {
             key={tab.id}
             items={recordItems}
             startPath={tab.path as string}
+            jumpTo={pdfJump?.docId === tab.id ? pdfJump : undefined}
             cropOn={cropOn}
             cropRatio={cropRatio}
             onCropOn={setCropOn}
@@ -6993,7 +7121,7 @@ export default function App(): JSX.Element {
             key={tab.path}
             path={tab.path as string}
             onOutline={onOutline}
-            jumpTo={pdfJump}
+            jumpTo={pdfJump?.docId === tab.id ? pdfJump : undefined}
             cropOn={cropOn}
             cropRatio={cropRatio}
             onCropOn={setCropOn}
@@ -7237,6 +7365,7 @@ export default function App(): JSX.Element {
                 clearDraftNonce={agentDraftClearNonce[t.id]}
                 attachmentRequests={agentAttachmentRequests[t.id] ?? []}
                 onDraftChange={(draft) => handleAgentDraftChange(t.id, draft)}
+                onInlineActions={registerInlineActions}
                 onAttachmentRequestsHandled={(requestIds) =>
                   handleAgentAttachmentRequestsHandled(t.id, requestIds)
                 }
@@ -7614,6 +7743,7 @@ export default function App(): JSX.Element {
                   clearDraftNonce={agentDraftClearNonce[t.id]}
                   attachmentRequests={agentAttachmentRequests[t.id] ?? []}
                   onDraftChange={(draft) => handleAgentDraftChange(t.id, draft)}
+                  onInlineActions={registerInlineActions}
                   onAttachmentRequestsHandled={(requestIds) =>
                     handleAgentAttachmentRequestsHandled(t.id, requestIds)
                   }
@@ -8213,8 +8343,21 @@ export default function App(): JSX.Element {
         <span className="status-right">{statusInfo}</span>
       </div>
 
-      <SelectionAsk onAsk={askClaude} />
+      <SelectionAsk onAsk={askClaude} onInline={openInlineSelection} inlineOpen={Boolean(inlineSelection)} />
       <SelectionMenu onAsk={askClaude} />
+      {inlineSelection && (
+        <InlineSelectionCommand key={inlineSelection.key} x={inlineSelection.x} y={inlineSelection.y}
+          domRange={inlineSelection.domRange} sourceElement={inlineSelection.sourceElement}
+          caseName={inlineSelection.caseName}
+          sourceLabel={`${inlineSelection.source.docTitle ?? '선택 영역'}${inlineSelection.source.range?.startPage ? ` · PDF ${inlineSelection.source.range.startPage}쪽` : ''}`}
+          text={inlineSelection.text} targetId={inlineSelection.targetId}
+          targets={inlineTargetsForCase(inlineSelection.caseId, inlineSelection.sourceSide).map((term, index) => ({
+            id: term.id, label: `${index + 1}. ${agentProviderLabel(term)} · ${term.sessionTitle ?? term.title}`
+          }))}
+          ready={inlineReadyIds.has(inlineSelection.targetId)} onTargetChange={changeInlineTarget}
+          suggest={(prefix) => inlineActionsRef.current.get(inlineSelection.targetId)?.suggest(prefix)}
+          onSubmit={submitInlineSelection} onClose={() => setInlineSelection(null)} />
+      )}
       {slashCommandPalette}
       {closeWindowDialog}
 
@@ -8645,7 +8788,7 @@ const SELECTION_ACTION_TARGET_SELECTOR =
   '.text-doc, .file-view, .pdf-viewer, .textLayer, .csv-wrap, .agent-md-body, .agent-card-text, .agent-card-input, .agent-process-step-text'
 const SELECTION_ACTION_EXCLUDE_SELECTOR =
   '.terminal-surface, .xterm, .tabs, .sidebar, .activitybar, .statusbar, button, input, textarea, select'
-const SELECTION_ACTION_CONTROL_SELECTOR = '.sel-actions, .ctx-menu'
+const SELECTION_ACTION_CONTROL_SELECTOR = '.sel-actions, .ctx-menu, .inline-selection-command'
 
 const elementFromSelectionNode = (node: Node | null | undefined): Element | null =>
   node instanceof Element ? node : (node?.parentElement ?? null)
@@ -8674,6 +8817,14 @@ const selectionSourceForElement = (
     detail?.editorDraftId
   const range = detail?.range
   if (!docId && !range) return undefined
+  const pdfLayer = element?.closest<HTMLElement>('.textLayer[data-pdf-page]')
+  const page = Number(pdfLayer?.dataset.pdfPage)
+  const selection = element?.ownerDocument.defaultView?.getSelection()
+  const selectedRange = selection?.rangeCount === 1 ? selection.getRangeAt(0) : undefined
+  if (pdfLayer && Number.isSafeInteger(page) && page > 0 && selectedRange &&
+      pdfLayer.contains(selectedRange.startContainer) && pdfLayer.contains(selectedRange.endContainer)) {
+    return { docId, docPath: pdfLayer.dataset.pdfPath, text, range: { startPage: page, endPage: page } }
+  }
   return { docId, text, range }
 }
 
@@ -8702,7 +8853,7 @@ const quoteAgentPanelSelection = (opts?: ClaudeAskOptions): boolean => {
 }
 
 type SelectionAskHandler = (text: string, opts?: ClaudeAskOptions) => void
-type SelectionActionBox = TextSelectionOverlayDetail & { askOpts?: ClaudeAskOptions }
+type SelectionActionBox = TextSelectionOverlayDetail & { askOpts?: ClaudeAskOptions; sourceElement?: HTMLElement }
 
 // 본문에서 텍스트 선택 후 우클릭 → 컨텍스트 메뉴 (Claude/법제처/법고을/엘박스)
 function SelectionMenu({ onAsk }: { onAsk: SelectionAskHandler }): JSX.Element | null {
@@ -8823,8 +8974,29 @@ function SelectionMenu({ onAsk }: { onAsk: SelectionAskHandler }): JSX.Element |
 }
 
 // 본문에서 텍스트를 선택하면 떠오르는 "Claude에 묻기" 버튼
-function SelectionAsk({ onAsk }: { onAsk: SelectionAskHandler }): JSX.Element | null {
+function SelectionAsk({ onAsk, onInline, inlineOpen = false }: {
+  onAsk: SelectionAskHandler
+  onInline?: (box: SelectionActionBox) => void
+  inlineOpen?: boolean
+}): JSX.Element | null {
   const [box, setBox] = useState<SelectionActionBox | null>(null)
+  const boxRef = useRef(box)
+  boxRef.current = box
+  useEffect(() => {
+    if (!onInline) return
+    const openFromKey = (event: KeyboardEvent): void => {
+      if (event.isComposing || event.keyCode === 229 || inlineOpen ||
+          !(event.metaKey || event.ctrlKey) || event.key.toLowerCase() !== 'j') return
+      if (event.target instanceof Element && event.target.closest('.agent-panel, .terminal-surface, input, textarea, select')) return
+      const selected = boxRef.current
+      if (!selected?.askOpts?.selectionSource?.docId) return
+      event.preventDefault()
+      event.stopPropagation()
+      onInline(selected)
+    }
+    document.addEventListener('keydown', openFromKey, true)
+    return () => document.removeEventListener('keydown', openFromKey, true)
+  }, [onInline, inlineOpen])
 
   useEffect(() => {
     let frame = 0
@@ -8832,6 +9004,7 @@ function SelectionAsk({ onAsk }: { onAsk: SelectionAskHandler }): JSX.Element | 
     let pendingEditorDetail: TextSelectionOverlayDetail | null = null
 
     const updateFromSelection = (): void => {
+      if (document.activeElement?.closest('.inline-selection-command')) return
       const sel = window.getSelection()
       const text = sel?.toString() ?? ''
       const visibleText = text.trim()
@@ -8854,6 +9027,9 @@ function SelectionAsk({ onAsk }: { onAsk: SelectionAskHandler }): JSX.Element | 
       setBox({
         x: rect.left + rect.width / 2,
         y: rect.top - 6,
+        bottom: rect.bottom,
+        domRange: sel.getRangeAt(0).cloneRange(),
+        sourceElement: el?.closest<HTMLElement>('[data-doc-id]') ?? undefined,
         text,
         count: Array.from(visibleText).length,
         askOpts: askOptionsForSelectionElement(
@@ -8882,6 +9058,7 @@ function SelectionAsk({ onAsk }: { onAsk: SelectionAskHandler }): JSX.Element | 
       const selectionSource = selectionSourceForElement(docElement, detail.text, detail)
       setBox({
         ...detail,
+        sourceElement: docElement instanceof HTMLElement ? docElement : undefined,
         askOpts: askOptionsForSelectionElement(docElement, selectionSource)
       })
     }
@@ -8936,7 +9113,7 @@ function SelectionAsk({ onAsk }: { onAsk: SelectionAskHandler }): JSX.Element | 
     }
   }, [])
 
-  if (!box) return null
+  if (!box || inlineOpen) return null
   const centerDraftId = box.editorDraftId
   return (
     <div
@@ -8965,12 +9142,13 @@ function SelectionAsk({ onAsk }: { onAsk: SelectionAskHandler }): JSX.Element | 
       <button
         type="button"
         onClick={() => {
-          if (!quoteAgentPanelSelection(box.askOpts)) onAsk(box.text, box.askOpts)
+          if (onInline && box.askOpts?.selectionSource?.docId) onInline(box)
+          else if (!quoteAgentPanelSelection(box.askOpts)) onAsk(box.text, box.askOpts)
           setBox(null)
           window.getSelection()?.removeAllRanges()
         }}
       >
-        ✳ Claude에 묻기
+        {onInline && box.askOpts?.selectionSource?.docId ? '이 부분에 지시 · ⌘/Ctrl+J' : '✳ Claude에 묻기'}
       </button>
     </div>
   )

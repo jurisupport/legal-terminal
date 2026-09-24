@@ -122,6 +122,11 @@ export interface AgentProviderHandoff {
   count: number
 }
 
+export type AgentInlineActions = {
+  submit(request: { text: string; attachment: AgentAttachment }): Promise<{ ok: boolean; error?: string }>
+  suggest(prefix: string): string | undefined
+}
+
 interface AgentPanelProps {
   id: string
   cwd: string
@@ -154,6 +159,7 @@ interface AgentPanelProps {
   onOpenAttachmentSource?: (attachment: AgentAttachment) => void
   // 전송 직전 첨부를 바꿔치기할 기회 (예: 미저장 md 문서 → 임시저장 작업본). null이면 원본 유지.
   onPrepareAttachment?: (attachment: AgentAttachment) => Promise<AgentAttachment | null>
+  onInlineActions?: (id: string, actions: AgentInlineActions | null) => void
 }
 
 export interface AgentAttachmentRequest {
@@ -1896,7 +1902,8 @@ export default function AgentPanel({
   onOpenDiff,
   onOpenFile,
   onOpenAttachmentSource,
-  onPrepareAttachment
+  onPrepareAttachment,
+  onInlineActions
 }: AgentPanelProps): JSX.Element {
   const usesClaudeRemoteAuth = Boolean(ssh) && provider === 'claude'
   const usesAgentAuth = usesClaudeRemoteAuth || provider === 'codex'
@@ -1953,7 +1960,13 @@ export default function AgentPanel({
   const mentionMenuRef = useRef<HTMLDivElement>(null)
   const agentLabel = agentProviderLabels[provider]
   const defaultModel = defaultModels[provider]
-  const createdRef = useRef(false)
+  const inlineSession = useMemo(() => ({
+    id,
+    provider,
+    active: true,
+    sending: false,
+    creation: null as Promise<{ ok: boolean; error?: string }> | null
+  }), [id, provider])
   const scrollRef = useRef<HTMLDivElement>(null)
   const shouldFollowTimelineRef = useRef(true)
   const showNewOutputNoticeRef = useRef(false)
@@ -2004,9 +2017,14 @@ export default function AgentPanel({
   useEffect(() => clearEscInterruptTimer, [clearEscInterruptTimer])
 
   useEffect(() => {
+    inlineSession.active = true
+    promptHistoryRef.current = []
+    return () => { inlineSession.active = false }
+  }, [inlineSession])
+
+  useEffect(() => {
     if (providerRef.current === provider) return
     providerRef.current = provider
-    createdRef.current = false
     loadedHistoryKeyRef.current = null
     handledAttachmentRequestIdsRef.current.clear()
     setItems([])
@@ -2031,7 +2049,7 @@ export default function AgentPanel({
     if (position !== undefined) setSlashCaret(position)
     window.requestAnimationFrame(() => {
       const textarea = textareaRef.current
-      if (!textarea) return
+      if (!textarea || document.activeElement?.closest('.inline-selection-command')) return
       const caret = Math.max(0, Math.min(position ?? textarea.value.length, textarea.value.length))
       textarea.focus()
       textarea.setSelectionRange(caret, caret)
@@ -2309,9 +2327,8 @@ export default function AgentPanel({
 
   useEffect(() => {
     if (!settingsLoaded) return
-    if (createdRef.current) return
-    createdRef.current = true
-    void window.lt.agent
+    if (inlineSession.creation) return
+    inlineSession.creation = window.lt.agent
       .create({
         id,
         cwd,
@@ -2326,19 +2343,26 @@ export default function AgentPanel({
         workspaceContext
       })
       .then(async (result) => {
+        if (!inlineSession.active) return { ok: false, error: 'Agent 대화가 변경되거나 닫혔습니다.' }
         if (!result.ok) setError(result.error ?? 'Agent 세션을 만들 수 없습니다.')
-        if (!result.ok || !forkFromSessionId || resumeSessionId) return
+        if (!result.ok || !forkFromSessionId || resumeSessionId) return result
         const transcript = await loadSessionTranscript(forkFromSessionId, ssh, { refresh: true }).catch(() => null)
-        if (!transcript || transcript.messages.length === 0) return
+        if (!inlineSession.active) return { ok: false, error: 'Agent 대화가 변경되거나 닫혔습니다.' }
+        if (!transcript || transcript.messages.length === 0) return result
         const sendResult = await window.lt.agent.send(id, {
           workspaceContext,
           text: forkContextPrompt(transcript),
           displayText: `Fork 맥락 가져오기 · ${transcript.messages.length}개 메시지`
         })
-        if (!sendResult.ok) setError(sendResult.error ?? 'Fork 맥락을 가져올 수 없습니다.')
+        if (!sendResult.ok && inlineSession.active) setError(sendResult.error ?? 'Fork 맥락을 가져올 수 없습니다.')
+        return sendResult
       })
-      .catch((e) => setError(String(e instanceof Error ? e.message : e)))
-  }, [caseContext, cwd, defaultModel, forkFromSessionId, id, mode, provider, resumeSessionId, settingsLoaded, ssh, title])
+      .catch((e) => {
+        const error = String(e instanceof Error ? e.message : e)
+        if (inlineSession.active) setError(error)
+        return { ok: false, error }
+      })
+  }, [caseContext, cwd, defaultModel, forkFromSessionId, id, inlineSession, mode, provider, resumeSessionId, settingsLoaded, ssh, title])
 
   // 프로바이더 전환으로 넘어온 대화 맥락을 보류해뒀다가 첫 지시에 합쳐 보낸다.
   useEffect(() => {
@@ -2887,6 +2911,83 @@ export default function AgentPanel({
     })
     focusPrompt()
   }
+
+  const inlineState = {
+    session: inlineSession, sendBlockedReason, mode, queuesNewInput, workspaceContext,
+    pendingHandoff, allSlashCommands, onPrepareAttachment, onHandoffConsumed, selectPermissionMode
+  }
+  const inlineStateRef = useRef(inlineState)
+  inlineStateRef.current = inlineState
+
+  useEffect(() => {
+    let active = true
+    const unavailable = (): { ok: false; error: string } => ({ ok: false, error: 'Agent 대화가 변경되거나 닫혔습니다. 다시 선택해 주세요.' })
+    const actions: AgentInlineActions = {
+      suggest: (prefix) => {
+        if (!active || inlineStateRef.current.session.id !== id || !prefix.trim()) return undefined
+        // ponytail: complete short single-line instructions; richer multiline previews can be added when needed.
+        return [...promptHistoryRef.current].reverse().find((prompt) => prompt.length <= 500 && !prompt.includes('\n') && prompt !== prefix && prompt.startsWith(prefix))
+      },
+      submit: async ({ text, attachment }) => {
+        const session = inlineStateRef.current.session
+        const isCurrent = (): boolean => active && session.active && session.id === id && inlineStateRef.current.session === session
+        if (!isCurrent()) return unavailable()
+        if (session.sending) return { ok: false, error: '이 대화에 지시를 보내는 중입니다.' }
+        const rawText = text.trim()
+        if (!rawText) return { ok: false, error: '선택한 부분에 대한 지시를 입력해 주세요.' }
+        session.sending = true
+        try {
+          if (!session.creation) return { ok: false, error: inlineStateRef.current.sendBlockedReason || 'Agent 세션 준비 중입니다. 잠시 후 다시 보내 주세요.' }
+          const created = await session.creation
+          if (!isCurrent()) return unavailable()
+          if (!created.ok) return { ok: false, error: created.error ?? 'Agent 세션을 만들 수 없습니다.' }
+          let state = inlineStateRef.current
+          if (state.sendBlockedReason) return { ok: false, error: state.sendBlockedReason }
+          const commandName = slashCommandName(rawText)
+          const command = state.allSlashCommands.find((entry) => entry.name === commandName)
+          if (commandName && (!command?.expand || commandName === '/mcp' || commandName === '/model' ||
+            (session.provider === 'codex' && codexPanelSlashCommandNames.has(commandName)) ||
+            (session.provider === 'claude' && claudeTerminalOnlySlashCommandNames.has(commandName)))) {
+            return { ok: false, error: `${commandName}은 Agent 입력창에서 실행해 주세요. 여기서는 선택한 부분에 대한 지시를 보낼 수 있습니다.` }
+          }
+          const expanded = expandSlashInput(rawText, state.allSlashCommands)
+          const prepared = state.onPrepareAttachment ? (await state.onPrepareAttachment(attachment)) ?? attachment : attachment
+          if (!isCurrent()) return unavailable()
+          state = inlineStateRef.current
+          if (state.sendBlockedReason) return { ok: false, error: state.sendBlockedReason }
+          const handoff = state.pendingHandoff
+          const result = await window.lt.agent.send(session.id, {
+            workspaceContext: state.workspaceContext,
+            text: handoff ? `${handoff.preamble}\n${expanded.text}` : expanded.text,
+            ...(handoff ? { displayText: expanded.text } : {}),
+            attachments: [prepared],
+            permissionMode: expanded.mode ?? state.mode,
+            delivery: state.queuesNewInput ? 'queue' : 'normal'
+          })
+          if (!result.ok) return { ok: false, error: result.error ?? 'Agent 요청을 보낼 수 없습니다.' }
+          if (isCurrent()) {
+            // Inline history must not reset the normal input's history draft/cursor.
+            promptHistoryRef.current = mergePromptHistory(promptHistoryRef.current, [rawText])
+            if (expanded.mode) state.selectPermissionMode(expanded.mode, false)
+            if (handoff && inlineStateRef.current.pendingHandoff === handoff) {
+              setPendingHandoff((current) => current === handoff ? null : current)
+              state.onHandoffConsumed?.()
+            }
+          }
+          return { ok: true }
+        } catch (error) {
+          return { ok: false, error: error instanceof Error ? error.message : String(error) }
+        } finally {
+          session.sending = false
+        }
+      }
+    }
+    onInlineActions?.(id, actions)
+    return () => {
+      active = false
+      onInlineActions?.(id, null)
+    }
+  }, [id, onInlineActions])
 
   const send = async (delivery?: AgentSendDelivery): Promise<void> => {
     const rawText = input.trim()
