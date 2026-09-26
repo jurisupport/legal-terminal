@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs'
 import vm from 'node:vm'
 import ts from 'typescript'
 import * as summary from '../src/shared/todoSummary.ts'
+import { parseRpc } from '../src/main/mcpResponse.ts'
 const { kstDateKey, setTodoDate, filterTodos, summarizeTodos, todoTags } = summary
 const now = '2026-09-12T00:00:00+09:00'
 const todo = (id, extra = {}) => ({ id, title: id, type: 'todo', status: 'pending', ...extra })
@@ -25,16 +26,24 @@ const schema = (name, fields) => ({ name, inputSchema: {properties:Object.fromEn
 const legacyTools = [schema('list_tasks',['type','status','caseId','page','limit']), schema('create_task',['type','title','content','dueDate','caseId','priority']), schema('update_task',['title','content','dueDate','priority']), schema('update_task_status',['status'])]
 const modernTools = [schema('list_tasks',['type','status','caseId','page','limit','fields','includeClosed']), ...['create_task','update_task'].map(n=>schema(n,['type','title','content','dueDate','priority','reviewAt','parentId','evidence','version'])),schema('update_task_status',['status','childDispositions','version']),schema('get_task_evidence_suggestions',['id'])]
 function adapter(handler, toolSchemas=modernTools, hooks={}) {
-  const calls=[]; let settings={jurisupportTokenEnc:'plain:synthetic-test'}
+  const calls=[], posts=[]; let settings={jurisupportTokenEnc:'plain:synthetic-test'}
+  let clock=Date.parse('2026-09-27T00:00:00Z')
+  class Clock extends Date { static now() { return clock } }
+  const timers=new Set()
+  const fakeTimeout=(fn,ms)=>{
+    const timer={};timers.add(timer)
+    setImmediate(async()=>{if(!timers.delete(timer))return;await hooks.beforeWait?.(ms);clock+=ms;fn()})
+    return timer
+  }
   const exports={}
   const code=ts.transpileModule(readFileSync(new URL('../src/main/jurisupport.ts',import.meta.url),'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText
-  const context={exports, module:{exports}, console:{warn(){}}, Buffer, Date, Promise, Map, Set, JSON, String, Number, Object, Array, Error, AbortController, setTimeout, clearTimeout,
+  const context={exports, module:{exports}, console:{warn(){}}, Buffer, Date:Clock, Promise, Map, Set, JSON, String, Number, Object, Array, Error, AbortController, setTimeout:fakeTimeout, clearTimeout:timer=>timers.delete(timer),
     require(name) {
       if(name==='electron')return {app:{getPath:()=>'/tmp'},safeStorage:{isEncryptionAvailable:()=>false}}
       if(name==='./settings')return {getSettings:async()=>settings,setSettings:async(p)=>{await hooks.beforeSettings?.();settings={...settings,...p}}}
       if(name==='fs/promises')return {rm:async()=>{}}
       if(name==='path')return {join:(...v)=>v.join('/')}
-      if(name==='./mcpResponse')return {parseRpc:JSON.parse}
+      if(name==='./mcpResponse')return {parseRpc}
       if(name==='../shared/todoSummary')return summary
       if(name==='./jurisupportNormalize')return {normalizeCase:x=>x,normalizeCaseList:x=>x}
       if(name==='./imageSize')return {}
@@ -42,6 +51,9 @@ function adapter(handler, toolSchemas=modernTools, hooks={}) {
     },
     async fetch(_url, options) {
       const request=JSON.parse(options.body)
+      posts.push({request,at:clock,headers:options.headers})
+      const override=await hooks.post?.(request,posts)
+      if(override)return override
       let result={}
       if(request.method==='tools/list') result={tools:toolSchemas}
       if(request.method==='tools/call') {
@@ -49,12 +61,81 @@ function adapter(handler, toolSchemas=modernTools, hooks={}) {
         const data=await handler(request.params.name, request.params.arguments)
         result={content:[{type:'text',text:JSON.stringify(data)}]}
       }
-      return {status:200,headers:{get:()=> 'synthetic-session'},text:async()=>JSON.stringify({jsonrpc:'2.0',result})}
+      return {status:200,headers:{get:name=>name==='mcp-session-id'?'synthetic-session':null},text:async()=>JSON.stringify({jsonrpc:'2.0',result})}
     }
   }
   vm.runInNewContext(code,context)
-  return {api:exports,calls}
+  return {api:exports,calls,posts}
 }
+
+// Rate limiting must protect the shared transport, including MCP errors wrapped in HTTP 200.
+const response=(status,body,headers={})=>({status,headers:{get:name=>headers[name]??null},text:async()=>typeof body==='string'?body:JSON.stringify(body)})
+const limited=response(200,{result:{isError:true,content:[{type:'text',text:'Error: 요청이 너무 많습니다. 잠시 후 다시 시도해주세요. (code=RATE_LIMIT_EXCEEDED)'}]}})
+let retried=false
+let rateTransport=adapter((_name,args)=>todo(args.id,{status:'closed'}),modernTools,{post(request){
+  if(request.params?.name==='update_task_status'&&!retried){retried=true;return limited}
+}})
+await Promise.all([rateTransport.api.archiveTodo('first'),rateTransport.api.archiveTodo('second')])
+let writes=rateTransport.posts.filter(p=>p.request.params?.name==='update_task_status')
+assert.deepEqual(writes.map(p=>p.request.params.arguments.id),['first','first','second'])
+assert.ok(writes[1].at-writes[0].at>=60_000,'wrapped rate limit waits for the server window')
+assert.equal(rateTransport.calls.length,2,'only rejected attempts retry; each successful mutation runs once')
+for(let i=1;i<rateTransport.posts.length;i++)assert.ok(rateTransport.posts[i].at-rateTransport.posts[i-1].at>=700,'all HTTP requests share pacing')
+
+for(const method of ['initialize','notifications/initialized','tools/list','tools/call']){
+  let failedAt,recoveredAt
+  rateTransport=adapter(()=>todo('http'),modernTools,{post(request,posts){
+    if(request.method!==method)return
+    if(failedAt===undefined){failedAt=posts.at(-1).at;return response(429,'Too many requests',{'retry-after':'2'})}
+    recoveredAt=posts.at(-1).at
+  }})
+  await rateTransport.api.todoCapabilities();await rateTransport.api.getTodo('http')
+  assert.ok(recoveredAt-failedAt>=2000,method+' honors Retry-After')
+}
+for(const header of ['date','invalid','zero']){
+  let firstAt,secondAt
+  rateTransport=adapter(()=>todo('header'),modernTools,{post(request,posts){
+    if(request.method!=='tools/call')return
+    if(firstAt===undefined){firstAt=posts.at(-1).at;return response(429,'rate limited',{'retry-after':header==='date'?new Date(firstAt+5000).toUTCString():header==='zero'?'0':'invalid'})}
+    secondAt=posts.at(-1).at
+  }})
+  await rateTransport.api.getTodo('header')
+  assert.ok(secondAt-firstAt>=(header==='date'?4000:header==='zero'?700:60_000))
+}
+rateTransport=adapter(()=>todo('paced'))
+await Promise.all(Array.from({length:105},(_,i)=>rateTransport.api.getTodo(String(i))))
+assert.equal(rateTransport.calls.length,105)
+assert.ok(rateTransport.posts.at(-1).at-rateTransport.posts[2].at>=104*700,'concurrent callers cannot burst past 100 requests per minute')
+let attempts=0
+rateTransport=adapter(()=>todo('never'),modernTools,{post(request){if(request.method==='tools/call'){attempts++;return limited}}})
+await assert.rejects(()=>rateTransport.api.archiveTodo('never'),/호출 제한/)
+assert.equal(attempts,3,'persistent rate limits have bounded retries')
+assert.equal(rateTransport.calls.length,0)
+
+for(const failure of ['network','conflict','server','success-text']){
+  let count=0
+  rateTransport=adapter(()=>todo('normal'),modernTools,{post(request){
+    if(request.method!=='tools/call')return
+    count++
+    if(failure==='network')throw Error('synthetic network failure')
+    if(failure==='success-text')return response(200,{result:{content:[{type:'text',text:JSON.stringify(todo('normal',{title:'RATE_LIMIT_EXCEEDED'}))}]}})
+    return response(failure==='conflict'?409:500,{error:{message:failure}})
+  }})
+  if(failure==='success-text')assert.equal((await rateTransport.api.getTodo('normal')).id,'normal')
+  else await assert.rejects(()=>rateTransport.api.archiveTodo('normal'))
+  assert.equal(count,1,failure+' must not replay a mutation')
+}
+let switched=false
+rateTransport=adapter(()=>todo('new-account'),modernTools,{
+  post(request){if(request.method==='tools/call'&&!switched)return limited},
+  async beforeWait(ms){if(ms>=60_000&&!switched){switched=true;await rateTransport.api.setToken('synthetic-new-account')}}
+})
+await assert.rejects(()=>rateTransport.api.archiveTodo('old-account'),/계정/)
+assert.equal(rateTransport.posts.filter(p=>p.request.method==='tools/call').length,1,'account switch cancels delayed writes')
+await rateTransport.api.getTodo('new-account')
+assert.equal(rateTransport.posts.at(-1).headers.Authorization,'Bearer synthetic-new-account')
+console.log('MCP rate limits: paced shared queue, wrapped/HTTP 429 retries, Retry-After, bounded failure, no unsafe replays and account cancellation ok')
+
 let transport=adapter((name,args)=> {
   assert.equal(name,'list_tasks')
   if(args.status==='in_progress')return {data:[todo('duplicate',{status:'in_progress',title:'changed title'})],pagination:{total:1,totalPages:1}}

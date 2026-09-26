@@ -95,11 +95,11 @@ curl -fsSL https://github.com/jurisupport/legal-terminal/releases/latest/downloa
 
 ## 이번 업데이트
 
-최신 릴리스: [v0.1.237](https://github.com/jurisupport/legal-terminal/releases/tag/v0.1.237)
+최신 릴리스: [v0.1.239](https://github.com/jurisupport/legal-terminal/releases/tag/v0.1.239)
 
-- **사건 탭 닫기 수정**: 활성 사건을 닫으면 다음 사건으로 이동하고, 다음이 없으면 이전 사건으로 이동합니다.
-- **작업 화면 복원**: 이동한 사건에서 마지막으로 보고 있던 문서와 Agent 화면을 다시 표시합니다.
-- **마지막 사건 닫기**: 더 이상 열린 사건이 없을 때만 빈 작업 화면을 표시하며, 시작하기 화면이 다시 나타나지 않습니다.
+- **완료 할일 일괄 종료 안정화**: JuriSupport 요청을 0.7초 간격으로 보내 호출 제한을 줄입니다.
+- **호출 제한 자동 재시도**: 제한 응답을 받으면 안내된 시간만큼 기다린 뒤 최대 두 번 재시도합니다. 대기 시간이 없으면 1분부터 대기합니다.
+- **중복 처리 방지**: 성공한 종료는 반복하지 않으며, 대기 중 계정이 바뀌면 이전 계정의 요청을 중단합니다.
 
 ## 처음 쓰는 순서
 

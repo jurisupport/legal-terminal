@@ -29,6 +29,9 @@ export function agentMcpAccountEpoch(): number { return accountEpoch }
 let accountEpoch = 0
 let sessionId: string | null = null
 let toolQueue: Promise<void> = Promise.resolve()
+// Leave headroom below the API's 100 requests/minute; the shared queue also covers detail reads.
+const MCP_REQUEST_INTERVAL_MS = 700
+let nextMcpPostAt = 0
 
 const CASES_PAGE_LIMIT = 50
 const CASES_MAX_PAGES = 40
@@ -57,6 +60,7 @@ export async function setToken(token: string): Promise<void> {
   accountEpoch++ // Requests begun during credential persistence also belong to the old account.
   sessionId = null // 토큰 바뀌면 세션 무효화
   toolQueue = Promise.resolve()
+  nextMcpPostAt = 0
   clearJuriSupportCaches()
 }
 
@@ -108,7 +112,8 @@ export async function tokenStatus(): Promise<JsTokenStatus> {
 async function rawPost(
   token: string,
   body: unknown,
-  sid?: string | null
+  sid: string | null | undefined,
+  epoch: number
 ): Promise<{ status: number; sid: string | null; text: string }> {
   const headers: Record<string, string> = {
     Authorization: `Bearer ${token}`,
@@ -116,27 +121,44 @@ async function rawPost(
     Accept: 'application/json, text/event-stream'
   }
   if (sid) headers['mcp-session-id'] = sid
-  // 타임아웃: SSE 응답이 늦거나 스트림이 닫히지 않으면 무한 대기(사건목록 '불러오는 중' 멈춤) → 중단.
-  const ctrl = new AbortController()
-  const timer = setTimeout(() => ctrl.abort(), 20000)
-  try {
-    const res = await fetch(MCP_URL, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify(body),
-      signal: ctrl.signal
-    })
-    const text = await res.text()
-    return { status: res.status, sid: res.headers.get('mcp-session-id'), text }
-  } catch (e) {
-    if (ctrl.signal.aborted) throw new Error('JuriSupport 응답 시간 초과 (네트워크 확인 후 ↻ 다시 시도)')
-    throw e
-  } finally {
-    clearTimeout(timer)
+  for (let attempt = 0; ; attempt++) {
+    while (epoch === accountEpoch && Date.now() < nextMcpPostAt) {
+      await new Promise<void>((resolve) => setTimeout(resolve, Math.min(nextMcpPostAt - Date.now(), 60_000)))
+    }
+    if (epoch !== accountEpoch) throw new Error('계정이 변경되었습니다. 다시 조회해 주세요.')
+    nextMcpPostAt = Date.now() + MCP_REQUEST_INTERVAL_MS
+    // Only the network attempt has a timeout; pacing/backoff must not consume it.
+    const ctrl = new AbortController()
+    const timer = setTimeout(() => ctrl.abort(), 20000)
+    let res: Response
+    let text: string
+    try {
+      res = await fetch(MCP_URL, { method: 'POST', headers, body: JSON.stringify(body), signal: ctrl.signal })
+      text = await res.text()
+    } catch (e) {
+      if (ctrl.signal.aborted) throw new Error('JuriSupport 응답 시간 초과 (네트워크 확인 후 ↻ 다시 시도)')
+      throw e
+    } finally {
+      clearTimeout(timer)
+    }
+    if (epoch !== accountEpoch) throw new Error('계정이 변경되었습니다. 다시 조회해 주세요.')
+    const rpc = parseRpc(text)
+    const result = rpc?.result as { isError?: boolean; content?: { type: string; text: string }[] } | undefined
+    const errorText = rpc?.error?.message ?? (result?.isError ? result.content?.filter((c) => c.type === 'text').map((c) => c.text).join('\n') : '') ?? ''
+    // The MCP proxy wraps API rejections in HTTP 200 and preserves the error code in text.
+    const limited = res.status === 429 || /\b(?:RATE_LIMIT_EXCEEDED|TOO_MANY_REQUESTS|HTTP 429|rate limit exceeded)\b/i.test(errorText)
+    if (!limited) return { status: res.status, sid: res.headers.get('mcp-session-id'), text }
+
+    const retryAfter = res.headers.get('retry-after')?.trim()
+    const delay = retryAfter ? (/^\d+(?:\.\d+)?$/.test(retryAfter) ? Number(retryAfter) * 1000 : Date.parse(retryAfter) - Date.now()) : NaN
+    // The legacy MCP proxy drops Retry-After; allow its full minute window to reset.
+    const waitMs = Math.max(MCP_REQUEST_INTERVAL_MS, Number.isFinite(delay) ? delay : 60_000 * 2 ** attempt)
+    nextMcpPostAt = Math.max(nextMcpPostAt, Date.now() + waitMs)
+    if (attempt >= 2) throw new Error('JuriSupport 호출 제한이 계속되고 있습니다. 잠시 후 다시 확인해 주세요.')
   }
 }
 
-async function ensureSession(token: string): Promise<string> {
+async function ensureSession(token: string, epoch: number): Promise<void> {
   const init = await rawPost(token, {
     jsonrpc: '2.0',
     id: 1,
@@ -146,32 +168,34 @@ async function ensureSession(token: string): Promise<string> {
       capabilities: {},
       clientInfo: { name: 'legal-terminal', version: '0.0.1' }
     }
-  })
+  }, undefined, epoch)
   if (!init.sid) {
     const err = parseRpc(init.text)
     throw new Error('MCP 초기화 실패: ' + (err?.error?.message ?? `HTTP ${init.status}`))
   }
-  await rawPost(token, { jsonrpc: '2.0', method: 'notifications/initialized' }, init.sid)
-  return init.sid
+  await rawPost(token, { jsonrpc: '2.0', method: 'notifications/initialized' }, init.sid, epoch)
+  if (epoch !== accountEpoch) throw new Error('계정이 변경되었습니다. 다시 조회해 주세요.')
+  sessionId = init.sid
 }
 
 // 도구 호출 본체. 세션 만료 시 1회 재수립 후 재시도.
-async function callToolNow(name: string, args: Record<string, unknown>): Promise<unknown> {
+async function callToolNow(name: string, args: Record<string, unknown>, epoch: number): Promise<unknown> {
   const token = await getToken()
   if (!token) throw new Error('JuriSupport 토큰이 설정되지 않았습니다.')
-  if (!sessionId) sessionId = await ensureSession(token)
+  if (!sessionId) await ensureSession(token, epoch)
 
   const call = (): Promise<{ status: number; sid: string | null; text: string }> =>
     rawPost(
       token,
       { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name, arguments: args } },
-      sessionId
+      sessionId,
+      epoch
     )
 
   let resp = await call()
   let rpc = parseRpc(resp.text)
   if (rpc?.error && /session/i.test(rpc.error.message || '')) {
-    sessionId = await ensureSession(token)
+    await ensureSession(token, epoch)
     resp = await call()
     rpc = parseRpc(resp.text)
   }
@@ -197,18 +221,18 @@ async function callToolNow(name: string, args: Record<string, unknown>): Promise
 type McpToolInfo = { name: string; description?: string; inputSchema?: { properties?: Record<string, unknown> } }
 
 // MCP 서버가 제공하는 도구 목록. 사무실 프로필과 지원 필드 탐색에 쓴다.
-async function listMcpToolsNow(): Promise<McpToolInfo[]> {
+async function listMcpToolsNow(epoch: number): Promise<McpToolInfo[]> {
   const token = await getToken()
   if (!token) throw new Error('JuriSupport 토큰이 설정되지 않았습니다.')
-  if (!sessionId) sessionId = await ensureSession(token)
+  if (!sessionId) await ensureSession(token, epoch)
 
   const call = (): Promise<{ status: number; sid: string | null; text: string }> =>
-    rawPost(token, { jsonrpc: '2.0', id: 3, method: 'tools/list', params: {} }, sessionId)
+    rawPost(token, { jsonrpc: '2.0', id: 3, method: 'tools/list', params: {} }, sessionId, epoch)
 
   let resp = await call()
   let rpc = parseRpc(resp.text)
   if (rpc?.error && /session/i.test(rpc.error.message || '')) {
-    sessionId = await ensureSession(token)
+    await ensureSession(token, epoch)
     resp = await call()
     rpc = parseRpc(resp.text)
   }
@@ -240,14 +264,14 @@ async function enqueueMcp<T>(run: () => Promise<T>): Promise<T> {
 async function callTool(name: string, args: Record<string, unknown>, epoch = accountEpoch): Promise<unknown> {
   return enqueueMcp(async () => {
     if (epoch !== accountEpoch) throw new Error('계정이 변경되었습니다. 다시 조회해 주세요.')
-    const result = await callToolNow(name, args)
+    const result = await callToolNow(name, args, epoch)
     if (epoch !== accountEpoch) throw new Error('계정이 변경되었습니다. 다시 조회해 주세요.')
     return result
   })
 }
 
-async function listMcpTools(): Promise<McpToolInfo[]> {
-  return enqueueMcp(listMcpToolsNow)
+async function listMcpTools(epoch = accountEpoch): Promise<McpToolInfo[]> {
+  return enqueueMcp(() => listMcpToolsNow(epoch))
 }
 
 export interface JsTodoProgress {

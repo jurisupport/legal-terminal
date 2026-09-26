@@ -88,6 +88,6 @@ export default function BulkTodoClosure({ todos, onClose, onChanged }: {
       <button className="todo-small" disabled={busy || done === rows.length} onClick={() => void load()}>다시 확인</button>
       <button className="todo-primary" disabled={busy || !count} onClick={() => void save()}>{count}건 일괄 종료</button>
     </div>
-    {busy && <p className="muted small">닫으면 남은 처리를 중단합니다. 이미 요청한 할일은 종료될 수 있습니다.</p>}
+    {busy && <p className="muted small">요청 간격을 두고 순서대로 처리하며, 호출 제한 시 잠시 기다린 뒤 자동으로 재시도합니다. 닫으면 남은 처리를 중단합니다. 이미 요청한 할일은 종료될 수 있습니다.</p>}
   </TodoDialog>
 }
