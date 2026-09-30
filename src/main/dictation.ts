@@ -18,18 +18,28 @@ export interface DictationTranscribeInput {
   audio: Uint8Array
   mimeType: string
   context?: DictationContext
+  diarize?: boolean
+}
+
+export interface DictationSegment {
+  speaker: string
+  text: string
+  start: number
+  end: number
 }
 
 export interface DictationTranscribeResult {
   ok: boolean
   text?: string
   corrected?: boolean
+  segments?: DictationSegment[]
   error?: string
 }
 
 const TRANSCRIPTION_URL = 'https://api.openai.com/v1/audio/transcriptions'
 const RESPONSES_URL = 'https://api.openai.com/v1/responses'
 const TRANSCRIPTION_MODEL = 'gpt-transcribe'
+const DIARIZATION_MODEL = 'gpt-4o-transcribe-diarize'
 const CORRECTION_MODEL = 'gpt-5.4-mini'
 const MAX_AUDIO_BYTES = 25 * 1024 * 1024
 
@@ -154,6 +164,25 @@ function stripCodeFence(text: string): string {
   return trimmed.replace(/^```[a-zA-Z0-9_-]*\s*/, '').replace(/\s*```$/, '').trim()
 }
 
+function extractSegments(value: unknown): DictationSegment[] | null {
+  if (!value || typeof value !== 'object') return null
+  const items = (value as Record<string, unknown>).segments
+  if (!Array.isArray(items) || items.length === 0) return null
+  const segments: DictationSegment[] = []
+  for (const item of items) {
+    if (!item || typeof item !== 'object') return null
+    const { speaker, text, start, end } = item as Record<string, unknown>
+    if (
+      typeof speaker !== 'string' || !speaker.trim() ||
+      typeof text !== 'string' || !text.trim() ||
+      typeof start !== 'number' || !Number.isFinite(start) || start < 0 ||
+      typeof end !== 'number' || !Number.isFinite(end) || end < start
+    ) return null
+    segments.push({ speaker: speaker.trim(), text: text.trim(), start, end })
+  }
+  return segments
+}
+
 async function callResponses(
   key: string,
   body: Record<string, unknown>
@@ -237,23 +266,30 @@ function copyAudioBuffer(audio: Uint8Array): ArrayBuffer {
 async function transcribeAudio(
   key: string,
   input: DictationTranscribeInput
-): Promise<{ ok: true; text: string; corrected: boolean } | { ok: false; error: string }> {
+): Promise<DictationTranscribeResult> {
   if (!(input.audio instanceof Uint8Array) || input.audio.byteLength === 0) {
     return { ok: false, error: '녹음 파일이 비어 있습니다.' }
   }
   if (input.audio.byteLength > MAX_AUDIO_BYTES) {
     return { ok: false, error: '녹음 파일이 25MB를 초과했습니다.' }
   }
+  const diarize = input.diarize === true
   const form = new FormData()
-  form.append('model', TRANSCRIPTION_MODEL)
+  form.append('model', diarize ? DIARIZATION_MODEL : TRANSCRIPTION_MODEL)
   form.append('file', new Blob([copyAudioBuffer(input.audio)], { type: input.mimeType || 'audio/webm' }), 'dictation.webm')
-  form.append('languages[]', 'ko')
-  form.append('prompt', transcriptionPrompt(input.context))
-  const keywords = keywordList(input.context)
-  for (const keyword of keywords) form.append('keywords[]', keyword)
+  if (diarize) {
+    form.append('language', 'ko')
+    form.append('response_format', 'diarized_json')
+    form.append('chunking_strategy', 'auto')
+  } else {
+    form.append('languages[]', 'ko')
+    form.append('prompt', transcriptionPrompt(input.context))
+    const keywords = keywordList(input.context)
+    for (const keyword of keywords) form.append('keywords[]', keyword)
+  }
 
   const ctrl = new AbortController()
-  const timer = setTimeout(() => ctrl.abort(), 120_000)
+  const timer = setTimeout(() => ctrl.abort(), diarize ? 600_000 : 120_000)
   try {
     const response = await fetch(TRANSCRIPTION_URL, {
       method: 'POST',
@@ -268,6 +304,16 @@ async function transcribeAudio(
       parsed = JSON.parse(text) as unknown
     } catch {
       return { ok: false, error: '전사 응답 JSON 파싱 실패' }
+    }
+    if (diarize) {
+      const segments = extractSegments(parsed)
+      if (!segments) return { ok: false, error: '화자 분리 결과가 비어 있거나 올바르지 않습니다. 전사를 다시 시도해 주세요.' }
+      return {
+        ok: true,
+        text: extractText(parsed).trim() || segments.map((segment) => segment.text).join('\n'),
+        corrected: false,
+        segments
+      }
     }
     const rawText = stripCodeFence(extractText(parsed))
     if (!rawText.trim()) return { ok: false, error: '전사 결과가 비어 있습니다.' }

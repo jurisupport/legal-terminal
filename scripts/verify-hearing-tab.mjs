@@ -130,18 +130,23 @@ try {
     })
     replace('case:getJsPairing', () => ({ drafts: dashboardDrafts }))
     replace('case:setJsPairing', () => undefined)
-    replace('fs:list', () => [])
+    replace('fs:list', (_event, dir) => [...new Set(
+      (globalThis.__hearingWrites ?? []).map((write) => write.path)
+    )].filter((filePath) => filePath.startsWith(`${dir}/`)).map((filePath) => ({
+      path: filePath, name: filePath.split('/').at(-1), isDir: false, mtimeMs: Date.now()
+    })))
     replace('fs:stat', async (_event, targetPath) => {
       if (String(targetPath).startsWith('ssh://')) {
         await new Promise((resolve) => setTimeout(resolve, 3_000))
       }
+      if (targetPath === `${dashboardDrafts}/.hearings`) return { ok: true, isDir: true }
       if (String(targetPath).startsWith(dashboardDrafts) && String(targetPath).endsWith('.hearing.json')) {
         return { ok: true, isDir: false, size: 512, mtimeMs: Date.now() }
       }
       return { ok: false, error: 'missing' }
     })
-    replace('fs:readText', () => {
-      const text = JSON.stringify({
+    replace('fs:readText', (_event, targetPath) => {
+      const text = globalThis.__hearingWrites?.findLast((write) => write.path === targetPath)?.content ?? JSON.stringify({
         version: 1,
         id: 'saved-hearing',
         case: { caseNumber: dashboardCase.caseNumber, caseName: dashboardCase.caseName },
@@ -428,6 +433,108 @@ try {
     `기일기록 탭에 돌아오면 마지막 발언이 보여야 한다: ${JSON.stringify(restoredScrollMetrics)}`
   )
   console.log('hearing record returns to the latest statement after tab changes')
+
+  const diarizationEntryOffset = await messages.count()
+  let nextDiarizationIndex = await app.evaluate(() => globalThis.__hearingTranscriptions.length)
+  const diarizeToggle = shellPanel.getByRole('checkbox', { name: '화자 자동 분리' })
+  await diarizeToggle.check()
+  await composer.fill('녹음과 별개로 작성 중인 메모')
+  const recordingStartedAt = Date.now()
+  await dictationButton.click()
+  await shellPanel.locator('.hearing-dictation-btn.recording').waitFor()
+  assert.ok(await diarizeToggle.isDisabled(), '녹음 도중 화자 분리 방식을 바꾸지 못해야 한다')
+  await dictationButton.click()
+  await messages.last().getByRole('status').waitFor()
+  assert.equal(await composer.inputValue(), '녹음과 별개로 작성 중인 메모')
+  await submit.click()
+  const diarizedResult = {
+    ok: true,
+    text: '첫 질문 첫 답변 다음 질문',
+    segments: [
+      { speaker: 'A', text: '첫 질문', start: 0.5, end: 2 },
+      { speaker: 'B', text: '첫 답변', start: 2.5, end: 5 },
+      { speaker: 'A', text: '다음 질문', start: 6, end: 8 }
+    ]
+  }
+  await resolveDictation(nextDiarizationIndex++, diarizedResult)
+  await shellPanel.getByRole('combobox', { name: '화자 1 일괄 지정' }).waitFor()
+  assert.equal(await app.evaluate(() => globalThis.__hearingTranscriptions.at(-1).payload.diarize), true)
+  assert.deepEqual(await messages.locator('textarea').evaluateAll((inputs, offset) => inputs.slice(offset).map((input) => input.value), diarizationEntryOffset),
+    ['첫 질문', '첫 답변', '다음 질문', '녹음과 별개로 작성 중인 메모'],
+    '한 녹음의 발언 순서를 보존하고 전사 대기 중 작성한 메모도 유지해야 한다')
+  const firstDetectedId = await messages.nth(diarizationEntryOffset + 0).getByRole('combobox').inputValue()
+  assert.equal(await messages.nth(diarizationEntryOffset + 2).getByRole('combobox').inputValue(), firstDetectedId)
+  assert.notEqual(await messages.nth(diarizationEntryOffset + 1).getByRole('combobox').inputValue(), firstDetectedId)
+  await page.waitForTimeout(1_100)
+  await shellPanel.getByRole('button', { name: '읽기', exact: true }).click()
+  await shellPanel.locator('.hearing-reader-item').first().click()
+  await shellPanel.getByRole('combobox', { name: '화자 1 일괄 지정' }).waitFor()
+  await page.screenshot({ path: '/tmp/legal-terminal-diarization-check.png' })
+  await shellPanel.locator('.hearing-template-btn', { hasText: '형사' }).click()
+  assert.equal(await shellPanel.locator('.hearing-detected-speakers select').count(), 2,
+    '템플릿을 바꿔도 이미 기록한 화자는 유지해야 한다')
+  assert.equal(await messages.nth(diarizationEntryOffset + 0).getByRole('combobox').inputValue(), firstDetectedId)
+  await shellPanel.getByRole('combobox', { name: '화자 1 일괄 지정' }).selectOption('court')
+  assert.equal(await messages.nth(diarizationEntryOffset + 0).getByRole('combobox').inputValue(), 'court')
+  assert.equal(await messages.nth(diarizationEntryOffset + 2).getByRole('combobox').inputValue(), 'court')
+  assert.notEqual(await messages.nth(diarizationEntryOffset + 1).getByRole('combobox').inputValue(), 'court')
+  await page.waitForTimeout(1_100)
+  const separatedRecord = await app.evaluate(() => JSON.parse(globalThis.__hearingWrites.at(-1).content))
+  const savedDiarization = separatedRecord.entries.slice(diarizationEntryOffset)
+  assert.equal(savedDiarization[0].recording.id, savedDiarization[2].recording.id)
+  assert.deepEqual(savedDiarization.slice(0, 3).map((entry) => [entry.recording.start, entry.recording.end]),
+    [[0.5, 2], [2.5, 5], [6, 8]], '녹음 구간은 원본 값으로 저장해야 한다')
+  assert.ok(Date.parse(savedDiarization[0].createdAt) >= recordingStartedAt)
+  assert.equal(Date.parse(savedDiarization[2].createdAt) - Date.parse(savedDiarization[0].createdAt), 5500)
+  console.log('one recording splits by speaker, preserves drafts and timestamps, and supports persisted bulk assignment')
+
+  await dictationButton.click()
+  await shellPanel.locator('.hearing-dictation-btn.recording').waitFor()
+  await dictationButton.click()
+  await messages.last().getByRole('status').waitFor()
+  await resolveDictation(nextDiarizationIndex++, diarizedResult)
+  await page.waitForFunction((expected) => document.querySelectorAll('.hearing-message').length === expected, diarizationEntryOffset + 7)
+  assert.notEqual(await messages.nth(diarizationEntryOffset + 4).getByRole('combobox').inputValue(), 'court',
+    '새 녹음의 A 화자를 이전 녹음에서 지정한 재판부로 추정하면 안 된다')
+  assert.notEqual(await messages.nth(diarizationEntryOffset + 5).getByRole('combobox').inputValue(),
+    await messages.nth(diarizationEntryOffset + 1).getByRole('combobox').inputValue(), '화자 번호는 녹음마다 독립적이어야 한다')
+
+  await dictationButton.click()
+  await shellPanel.locator('.hearing-dictation-btn.recording').waitFor()
+  await dictationButton.click()
+  await messages.last().getByRole('status').waitFor()
+  await resolveDictation(nextDiarizationIndex++, { ok: false, error: '화자 전사 연결 실패' })
+  await page.waitForFunction(() => document.querySelector('.hearing-message:last-child .hearing-dictation-status')
+    ?.textContent?.includes('화자 전사 연결 실패'))
+  assert.ok(await dictationButton.isEnabled(), '화자 분리 실패 후에도 다음 녹음이 가능해야 한다')
+  await composer.press('ArrowUp')
+  assert.equal(await messages.count(), diarizationEntryOffset + 8, '위쪽 방향키가 재시도할 녹음과 실패 행을 제거하면 안 된다')
+  await messages.last().getByRole('button', { name: '전사 재시도', exact: true }).click()
+  await messages.last().getByRole('status').waitFor()
+  await resolveDictation(nextDiarizationIndex++, diarizedResult)
+  await page.waitForFunction((expected) => document.querySelectorAll('.hearing-message').length === expected, diarizationEntryOffset + 10)
+  assert.equal(await messages.count(), diarizationEntryOffset + 10, '재녹음 없이 실패한 행을 화자별 발언으로 바꿔야 한다')
+  assert.equal(await app.evaluate(() => globalThis.__hearingTranscriptions.at(-1).payload.audio.byteLength), 10)
+  await dictationButton.click()
+  await shellPanel.locator('.hearing-dictation-btn.recording').waitFor()
+  await dictationButton.click()
+  await messages.last().getByRole('status').waitFor()
+  await resolveDictation(nextDiarizationIndex++, { ok: false, error: '다시 연결 실패' })
+  const retryButton = messages.last().getByRole('button', { name: '전사 재시도', exact: true })
+  await retryButton.waitFor()
+  await retryButton.click()
+  await dictationButton.click()
+  await shellPanel.locator('.hearing-dictation-btn.recording').waitFor()
+  await resolveDictation(nextDiarizationIndex++, diarizedResult)
+  await page.waitForFunction((expected) => document.querySelectorAll('.hearing-message').length === expected, diarizationEntryOffset + 13)
+  assert.equal(await dictationButton.getAttribute('aria-label'), '녹음 정지',
+    '전사 재시도가 완료되어도 다른 녹음은 계속되어야 한다')
+  await dictationButton.click()
+  await messages.last().getByRole('status').waitFor()
+  await resolveDictation(nextDiarizationIndex++, diarizedResult)
+  await page.waitForFunction((expected) => document.querySelectorAll('.hearing-message').length === expected, diarizationEntryOffset + 16)
+  await diarizeToggle.uncheck()
+  console.log('speaker groups remain distinct across recordings; failed recordings are retried without interrupting new recordings')
 
   await page.locator('.activity-item[title*="새 사건 추가"]').click()
   await page.locator('.new-case-recent-row', { hasText: recent.name }).click()

@@ -4314,11 +4314,36 @@ body {
 .hearing-dictation-note {
   grid-column: 1 / -1;
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
   color: var(--muted);
   font-size: 11.5px;
+}
+.hearing-dictation-mode,
+.hearing-detected-speakers label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.hearing-dictation-mode {
+  white-space: nowrap;
+}
+.hearing-detected-speakers {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+.hearing-detected-speakers select {
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--fg);
+  background: var(--bg);
+  font: inherit;
 }
 .hearing-dictation-note strong {
   color: #d7ba7d;

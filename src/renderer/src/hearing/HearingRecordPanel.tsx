@@ -37,6 +37,7 @@ interface HearingSpeaker {
   label: string
   role: SpeakerRole
   shortcut?: string
+  detected?: boolean
 }
 
 interface HearingRequest {
@@ -53,6 +54,7 @@ interface HearingEntry {
   text: string
   createdAt: string
   important?: boolean
+  recording?: { id: string; start: number; end: number }
   dictation?: { status: 'transcribing' | 'error'; message: string }
 }
 
@@ -323,7 +325,7 @@ function normalizeSpeakers(value: unknown): HearingSpeaker[] {
       const id = normalizeSpeakerId(speaker.id)
       if (!id || !speaker.label || seenIds.has(id)) return []
       seenIds.add(id)
-      return [{ id, label: speaker.label, role: normalizeSpeakerRole(speaker.role) }]
+      return [{ id, label: speaker.label, role: normalizeSpeakerRole(speaker.role), detected: speaker.detected === true }]
     })
   return withSequentialShortcuts(speakers)
 }
@@ -394,6 +396,13 @@ function mergePendingRecord(
     return [...saved, ...added.filter((item) => !savedIds.has(item.id))]
   }
   const pendingEntries = new Map(pending.entries.map((entry) => [entry.id, entry]))
+  const recordingEntries = new Map<string, HearingEntry[]>()
+  for (const entry of pending.entries) {
+    if (!entry.recording) continue
+    const group = recordingEntries.get(entry.recording.id) ?? []
+    group.push(entry)
+    recordingEntries.set(entry.recording.id, group)
+  }
   return {
     ...loaded,
     case: { ...pending.case, ...loaded.case },
@@ -403,9 +412,9 @@ function mergePendingRecord(
       : loaded.activeSpeakerId,
     requests: mergeById(loaded.requests, pending.requests),
     // 파일을 읽는 동안 완료된 전사문을 이전 전사 상태로 덮어쓰지 않는다.
-    entries: mergeById(loaded.entries, pending.entries).map((entry) =>
-      entry.dictation ? pendingEntries.get(entry.id) ?? entry : entry
-    ),
+    entries: mergeById(loaded.entries.flatMap((entry) => entry.dictation
+      ? recordingEntries.get(entry.id) ?? [pendingEntries.get(entry.id) ?? entry]
+      : [entry]), pending.entries),
     result: {
       status: pending.result.status || loaded.result.status,
       nextDate: pending.result.nextDate || loaded.result.nextDate,
@@ -536,6 +545,7 @@ export default function HearingRecordPanel({
   const [dictationState, setDictationState] = useState<DictationState>('idle')
   const [dictationSeconds, setDictationSeconds] = useState(0)
   const [dictationMessage, setDictationMessage] = useState('')
+  const [diarize, setDiarize] = useState(false)
   const loadStateRef = useRef<LoadState>(initialPath ? 'loading' : 'idle')
   const [loadState, setLoadState] = useState<LoadState>(loadStateRef.current)
   const inputRef = useRef<HTMLTextAreaElement>(null)
@@ -555,7 +565,10 @@ export default function HearingRecordPanel({
   const dictationSignalTimerRef = useRef<number | null>(null)
   const heardAudioRef = useRef(false)
   const dictationStartingRef = useRef(false)
+  const recordingSessionRef = useRef({ diarize: false, startedAt: 0 })
   const pendingDictationsRef = useRef(new Set<string>())
+  // ponytail: failed audio lives only in this record; use a sidecar file if recovery after closing is needed.
+  const retryDictationsRef = useRef(new Map<string, () => Promise<void>>())
   const dictationSelectionRef = useRef({ value: '', start: 0, end: 0, message: '전사 중...' })
   // onSavedPath는 부모가 인라인으로 넘겨 렌더마다 바뀌므로 ref로 받아
   // saveRecord/flushAutoSave의 useCallback 재생성(→ 렌더마다 저장 루프)을 막는다.
@@ -579,6 +592,10 @@ export default function HearingRecordPanel({
 
   useEffect(() => {
     latestRecordRef.current = record
+    const entryIds = new Set(record.entries.map((entry) => entry.id))
+    for (const id of retryDictationsRef.current.keys()) {
+      if (!entryIds.has(id)) retryDictationsRef.current.delete(id)
+    }
   }, [record])
 
   useEffect(() => {
@@ -628,18 +645,20 @@ export default function HearingRecordPanel({
     async (mimeType: string): Promise<void> => {
       const chunks = dictationChunksRef.current
       const selection = dictationSelectionRef.current
+      const session = recordingSessionRef.current
       const currentRecord = latestRecordRef.current
       const entry: HearingEntry = {
         id: newId('entry'),
         speakerId: currentRecord.activeSpeakerId,
-        text: selection.value,
+        text: session.diarize ? '' : selection.value,
         createdAt: new Date().toISOString(),
-        dictation: { status: 'transcribing', message: selection.message }
+        dictation: { status: 'transcribing', message: session.diarize ? '화자 구분하여 전사 중...' : selection.message }
       }
-      pendingDictationsRef.current.add(entry.id)
       touch((current) => ({ ...current, entries: [...current.entries, entry] }))
-      latestDraftRef.current = ''
-      setDraft('')
+      if (!session.diarize) {
+        latestDraftRef.current = ''
+        setDraft('')
+      }
       dictationChunksRef.current = []
       recorderRef.current = null
       releaseDictationMedia()
@@ -647,49 +666,95 @@ export default function HearingRecordPanel({
       setDictationMessage('')
       focusInput()
       window.requestAnimationFrame(() => latestEntryRef.current?.scrollIntoView({ block: 'nearest' }))
-      try {
-        const audio = new Uint8Array(await new Blob(chunks, { type: mimeType }).arrayBuffer())
-        if (audio.byteLength === 0) throw new Error('녹음된 음성이 없습니다.')
-        const speaker = currentRecord.speakers.find(
-          (item) => item.id === currentRecord.activeSpeakerId
-        )?.label
-        const result = await window.lt.dictation.transcribe({
-          audio,
-          mimeType: mimeType || 'audio/webm',
-          context: {
-            court: currentRecord.case.court,
-            caseNumber: currentRecord.case.caseNumber,
-            caseName: currentRecord.case.caseName,
-            client: currentRecord.case.client,
-            opponent: currentRecord.case.opponent,
-            partyNames: currentRecord.case.partyNames,
-            speaker
+      const request = async (): Promise<void> => {
+        if (pendingDictationsRef.current.has(entry.id)) return
+        pendingDictationsRef.current.add(entry.id)
+        touch((current) => ({
+          ...current,
+          entries: current.entries.map((item) => item.id === entry.id
+            ? { ...item, dictation: entry.dictation }
+            : item)
+        }))
+        try {
+          const audio = new Uint8Array(await new Blob(chunks, { type: mimeType }).arrayBuffer())
+          if (audio.byteLength === 0) throw new Error('녹음된 음성이 없습니다.')
+          const speaker = currentRecord.speakers.find(
+            (item) => item.id === currentRecord.activeSpeakerId
+          )?.label
+          const result = await window.lt.dictation.transcribe({
+            audio,
+            mimeType: mimeType || 'audio/webm',
+            diarize: session.diarize,
+            context: {
+              court: currentRecord.case.court,
+              caseNumber: currentRecord.case.caseNumber,
+              caseName: currentRecord.case.caseName,
+              client: currentRecord.case.client,
+              opponent: currentRecord.case.opponent,
+              partyNames: currentRecord.case.partyNames,
+              speaker
+            }
+          })
+          if (!result.ok) throw new Error(result.error || '전사 결과가 없습니다.')
+          if (session.diarize) {
+            const segments = result.segments
+            if (!segments?.length) throw new Error('화자별 전사 결과가 없습니다.')
+            const detectedIds = [...new Set(segments.map((segment) => segment.speaker))]
+            const speakerIds = new Map(detectedIds.map((id, index) => [id, `${entry.id}-speaker-${index}`]))
+            const entries: HearingEntry[] = segments.map((segment, index) => ({
+              id: index === 0 ? entry.id : `${entry.id}-segment-${index}`,
+              speakerId: speakerIds.get(segment.speaker)!,
+              text: segment.text,
+              createdAt: new Date(session.startedAt + segment.start * 1000).toISOString(),
+              recording: { id: entry.id, start: segment.start, end: segment.end }
+            }))
+            touch((current) => {
+              if (!current.entries.some((item) => item.id === entry.id)) return current
+              const usedLabels = new Set(current.speakers.map((speaker) => speaker.label))
+              let nextNumber = 1
+              const detected: HearingSpeaker[] = detectedIds.map((id) => {
+                while (usedLabels.has(`화자 ${nextNumber}`)) nextNumber++
+                const label = `화자 ${nextNumber++}`
+                return { id: speakerIds.get(id)!, label, role: 'other', detected: true }
+              })
+              return {
+                ...current,
+                speakers: withSequentialShortcuts([...current.speakers, ...detected]),
+                activeSpeakerId: current.activeSpeakerId || detected[0].id,
+                entries: current.entries.flatMap((item) => item.id === entry.id ? entries : [item])
+              }
+            })
+            retryDictationsRef.current.delete(entry.id)
+            return
           }
-        })
-        if (!result.ok || !result.text?.trim()) throw new Error(result.error || '전사 결과가 없습니다.')
-        const insertion = insertDictationText(
-          selection.value,
-          result.text,
-          selection.start,
-          selection.end
-        )
-        touch((current) => ({
-          ...current,
-          entries: current.entries.map((item) => item.id === entry.id
-            ? { ...item, text: insertion.value, important: insertion.value.startsWith('*'), dictation: undefined }
-            : item)
-        }))
-      } catch (error) {
-        const message = `전사 실패: ${error instanceof Error ? error.message : String(error)}`
-        touch((current) => ({
-          ...current,
-          entries: current.entries.map((item) => item.id === entry.id
-            ? { ...item, dictation: { status: 'error', message } }
-            : item)
-        }))
-      } finally {
-        pendingDictationsRef.current.delete(entry.id)
+          if (!result.text?.trim()) throw new Error('전사 결과가 없습니다.')
+          const insertion = insertDictationText(
+            selection.value,
+            result.text,
+            selection.start,
+            selection.end
+          )
+          touch((current) => ({
+            ...current,
+            entries: current.entries.map((item) => item.id === entry.id
+              ? { ...item, text: insertion.value, important: insertion.value.startsWith('*'), dictation: undefined }
+              : item)
+          }))
+          retryDictationsRef.current.delete(entry.id)
+        } catch (error) {
+          const message = `전사 실패: ${error instanceof Error ? error.message : String(error)}`
+          touch((current) => ({
+            ...current,
+            entries: current.entries.map((item) => item.id === entry.id
+              ? { ...item, dictation: { status: 'error', message } }
+              : item)
+          }))
+        } finally {
+          pendingDictationsRef.current.delete(entry.id)
+        }
       }
+      if (session.diarize) retryDictationsRef.current.set(entry.id, request)
+      await request()
     },
     [focusInput, releaseDictationMedia, touch]
   )
@@ -714,7 +779,7 @@ export default function HearingRecordPanel({
 
   const startDictation = useCallback(async (): Promise<void> => {
     if (dictationState !== 'idle' || recorderRef.current || dictationStartingRef.current) return
-    if (!latestRecordRef.current.speakers.length) {
+    if (!diarize && !latestRecordRef.current.speakers.length) {
       setSpeakerFormOpen(true)
       setSpeakerFormMessage('대화자를 먼저 추가하세요.')
       return
@@ -750,6 +815,7 @@ export default function HearingRecordPanel({
       audioContext.createMediaStreamSource(stream).connect(analyser)
       const levels = new Uint8Array(analyser.fftSize)
       const startedAt = Date.now()
+      recordingSessionRef.current = { diarize, startedAt }
       let warned = false
 
       audioContextRef.current = audioContext
@@ -806,7 +872,7 @@ export default function HearingRecordPanel({
     } finally {
       dictationStartingRef.current = false
     }
-  }, [dictationState, releaseDictationMedia, stopDictation, transcribeDictation])
+  }, [diarize, dictationState, releaseDictationMedia, stopDictation, transcribeDictation])
 
   useEffect(() => {
     const toggleDictation = (event: globalThis.KeyboardEvent): void => {
@@ -1068,10 +1134,16 @@ export default function HearingRecordPanel({
   const applyTemplate = (template: HearingRecordTemplate): void => {
     const presetSpeakers = resolveSpeakerPreset(template.speakers)
     touch((current) => {
+      const presetIds = new Set(presetSpeakers.map((speaker) => speaker.id))
+      const usedIds = new Set(current.entries.map((entry) => entry.speakerId))
+      const speakers = withSequentialShortcuts([
+        ...presetSpeakers,
+        ...current.speakers.filter((speaker) => usedIds.has(speaker.id) && !presetIds.has(speaker.id))
+      ])
       return {
         ...current,
-        speakers: presetSpeakers,
-        activeSpeakerId: presetSpeakers[0]?.id ?? ''
+        speakers,
+        activeSpeakerId: speakers[0]?.id ?? ''
       }
     })
     setSpeakerFormOpen(presetSpeakers.length === 0)
@@ -1133,6 +1205,21 @@ export default function HearingRecordPanel({
         entry.id === entryId ? { ...entry, ...patch } : entry
       )
     }))
+  }
+
+  const assignDetectedSpeaker = (sourceId: string, targetId: string): void => {
+    if (sourceId === targetId) return
+    touch((current) => {
+      if (!current.speakers.some((speaker) => speaker.id === targetId)) return current
+      return {
+        ...current,
+        speakers: withSequentialShortcuts(current.speakers.filter((speaker) => speaker.id !== sourceId)),
+        activeSpeakerId: current.activeSpeakerId === sourceId ? targetId : current.activeSpeakerId,
+        entries: current.entries.map((entry) => entry.speakerId === sourceId
+          ? { ...entry, speakerId: targetId }
+          : entry)
+      }
+    })
   }
 
   const addRequest = (text: string): void => {
@@ -1254,7 +1341,7 @@ export default function HearingRecordPanel({
 
   const editLastEntry = (): void => {
     const last = record.entries[record.entries.length - 1]
-    if (!last || last.dictation?.status === 'transcribing') return
+    if (!last || last.dictation?.status === 'transcribing' || retryDictationsRef.current.has(last.id)) return
     touch((current) => ({
       ...current,
       activeSpeakerId: last.speakerId,
@@ -1612,6 +1699,26 @@ export default function HearingRecordPanel({
             <span>진행 메모</span>
             <small>Enter 저장 · Tab 화자 전환 · ↑ 직전 수정</small>
           </div>
+          {speakers.some((speaker) => speaker.detected) && (
+            <div className="hearing-detected-speakers">
+              <small>화자 지정 · 같은 화자의 발언 전체에 적용</small>
+              {speakers.filter((speaker) => speaker.detected).map((speaker) => (
+                <label key={speaker.id}>
+                  {speaker.label}
+                  <select
+                    aria-label={`${speaker.label} 일괄 지정`}
+                    value={speaker.id}
+                    onChange={(event) => assignDetectedSpeaker(speaker.id, event.currentTarget.value)}
+                  >
+                    <option value={speaker.id}>미지정</option>
+                    {speakers.filter((target) => !target.detected).map((target) => (
+                      <option key={target.id} value={target.id}>{target.label}</option>
+                    ))}
+                  </select>
+                </label>
+              ))}
+            </div>
+          )}
           <div className="hearing-log">
             {sortedEntries.length === 0 ? (
               <p className="muted small hearing-empty-line">화자 버튼 또는 숫자키를 누르고 바로 입력하세요.</p>
@@ -1626,6 +1733,11 @@ export default function HearingRecordPanel({
                   >
                     <div className="hearing-message-meta">
                       <span>{formatTime(entry.createdAt)}</span>
+                      {entry.recording && (
+                        <span title="녹음 시작 후 발언 구간">
+                          {formatDuration(Math.floor(entry.recording.start))}–{formatDuration(Math.floor(entry.recording.end))}
+                        </span>
+                      )}
                       <select
                         aria-label="발화자 수정"
                         value={speaker?.id ?? ''}
@@ -1646,7 +1758,8 @@ export default function HearingRecordPanel({
                       className="hearing-message-bubble"
                       aria-label="진행 메모 수정"
                       value={entry.text}
-                      disabled={entry.dictation?.status === 'transcribing'}
+                      disabled={entry.dictation?.status === 'transcribing' ||
+                        (entry.dictation?.status === 'error' && retryDictationsRef.current.has(entry.id))}
                       onChange={(event) =>
                         updateEntry(entry.id, {
                           text: event.currentTarget.value,
@@ -1657,6 +1770,16 @@ export default function HearingRecordPanel({
                     {entry.dictation && (
                       <div className="hearing-dictation-status" role="status" aria-live="polite">
                         {entry.dictation.message}
+                        {entry.dictation.status === 'error' && retryDictationsRef.current.has(entry.id) && (
+                          <button
+                            type="button"
+                            className="hearing-small-btn"
+                            title="이 기록을 닫기 전까지 같은 녹음으로 재시도할 수 있습니다."
+                            onClick={() => void retryDictationsRef.current.get(entry.id)?.()}
+                          >
+                            전사 재시도
+                          </button>
+                        )}
                       </div>
                     )}
                   </div>
@@ -1755,7 +1878,7 @@ export default function HearingRecordPanel({
           title={
             dictationState === 'recording'
               ? '녹음을 끝내고 받아쓰기 (Ctrl/Cmd+Shift+D)'
-              : '마이크로 받아쓰기 (Ctrl/Cmd+Shift+D)'
+              : diarize ? '연속 녹음 후 화자별로 저장 (Ctrl/Cmd+Shift+D)' : '마이크로 받아쓰기 (Ctrl/Cmd+Shift+D)'
           }
           aria-label={dictationState === 'recording' ? '녹음 정지' : '음성 받아쓰기'}
           aria-pressed={dictationState === 'recording'}
@@ -1768,7 +1891,7 @@ export default function HearingRecordPanel({
             ? `... ${formatDuration(dictationSeconds)}`
             : dictationState === 'starting'
               ? '...'
-              : '🎙 받아쓰기'}
+              : diarize ? '🎙 대화 녹음' : '🎙 받아쓰기'}
         </button>
         <button
           className="hearing-primary-btn"
@@ -1777,8 +1900,20 @@ export default function HearingRecordPanel({
           입력
         </button>
         <div className="hearing-dictation-note">
+          <label className="hearing-dictation-mode">
+            <input
+              type="checkbox"
+              checked={diarize}
+              disabled={dictationState !== 'idle'}
+              onChange={(event) => setDiarize(event.currentTarget.checked)}
+            />
+            화자 자동 분리
+          </label>
           <span>
-            Ctrl/Cmd+Shift+D: 시작·정지 · 정지 후 대화목록에서 전사 · 바로 다음 입력 가능 · 음성은 OpenAI API로 전송
+            {diarize
+              ? '한 번 녹음 → 정지 후 화자별 텍스트 저장 · 화자 이름은 직접 지정 · 최대 80분 · '
+              : 'Ctrl/Cmd+Shift+D: 시작·정지 · 정지 후 대화목록에서 전사 · 바로 다음 입력 가능 · '}
+            음성은 OpenAI API로 전송
             · 관련 법령·고지 절차 확인
           </span>
           {dictationMessage && (
