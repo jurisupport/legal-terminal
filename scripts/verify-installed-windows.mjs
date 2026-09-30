@@ -19,13 +19,13 @@ const ruleName = `legal-terminal-smoke-${randomUUID()}`
 const version = JSON.parse(await fs.readFile(path.join(root, 'package.json'), 'utf8')).version
 const pause = () => new Promise(resolve => setTimeout(resolve, 100))
 const psQuote = value => `'${value.replaceAll("'", "''")}'`
-const powershell = source => execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', `$ErrorActionPreference = 'Stop'; ${source}`], { encoding: 'utf8', timeout: 30000 })
-let child, socket, firewallAdded = false, output = ''
+const powershell = (source, timeout = 30000) => execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', `$ErrorActionPreference = 'Stop'; ${source}`], { encoding: 'utf8', timeout })
+let child, socket, primaryError, firewallAdded = false, output = ''
 try {
   await fs.mkdir(profile, { recursive: true })
   await fs.mkdir(evidenceDir, { recursive: true })
   // The assisted NSIS installer does not launch the app silently without --force-run.
-  execFileSync(path.join(root, 'dist/legal-terminal-Setup.exe'), ['/S', '/currentuser', `/D=${installDir}`], { windowsVerbatimArguments: true, timeout: 120000 })
+  powershell(`$installer = Start-Process -FilePath ${psQuote(path.join(root, 'dist/legal-terminal-Setup.exe'))} -ArgumentList ${psQuote(`/S /currentuser /D=${installDir}`)} -PassThru; if (-not $installer.WaitForExit(120000)) { Stop-Process -Id $installer.Id -Force; throw 'NSIS installation timed out' }; if ($installer.ExitCode -ne 0) { throw "NSIS installation failed: $($installer.ExitCode)" }`, 150000)
   await fs.access(executable)
   const dismissedSkillHash = {}
   const skills = path.join(installDir, 'resources/skills')
@@ -107,13 +107,38 @@ try {
   const result = { version, platform: info.platform, electron: info.versions.electron, nsisSilentInstall: true, packagedRenderer: true, isolatedPersistence: true, networkBlocked: true, rendererErrors }
   await fs.writeFile(path.join(evidenceDir, 'installed-windows.json'), JSON.stringify(result, null, 2))
   console.log('INSTALLED_WINDOWS_RESULT ' + JSON.stringify(result))
+} catch (error) {
+  primaryError = error
+  try {
+    output += powershell("Get-WinEvent -FilterHashtable @{ LogName = 'Application'; Id = 1000, 1001; StartTime = (Get-Date).AddMinutes(-5) } -ErrorAction SilentlyContinue | Where-Object { $_.Message -like '*legal-terminal*' } | Select-Object TimeCreated, Message | Format-List | Out-String")
+    console.error(output)
+  } catch {}
+  throw error
 } finally {
-  socket?.close()
-  if (child?.pid && child.exitCode === null) {
-    execFileSync('taskkill.exe', ['/PID', String(child.pid), '/T', '/F'], { timeout: 10000, stdio: 'ignore' })
-    await new Promise(resolve => child.exitCode !== null ? resolve() : child.once('exit', resolve))
+  const cleanupErrors = []
+  const cleanup = async action => { try { await action() } catch (error) { cleanupErrors.push(error) } }
+  await cleanup(async () => {
+    socket?.close()
+    const exited = () => child.exitCode !== null || child.signalCode !== null
+    if (!child?.pid || exited()) return
+    try {
+      execFileSync('taskkill.exe', ['/PID', String(child.pid), '/T', '/F'], { timeout: 10000, stdio: 'ignore' })
+    } catch (error) {
+      // The process may have exited while the PID-scoped termination was starting.
+      await new Promise(setImmediate)
+      if (!exited()) throw error
+    }
+    if (!exited()) await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(Error('Installed app did not exit after taskkill')), 10000)
+      child.once('exit', () => { clearTimeout(timer); resolve() })
+    })
+  })
+  await cleanup(() => { if (firewallAdded) powershell(`Remove-NetFirewallRule -DisplayName ${psQuote(ruleName)}`) })
+  await cleanup(() => fs.writeFile(path.join(evidenceDir, 'installed-windows.log'), output))
+  await cleanup(() => fs.rm(temp, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }))
+  if (cleanupErrors.length) {
+    const failure = new AggregateError(cleanupErrors, 'Installed Windows smoke cleanup failed')
+    if (primaryError) console.error(failure)
+    else throw failure
   }
-  if (firewallAdded) powershell(`Remove-NetFirewallRule -DisplayName ${psQuote(ruleName)}`)
-  await fs.writeFile(path.join(evidenceDir, 'installed-windows.log'), output).catch(() => {})
-  await fs.rm(temp, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 })
 }

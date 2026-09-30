@@ -73,7 +73,7 @@
     "verify:bulk-todo-closure-ui": "node scripts/verify-bulk-todo-closure-ui.mjs",
     "verify:case-management": "node --experimental-strip-types --no-warnings scripts/verify-case-management.mjs && node --experimental-strip-types --no-warnings scripts/verify-case-management-settings.mjs && node --experimental-strip-types --no-warnings scripts/verify-case-management-adapter.mjs && node --experimental-strip-types --no-warnings scripts/verify-workspace-case-scope.mjs && node --experimental-strip-types --no-warnings scripts/verify-next-action-proposal.mjs",
     "verify:case-management-app": "node scripts/verify-case-management-app.mjs && node scripts/verify-todo-app.mjs && node scripts/verify-case-management-ui.mjs && node scripts/verify-hearing-followups.mjs",
-    "verify:desktop": "npm run typecheck && npm run verify:agent-runtime && npm run verify:todo-summary && npm run verify:todo-files && npm run verify:agent-case-context && npm run verify:agent-mcp && npm run verify:agent-todo && npm run verify:inline-selection && npm run verify:case-management && npm run verify:node-pty && npm run build && npm run verify:case-management-app",
+    "verify:desktop": "node scripts/verify-installed-windows-cleanup.mjs && npm run typecheck && npm run verify:agent-runtime && npm run verify:todo-summary && npm run verify:todo-files && npm run verify:agent-case-context && npm run verify:agent-mcp && npm run verify:agent-todo && npm run verify:inline-selection && npm run verify:case-management && npm run verify:node-pty && npm run build && npm run verify:case-management-app",
     "verify:installed-windows": "node scripts/verify-installed-windows.mjs"
   },
   "dependencies": {

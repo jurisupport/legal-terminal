@@ -177,6 +177,7 @@ function runApp({ root, temp, chosenDir, screenshot }) {
       freshTitle='서버에서 방금 수정된 최신 검토 업무'
       await clickTask('a','AI에게 다음 행동 제안받기')
       await wait(()=>evaluate(`!!document.querySelector('[aria-label="다음 행동 제안"]') && document.querySelector('.agent-composer textarea')?.value.includes('첨부한 할일')`),'Opt-in proposal draft')
+      await wait(()=>counts('agent:create')>0,'Explicit proposal native Agent creation')
       assert.equal(counts('agent:create'),1,'Explicit AI proposal creates one Agent')
       assert.equal(counts('agent:send'),0,'Proposal preparation still requires explicit send')
       assert.equal(counts('todo:create'),0,'Proposal display cannot create task')
