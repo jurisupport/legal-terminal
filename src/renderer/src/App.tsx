@@ -4447,7 +4447,8 @@ export default function App(): JSX.Element {
       captureUri = saved.path
       capturePath = parseRemoteUri(saved.path)?.path ?? saved.path
     }
-    const media = { ...selection, capturePath }
+    const projectDir = mediaProjectDir(selection.sourcePath)
+    const media = { ...selection, capturePath, projectDir: projectDir ? parseRemoteUri(projectDir)?.path ?? projectDir : undefined }
     const sourceName = fileNameFromPath(selection.sourcePath)
     const rangeLabel = selection.start !== undefined && selection.end !== undefined
       ? `${formatMediaTime(selection.start)}–${formatMediaTime(selection.end)}` : formatMediaTime(selection.time)
