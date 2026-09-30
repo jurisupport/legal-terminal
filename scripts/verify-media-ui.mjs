@@ -16,6 +16,12 @@ async function electronCheck({ root, temp, output }) {
   const fs = require('node:fs/promises')
   const path = require('node:path')
   const assert = require('node:assert/strict')
+  const mediaChecks = []
+  const originalHandle = ipcMain.handle.bind(ipcMain)
+  ipcMain.handle = (channel, handler) => originalHandle(channel, channel === 'media:check' ? async (...args) => {
+    try { const result = await handler(...args); mediaChecks.push({ input: args[1], result }); return result }
+    catch (error) { mediaChecks.push({ input: args[1], error: error.message }); throw error }
+  } : handler)
   app.setPath('userData', path.join(temp, 'profile'))
   require(path.join(root, 'out/main/index.js'))
   // No provider process or model request is created by the UI fixture.
@@ -107,7 +113,11 @@ async function electronCheck({ root, temp, output }) {
     await screenshot('media-review-min-window')
     checks.push('Minimum main-window layout without horizontal clipping')
 
+    const beforeReplacement = await fs.stat(sample)
     await fs.copyFile(path.join(temp, 'replacement.mp4'), sample)
+    const afterReplacement = await fs.stat(sample)
+    const inspection = await run(`const [sourcePath,versionId]=JSON.parse(document.querySelector('.media-viewer [aria-label="리뷰 버전"]').value); return {sourcePath,versionId,check:await window.lt.media.check({path:sourcePath,versionId}),projectCheck:await window.lt.media.check({path:sourcePath,versionId,projectDir:${JSON.stringify(path.dirname(sample))}}),visibility:document.visibilityState};`)
+    console.log('MEDIA_REPLACEMENT_INFO', JSON.stringify({before:beforeReplacement,after:afterReplacement,inspection}))
     await wait("document.querySelector('.media-viewer')?.textContent.includes('원본이 변경되었습니다')", 'Changed file candidate detection')
     assert.equal(await run('return testMedia().src'), original.url, 'Candidate change must not auto-replace review')
     await run("testButton('원본 다시 읽기').click()")
@@ -146,6 +156,8 @@ async function electronCheck({ root, temp, output }) {
     console.log('MEDIA_UI_RESULT '+JSON.stringify({checks,output}))
     app.exit(0)
   } catch (error) {
+    console.error('MEDIA_CHECK_DIAGNOSTICS', JSON.stringify(mediaChecks))
+    console.error('MEDIA_CACHE_DIAGNOSTICS', await fs.readFile(path.join(temp, 'profile/media-review/index.json'),'utf8').catch(()=>''))
     await screenshot('media-review-failure').catch(()=>{})
     console.error(error)
     app.exit(1)
