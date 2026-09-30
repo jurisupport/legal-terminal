@@ -62,12 +62,17 @@ jobs:
       - name: Verify desktop and case-management runtime
         run: npm run verify:desktop
 
+      - name: Verify native media review
+        run: npm run verify:media && npm run verify:media-viewer && npm run verify:media-ui
+        env:
+          LT_MEDIA_UI_OUTPUT: .omx/screenshots/media-review
+
       - name: Upload runtime evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: release-runtime-macos-${{ matrix.arch }}
-          path: .omx/screenshots/*.png
+          path: .omx/screenshots/**
           if-no-files-found: warn
 
       - name: Package macOS
@@ -100,6 +105,11 @@ jobs:
       - name: Verify desktop and case-management runtime
         run: npm run verify:desktop
 
+      - name: Verify native media review
+        run: npm run verify:media && npm run verify:media-viewer && npm run verify:media-ui
+        env:
+          LT_MEDIA_UI_OUTPUT: .omx/screenshots/media-review
+
       - name: Package Windows
         run: npx electron-builder --win --publish never
 
@@ -111,7 +121,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: release-runtime-windows-x64
-          path: .omx/screenshots/*
+          path: .omx/screenshots/**
           if-no-files-found: warn
 
       - name: Upload Windows

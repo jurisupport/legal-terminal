@@ -95,13 +95,13 @@ curl -fsSL https://github.com/jurisupport/legal-terminal/releases/latest/downloa
 
 ## 이번 업데이트
 
-최신 릴리스: [v0.1.241](https://github.com/jurisupport/legal-terminal/releases/tag/v0.1.241)
+최신 릴리스: [v0.1.242](https://github.com/jurisupport/legal-terminal/releases/tag/v0.1.242)
 
-- **한 번 녹음하고 화자별 저장**: 기일기록에서 ‘화자 자동 분리’를 켜면 연속 녹음이 끝난 뒤 화자별 발언과 녹음 구간을 텍스트로 자동 저장합니다.
-- **화자 이름 일괄 지정**: 감지한 화자 1·2 등을 재판부·원고·피고 또는 직접 추가한 대화자에 연결하면 같은 화자의 발언 전체에 적용됩니다.
-- **전사 재시도**: 실패한 전사는 해당 기록을 닫기 전까지 같은 녹음으로 다시 시도할 수 있습니다. 전사 중에도 메모와 다음 녹음을 이어갈 수 있습니다.
+- **영상·음성 리뷰**: 파일을 앱에서 재생하고 장면·구간을 선택해 캡처와 함께 Agent에 질문합니다.
+- **원격 미디어와 버전 비교**: SSH 영상은 디스크로 내려받아 재생하고, 전송 취소·수정본 전환·이전 버전 비교를 지원합니다.
+- **Remotion 미리보기**: 프로젝트의 영상을 최종 MP4 생성 전에 확인하고 선택 프레임을 대화로 전달합니다.
 
-기존 OpenAI API 키를 사용합니다. 녹음 원본 파일은 영구 보관하지 않습니다.
+[미디어 리뷰 사용법](docs/media-review.md) · [Remotion 프로젝트 연결 설정](docs/remotion-preview.md)
 
 ## 처음 쓰는 순서
 
