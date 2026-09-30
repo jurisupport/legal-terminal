@@ -124,8 +124,11 @@ function TodosDashboardContent({
   onBrief,
   onManageTodos,
   onOpenEvidenceFile,
-  snapshot, initialFilter = 'open', filterNonce = 0, onGlobalWork
+  snapshot, initialCaseId, onStartTask, onAskNextAction, initialFilter = 'open', filterNonce = 0, onGlobalWork
 }: {
+  initialCaseId?: string
+  onStartTask?: (todo: JsTodo) => void | Promise<void>
+  onAskNextAction?: (todo: JsTodo) => void
   snapshot: SharedTodoSnapshot
   initialFilter?: TodoFilter
   filterNonce?: number
@@ -147,7 +150,10 @@ function TodosDashboardContent({
   const [err, setErr] = useState('')
   const [loading, setLoading] = useState(false)
   const [search, setSearch] = useState('')
+  const [caseFilter, setCaseFilter] = useState(initialCaseId || '')
+  useEffect(() => { setCaseFilter(initialCaseId || '') }, [initialCaseId, filterNonce])
   const [status, setStatus] = useState('open')
+  const [todayCompleted, setTodayCompleted] = useState(false)
   const [filter, setFilter] = useState<TodoFilter>(initialFilter)
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({})
   const [capabilities, setCapabilities] = useState<TodoCapabilities | null>(null)
@@ -169,20 +175,22 @@ function TodosDashboardContent({
     ? sshProfiles.find((p) => p.id === defaultOpenProfileId)
     : undefined
 
+  const todayKey = kstDateKey(new Date())
   const filteredTodos = useMemo(() => {
     const source = ['open', 'pending', 'in_progress'].includes(status) ? filterTodos(todos ?? [], filter).filter((todo) => status === 'open' || todo.status === status) : todos ?? []
     const q = search.trim().toLocaleLowerCase()
-    return source.filter((todo) => (!todo.type || todo.type === 'todo') &&
-      (status !== 'completed' || ['completed', 'done'].includes(todo.status)) &&
+    return source.filter((todo) => (!caseFilter || todo.caseId === caseFilter) && (!todo.type || todo.type === 'todo') &&
+      (status !== 'completed' || (['completed', 'done'].includes(todo.status) && (!todayCompleted || kstDateKey(todo.completedAt) === todayKey))) &&
       (status !== 'closed' || ['closed', 'archived'].includes(todo.status)) &&
       (!q || [todo.title, todo.caseNumber, todo.caseName, todo.client, todo.opponent, todo.partyNames].filter(Boolean).join(' ').toLocaleLowerCase().includes(q))).slice().sort(compareTodos)
-  }, [todos, filter, status, search])
+  }, [todos, filter, status, search, caseFilter, todayCompleted, todayKey])
   const groups = useMemo(() => {
     const result = new Map<string, JsTodo[]>()
     for (const todo of filteredTodos) { const key = todo.caseId || ''; result.set(key, [...(result.get(key) ?? []), todo]) }
     return [...result.entries()]
   }, [filteredTodos])
   const openDefault = (todo: JsTodo): void => {
+    if (onStartTask) { void Promise.resolve().then(() => onStartTask(todo)).catch((e) => setErr(String(e))); return }
     const c = todoToCase(todo)
     if (!c) return
     if (onOpenDefault) {
@@ -234,7 +242,7 @@ function TodosDashboardContent({
     const title = newTitle.trim()
     if (!title) return
     setErr('')
-    void runMutation('create', async () => { const r = await window.lt.todo.create({ title, dueDate: newDue ? setTodoDate(null, newDue) : undefined, ...(capabilities?.createFields.includes('reviewAt') && newReview ? { reviewAt: setTodoDate(null, newReview) } : {}), ...(capabilities?.createFields.includes('priority') ? { priority: newPriority } : {}) })
+    void runMutation('create', async () => { const r = await window.lt.todo.create({ title, ...(caseFilter ? { caseId: caseFilter } : {}), dueDate: newDue ? setTodoDate(null, newDue) : undefined, ...(capabilities?.createFields.includes('reviewAt') && newReview ? { reviewAt: setTodoDate(null, newReview) } : {}), ...(capabilities?.createFields.includes('priority') ? { priority: newPriority } : {}) })
       if (!r.ok) {
         setErr(r.error ?? '추가 실패')
         return
@@ -323,6 +331,7 @@ function TodosDashboardContent({
         </button>}
       </div>
 
+      {caseFilter && <p className="todo-filter-count">선택한 사건의 업무 <button className="todo-small" onClick={() => setCaseFilter('')}>모든 사건 보기</button></p>}
       <fieldset className="todo-create" disabled={!!busyId}>
         <input
           className="todo-create-input"
@@ -363,6 +372,8 @@ function TodosDashboardContent({
       </div>
 
       {status === 'completed' && <div className="todo-filters">
+        <button className="todo-tab" aria-pressed={!todayCompleted} onClick={() => setTodayCompleted(false)}>전체 완료 기록</button>
+        <button className="todo-tab" aria-pressed={todayCompleted} onClick={() => setTodayCompleted(true)}>오늘 완료 기록</button>
         <button className="todo-primary" disabled={!tokenReady || !todos || loading || !!err || !!busyId || !filteredTodos.length} onClick={() => setBulkTodos(filteredTodos)}>완료된 할일 일괄 종료</button>
         <span className="muted small">현재 표시된 완료 할일 {filteredTodos.length}건</span>
       </div>}
@@ -402,7 +413,7 @@ function TodosDashboardContent({
               title={caseContext ? '클릭 → 작업환경 열기 · 우클릭 → 메뉴' : todo.title}
             >
               <div className="todo-top">
-                <span className={`todo-status st-${todo.status}`}>{statusKo(todo.status)}</span>
+                <span className={`todo-status st-${todo.status}`}>{['completed', 'done'].includes(todo.status) && todo.title.startsWith('[기일기록]') ? '기일기록 저장' : statusKo(todo.status)}</span>
                 {caseTitle && <span className="todo-case-context">{caseTitle}</span>}
               </div>
               <div className="todo-title">{todo.title || '(제목 없음)'}</div>
@@ -419,7 +430,8 @@ function TodosDashboardContent({
                 {todo.opponent && <span>상대 {todo.opponent}</span>}
                 {!todo.client && !todo.opponent && todo.partyNames && <span>당사자 {todo.partyNames}</span>}
               </div>
-              {recent && <div className="todo-recent">{recent.text}</div>}
+              {recent && <div className="todo-recent">진행 기록 · {recent.text}</div>}
+              {['completed', 'done'].includes(todo.status) && <p className="muted small">{todo.title.startsWith('[기일기록]') ? '기일기록 저장 · 후속 업무의 완료는 별도로 확인하세요.' : '할일 완료 기록 · 제출 여부는 원본 근거로 확인하세요.'} · {kstDateKey(todo.completedAt) ? fmtDate(todo.completedAt) : '완료일 확인 필요'}</p>}
               <div className="todo-progress-row" onClick={(e) => e.stopPropagation()}>
                 <input
                   className="todo-progress-input"
@@ -455,6 +467,7 @@ function TodosDashboardContent({
               {relatedInput && <p className="todo-warning">추가할 할일에는 기한이 없습니다. 다른 기한·산출물은 별도 할일로 추가하세요.</p>}
               <TodoDetails todo={todo} parentTitle={snapshot.todos?.find((parent) => parent.id === todo.parentId)?.title} capabilities={capabilities} onOpenEvidenceFile={onOpenEvidenceFile} onChanged={changed} onComplete={() => completeTodo(todo)} />
               <div className="todo-actions" onClick={(e) => e.stopPropagation()}>
+                {onAskNextAction && <button className="todo-small" onClick={() => onAskNextAction(todo)}>AI에게 다음 행동 제안받기</button>}
                 {onManageTodos && <button className="todo-small" onClick={() => onManageTodos([todo])}>에이전트로 정리</button>}
                 {todo.status === 'completed' || todo.status === 'done' ? (
                   <button className="todo-small" onClick={() => reopenTodo(todo)}>

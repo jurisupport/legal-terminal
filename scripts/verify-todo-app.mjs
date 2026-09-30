@@ -25,6 +25,7 @@ function runApp({ root, temp, chosenDir, screenshot }) {
     { id: 'undated', type: 'todo', title: '통합 검증 기한 없는 할일', status: 'in_progress', createdAt: '2020-01-01', updatedAt: '2020-01-01', version: 1 },
     { id: 'review', type: 'todo', title: '통합 검증 재확인 할일', status: 'pending', dueDate: '2099-01-01', reviewAt: '2020-01-01', createdAt: '2020-01-01', version: 1 }
   ]
+  require('node:os').homedir = () => require('node:path').join(temp, 'home')
   const settings = { draftsRoot: chosenDir, sshProfiles: [], agentDefaultProvider: 'codex', agentDefaultPermissionMode: 'ask', notifyDone: false }
   app.setPath('userData', require('node:path').join(temp, 'profile'))
   BrowserWindow.prototype.show = function () {}
@@ -32,7 +33,7 @@ function runApp({ root, temp, chosenDir, screenshot }) {
   const register = ipcMain.handle.bind(ipcMain)
   const originalOn = ipcMain.on.bind(ipcMain)
   ipcMain.on = (channel, callback) => originalOn(channel, channel === 'fs:watch' || channel.startsWith('pty:') ? () => {} : callback)
-  const realChannels = new Set(['app:info', 'app:setWindowTitle', 'tabs:ready', 'workspace:save', 'workspace:list', 'workspace:load'])
+  const realChannels = new Set(['app:info', 'app:setWindowTitle', 'tabs:ready', 'workspace:save', 'workspace:list', 'workspace:load', 'caseManagement:get', 'caseManagement:update'])
   ipcMain.handle = (channel, handler) => register(channel, async (event, ...args) => {
     const call = { channel, args }
     calls.push(call)
@@ -51,6 +52,11 @@ function runApp({ root, temp, chosenDir, screenshot }) {
     if (channel === 'js:hasToken') return true
     if (channel === 'js:tokenStatus') return { hasToken: true, error: null }
     if (channel === 'js:listCases') return { ok: true, cases: [] }
+    if (channel === 'js:upcomingHearings') {
+      const today = new Date(Date.now() + 9 * 3600000).toISOString().slice(0, 10)
+      const tomorrow = new Date(Date.parse(today) + 86400000).toISOString().slice(0, 10)
+      return { ok: true, complete: true, fetchedAt: new Date().toISOString(), hearings: Array.from({ length: 42 }, (_, index) => ({ id: `hearing-${index}`, dateTime: `${index < 27 ? today : tomorrow}T10:00:00+09:00`, type: '변론', status: 'scheduled', case: { id: `case-${index}`, caseName: `합성 사건 ${index}`, parties: [], hearings: [] } })) }
+    }
     if (channel === 'js:hearingSummary') return { ok: true, summary: { todayCount: 27, weekCount: 42, fetchedAt: new Date().toISOString() } }
     if (channel === 'todo:list') return { ok: true, todos: args[0]?.type === 'memo' ? [] : rows }
     if (channel === 'todo:capabilities') return { ok: true, capabilities: { queryFields: ['fields', 'includeClosed'], createFields: ['reviewAt', 'priority', 'parentId'], updateFields: ['reviewAt', 'priority', 'parentId', 'evidence'], statusFields: ['childDispositions'], evidenceSuggestions: true } }
@@ -121,6 +127,8 @@ function runApp({ root, temp, chosenDir, screenshot }) {
       await wait(() => evaluate(`document.querySelectorAll('.todo-card').length === 1 && document.querySelector('.todo-card').textContent.includes('통합 검증 기한 없는 할일')`), 'Undated filter')
       await evaluate(`smoke.textButton('전체 열린 할일')`)
       await wait(() => evaluate(`document.querySelectorAll('.todo-card').length === 3`), 'All open todos')
+      assert.equal(calls.filter(call => call.channel === 'agent:create').length, 0, 'Opening and filtering todos never creates an Agent')
+      assert.equal(calls.filter(call => call.channel === 'agent:send').length, 0, 'Opening and filtering todos never sends a prompt')
       await evaluate(`smoke.textButton('전체 할일 정리 시작')`)
       await wait(() => calls.some((call) => call.channel === 'agent:create'), 'Global Agent creation')
       const created = calls.find((call) => call.channel === 'agent:create').args[0]
@@ -264,7 +272,7 @@ function runApp({ root, temp, chosenDir, screenshot }) {
       assert.deepEqual([...new Set(unexpected)], [])
       assert.deepEqual(rendererErrors, [])
       await capture()
-      console.log('TODO_APP_RESULT ' + JSON.stringify({ checks: 47, remoteDefaults: true, ipcCalls: calls.length, actualWorkspaceSaveReload: true, rendererErrors, screenshot }))
+      console.log('TODO_APP_RESULT ' + JSON.stringify({ checks: 49, remoteDefaults: true, ipcCalls: calls.length, actualWorkspaceSaveReload: true, rendererErrors, screenshot }))
       app.exit(0)
     } catch (error) {
       await capture()

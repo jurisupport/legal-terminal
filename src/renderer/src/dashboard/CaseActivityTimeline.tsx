@@ -76,6 +76,7 @@ export default function CaseActivityTimeline({
 
   return (
     <div className="case-timeline" onClick={(e) => e.stopPropagation()}>
+      <p className="muted small">AI 대화·작성 이력입니다. 실제 제출·업무 완료 여부는 할일과 근거에서 확인하세요.</p>
       {failed && <div className="muted small">작업 이력을 불러오지 못했습니다.</div>}
       {!failed && !activity && <div className="muted small">불러오는 중…</div>}
       {activity && !activity.sessions.length && (

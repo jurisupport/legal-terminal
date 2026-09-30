@@ -69,8 +69,10 @@ import TodayTodos from './dashboard/TodayTodos'
 import TodoSummary, { TodoHeaderBadge } from './dashboard/TodoSummary'
 import { todoAgentPrompt } from '../../shared/agentTodo'
 import { useTodoSnapshot, type TodoSnapshot } from './dashboard/useTodoSnapshot'
-import type { TodoFilter } from '../../shared/todoSummary'
-import type { JsTodo } from './env'
+import { useCaseManagementUi } from './dashboard/useCaseManagementUi'
+import NextActionProposal, { type NextActionRequest } from './NextActionProposal'
+import { kstDateKey, type TodoFilter } from '../../shared/todoSummary'
+import type { JsTodo, JsUpcomingHearing } from './env'
 import { buildAgentWorkspaceContext, resolveAgentContextKind, type AgentContextKind, type AgentWorkspaceContext } from '../../shared/agentWorkspaceContext'
 import HearingRecordPanel, {
   buildHearingRecordTitle,
@@ -375,6 +377,7 @@ type SaveDirtyDocResult = { ok: true } | { ok: false; error: string }
  */
 interface TermTab {
   todoManagement?: boolean
+  selectedTaskId?: string
   contextKind?: AgentContextKind
   id: string
   title: string
@@ -1015,6 +1018,7 @@ const agentWorkspaceContextForTerm = (source: TermTab, appVersion?: string): Age
   cwd: source.cwd,
   appVersion,
   caseId: source.jsId,
+  selectedTaskId: source.selectedTaskId,
   court: source.court,
   caseNumber: source.caseNumber,
   caseName: source.caseName,
@@ -1383,6 +1387,7 @@ const upsertCaseTab = (
         activeDocId: incoming.activeDocId ?? existing.activeDocId,
         activeTermId: incoming.activeTermId ?? existing.activeTermId,
         activeWork: incoming.activeWork ?? existing.activeWork,
+        selectedTaskId: incoming.selectedTaskId ?? existing.selectedTaskId,
         updatedAt: incoming.updatedAt ?? Date.now()
       }
     : matchingId ? { ...incoming, id: caseTabId(incoming, tabs) } : incoming
@@ -1405,6 +1410,7 @@ const sanitizeCaseWorkspaceTab = (value: unknown): CaseWorkspaceTab | null => {
     ...caseTabFromCurrentCase(source, typeof raw.activeTermId === 'string' ? raw.activeTermId : undefined),
     id,
     activeDocId: typeof raw.activeDocId === 'string' ? raw.activeDocId : undefined,
+    selectedTaskId: typeof raw.selectedTaskId === 'string' ? raw.selectedTaskId : undefined,
     activeWork:
       raw.activeWork && typeof raw.activeWork === 'object'
         ? {
@@ -1655,8 +1661,8 @@ export default function App(): JSX.Element {
   }, [caseTabs])
   const termTabsRef = useRef<TermTab[]>([])
   const caseTabsRef = useRef<CaseWorkspaceTab[]>([])
-  const autoRestoreWorkspaceRef = useRef<(source: CurrentCase) => void>(() => {})
-  const autoRestoreInFlightRef = useRef<Set<string>>(new Set())
+  const autoRestoreWorkspaceRef = useRef<(source: CurrentCase) => Promise<void>>(async () => {})
+  const autoRestoreInFlightRef = useRef<Map<string, Promise<void>>>(new Map())
   const autoRestoreDoneRef = useRef<Set<string>>(new Set())
   const autoSaveEligibleRef = useRef<Set<string>>(new Set())
   const autoWorkspaceSaveChainRef = useRef<Promise<void>>(Promise.resolve())
@@ -1708,6 +1714,8 @@ export default function App(): JSX.Element {
   } | null>(null)
   const [workspaceRestorePrompt, setWorkspaceRestorePrompt] =
     useState<WorkspaceRestorePromptState | null>(null)
+  const workspaceRestoreResolve = useRef<((choice: WorkspaceRestoreChoice) => void) | null>(null)
+  const [workspaceRestoreNotice, setWorkspaceRestoreNotice] = useState('')
 
   // 활성 PDF의 목차 분류 결과 + 페이지 점프 신호
   const [pdfRecord, setPdfRecord] = useState<{ path: string; parsed: ParsedRecord } | null>(null)
@@ -2643,7 +2651,9 @@ export default function App(): JSX.Element {
       records: source.records,
       name: source.name
     }).then(setRecent)
-    autoRestoreWorkspaceRef.current(source)
+    void autoRestoreWorkspaceRef.current(source).catch((error) => {
+      void window.lt.dialog.alert('작업 위치를 복원하지 못했습니다: ' + String(error))
+    })
     return tab
   }
 
@@ -4665,6 +4675,7 @@ export default function App(): JSX.Element {
       autoAgent: t.kind === 'agent' ? undefined : isAgentProvider(t.autoAgent) ? t.autoAgent : undefined,
       agentProvider: t.kind === 'agent' ? resolveAgentProvider(t.agentProvider, ssh) : undefined,
       todoManagement: typeof t.todoManagement === 'boolean' ? t.todoManagement : undefined,
+      selectedTaskId: typeof t.selectedTaskId === 'string' ? t.selectedTaskId : undefined,
       contextKind: t.contextKind === 'global' || t.contextKind === 'case' || t.contextKind === 'folder' ? t.contextKind : undefined,
       jsId: typeof t.jsId === 'string' ? t.jsId : undefined,
       court: typeof t.court === 'string' ? t.court : undefined,
@@ -4846,7 +4857,8 @@ export default function App(): JSX.Element {
     setTreeRefresh((n) => n + 1)
   }
 
-  const workspaceLocation = (source: CurrentCase): { cwd: string; profileId?: string; ssh?: SshConn } => ({
+  const workspaceLocation = (source: CurrentCase): { cwd: string; profileId?: string; ssh?: SshConn; caseId?: string } => ({
+    caseId: source.meta?.jsId,
     cwd: source.remotePath ?? parseRemoteUri(source.drafts)?.path ?? source.drafts,
     profileId: source.profileId,
     ssh: source.ssh
@@ -4854,7 +4866,7 @@ export default function App(): JSX.Element {
 
   const workspaceLocationKey = (source: CurrentCase): string => {
     const location = workspaceLocation(source)
-    return `${location.profileId ?? 'local'}\0${normalizedCasePathKey(location.cwd)}`
+    return `${location.profileId ?? 'local'}\0${normalizedCasePathKey(location.cwd)}\0${location.caseId ?? ''}`
   }
 
   const remoteWorkspacePath = (value: string | undefined, profileId: string): string | undefined => {
@@ -4927,8 +4939,11 @@ export default function App(): JSX.Element {
   const askWorkspaceRestore = (
     local: WorkspaceSnapshot | undefined,
     remote: WorkspaceSnapshot
-  ): Promise<WorkspaceRestoreChoice> =>
-    new Promise((resolve) => setWorkspaceRestorePrompt({ local, remote, resolve }))
+  ): Promise<WorkspaceRestoreChoice> => new Promise((resolve) => {
+    workspaceRestoreResolve.current?.('skip')
+    workspaceRestoreResolve.current = resolve
+    setWorkspaceRestorePrompt({ local, remote, resolve })
+  })
 
   const saveCaseWorkspace = async (caseTabIdValue: string): Promise<void> => {
     const tab = caseTabs.find((item) => item.id === caseTabIdValue)
@@ -4954,6 +4969,7 @@ export default function App(): JSX.Element {
   saveAllCaseWorkspacesRef.current = saveAllCaseWorkspaces
 
   const restoreAutomaticWorkspace = async (source: CurrentCase): Promise<void> => {
+    const account = todoAccountGeneration.current
     const id = resolveCaseTabId(source)
     const key = workspaceLocationKey(source)
     if (
@@ -4964,9 +4980,12 @@ export default function App(): JSX.Element {
     )
       return
     autoRestoreDoneRef.current.add(key)
-    autoRestoreInFlightRef.current.add(key)
+    setWorkspaceRestoreNotice('')
     try {
       const result = await window.lt.workspace.autoLoad(workspaceLocation(source))
+      if (account !== todoAccountGeneration.current) return
+      if (!result.ok) throw new Error(result.error || '저장된 작업환경을 불러오지 못했습니다.')
+      if (result.error) setWorkspaceRestoreNotice(result.error)
       const local = result.local?.snapshot
         ? rebaseRemoteWorkspace(result.local.snapshot, source)
         : undefined
@@ -4994,7 +5013,7 @@ export default function App(): JSX.Element {
       } else {
         selected = local
       }
-      if (!selected) return
+      if (!selected || account !== todoAccountGeneration.current) return
       restoreWorkspaceSnapshot(selected)
       autoSaveEligibleRef.current.add(id)
       window.setTimeout(() => {
@@ -5006,10 +5025,20 @@ export default function App(): JSX.Element {
       autoRestoreInFlightRef.current.delete(key)
     }
   }
-  autoRestoreWorkspaceRef.current = (source) => void restoreAutomaticWorkspace(source)
+  autoRestoreWorkspaceRef.current = (source) => {
+    const key = workspaceLocationKey(source)
+    const existing = autoRestoreInFlightRef.current.get(key)
+    if (existing) return existing
+    const request = restoreAutomaticWorkspace(source).catch((error) => {
+      autoRestoreDoneRef.current.delete(key)
+      throw error
+    }).finally(() => autoRestoreInFlightRef.current.delete(key))
+    autoRestoreInFlightRef.current.set(key, request)
+    return request
+  }
 
   const automaticWorkspaceSignature = JSON.stringify({
-    cases: caseTabs.map((tab) => [tab.id, tab.activeDocId, tab.activeTermId, tab.activeWork]),
+    cases: caseTabs.map((tab) => [tab.id, tab.activeDocId, tab.activeTermId, tab.activeWork, tab.selectedTaskId]),
     docs: docTabs
       .filter((tab) => !isSharedDocTab(tab))
       .map((tab) => [tab.id, tab.caseTabId ?? caseIdForDoc(tab), tab.path, tab.side]),
@@ -5019,6 +5048,7 @@ export default function App(): JSX.Element {
       tab.cwd,
       tab.resumeSessionId,
       tab.sessionTitle,
+      tab.selectedTaskId,
       tab.side
     ])
   })
@@ -5908,6 +5938,27 @@ export default function App(): JSX.Element {
   const todoManagerTab = useRef<TermTab | null>(null)
   const todoAccountGeneration = useRef(0)
   const todoSnapshot = useTodoSnapshot(todoNonce)
+  const caseUi = useCaseManagementUi(todoSnapshot)
+  const taskStartPending = useRef(false)
+  const [todoCaseFilter, setTodoCaseFilter] = useState('')
+  const [upcomingHearings, setUpcomingHearings] = useState<JsUpcomingHearing[] | undefined>()
+  const [hearingsComplete, setHearingsComplete] = useState(false)
+  const [nextActionRequest, setNextActionRequest] = useState<NextActionRequest | null>(null)
+  useEffect(() => window.lt.js.onTokenChanged(() => {
+    window.dispatchEvent(new Event(JS_TOKEN_UPDATED_EVENT))
+  }), [])
+  useEffect(() => {
+    if (!caseUi.state || !todoSnapshot.todos || todoSnapshot.error) return
+    const selectionFor = (caseId?: string): string | undefined => {
+      const id = caseId && caseUi.state!.ui.selectedTaskByCase[caseId]
+      return id && todoSnapshot.todos!.some((todo) => todo.id === id && todo.caseId === caseId &&
+        todo.type !== 'memo' && ['pending', 'in_progress'].includes(todo.status)) ? id : undefined
+    }
+    setTermTabs((tabs) => tabs.some((tab) => tab.selectedTaskId !== selectionFor(tab.jsId))
+      ? tabs.map((tab) => ({ ...tab, selectedTaskId: selectionFor(tab.jsId) })) : tabs)
+    setCaseTabs((tabs) => tabs.some((tab) => tab.selectedTaskId !== selectionFor(tab.meta?.jsId))
+      ? tabs.map((tab) => ({ ...tab, selectedTaskId: selectionFor(tab.meta?.jsId) })) : tabs)
+  }, [caseUi.state, todoSnapshot.todos, todoSnapshot.error, termTabs, caseTabs])
   const [todoFilter, setTodoFilter] = useState<TodoFilter>('open')
   const [todoFilterNonce, setTodoFilterNonce] = useState(0)
   const [contextAppVersion, setContextAppVersion] = useState<string>()
@@ -5919,19 +5970,33 @@ export default function App(): JSX.Element {
     let cancelled = false
     if (todoSnapshot.hasToken !== true) {
       setHearingSummary(null)
+      setUpcomingHearings(undefined)
+      setHearingsComplete(false)
       setSummaryHearingsLoading(false)
       return
     }
     setSummaryHearingsLoading(true)
-    void window.lt.js.hearingSummary().then((result) => {
+    setHearingsComplete(false)
+    void window.lt.js.upcomingHearings().then(async (result) => {
       if (cancelled) return
-      if (result.ok && result.summary) { setHearingSummary(result.summary); setSummaryHearingsError('') }
-      else setSummaryHearingsError(result.error ?? '기일을 불러오지 못했습니다.')
+      if (result.ok && result.complete && result.hearings) {
+        const today = kstDateKey(new Date())
+        setUpcomingHearings(result.hearings)
+        setHearingsComplete(true)
+        setHearingSummary({ todayCount: result.hearings.filter((h) => kstDateKey(h.dateTime) === today).length,
+          weekCount: result.hearings.length, fetchedAt: result.fetchedAt ?? new Date().toISOString() })
+        setSummaryHearingsError('')
+      } else {
+        setSummaryHearingsError(result.error ?? '기일 전체 목록을 확인하지 못했습니다.')
+        const fallback = await window.lt.js.hearingSummary()
+        if (!cancelled && fallback.ok && fallback.summary) setHearingSummary(fallback.summary)
+      }
     }).catch((error) => { if (!cancelled) setSummaryHearingsError(String(error)) })
       .finally(() => { if (!cancelled) setSummaryHearingsLoading(false) })
     return () => { cancelled = true }
   }, [jsNonce, todoSnapshot.hasToken, todoSnapshot.fetchedAt])
   const openTodoSummary = (filter: TodoFilter = 'open'): void => {
+    setTodoCaseFilter('')
     setTodoFilter(filter)
     setTodoFilterNonce((value) => value + 1)
     setMode('todos')
@@ -5992,22 +6057,36 @@ export default function App(): JSX.Element {
     if (todoManagerTab.current && termTabs.some((term) => term.id === todoManagerTab.current!.id)) todoManagerPendingRender.current = false
     else if (!todoManagerPendingRender.current) todoManagerTab.current = null
   }, [termTabs])
-  useEffect(() => {
-    if (mode === 'todos' && todoSnapshot.hasToken === true) {
-      void openGlobalTodoWork().catch((error) => console.warn('할일 에이전트를 열지 못했습니다.', error))
-    }
-  }, [mode, todoSnapshot.hasToken])
-
-  const todoSummary = <TodoSummary snapshot={todoSnapshot} onFilter={openTodoSummary}
+  const selectedWorkspaceTask = todoSnapshot.todos?.find((todo) => todo.id ===
+    caseUi.state?.ui.selectedTaskByCase[currentCase?.meta?.jsId ?? ''] &&
+    todo.caseId === currentCase?.meta?.jsId && todo.type !== 'memo' && ['pending', 'in_progress'].includes(todo.status))
+  const todoSummary = <><TodoSummary snapshot={todoSnapshot} onFilter={openTodoSummary}
     onGlobalWork={() => void openGlobalTodoWork()} hearingSummary={hearingSummary}
+    upcomingHearings={upcomingHearings} hearingsComplete={hearingsComplete}
+    onOpenCase={(c) => void openCaseDefault(c)}
     hearingsLoading={summaryHearingsLoading} hearingsError={summaryHearingsError} />
+    <TodayTodos snapshot={todoSnapshot} caseUi={caseUi} onChanged={() => setTodoNonce((n) => n + 1)}
+      onStartTask={startCaseTask} onAskNextAction={askNextAction} onOpenTodos={() => openTodoSummary()} />
+  </>
 
   // 설정창에서 JuriSupport 토큰을 바꾸면 기일·할 일 패널도 새로고침한다.
   useEffect(() => {
     const onTokenUpdated = (): void => {
       todoAccountGeneration.current++
+      setNextActionRequest(null)
+      workspaceRestoreResolve.current?.('skip')
+      workspaceRestoreResolve.current = null
+      setWorkspaceRestorePrompt(null)
+      setWorkspaceRestoreNotice('')
+      remoteCasePickerResolve.current?.(undefined)
+      remoteCasePickerResolve.current = null
+      setRemoteCasePick(null)
       todoManagerTab.current = null
-      setTermTabs((tabs) => tabs.map((term) => term.contextKind === 'global' && (term.todoManagement || term.title === '전체 할일 정리') ? { ...term, todoManagement: false } : term))
+      setTermTabs((tabs) => tabs.map((term) => ({ ...term, selectedTaskId: undefined,
+        ...(term.contextKind === 'global' && (term.todoManagement || term.title === '전체 할일 정리') ? { todoManagement: false } : {}) })))
+      setCaseTabs((tabs) => tabs.map((tab) => ({ ...tab, selectedTaskId: undefined })))
+      setUpcomingHearings(undefined)
+      setHearingsComplete(false)
       setJsNonce((n) => n + 1)
       setTodoNonce((n) => n + 1)
     }
@@ -6608,9 +6687,11 @@ export default function App(): JSX.Element {
     detailLoaded = false,
     activateExistingTerm = true
   ): Promise<OpenedCase | null> => {
+    const account = todoAccountGeneration.current
     // 사건 선택 즉시 탐색기로 전환 — 상세 조회·폴더 매칭이 끝날 때까지 대시보드에 머물지 않는다
     setMode('explorer')
     if (!detailLoaded) c = await loadCaseDetail(c)
+    if (account !== todoAccountGeneration.current) return null
     const saved = c.id ? await window.lt.case.getJsPairing(c.id) : undefined
     let drafts = saved?.drafts ? await canonicalLocalDrafts(saved.drafts) : undefined
     let records = saved?.records
@@ -6624,6 +6705,7 @@ export default function App(): JSX.Element {
       records = resolved.records
       recordSuggestions = resolved.records ? [] : (resolved.suggestions ?? [])
     }
+    if (account !== todoAccountGeneration.current) return null
     if (!drafts) {
       // 자동 매칭 실패 → 사용자가 직접 작성서류 폴더 지정
       const picked = await window.lt.dialog.pickFolder({
@@ -6633,7 +6715,9 @@ export default function App(): JSX.Element {
       if (!picked) return null
       drafts = await canonicalLocalDrafts(picked.path)
     }
+    if (account !== todoAccountGeneration.current) return null
     if (c.id) await window.lt.case.setJsPairing(c.id, drafts, records)
+    if (account !== todoAccountGeneration.current) return null
     const suggested = records ? undefined : recordSuggestions[0]?.path
     // 세션 자동 명명: 법원(약칭) · 사건번호 · 사건명
     const court = c.court || ''
@@ -6667,7 +6751,8 @@ export default function App(): JSX.Element {
       name,
       meta
     }
-    const existing = termTabs.find((t) => !t.ssh && t.cwd === drafts)
+    const existing = termTabsRef.current.find((t) => !t.ssh && t.cwd === drafts &&
+      t.contextKind !== 'global' && (!t.jsId || t.jsId === c.id))
     let term: TermTab | undefined
     let termId: string | undefined
     if (existing) {
@@ -6847,15 +6932,19 @@ export default function App(): JSX.Element {
     name: string
     meta: CaseMeta
     caseData: JsCase
+    account: number
   } | null>(null)
+  const remoteCasePickerResolve = useRef<((result: { id: string; title: string; source: CurrentCase } | undefined) => void) | null>(null)
   const openCaseRemote = async (
     c: JsCase,
     profile: SshProfile,
     remotePath?: string
   ): Promise<{ id: string; title: string; source: CurrentCase } | undefined> => {
+    const account = todoAccountGeneration.current
     // 사건 선택 즉시 탐색기로 전환 — 상세 조회·원격 폴더 매칭(SSH)이 끝날 때까지 대시보드에 머물지 않는다
     setMode('explorer')
     c = await loadCaseDetail(c)
+    if (account !== todoAccountGeneration.current) return undefined
     const court = c.court || ''
     const client = c.parties
       .filter((p) => p.role === 'client')
@@ -6885,6 +6974,7 @@ export default function App(): JSX.Element {
       return opened
     }
     const saved = c.id ? await window.lt.case.getJsPairing(remoteJsPairingKey(profile.id, c.id)) : undefined
+    if (account !== todoAccountGeneration.current) return undefined
     const savedRemote = saved?.drafts ? parseRemoteUri(saved.drafts) : null
     const savedRecords = saved?.records
     if (savedRemote?.profileId === profile.id) {
@@ -6897,37 +6987,122 @@ export default function App(): JSX.Element {
     if (profile.draftsRoot) {
       matchedUri = await matchCaseFolder(remoteUri(profile.id, profile.draftsRoot), c)
     }
+    if (account !== todoAccountGeneration.current) return undefined
     if (matchedUri) {
       const remotePath = remotePlain(matchedUri, profile.id)
-      const opened = openRemoteCaseContext(profile, remotePath, name, meta)
       if (c.id) await window.lt.case.setJsPairing(remoteJsPairingKey(profile.id, c.id), matchedUri)
+      if (account !== todoAccountGeneration.current) return undefined
+      const opened = openRemoteCaseContext(profile, remotePath, name, meta)
       // 소송기록 매칭은 사건 컨텍스트를 먼저 띄운 뒤 비동기로 붙인다.
       resolveRemoteRecordsLater(opened.id, profile, remotePath, opened.title, c)
       return opened
     } else {
       // 작성서류 매칭 실패 → 폴더 선택기로 직접 지정 (소송기록은 picker onPick에서 resolve)
-      setRemoteCasePick({ profile, name, meta, caseData: c })
+      remoteCasePickerResolve.current?.(undefined)
+      return new Promise((resolve) => {
+        remoteCasePickerResolve.current = resolve
+        setRemoteCasePick({ profile, name, meta, caseData: c, account })
+      })
     }
   }
 
-  const openCaseDefault = (c: JsCase): void => {
-    void (async () => {
-      let profiles = sshProfiles
-      let target = resolveCaseOpenTarget(caseOpenTarget, profiles)
-      try {
-        const settings = await window.lt.settings.get()
-        profiles = settings.sshProfiles ?? []
-        target = resolveCaseOpenTarget(settings.caseOpenTarget, profiles)
-        setSshProfiles(profiles)
-        setCaseOpenTarget(target)
-      } catch {
-        // 현재 렌더의 설정 state로 폴백한다.
+  const openCaseDefault = async (c: JsCase): Promise<CurrentCase | null> => {
+    const account = todoAccountGeneration.current
+    let profiles = sshProfiles
+    let target = resolveCaseOpenTarget(caseOpenTarget, profiles)
+    try {
+      const settings = await window.lt.settings.get()
+      profiles = settings.sshProfiles ?? []
+      target = resolveCaseOpenTarget(settings.caseOpenTarget, profiles)
+      setSshProfiles(profiles)
+      setCaseOpenTarget(target)
+    } catch {
+      // 현재 렌더의 설정 state로 폴백한다.
+    }
+    if (account !== todoAccountGeneration.current) return null
+    const profileId = caseOpenProfileId(target)
+    const profile = profileId ? profiles.find((p) => p.id === profileId) : undefined
+    if (profile) return (await openCaseRemote(c, profile))?.source ?? null
+    return openCaseWorkspace(c)
+  }
+
+  async function openTaskWorkspace(todo: JsTodo): Promise<{ tab: CaseWorkspaceTab; task: JsTodo } | null> {
+    if (taskStartPending.current) return null
+    const account = todoAccountGeneration.current
+    taskStartPending.current = true
+    try {
+      const live = await window.lt.todo.get(todo.id)
+      if (account !== todoAccountGeneration.current) return null
+      if (!live.ok || !live.todo) throw new Error(live.error || '현재 할일을 확인하지 못했습니다.')
+      const task = live.todo
+      if (task.type === 'memo' || !['pending', 'in_progress'].includes(task.status)) {
+        todoSnapshot.refresh()
+        throw new Error('이미 처리되었거나 변경된 할일입니다. 목록을 다시 확인해 주세요.')
       }
-      const profileId = caseOpenProfileId(target)
-      const profile = profileId ? profiles.find((p) => p.id === profileId) : undefined
-      if (profile) await openCaseRemote(c, profile)
-      else await openCaseWorkspace(c)
-    })()
+      if (!task.caseId) throw new Error('이 할일에 사건이 연결되어 있지 않습니다. 사건을 연결한 뒤 작업환경을 열어 주세요.')
+      if (todo.caseId && todo.caseId !== task.caseId) throw new Error('할일의 연결 사건이 변경되었습니다. 목록을 다시 확인해 주세요.')
+      const current = await window.lt.js.getCase(task.caseId)
+      if (account !== todoAccountGeneration.current) return null
+      if (!current.ok || !current.case) throw new Error(current.error || '사건에 접근할 수 없습니다.')
+      let tab = caseTabsRef.current.find((item) => item.meta?.jsId === task.caseId)
+      if (tab) {
+        openCaseTab(tab)
+        await autoRestoreWorkspaceRef.current(currentCaseFromCaseTab(tab))
+        if (account !== todoAccountGeneration.current) return null
+        tab = caseTabsRef.current.find((item) => item.meta?.jsId === task.caseId)
+      }
+      else {
+        const opened = await openCaseDefault(current.case)
+        if (!opened || account !== todoAccountGeneration.current) return null
+        await autoRestoreWorkspaceRef.current(opened)
+        if (account !== todoAccountGeneration.current) return null
+        tab = caseTabsRef.current.find((item) => item.meta?.jsId === task.caseId)
+      }
+      if (!tab) throw new Error('사건 작업환경을 확인하지 못했습니다.')
+      if (!await caseUi.update((ui) => ({ selectedTaskByCase: {
+        ...ui.selectedTaskByCase, [task.caseId!]: task.id
+      } }))) throw new Error('다음 할일 선택을 저장하지 못했습니다. 개인 선택을 새로 불러온 뒤 다시 시도해 주세요.')
+      if (account !== todoAccountGeneration.current) return null
+      openCaseTab(tab)
+      setCaseTabs((tabs) => tabs.map((item) => item.id === tab!.id ? { ...item, selectedTaskId: task.id } : item))
+      setTermTabs((tabs) => tabs.map((item) => item.jsId === task.caseId ? { ...item, selectedTaskId: task.id } : item))
+      todoSnapshot.refresh()
+      return { tab, task }
+    } finally { taskStartPending.current = false }
+  }
+
+  async function startCaseTask(todo: JsTodo): Promise<void> { await openTaskWorkspace(todo) }
+
+  function openCaseTodos(caseId: string): void {
+    setTodoCaseFilter(caseId)
+    setTodoFilter('open')
+    setTodoFilterNonce((value) => value + 1)
+    setMode('todos')
+  }
+
+  function askNextAction(todo: JsTodo): void {
+    const account = todoAccountGeneration.current
+    void openTaskWorkspace(todo).then((opened) => {
+      if (!opened || account !== todoAccountGeneration.current) return
+      const { tab, task } = opened
+      const source = currentCaseFromCaseTab(tab)
+      let agent = termTabsRef.current.find((term) => isAgentTab(term) && term.jsId === todo.caseId &&
+        caseIdForTerm(term) === tab.id)
+      if (!agent) {
+        if (source.ssh && source.profileId && source.remotePath) {
+          const profile = sshProfiles.find((item) => item.id === source.profileId)
+          if (!profile) throw new Error('원격 연결을 확인해 주세요.')
+          agent = createRemoteCase(profile, source.remotePath, source.name, source.meta, source.records, 'right')
+        } else agent = createCase(source.drafts, source.name, source.records, undefined, source.meta, 'right')
+      }
+      const request = { id: newId(), task, sessionId: agent.id }
+      setNextActionRequest(request)
+      const text = [`[next-action:${request.id}]`, todoAgentPrompt([task]), '',
+        '이 할일에서 지금 시작할 수 있는 작은 다음 행동 하나만 제안해줘. 완료나 저장은 하지 마.',
+        '제안 첫 줄은 "다음 행동: 구체적인 행동"으로 쓰고, 근거와 확인할 점을 짧게 알려줘. 원문에 없는 기한은 만들지 마.'].join('\n')
+      queueAgentAttachment(agent, { kind: 'selection', label: '다음 행동 제안 요청', text },
+        '첨부한 할일의 다음 행동 하나를 제안해줘. 아직 저장하거나 실행하지 마.')
+    }).catch((error) => { if (account === todoAccountGeneration.current) void window.lt.dialog.alert(String(error)) })
   }
 
   // 우클릭: Claude에 사건 브리핑 요청
@@ -7052,6 +7227,7 @@ export default function App(): JSX.Element {
           }
           onOpenReport={(path, title) => openFile(path, title, 'left')}
           onSummarizeReport={summarizeHearingReportWithClaude}
+          onTasksChanged={() => setTodoNonce((value) => value + 1)}
         />
       )}
       {(tab?.kind === 'mdview' || tab?.kind === 'markdown') && (
@@ -7415,6 +7591,12 @@ export default function App(): JSX.Element {
       return (
         <div className="work-pane work-left" key="cases" data-work-side="left">
           <CasesDashboard
+            snapshot={todoSnapshot}
+            caseUi={caseUi}
+            hearings={hearingsComplete ? upcomingHearings : undefined}
+            onStartTask={startCaseTask}
+            onAskNextAction={askNextAction}
+            onOpenTodos={openCaseTodos}
             onOpenWorkspace={openCaseWorkspace}
             onOpenDefault={openCaseDefault}
             onOpenRemote={openCaseRemote}
@@ -7439,6 +7621,9 @@ export default function App(): JSX.Element {
           {todoSummary}
           <TodosDashboard
             snapshot={todoSnapshot}
+            initialCaseId={todoCaseFilter}
+            onStartTask={startCaseTask}
+            onAskNextAction={askNextAction}
             onOpenEvidenceFile={(path, label) => { openFile(path, label ?? fileNameFromPath(path)) }}
             initialFilter={todoFilter}
             filterNonce={todoFilterNonce}
@@ -8075,7 +8260,18 @@ export default function App(): JSX.Element {
     >
       <div className="workspace-todo-header">
         <TodoHeaderBadge snapshot={todoSnapshot} onOpen={() => openTodoSummary('overdue')} />
-        <button className="todo-small" onClick={() => openTodoSummary()}>오늘 요약</button>
+        {workspaceRestoreNotice && <span className="todo-warning" role="status">{workspaceRestoreNotice}</span>}
+        {selectedWorkspaceTask && <div className="todo-actions" aria-label="현재 사건의 다음 행동">
+          <span>내 다음 행동: {selectedWorkspaceTask.title}</span>
+          <span className="muted small">{selectedWorkspaceTask.dueDate ? `기한 ${kstDateKey(selectedWorkspaceTask.dueDate) || '날짜 확인 필요'} · ` : ''}
+            {selectedWorkspaceTask.waitingFor ? `대기 · ${selectedWorkspaceTask.waitingFor}` : ''}
+            {selectedWorkspaceTask.reviewAt ? ` · 재확인 ${kstDateKey(selectedWorkspaceTask.reviewAt) || '날짜 확인 필요'}` : ''}</span>
+          <button className="todo-small" onClick={() => openCaseTodos(selectedWorkspaceTask.caseId!)}>사건 업무</button>
+          <button className="todo-small" onClick={() => askNextAction(selectedWorkspaceTask)}>다음 행동 제안</button>
+        </div>}
+        {nextActionRequest && <NextActionProposal key={nextActionRequest.id} request={nextActionRequest}
+          activeCaseId={currentCase?.meta?.jsId} onClose={() => setNextActionRequest(null)}
+          onSaved={() => setTodoNonce((value) => value + 1)} />}
       </div>
       {/* ── 액티비티바 (모드 전환) ── */}
       <div className="activitybar" key="activity">
@@ -8390,6 +8586,7 @@ export default function App(): JSX.Element {
           state={workspaceRestorePrompt}
           onChoose={(choice) => {
             const prompt = workspaceRestorePrompt
+            workspaceRestoreResolve.current = null
             setWorkspaceRestorePrompt(null)
             prompt.resolve(choice)
           }}
@@ -8465,19 +8662,29 @@ export default function App(): JSX.Element {
           profile={remoteCasePick.profile}
           onSync={showSync}
           title={`「${remoteCasePick.name}」 작성서류 폴더 선택`}
-          onCancel={() => setRemoteCasePick(null)}
-          onPick={async (remotePath) => {
-            const { profile, name, meta, caseData } = remoteCasePick
+          onCancel={() => {
+            remoteCasePickerResolve.current?.(undefined)
+            remoteCasePickerResolve.current = null
             setRemoteCasePick(null)
-            const opened = openRemoteCaseContext(profile, remotePath, name, meta)
-            if (caseData.id) {
-              await window.lt.case.setJsPairing(
-                remoteJsPairingKey(profile.id, caseData.id),
-                remoteUri(profile.id, remotePath)
-              )
+          }}
+          onPick={async (remotePath) => {
+            const { profile, name, meta, caseData, account } = remoteCasePick
+            const resolve = remoteCasePickerResolve.current
+            remoteCasePickerResolve.current = null
+            setRemoteCasePick(null)
+            if (account !== todoAccountGeneration.current) { resolve?.(undefined); return }
+            try {
+              if (caseData.id) await window.lt.case.setJsPairing(
+                  remoteJsPairingKey(profile.id, caseData.id), remoteUri(profile.id, remotePath))
+              if (account !== todoAccountGeneration.current) { resolve?.(undefined); return }
+              const opened = openRemoteCaseContext(profile, remotePath, name, meta)
+              resolveRemoteRecordsLater(opened.id, profile, remotePath, opened.title, caseData)
+              setMode('explorer')
+              resolve?.(opened)
+            } catch (error) {
+              resolve?.(undefined)
+              void window.lt.dialog.alert('사건 폴더 연결을 저장하지 못했습니다: ' + String(error))
             }
-            resolveRemoteRecordsLater(opened.id, profile, remotePath, opened.title, caseData)
-            setMode('explorer')
           }}
         />
       )}
@@ -9509,7 +9716,7 @@ function DocsPanel({
             onTodoChanged={onTodoChanged}
           />
         )}
-        {mode === 'todos' && <TodayTodos snapshot={todoSnapshot} onChanged={onTodoChanged} />}
+        {mode === 'todos' && <div className="muted pad small">오늘 요약에서 기한과 선택한 업무를 확인하세요.</div>}
       </div>
     </div>
   )

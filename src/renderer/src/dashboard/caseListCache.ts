@@ -14,6 +14,7 @@ export interface CaseListParams {
 type CaseListQuery = Omit<CaseListParams, 'refresh'>
 type CaseListResult = { ok: boolean; cases?: JsCase[]; error?: string }
 
+let cacheGeneration = 0
 const caseListCache = new Map<string, { fetchedAt: number; cases: JsCase[] }>()
 const caseListInflight = new Map<string, Promise<CaseListResult>>()
 
@@ -38,6 +39,7 @@ export function readCachedCaseList(params: CaseListQuery = {}): JsCase[] | undef
 }
 
 export function clearCaseListCache(): void {
+  cacheGeneration++
   caseListCache.clear()
   caseListInflight.clear()
 }
@@ -55,9 +57,11 @@ export function listCasesCached(params: CaseListParams = {}): Promise<CaseListRe
     if (inflight) return inflight
   }
 
+  const expected = cacheGeneration
   const request = window.lt.js
     .listCases({ ...compactQuery(query), ...(refresh ? { refresh: true } : {}) })
     .then((result) => {
+      if (expected !== cacheGeneration) return { ok: false, error: '연결이 변경되었습니다.' }
       if (result.ok) {
         caseListCache.set(key, { fetchedAt: Date.now(), cases: result.cases ?? [] })
       }

@@ -7338,7 +7338,8 @@ button.agent-attachment-chip {
 }
 
 /* Shared task summary and review controls */
-.workspace-todo-header { grid-area: todoheader; display: flex; justify-content: flex-end; align-items: center; gap: 8px; padding: 5px 10px; min-height: 34px; border-bottom: 1px solid var(--border); background: var(--bg-alt); }
+.workspace-todo-header { grid-area: todoheader; display: flex; flex-wrap: wrap; min-width: 0; justify-content: flex-end; align-items: center; gap: 8px; padding: 5px 10px; min-height: 34px; border-bottom: 1px solid var(--border); background: var(--bg-alt); }
+.workspace-todo-header > .todo-summary { flex-basis: 100%; min-width: 0; max-height: 36vh; overflow: auto; margin: 0; }
 .todo-work-pane { height: 100%; min-height: 0; overflow: auto; }
 .todo-work-pane > .todo-dash { height: auto; overflow: visible; }
 .todo-work-pane .todo-list { overflow: visible; }
@@ -7384,3 +7385,23 @@ fieldset.todo-card { margin: 0; min-width: 0; }
 .todo-case-task label { margin: 6px 0; }
 .todo-dialog textarea { width: 100%; min-height: 70px; }
 .todo-summary button:focus-visible, .todo-dash button:focus-visible, .todo-dash input:focus-visible, .todo-dialog :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* Case management reuses the existing dashboard and native form controls. */
+.case-next-task { margin: 10px 0; padding: 10px; border: 1px solid var(--border); border-radius: 6px; cursor: default; overflow-wrap: anywhere; }
+.case-management-tools, .today-management { padding: 10px 12px; }
+.today-management section { margin-bottom: 18px; }
+.today-management h3 { font-size: 13px; margin: 8px 0; }
+.today-management details, .today-hearings { margin: 12px 0; }
+.today-management summary, .today-hearings summary { cursor: pointer; }
+.today-management .agenda-body, .today-management .todo-actions { min-width: 0; white-space: normal; overflow-wrap: anywhere; }
+.today-management .agenda-row { align-items: flex-start; }
+.today-management .todo-actions { margin-top: 6px; display: flex; flex-wrap: wrap; }
+.case-focus-add { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+.case-focus-add select { max-width: 100%; min-width: 0; }
+.case-task-panel .todo-create { display: flex; flex-wrap: wrap; min-width: 0; }
+.case-task-panel label, .todo-details label { max-width: 100%; }
+.case-task-panel input, .todo-details input, .todo-details select { max-width: 100%; min-width: 0; }
+.case-task-item { border-top: 1px solid var(--border); padding: 12px 0; overflow-wrap: anywhere; }
+.case-recovery-body { border: 0; padding: 0; margin: 0; min-width: 0; }
+.today-hearings li { margin: 8px 0; overflow-wrap: anywhere; }
+.case-task-panel .todo-actions { flex-wrap: wrap; justify-content: flex-start; }

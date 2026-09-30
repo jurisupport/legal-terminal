@@ -27,6 +27,7 @@ export function onAgentMcpAccountChange(listener: () => void): () => void {
 }
 export function agentMcpAccountEpoch(): number { return accountEpoch }
 let accountEpoch = 0
+let changingCredentials = 0
 let sessionId: string | null = null
 let toolQueue: Promise<void> = Promise.resolve()
 // Leave headroom below the API's 100 requests/minute; the shared queue also covers detail reads.
@@ -49,19 +50,22 @@ const todoCaseCache = new Map<string, JsCase | null>()
 // ── 토큰 저장/조회 (safeStorage 암호화, 불가 시 평문 폴백) ──
 export async function setToken(token: string): Promise<void> {
   accountEpoch++
-  for (const listener of agentAccountListeners) listener()
-  let enc: string
-  if (token && safeStorage.isEncryptionAvailable()) {
-    enc = 'v1:' + safeStorage.encryptString(token).toString('base64')
-  } else {
-    enc = 'plain:' + token
-  }
-  await setSettings({ jurisupportTokenEnc: token ? enc : undefined })
-  accountEpoch++ // Requests begun during credential persistence also belong to the old account.
-  sessionId = null // 토큰 바뀌면 세션 무효화
-  toolQueue = Promise.resolve()
-  nextMcpPostAt = 0
+  changingCredentials++
   clearJuriSupportCaches()
+  for (const listener of agentAccountListeners) listener()
+  try {
+    const enc = token && safeStorage.isEncryptionAvailable()
+      ? 'v1:' + safeStorage.encryptString(token).toString('base64')
+      : 'plain:' + token
+    await setSettings({ jurisupportTokenEnc: token ? enc : undefined })
+  } finally {
+    changingCredentials--
+    accountEpoch++ // Invalidate requests begun during credential persistence, including failures.
+    sessionId = null
+    toolQueue = Promise.resolve()
+    nextMcpPostAt = 0
+    clearJuriSupportCaches()
+  }
 }
 
 async function getToken(): Promise<string | null> {
@@ -125,7 +129,7 @@ async function rawPost(
     while (epoch === accountEpoch && Date.now() < nextMcpPostAt) {
       await new Promise<void>((resolve) => setTimeout(resolve, Math.min(nextMcpPostAt - Date.now(), 60_000)))
     }
-    if (epoch !== accountEpoch) throw new Error('계정이 변경되었습니다. 다시 조회해 주세요.')
+    if (changingCredentials || epoch !== accountEpoch) throw new Error('계정이 변경되었습니다. 다시 조회해 주세요.')
     nextMcpPostAt = Date.now() + MCP_REQUEST_INTERVAL_MS
     // Only the network attempt has a timeout; pacing/backoff must not consume it.
     const ctrl = new AbortController()
@@ -141,7 +145,7 @@ async function rawPost(
     } finally {
       clearTimeout(timer)
     }
-    if (epoch !== accountEpoch) throw new Error('계정이 변경되었습니다. 다시 조회해 주세요.')
+    if (changingCredentials || epoch !== accountEpoch) throw new Error('계정이 변경되었습니다. 다시 조회해 주세요.')
     const rpc = parseRpc(text)
     const result = rpc?.result as { isError?: boolean; content?: { type: string; text: string }[] } | undefined
     const errorText = rpc?.error?.message ?? (result?.isError ? result.content?.filter((c) => c.type === 'text').map((c) => c.text).join('\n') : '') ?? ''
@@ -174,7 +178,7 @@ async function ensureSession(token: string, epoch: number): Promise<void> {
     throw new Error('MCP 초기화 실패: ' + (err?.error?.message ?? `HTTP ${init.status}`))
   }
   await rawPost(token, { jsonrpc: '2.0', method: 'notifications/initialized' }, init.sid, epoch)
-  if (epoch !== accountEpoch) throw new Error('계정이 변경되었습니다. 다시 조회해 주세요.')
+  if (changingCredentials || epoch !== accountEpoch) throw new Error('계정이 변경되었습니다. 다시 조회해 주세요.')
   sessionId = init.sid
 }
 
@@ -263,9 +267,9 @@ async function enqueueMcp<T>(run: () => Promise<T>): Promise<T> {
 
 async function callTool(name: string, args: Record<string, unknown>, epoch = accountEpoch): Promise<unknown> {
   return enqueueMcp(async () => {
-    if (epoch !== accountEpoch) throw new Error('계정이 변경되었습니다. 다시 조회해 주세요.')
+    if (changingCredentials || epoch !== accountEpoch) throw new Error('계정이 변경되었습니다. 다시 조회해 주세요.')
     const result = await callToolNow(name, args, epoch)
-    if (epoch !== accountEpoch) throw new Error('계정이 변경되었습니다. 다시 조회해 주세요.')
+    if (changingCredentials || epoch !== accountEpoch) throw new Error('계정이 변경되었습니다. 다시 조회해 주세요.')
     return result
   })
 }
@@ -318,10 +322,16 @@ export interface TodoCapabilities {
   evidenceSuggestions: boolean
   caseClosure: boolean
   caseEngagement: boolean
+  taskAssignees?: boolean
 }
 export interface JsTodo {
+  assigneeName?: string | null
   type?: 'todo' | 'memo'
   reviewAt?: string | null
+  waitingFor?: string | null
+  assigneeId?: string | null
+  visibility?: 'private' | 'team' | 'company'
+  teamId?: number | null
   parentId?: string | null
   children?: { id: string; title: string; status: string }[]
   evidence?: TodoEvidence[]
@@ -366,6 +376,10 @@ export interface ListTodosParams {
 export interface TodoMutationInput extends TodoStatusOptions {
   type?: 'todo' | 'memo'
   reviewAt?: string | null
+  waitingFor?: string | null
+  assigneeId?: string | null
+  visibility?: 'private' | 'team' | 'company'
+  teamId?: number | null
   parentId?: string | null
   evidence?: TodoEvidence[]
   title?: string
@@ -604,6 +618,11 @@ function normalizeTodoFields(value: Record<string, unknown>): JsTodo | null {
     id,
     type: value.type === 'memo' ? 'memo' : 'todo',
     reviewAt: stringFrom(value.reviewAt) ?? null,
+    waitingFor: stringFrom(value.waitingFor) ?? null,
+    assigneeId: stringFrom(value.assigneeId) ?? stringFrom(asObject(value.assignee)?.id) ?? null,
+    assigneeName: stringFrom(asObject(value.assignee)?.name) ?? stringFrom(value.assigneeName) ?? null,
+    visibility: ['private', 'team', 'company'].includes(String(value.visibility)) ? value.visibility as JsTodo['visibility'] : undefined,
+    teamId: typeof value.teamId === 'number' ? value.teamId : null,
     parentId: stringFrom(value.parentId) ?? null,
     children: Array.isArray(value.openDescendants ?? value.children) ? ((value.openDescendants ?? value.children) as unknown[]).flatMap((child) => {
       const c = asObject(child)
@@ -789,6 +808,7 @@ export function todoCapabilities(): Promise<TodoCapabilities> {
       return {
         queryFields: fields('list_tasks'), createFields: writable('create_task'), updateFields: writable('update_task'),
         statusFields: fields('update_task_status'),
+        taskAssignees: tools.some((t) => t.name === 'list_task_assignees'),
         evidenceSuggestions: tools.some((t) => t.name === 'get_task_evidence_suggestions'),
         caseClosure: tools.some((t) => t.name === 'get_case_closure_preview') && ['taskDispositions', 'version'].every((field) => fields('update_case_status').includes(field)),
         caseEngagement: ['engagementStatus', 'taskDispositions', 'version'].every((field) => fields('update_case').includes(field))
@@ -817,9 +837,12 @@ async function taskListArgs(params: ListTodosParams): Promise<Record<string, unk
 }
 
 async function taskWriteArgs(input: TodoMutationInput, create: boolean): Promise<Record<string, unknown>> {
+  if (input.assigneeId !== undefined && input.assigneeId !== null && !input.assigneeId.trim()) throw new Error('담당자 식별자를 확인해 주세요.')
+  if (input.visibility !== undefined && !['private', 'team', 'company'].includes(input.visibility)) throw new Error('공개 범위를 확인해 주세요.')
+  if (input.teamId !== undefined && input.teamId !== null && (!Number.isSafeInteger(input.teamId) || input.teamId <= 0)) throw new Error('팀 식별자를 확인해 주세요.')
   const args = compactRecord({ title: input.title, content: mergeCaseInfoWithNotes(input), dueDate: toMcpDateTime(input.dueDate), type: create ? input.type ?? 'todo' : input.type, caseId: create ? input.caseId : undefined })
   if (input.notes !== undefined && !mergeCaseInfoWithNotes(input)) args.content = ''
-  const extras = compactRecord({ reviewAt: toMcpDateTime(input.reviewAt), parentId: input.parentId, evidence: input.evidence, priority: input.priority === undefined ? undefined : normalizePriority(input.priority), version: input.version })
+  const extras = compactRecord({ waitingFor: input.waitingFor === undefined ? undefined : input.waitingFor?.trim() || null, assigneeId: input.assigneeId, visibility: input.visibility, teamId: input.teamId, reviewAt: toMcpDateTime(input.reviewAt), parentId: input.parentId, evidence: input.evidence, priority: input.priority === undefined ? undefined : normalizePriority(input.priority), version: input.version })
   if (input.priority !== undefined && !normalizePriority(input.priority)) throw new Error('중요도를 확인해 주세요.')
   if (Object.keys(extras).length || (!create && input.type)) {
     const capabilities = await todoCapabilities()
@@ -855,6 +878,7 @@ function clearJuriSupportCaches(): void {
   todoCaseCache.clear()
   caseListCache.clear()
   caseListInflight.clear()
+  upcomingHearingsInflight = null
   officeInflight = null
   // 계정이 바뀌면 이전 사무실 정보(로고·연락처)를 쓰면 안 된다.
   rm(officeCachePath(), { force: true }).catch(() => {})
@@ -903,6 +927,72 @@ async function listCasesFresh(params: CaseListQuery): Promise<JsCase[]> {
   throw new Error('사건 전체 조회 상한에 도달했습니다. 전체 목록을 확인할 수 없습니다.')
 }
 
+export interface JsUpcomingHearing {
+  id: string
+  dateTime: string
+  type: string
+  status?: string
+  location?: string | null
+  note?: string | null
+  case: JsCase
+}
+export interface UpcomingHearingsResult { hearings: JsUpcomingHearing[]; fetchedAt: string; complete: true }
+let upcomingHearingsInflight: Promise<UpcomingHearingsResult> | null = null
+export function upcomingHearings(): Promise<UpcomingHearingsResult> {
+  if (upcomingHearingsInflight) return upcomingHearingsInflight
+  const epoch = accountEpoch
+  const day = kstDateKey(new Date())
+  const dateFrom = `${day}T00:00:00+09:00`
+  const checkDay = (): void => {
+    if (kstDateKey(new Date()) !== day) throw new Error('조회 중 한국 시간 기준 날짜가 변경되었습니다. 전체 기일을 다시 조회해 주세요.')
+  }
+  const dateTo = new Date(Date.parse(dateFrom) + 7 * 86400000).toISOString()
+  const request = (async (): Promise<UpcomingHearingsResult> => {
+    const hearings = new Map<string, JsUpcomingHearing>()
+    for (let page = 0; page < 100; page++) {
+      checkDay()
+      const raw = asObject(await callTool('list_upcoming_hearings', { skip: page * 100, take: 100, dateTo }, epoch))
+      checkDay()
+      const data = asObject(raw?.data) ?? raw
+      if (raw?.success === false || raw?.error || !Array.isArray(data?.items) || typeof data.hasMore !== 'boolean') throw new Error('전체 기일 목록 응답을 확인할 수 없습니다. 서버 업데이트 후 다시 조회해 주세요.')
+      if (data.items.length > 100 || (page > 0 && data.items.length === 0)) throw new Error('기일 일부가 누락되었거나 잘못된 페이지입니다. 전체 조회를 다시 시도해 주세요.')
+      for (const value of data.items) {
+        const item = asObject(value)
+        const id = stringFrom(item?.id) ?? (typeof item?.id === 'number' && Number.isSafeInteger(item.id) && item.id > 0 ? String(item.id) : undefined)
+        const dateTime = stringFrom(item?.dateTime)
+        const jsCase = normalizeCase(item?.case)
+        if (!id || !dateTime || !kstDateKey(dateTime) || !/(?:Z|[+-]\d{2}:\d{2})$/i.test(dateTime) || !jsCase) throw new Error('식별자·일시·사건 정보가 없는 기일입니다. 전체 목록을 확인할 수 없습니다.')
+        if (hearings.has(id)) throw new Error('기일 조회 페이지가 반복되거나 중복되었습니다. 다시 조회해 주세요.')
+        hearings.set(id, { id, dateTime, type: stringFrom(item?.type) ?? '기일', status: stringFrom(item?.status), location: stringFrom(item?.location) ?? null, note: stringFrom(item?.note) ?? null, case: jsCase })
+      }
+      if (!data.hasMore) {
+        checkDay()
+        if (changingCredentials || epoch !== accountEpoch) throw new Error('계정이 변경되었습니다. 다시 조회해 주세요.')
+        return { hearings: [...hearings.values()].sort((a, b) => Date.parse(a.dateTime) - Date.parse(b.dateTime) || a.id.localeCompare(b.id)), fetchedAt: new Date().toISOString(), complete: true }
+      }
+      if (data.items.length !== 100) throw new Error('기일 일부가 누락되었습니다. 전체 조회를 다시 시도해 주세요.')
+    }
+    throw new Error('기일 전체 조회 상한에 도달했습니다. 전체 목록을 확인할 수 없습니다.')
+  })().finally(() => { if (upcomingHearingsInflight === request) upcomingHearingsInflight = null })
+  upcomingHearingsInflight = request
+  return request
+}
+
+export interface TodoAssigneesParams { taskId?: string; caseId?: string; visibility?: 'private' | 'team' | 'company'; teamId?: number }
+export async function todoAssignees(params: TodoAssigneesParams): Promise<{ id: string; name: string }[]> {
+  const epoch = accountEpoch
+  if (!(await todoCapabilities()).taskAssignees) throw new Error('서버가 담당자 후보 조회를 지원하지 않습니다. 서버 업데이트 후 다시 시도해 주세요.')
+  const raw = asObject(await callTool('list_task_assignees', compactRecord({ taskId: params.taskId, caseId: params.caseId, visibility: params.visibility, teamId: params.teamId }), epoch))
+  if (raw?.success === false || raw?.error || !Array.isArray(raw?.data)) throw new Error('담당자 후보 응답을 확인할 수 없습니다.')
+  return raw.data.map((value) => {
+    const item = asObject(value)
+    const id = stringFrom(item?.id)
+    if (!id || (item?.name != null && typeof item.name !== 'string')) throw new Error('담당자 후보 정보가 올바르지 않습니다.')
+    const name = stringFrom(item?.name) ?? '이름 미등록'
+    return { id, name }
+  })
+}
+
 export interface JsHearingSummary { todayCount: number; weekCount: number; fetchedAt: string }
 export async function hearingSummary(): Promise<JsHearingSummary> {
   const epoch = accountEpoch
@@ -919,7 +1009,7 @@ export async function hearingSummary(): Promise<JsHearingSummary> {
       typeof weekCount !== 'number' || !Number.isSafeInteger(weekCount) || weekCount < todayCount) {
     throw new Error('서버에서 한국 시간 기준 오늘·7일 기일 집계를 확인할 수 없습니다. 서버 업데이트 후 다시 조회해 주세요.')
   }
-  if (epoch !== accountEpoch) throw new Error('계정이 변경되었습니다. 다시 조회해 주세요.')
+  if (changingCredentials || epoch !== accountEpoch) throw new Error('계정이 변경되었습니다. 다시 조회해 주세요.')
   return { todayCount, weekCount, fetchedAt: new Date().toISOString() }
 }
 
@@ -939,7 +1029,7 @@ export async function listCases(params: ListCasesParams = {}): Promise<JsCase[]>
 
   const request = listCasesFresh(query)
     .then((cases) => {
-      if (epoch !== accountEpoch) throw new Error('계정이 변경되었습니다. 다시 조회해 주세요.')
+      if (changingCredentials || epoch !== accountEpoch) throw new Error('계정이 변경되었습니다. 다시 조회해 주세요.')
       caseListCache.set(key, { fetchedAt: Date.now(), cases })
       return cases
     })
@@ -1020,10 +1110,10 @@ export function listTodos(params: ListTodosParams = {}): Promise<JsTodo[]> {
         unique.set(todo.id, todo)
       }
     }
-    if (epoch !== accountEpoch) throw new Error('계정이 변경되었습니다. 다시 조회해 주세요.')
+    if (changingCredentials || epoch !== accountEpoch) throw new Error('계정이 변경되었습니다. 다시 조회해 주세요.')
     const result = [...unique.values()]
     const enriched = params.enrichCaseDetails === false ? result : await enrichTodos(result)
-    if (epoch !== accountEpoch) throw new Error('계정이 변경되었습니다. 다시 조회해 주세요.')
+    if (changingCredentials || epoch !== accountEpoch) throw new Error('계정이 변경되었습니다. 다시 조회해 주세요.')
     return enriched
   })().finally(() => { if (todoListInflight.get(key) === request) todoListInflight.delete(key) })
   todoListInflight.set(key, request)
@@ -1126,9 +1216,9 @@ export async function appendTodoProgress(
   const epoch = accountEpoch
   const todo = await getTodo(id)
   if (!todo) throw new Error('할일 원문을 확인할 수 없습니다. 다시 조회해 주세요.')
-  if (epoch !== accountEpoch) throw new Error('계정이 변경되었습니다. 다시 조회해 주세요.')
+  if (changingCredentials || epoch !== accountEpoch) throw new Error('계정이 변경되었습니다. 다시 조회해 주세요.')
   if (todo.version === undefined || !(await todoCapabilities()).updateFields.includes('version')) throw new Error('진행 기록을 안전하게 추가하려면 서버 업데이트가 필요합니다.')
-  if (epoch !== accountEpoch) throw new Error('계정이 변경되었습니다. 다시 조회해 주세요.')
+  if (changingCredentials || epoch !== accountEpoch) throw new Error('계정이 변경되었습니다. 다시 조회해 주세요.')
   const content = appendProgressContent(todo.notes, text, context)
   return updateTodo(id, { notes: content, version: todo.version })
 }

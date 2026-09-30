@@ -58,6 +58,7 @@ export interface WorkspaceListResult {
 }
 
 export interface AutomaticWorkspaceLocation {
+  caseId?: string
   cwd: string
   profileId?: string
   ssh?: SshProfileLike
@@ -105,14 +106,15 @@ function workspaceSnapshotPath(id: string): string {
   return join(workspaceStoreDir(), `${id}.json`)
 }
 
-export function workspaceIdForLocation(cwd: string, profileId?: string): string {
-  const key = profileId ? `auto-workspace:${profileId}:${cwd}` : `auto-workspace:${cwd}`
+export function workspaceIdForLocation(cwd: string, profileId?: string, caseId?: string): string {
+  const key = caseId
+    ? JSON.stringify(['case-workspace', profileId ?? null, cwd, caseId])
+    : profileId ? `auto-workspace:${profileId}:${cwd}` : `auto-workspace:${cwd}`
   return createHash('sha256').update(key).digest('hex').slice(0, 16)
 }
 
-function sharedWorkspacePath(cwd: string): string {
-  const id = createHash('sha256').update(cwd).digest('hex').slice(0, 24)
-  return join(homedir(), '.claude', 'legal-terminal-workspaces', `${id}.json`)
+function sharedWorkspacePath(cwd: string, caseId?: string): string {
+  return join(homedir(), '.claude', 'legal-terminal-workspaces', sharedRemoteFile(cwd, caseId))
 }
 
 function isSnapshot(value: unknown): value is WorkspaceSnapshot {
@@ -127,6 +129,35 @@ function asRecord(value: unknown): Record<string, unknown> | null {
 
 function asString(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim() ? value : undefined
+}
+
+/** A folder match alone is never evidence that a legacy snapshot belongs to this case. */
+export function snapshotMatchesCase(snapshot: WorkspaceSnapshot, caseId: string): boolean {
+  const currentCase = asRecord(snapshot.currentCase)
+  const tabs = Array.isArray(snapshot.caseTabs) ? snapshot.caseTabs : []
+  const terminals = Array.isArray(snapshot.terminals) ? snapshot.terminals : []
+  const ids = [
+    asString(asRecord(currentCase?.meta)?.jsId),
+    ...tabs.map((tab) => asString(asRecord(asRecord(tab)?.meta)?.jsId)),
+    ...terminals.map((term) => asString(asRecord(term)?.jsId))
+  ].filter((id): id is string => id !== undefined)
+  return ids.length > 0 && ids.every((id) => id === caseId)
+}
+
+async function loadCaseWorkspace(
+  load: (caseId?: string) => Promise<WorkspaceLoadResult>,
+  caseId?: string
+): Promise<WorkspaceLoadResult> {
+  const exact = await load(caseId)
+  if (!caseId || !exact.ok) return exact
+  if (exact.snapshot) {
+    return snapshotMatchesCase(exact.snapshot, caseId)
+      ? exact
+      : { ok: false, path: exact.path, error: '저장된 작업환경의 사건 정보가 일치하지 않아 복원하지 않았습니다.' }
+  }
+  const legacy = await load()
+  if (!legacy.ok || !legacy.snapshot || snapshotMatchesCase(legacy.snapshot, caseId)) return legacy
+  return { ok: true, path: legacy.path, snapshot: null, error: '이전 작업환경의 사건 정보를 확인할 수 없어 복원하지 않았습니다.' }
 }
 
 function arrayLength(value: unknown): number {
@@ -230,29 +261,30 @@ async function loadSnapshotFile(filePath: string): Promise<WorkspaceLoadResult> 
   }
 }
 
-async function saveSharedLocal(snapshot: WorkspaceSnapshot, cwd: string): Promise<void> {
-  const path = sharedWorkspacePath(cwd)
+async function saveSharedLocal(snapshot: WorkspaceSnapshot, cwd: string, caseId?: string): Promise<void> {
+  const path = sharedWorkspacePath(cwd, caseId)
   const tmp = `${path}.${process.pid}.${++sharedWriteSeq}.tmp`
   await mkdir(dirname(path), { recursive: true })
   await writeFile(tmp, JSON.stringify(snapshot, null, 2), 'utf8')
   await rename(tmp, path)
 }
 
-function sharedRemoteFile(cwd: string): string {
-  return `${createHash('sha256').update(cwd).digest('hex').slice(0, 24)}.json`
+function sharedRemoteFile(cwd: string, caseId?: string): string {
+  const key = caseId ? JSON.stringify(['case-workspace', cwd, caseId]) : cwd
+  return `${createHash('sha256').update(key).digest('hex').slice(0, 24)}.json`
 }
 
-function loadSharedRemote(ssh: SshProfileLike, cwd: string): Promise<WorkspaceLoadResult> {
-  const name = sharedRemoteFile(cwd)
-  const command = `file="$HOME/.claude/legal-terminal-workspaces/${name}"; [ -f "$file" ] && cat "$file"`
+function loadSharedRemote(ssh: SshProfileLike, cwd: string, caseId?: string): Promise<WorkspaceLoadResult> {
+  const name = sharedRemoteFile(cwd, caseId)
+  const command = `file="$HOME/.claude/legal-terminal-workspaces/${name}"; if [ -e "$file" ]; then cat "$file"; else exit 3; fi`
   return new Promise((resolve) => {
     execFile(
       sshBin,
       [...buildSshArgs(ssh, { usage: 'oneshot' }), command],
       { timeout: SHARED_WORKSPACE_TIMEOUT_MS, windowsHide: true, maxBuffer: SHARED_WORKSPACE_MAX_BYTES },
       (error, stdout) => {
-        if (error || !stdout.trim()) {
-          resolve({ ok: true, snapshot: null })
+        if (error) {
+          resolve(error.code === 3 ? { ok: true, snapshot: null } : { ok: false, error: String(error) })
           return
         }
         try {
@@ -273,9 +305,10 @@ function loadSharedRemote(ssh: SshProfileLike, cwd: string): Promise<WorkspaceLo
 function saveSharedRemote(
   ssh: SshProfileLike,
   cwd: string,
-  snapshot: WorkspaceSnapshot
+  snapshot: WorkspaceSnapshot,
+  caseId?: string
 ): Promise<void> {
-  const name = sharedRemoteFile(cwd)
+  const name = sharedRemoteFile(cwd, caseId)
   const command = [
     'dir="$HOME/.claude/legal-terminal-workspaces"',
     `file="$dir/${name}"`,
@@ -485,17 +518,20 @@ export async function saveAutomaticWorkspace(
   snapshot: WorkspaceSnapshot,
   location: AutomaticWorkspaceLocation
 ): Promise<WorkspaceSaveResult & { remoteError?: string }> {
+  if (location.caseId && !snapshotMatchesCase(snapshot, location.caseId)) {
+    return { ok: false, error: '작업환경의 사건 정보가 일치하지 않아 저장하지 않았습니다.' }
+  }
   const savedSnapshot: WorkspaceSnapshot = {
     ...snapshot,
-    workspaceId: workspaceIdForLocation(location.cwd, location.profileId),
+    workspaceId: workspaceIdForLocation(location.cwd, location.profileId, location.caseId),
     workspaceLabel: snapshot.workspaceLabel || displayNameFromPath(location.cwd) || '사건 작업환경',
     workspaceDevice: hostname()
   }
   const local = await saveWorkspaceSnapshot(savedSnapshot)
   if (!local.ok) return local
   try {
-    if (location.ssh) await saveSharedRemote(location.ssh, location.cwd, savedSnapshot)
-    else await saveSharedLocal(savedSnapshot, location.cwd)
+    if (location.ssh) await saveSharedRemote(location.ssh, location.cwd, savedSnapshot, location.caseId)
+    else await saveSharedLocal(savedSnapshot, location.cwd, location.caseId)
     return local
   } catch (e) {
     // 로컬 자동 저장은 성공했으므로 복원 가능하다. 원격 실패만 별도로 알려 다음 변경 때 재시도한다.
@@ -506,9 +542,14 @@ export async function saveAutomaticWorkspace(
 export async function loadAutomaticWorkspace(
   location: AutomaticWorkspaceLocation
 ): Promise<AutomaticWorkspaceLoadResult> {
-  const local = await loadWorkspaceSnapshot(workspaceIdForLocation(location.cwd, location.profileId))
+  const local = await loadCaseWorkspace(
+    (caseId) => loadWorkspaceSnapshot(workspaceIdForLocation(location.cwd, location.profileId, caseId)),
+    location.caseId
+  )
   if (!location.ssh) {
-    const shared = await loadSnapshotFile(sharedWorkspacePath(location.cwd))
+    const shared = await loadCaseWorkspace(
+      (caseId) => loadSnapshotFile(sharedWorkspacePath(location.cwd, caseId)), location.caseId
+    )
     return {
       ok: local.ok && shared.ok,
       local,
@@ -516,7 +557,9 @@ export async function loadAutomaticWorkspace(
       error: local.error || shared.error
     }
   }
-  const remote = await loadSharedRemote(location.ssh, location.cwd)
+  const remote = await loadCaseWorkspace(
+    (caseId) => loadSharedRemote(location.ssh!, location.cwd, caseId), location.caseId
+  )
   return {
     ok: local.ok && remote.ok,
     local,

@@ -48,3 +48,10 @@ const pending = currentAgentContext(scope, () => new Promise(() => {}), abort.si
 abort.abort()
 await pending
 console.log('workspace scopes and current case todo context ok')
+
+const focused = await currentAgentContext({ ...scope, selectedTaskId: '21' }, async () =>
+  Array.from({ length: 22 }, (_, i) => ({ id: String(i), title: `task ${i}`, caseId: scope.caseId, status: 'pending' })))
+assert.match(focused, /"selectedTaskId":"21","tasks":\[\{"id":"21"/)
+assert.doesNotMatch(await currentAgentContext({ ...scope, selectedTaskId: 'foreign' }, lookup), /foreign/)
+assert.doesNotMatch(await currentAgentContext({ ...scope, selectedTaskId: 'stale' }, async () => { throw Error('offline') }), /stale/)
+console.log('selected task is refreshed, scoped and kept in the preview')

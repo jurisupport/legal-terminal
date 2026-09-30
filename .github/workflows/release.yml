@@ -59,22 +59,16 @@ jobs:
       - name: Install dependencies
         run: npm ci --include=optional
 
-      - name: Verify task management
-        run: |
-          npm run typecheck
-          npm run verify:agent-runtime
-          npm run verify:todo-summary
-          npm run verify:todo-files
-          npm run verify:agent-case-context
-          npm run verify:agent-mcp
-          npm run verify:agent-todo
-          npm run verify:inline-selection
+      - name: Verify desktop and case-management runtime
+        run: npm run verify:desktop
 
-      - name: Verify native terminal binary
-        run: npm run verify:node-pty
-
-      - name: Build renderer/main (electron-vite)
-        run: npm run build
+      - name: Upload runtime evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-runtime-macos-${{ matrix.arch }}
+          path: .omx/screenshots/*.png
+          if-no-files-found: warn
 
       - name: Package macOS
         run: npx electron-builder --mac ${{ matrix.mac_targets }} --${{ matrix.arch }} --publish never
@@ -103,25 +97,22 @@ jobs:
       - name: Install dependencies
         run: npm ci --include=optional
 
-      - name: Verify native terminal binary
-        run: npm run verify:node-pty:win
-
-      - name: Verify task management
-        run: |
-          npm run typecheck
-          npm run verify:agent-runtime
-          npm run verify:todo-summary
-          npm run verify:todo-files
-          npm run verify:agent-case-context
-          npm run verify:agent-mcp
-          npm run verify:agent-todo
-          npm run verify:inline-selection
-
-      - name: Build renderer/main (electron-vite)
-        run: npm run build
+      - name: Verify desktop and case-management runtime
+        run: npm run verify:desktop
 
       - name: Package Windows
         run: npx electron-builder --win --publish never
+
+      - name: Verify installed Windows application
+        run: npm run verify:installed-windows
+
+      - name: Upload runtime evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-runtime-windows-x64
+          path: .omx/screenshots/*
+          if-no-files-found: warn
 
       - name: Upload Windows
         run: gh release upload $env:GITHUB_REF_NAME dist/legal-terminal-Setup.exe dist/legal-terminal-Setup.exe.blockmap dist/legal-terminal-portable.exe dist/latest.yml --clobber
