@@ -4,7 +4,7 @@ import type { AgentPermissionMode } from './agent-types'
 export const MANAGED_MCP = 'legal_terminal_jurisupport'
 export const MANAGED_MCP_ENV = 'LEGAL_TERMINAL_JURISUPPORT_TOKEN'
 export const MANAGED_MCP_URL = 'https://api.jurisupport.com/mcp'
-export const MCP_READ_TOOLS = new Set(['list_tasks', 'get_task', 'get_task_evidence_suggestions', 'get_case', 'list_cases', 'get_case_closure_preview', 'get_dashboard', 'list_documents', 'get_document', 'list_legal_documents', 'get_legal_document', 'list_case_progresses', 'list_hearings', 'get_hearing', 'list_hearing_notes', 'list_case_evidence', 'list_case_instances', 'list_case_relations', 'list_document_versions', 'get_document_version'])
+export const MCP_READ_TOOLS = new Set(['list_upcoming_hearings', 'list_task_assignees', 'list_tasks', 'get_task', 'get_task_evidence_suggestions', 'get_case', 'list_cases', 'get_case_closure_preview', 'get_dashboard', 'list_documents', 'get_document', 'list_legal_documents', 'get_legal_document', 'list_case_progresses', 'list_hearings', 'get_hearing', 'list_hearing_notes', 'list_case_evidence', 'list_case_instances', 'list_case_relations', 'list_document_versions', 'get_document_version'])
 export const MCP_WRITE_TOOLS = new Set(['create_task', 'create_task_from_source', 'update_task', 'update_task_from_source', 'update_task_status', 'delete_task', 'update_case', 'update_case_status'])
 export interface ManagedMcpConnection { token: string; epoch: number; tools: string[] }
 

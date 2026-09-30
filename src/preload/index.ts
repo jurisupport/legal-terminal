@@ -1,3 +1,5 @@
+import type { JsUpcomingHearing, TodoAssigneesParams } from '../main/jurisupport'
+import type { CaseManagementState, CaseManagementPatch } from '../shared/caseManagement'
 import type { AgentWorkspaceContext } from '../shared/agentWorkspaceContext'
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
 
@@ -83,6 +85,7 @@ interface PtyCreateOpts {
 }
 
 interface TerminalTabPayload {
+  selectedTaskId?: string
   contextKind?: 'case' | 'global' | 'folder'
   todoManagement?: boolean
   id: string
@@ -152,6 +155,7 @@ interface WorkspaceDocTabPayload {
 }
 
 interface WorkspaceCaseTabPayload {
+  selectedTaskId?: string
   contextKind?: 'case' | 'global' | 'folder'
   id: string
   name: string
@@ -290,6 +294,7 @@ interface WorkspaceListResult {
 }
 
 interface AutomaticWorkspaceLocation {
+  caseId?: string
   cwd: string
   profileId?: string
   ssh?: SshConn
@@ -490,10 +495,16 @@ interface TodoCapabilities {
   statusFields: string[]
   evidenceSuggestions: boolean
   caseClosure: boolean
+  taskAssignees?: boolean
 }
 interface JsTodo {
+  assigneeName?: string | null
   type?: 'todo' | 'memo'
   reviewAt?: string | null
+  waitingFor?: string | null
+  assigneeId?: string | null
+  visibility?: 'private' | 'team' | 'company'
+  teamId?: number | null
   parentId?: string | null
   children?: { id: string; title: string; status: string }[]
   evidence?: TodoEvidence[]
@@ -540,6 +551,10 @@ interface ListTodosParams {
 interface TodoMutationInput extends TodoStatusOptions {
   type?: 'todo' | 'memo'
   reviewAt?: string | null
+  waitingFor?: string | null
+  assigneeId?: string | null
+  visibility?: 'private' | 'team' | 'company'
+  teamId?: number | null
   parentId?: string | null
   evidence?: TodoEvidence[]
   title?: string
@@ -780,6 +795,10 @@ const api = {
       { path: string; name: string; width: number; height: number; error?: never } | { error: string } | null
     > => ipcRenderer.invoke('dialog:pickOfficeLogo')
   },
+  caseManagement: {
+    get: (): Promise<{ ok: boolean; state?: CaseManagementState; error?: string }> => ipcRenderer.invoke('caseManagement:get'),
+    update: (input: CaseManagementPatch): Promise<{ ok: boolean; state?: CaseManagementState; error?: string }> => ipcRenderer.invoke('caseManagement:update', input)
+  },
   settings: {
     get: (): Promise<AppSettings> => ipcRenderer.invoke('settings:get'),
     set: (patch: Partial<AppSettings>): Promise<AppSettings> =>
@@ -960,6 +979,12 @@ const api = {
       ipcRenderer.invoke('case:addHistory', entry)
   },
   js: {
+    onTokenChanged: (cb: () => void): (() => void) => {
+      const listener = (): void => cb()
+      ipcRenderer.on('js:tokenChanged', listener)
+      return () => ipcRenderer.removeListener('js:tokenChanged', listener)
+    },
+    upcomingHearings: (): Promise<{ ok: boolean; hearings?: JsUpcomingHearing[]; fetchedAt?: string; error?: string; complete?: boolean }> => ipcRenderer.invoke('js:upcomingHearings'),
     setToken: (token: string): Promise<void> => ipcRenderer.invoke('js:setToken', token),
     hasToken: (): Promise<boolean> => ipcRenderer.invoke('js:hasToken'),
     hearingSummary: (): Promise<{ ok: boolean; summary?: { todayCount: number; weekCount: number; fetchedAt: string }; error?: string }> => ipcRenderer.invoke('js:hearingSummary'),
@@ -982,6 +1007,7 @@ const api = {
     updateCaseEngagement: (id: string, engagementStatus: string, taskDispositions?: CaseTaskDisposition[], version?: number): Promise<{ ok: boolean; case?: unknown; error?: string }> => ipcRenderer.invoke('js:updateCaseEngagement', { id, engagementStatus, taskDispositions, version })
   },
   todo: {
+    assignees: (params: TodoAssigneesParams): Promise<{ ok: boolean; assignees?: { id: string; name: string }[]; error?: string }> => ipcRenderer.invoke('todo:assignees', params),
     capabilities: (): Promise<{ ok: boolean; capabilities?: TodoCapabilities; error?: string }> => ipcRenderer.invoke('todo:capabilities'),
     evidenceSuggestions: (id: string): Promise<{ ok: boolean; candidates?: TodoEvidence[]; error?: string }> => ipcRenderer.invoke('todo:evidenceSuggestions', id),
     list: (params?: ListTodosParams): Promise<{ ok: boolean; todos?: JsTodo[]; error?: string }> =>

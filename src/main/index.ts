@@ -6,7 +6,7 @@ import { readdir, readFile, realpath, stat, writeFile, copyFile, rm, mkdir, rena
 import { existsSync, watch, type Dirent, type FSWatcher } from 'fs'
 import { fileURLToPath } from 'url'
 import { inflateRawSync } from 'zlib'
-import { getSettings, setSettings, type Settings } from './settings'
+import { getSettings, setSettings, getCaseManagementState, updateCaseManagementState, type Settings } from './settings'
 import { checkUpdate, compareVersions, fetchLatestRelease } from './update'
 import { promptBundledSkillInstall } from './skillInstall'
 import { imageInfo } from './imageSize'
@@ -736,9 +736,26 @@ ipcMain.handle('dialog:openCase', async () => {
 })
 
 // ── JuriSupport(본체) MCP IPC ──
-ipcMain.handle('js:setToken', (_e, token: string) => js.setToken(token))
+function broadcastJuriSupportTokenChange(): void {
+  for (const win of BrowserWindow.getAllWindows()) {
+    if (!win.isDestroyed() && !win.webContents.isDestroyed()) win.webContents.send('js:tokenChanged')
+  }
+}
+js.onAgentMcpAccountChange(broadcastJuriSupportTokenChange)
+ipcMain.handle('js:setToken', async (_e, token: string) => {
+  try { await js.setToken(token) }
+  finally { broadcastJuriSupportTokenChange() }
+})
 ipcMain.handle('js:hasToken', () => js.hasToken())
 ipcMain.handle('js:tokenStatus', () => js.tokenStatus())
+ipcMain.handle('js:upcomingHearings', async () => {
+  try { return { ok: true, ...await js.upcomingHearings() } }
+  catch (error) { return { ok: false, complete: false, error: String(error instanceof Error ? error.message : error) } }
+})
+ipcMain.handle('todo:assignees', async (_e, params: js.TodoAssigneesParams) => {
+  try { return { ok: true, assignees: await js.todoAssignees(params) } }
+  catch (error) { return { ok: false, error: String(error instanceof Error ? error.message : error) } }
+})
 ipcMain.handle('js:hearingSummary', async () => {
   try { return { ok: true, summary: await js.hearingSummary() } }
   catch (e) { return { ok: false, error: String(e instanceof Error ? e.message : e) } }
@@ -974,10 +991,18 @@ ipcMain.handle('workspace:importFile', async (e) => {
 })
 
 // ── 설정 IPC ──
-const publicSettings = ({ jurisupportTokenEnc: _js, openaiApiKeyEnc: _openai, ...settings }: Settings) => settings
+ipcMain.handle('caseManagement:get', async () => {
+  try { return { ok: true, state: await getCaseManagementState() } }
+  catch (error) { return { ok: false, error: String(error instanceof Error ? error.message : error) } }
+})
+ipcMain.handle('caseManagement:update', async (_e, input: Parameters<typeof updateCaseManagementState>[0]) => {
+  try { return { ok: true, state: await updateCaseManagementState(input) } }
+  catch (error) { return { ok: false, error: String(error instanceof Error ? error.message : error) } }
+})
+const publicSettings = ({ jurisupportTokenEnc: _js, openaiApiKeyEnc: _openai, caseManagementState: _caseManagement, ...settings }: Settings) => settings
 ipcMain.handle('settings:get', async () => publicSettings(await getSettings()))
 ipcMain.handle('settings:set', async (_e, patch: Partial<Settings>) => {
-  const { jurisupportTokenEnc: _js, openaiApiKeyEnc: _openai, ...safePatch } = patch
+  const { jurisupportTokenEnc: _js, openaiApiKeyEnc: _openai, caseManagementState: _caseManagement, ...safePatch } = patch
   return publicSettings(await setSettings(safePatch))
 })
 ipcMain.handle('dictation:keyStatus', () => dictationKeyStatus())

@@ -1,4 +1,5 @@
 /// <reference types="vite/client" />
+import type { CaseManagementState, CaseManagementPatch } from '../../shared/caseManagement'
 import type { AgentWorkspaceContext } from '../../shared/agentWorkspaceContext'
 
 export interface SshConn {
@@ -81,6 +82,7 @@ export interface PtyCreateOpts {
 }
 
 export interface TerminalTabPayload {
+  selectedTaskId?: string
   contextKind?: 'case' | 'global' | 'folder'
   todoManagement?: boolean
   id: string
@@ -150,6 +152,7 @@ export interface WorkspaceDocTabPayload {
 }
 
 export interface WorkspaceCaseTabPayload {
+  selectedTaskId?: string
   contextKind?: 'case' | 'global' | 'folder'
   id: string
   name: string
@@ -265,6 +268,7 @@ export interface WorkspaceListResult {
 }
 
 export interface AutomaticWorkspaceLocation {
+  caseId?: string
   cwd: string
   profileId?: string
   ssh?: SshConn
@@ -611,6 +615,9 @@ export interface JsCase {
   _count?: { parties: number; hearings: number; progresses: number; documents: number }
 }
 
+export interface JsUpcomingHearing extends JsHearing { id: string; case: JsCase }
+export interface TodoAssigneesParams { taskId?: string; caseId?: string; visibility?: 'private' | 'team' | 'company'; teamId?: number }
+
 export interface JsTodoProgress {
   id?: string
   text: string
@@ -655,10 +662,16 @@ export interface TodoCapabilities {
   statusFields: string[]
   evidenceSuggestions: boolean
   caseClosure: boolean
+  taskAssignees?: boolean
 }
 export interface JsTodo {
+  assigneeName?: string | null
   type?: 'todo' | 'memo'
   reviewAt?: string | null
+  waitingFor?: string | null
+  assigneeId?: string | null
+  visibility?: 'private' | 'team' | 'company'
+  teamId?: number | null
   parentId?: string | null
   children?: { id: string; title: string; status: string }[]
   evidence?: TodoEvidence[]
@@ -705,6 +718,10 @@ export interface ListTodosParams {
 export interface TodoMutationInput extends TodoStatusOptions {
   type?: 'todo' | 'memo'
   reviewAt?: string | null
+  waitingFor?: string | null
+  assigneeId?: string | null
+  visibility?: 'private' | 'team' | 'company'
+  teamId?: number | null
   parentId?: string | null
   evidence?: TodoEvidence[]
   title?: string
@@ -744,6 +761,8 @@ export interface TodoTerminalResult {
 
 export interface LtApi {
   js: {
+    onTokenChanged: (cb: () => void) => () => void
+    upcomingHearings: () => Promise<{ ok: boolean; hearings?: JsUpcomingHearing[]; fetchedAt?: string; error?: string; complete?: boolean }>
     setToken: (token: string) => Promise<void>
     hasToken: () => Promise<boolean>
     hearingSummary: () => Promise<{ ok: boolean; summary?: { todayCount: number; weekCount: number; fetchedAt: string }; error?: string }>
@@ -762,6 +781,7 @@ export interface LtApi {
     updateCaseEngagement: (id: string, engagementStatus: string, taskDispositions?: CaseTaskDisposition[], version?: number) => Promise<{ ok: boolean; case?: JsCase | null; error?: string }>
   }
   todo: {
+    assignees: (params: TodoAssigneesParams) => Promise<{ ok: boolean; assignees?: { id: string; name: string }[]; error?: string }>
     capabilities: () => Promise<{ ok: boolean; capabilities?: TodoCapabilities; error?: string }>
     evidenceSuggestions: (id: string) => Promise<{ ok: boolean; candidates?: TodoEvidence[]; error?: string }>
     list: (params?: ListTodosParams) => Promise<{ ok: boolean; todos?: JsTodo[]; error?: string }>
@@ -826,6 +846,10 @@ export interface LtApi {
       | { error: string }
       | null
     >
+  }
+  caseManagement: {
+    get: () => Promise<{ ok: boolean; state?: CaseManagementState; error?: string }>
+    update: (input: CaseManagementPatch) => Promise<{ ok: boolean; state?: CaseManagementState; error?: string }>
   }
   settings: {
     get: () => Promise<AppSettings>

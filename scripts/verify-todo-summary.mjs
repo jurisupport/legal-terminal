@@ -222,13 +222,13 @@ const caseRead=transport.api.listCases()
 while(!releaseCase)await new Promise(resolve=>setImmediate(resolve))
 await transport.api.setToken('synthetic-account-two');releaseCase()
 await assert.rejects(()=>caseRead,/계정/)
-let finishSettings, finishList
-transport=adapter(async()=>{await new Promise(resolve=>{finishList=resolve});return {data:[todo('during-save')]}},modernTools,{beforeSettings:()=>new Promise(resolve=>{finishSettings=resolve})})
+let finishSettings
+transport=adapter(async()=>assert.fail('no network request during credential persistence'),modernTools,{beforeSettings:()=>new Promise(resolve=>{finishSettings=resolve})})
 const credentialChange=transport.api.setToken('synthetic-committed')
 while(!finishSettings)await new Promise(resolve=>setImmediate(resolve))
-const duringSave=transport.api.listTodos({enrichCaseDetails:false})
-while(!finishList)await new Promise(resolve=>setImmediate(resolve))
-finishSettings();await credentialChange;finishList();await assert.rejects(()=>duringSave,/계정/)
+await assert.rejects(()=>transport.api.listTodos({enrichCaseDetails:false}),/계정/)
+assert.equal(transport.calls.length,0)
+finishSettings();await credentialChange
 transport=adapter((_name,args)=>({data:todo('must-not-write',args)}))
 await transport.api.todoCapabilities()
 const guardedWrite=transport.api.createTodo({title:'guarded',reviewAt:now})

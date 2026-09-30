@@ -1,6 +1,9 @@
 import { app } from 'electron'
 import { join } from 'path'
-import { readFile, writeFile, mkdir } from 'fs/promises'
+import { readFile, writeFile, mkdir, rename, rm } from 'fs/promises'
+import { randomUUID } from 'crypto'
+import { emptyCaseManagementUi, type CaseManagementUi, type CaseManagementState, type CaseManagementPatch } from '../shared/caseManagement'
+import { kstDateKey } from '../shared/todoSummary'
 import type { AgentPermissionMode, AgentProvider } from './agent/agent-types'
 
 /** SSH 접속 프로필 — 원격 서버에서 사건 작업(claude 실행 등)을 위한 저장된 연결. */
@@ -44,6 +47,8 @@ export interface OfficeProfileSettings {
 
 /** 앱 전역 설정 (userData/config.json에 영구 저장) */
 export interface Settings {
+  /** Personal ID references; updated only through the revision-checked case-management API. */
+  caseManagementState?: CaseManagementState
   /** 서면 푸터 사무실 정보 (직접 입력) */
   officeProfile?: OfficeProfileSettings
   /** 저장된 SSH 접속 프로필 목록 */
@@ -104,17 +109,111 @@ function configPath(): string {
   return join(app.getPath('userData'), 'config.json')
 }
 
-export async function getSettings(): Promise<Settings> {
+// All config writers share this queue; reads during a write wait for its atomic rename.
+let writes: Promise<unknown> = Promise.resolve()
+function serialized<T>(operation: () => Promise<T>): Promise<T> {
+  const result = writes.then(operation)
+  writes = result.catch(() => {})
+  return result
+}
+async function readSettings(): Promise<Settings> {
   try {
-    return JSON.parse(await readFile(configPath(), 'utf8')) as Settings
-  } catch {
-    return {}
+    const value = JSON.parse(await readFile(configPath(), 'utf8'))
+    if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('설정 파일 형식을 확인해 주세요.')
+    return value as Settings
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return {}
+    throw error
   }
 }
-
-export async function setSettings(patch: Partial<Settings>): Promise<Settings> {
-  const next = { ...(await getSettings()), ...patch }
+async function writeSettings(settings: Settings): Promise<void> {
   await mkdir(app.getPath('userData'), { recursive: true })
-  await writeFile(configPath(), JSON.stringify(next, null, 2), 'utf8')
-  return next
+  const temporary = `${configPath()}.${randomUUID()}.tmp`
+  try {
+    await writeFile(temporary, JSON.stringify(settings, null, 2), { encoding: 'utf8', mode: 0o600 })
+    await rename(temporary, configPath())
+  } finally {
+    await rm(temporary, { force: true }).catch(() => {})
+  }
+}
+function newCaseManagementState(): CaseManagementState {
+  return { generation: randomUUID(), revision: 0, ui: emptyCaseManagementUi() }
+}
+
+export async function getSettings(): Promise<Settings> {
+  await writes
+  return readSettings()
+}
+
+export function setSettings(patch: Partial<Settings>): Promise<Settings> {
+  const { caseManagementState: _ignored, ...safePatch } = structuredClone(patch)
+  return serialized(async () => {
+    const current = await readSettings()
+    const next = { ...current, ...safePatch }
+    // Reset even for token reissue/removal; old in-flight UI writes cannot enter the new connection.
+    if (Object.hasOwn(safePatch, 'jurisupportTokenEnc')) next.caseManagementState = newCaseManagementState()
+    await writeSettings(next)
+    return next
+  })
+}
+
+function validateUiPatch(value: unknown): Partial<CaseManagementUi> {
+  const fail = (): never => { throw new Error('사건 화면 설정 형식을 확인해 주세요.') }
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return fail()
+  const patch = value as Record<string, unknown>
+  const validId = (id: unknown): id is string => typeof id === 'string' && !!id.trim() && id.length <= 512
+  const ids = (value: unknown): string[] => {
+    if (!Array.isArray(value) || value.length > 20_000 || !value.every(validId)) return fail()
+    return [...new Set(value)]
+  }
+  const result: Partial<CaseManagementUi> = {}
+  for (const [key, entry] of Object.entries(patch)) {
+    if (key === 'selectedTaskByCase') {
+      if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return fail()
+      const pairs = Object.entries(entry)
+      if (pairs.length > 20_000 || pairs.some(([caseId, taskId]) => !validId(caseId) || !validId(taskId))) return fail()
+      result.selectedTaskByCase = Object.fromEntries(pairs)
+    } else if (key === 'focus' || key === 'previousFocus') {
+      if (entry === null) { result[key] = null; continue }
+      if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return fail()
+      const focus = entry as Record<string, unknown>
+      if (Object.keys(focus).some(field => !['date', 'taskIds'].includes(field)) || typeof focus.date !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(focus.date) || kstDateKey(focus.date) !== focus.date) return fail()
+      result[key] = { date: focus.date, taskIds: ids(focus.taskIds) }
+    } else if (key === 'recovery') {
+      if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return fail()
+      const recovery = entry as Record<string, unknown>
+      if (Object.keys(recovery).some(field => !['caseId', 'seenCaseIds'].includes(field)) || (recovery.caseId !== null && !validId(recovery.caseId))) return fail()
+      result.recovery = { caseId: recovery.caseId as string | null, seenCaseIds: ids(recovery.seenCaseIds) }
+    } else return fail()
+  }
+  return result
+}
+
+export function getCaseManagementState(): Promise<CaseManagementState> {
+  return serialized(async () => {
+    const settings = await readSettings()
+    if (settings.caseManagementState) return settings.caseManagementState
+    const state = newCaseManagementState()
+    await writeSettings({ ...settings, caseManagementState: state })
+    return state
+  })
+}
+
+export function updateCaseManagementState(input: CaseManagementPatch): Promise<CaseManagementState> {
+  // Snapshot and validate IPC input before entering the queue.
+  if (!input || typeof input.generation !== 'string' || !Number.isSafeInteger(input.revision) || input.revision < 0) {
+    return Promise.reject(new Error('사건 화면 설정 버전을 확인해 주세요.'))
+  }
+  const generation = input.generation, revision = input.revision
+  let patch: Partial<CaseManagementUi>
+  try { patch = validateUiPatch(input.patch) } catch (error) { return Promise.reject(error) }
+  return serialized(async () => {
+    const settings = await readSettings()
+    const current = settings.caseManagementState
+    if (!current || current.generation !== generation) throw new Error('연결이 변경되었습니다. 사건 화면을 다시 조회해 주세요.')
+    if (current.revision !== revision) throw new Error('다른 화면에서 선택이 변경되었습니다. 다시 조회해 주세요.')
+    const state = { generation, revision: revision + 1, ui: { ...current.ui, ...patch } }
+    await writeSettings({ ...settings, caseManagementState: state })
+    return state
+  })
 }

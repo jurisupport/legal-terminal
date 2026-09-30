@@ -7,6 +7,7 @@ export interface AgentWorkspaceContext {
   cwd: string
   appVersion?: string
   caseId?: string
+  selectedTaskId?: string
   court?: string
   caseNumber?: string
   caseName?: string
@@ -63,6 +64,7 @@ ${context.todoManagement ? `이 대화는 앱의 할일 관리 대화입니다.
 할일 등록·정리 규칙:
 - 통화·문서에서 할일을 추출할 때 원문 기반 생성 도구를 우선 사용하고 원문에 없는 기한을 만들지 마세요.
 - 실제 기한과 재확인일을 구분하세요. 지원하는 도구에만 reviewAt을 전달하고, 날짜가 없으면 기한 미지정 사실을 알려 주세요.
+- 선택한 할일은 현재 작업의 초점입니다. 선택이나 화면 열기는 완료·기한 변경 지시가 아닙니다. 대기 사유가 있더라도 실제 기한은 유지하세요.
 - 같은 산출물의 세부 단계만 지원되는 parentId로 연결하고, 다른 기한·산출물의 업무는 독립적으로 보존하세요.
 - 기존 pending·in_progress를 확인해 중복 후보를 알리되 유사 제목만으로 삭제·종료·생성 생략하지 마세요.
 - 완료 근거는 확인 후보입니다. 초안·final 표시만으로 제출을 확정하거나 부모·사건 종료를 이유로 자식을 자동 완료하지 마세요.
