@@ -10,7 +10,7 @@ import { getSettings, setSettings, getCaseManagementState, updateCaseManagementS
 import { checkUpdate, compareVersions, fetchLatestRelease } from './update'
 import { promptBundledSkillInstall } from './skillInstall'
 import { imageInfo } from './imageSize'
-import { keyStatus as dictationKeyStatus, setKey as setDictationKey, transcribe as transcribeDictation } from './dictation'
+import { keyStatus as dictationKeyStatus, setKey as setDictationKey, transcribe as transcribeDictation, type DictationTranscribeInput } from './dictation'
 import {
   getPairing,
   setPairing,
@@ -1007,15 +1007,7 @@ ipcMain.handle('settings:set', async (_e, patch: Partial<Settings>) => {
 })
 ipcMain.handle('dictation:keyStatus', () => dictationKeyStatus())
 ipcMain.handle('dictation:setKey', (_e, key: string) => setDictationKey(key))
-ipcMain.handle('dictation:transcribe', (_e, input: { audio: Uint8Array; mimeType: string; context?: {
-  court?: string
-  caseNumber?: string
-  caseName?: string
-  client?: string
-  opponent?: string
-  partyNames?: string
-  speaker?: string
-} }) => transcribeDictation(input))
+ipcMain.handle('dictation:transcribe', (_e, input: DictationTranscribeInput) => transcribeDictation(input))
 
 // ── 사건 페어링·히스토리 IPC ──
 ipcMain.handle('case:getPairing', (_e, drafts: string) => getPairing(drafts))

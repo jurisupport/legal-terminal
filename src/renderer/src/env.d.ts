@@ -295,12 +295,21 @@ export interface DictationTranscribeInput {
   audio: Uint8Array
   mimeType: string
   context?: DictationContext
+  diarize?: boolean
+}
+
+export interface DictationSegment {
+  speaker: string
+  text: string
+  start: number
+  end: number
 }
 
 export interface DictationTranscribeResult {
   ok: boolean
   text?: string
   corrected?: boolean
+  segments?: DictationSegment[]
   error?: string
 }
 

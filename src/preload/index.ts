@@ -278,12 +278,21 @@ interface DictationTranscribeInput {
   audio: Uint8Array
   mimeType: string
   context?: DictationContext
+  diarize?: boolean
+}
+
+interface DictationSegment {
+  speaker: string
+  text: string
+  start: number
+  end: number
 }
 
 interface DictationTranscribeResult {
   ok: boolean
   text?: string
   corrected?: boolean
+  segments?: DictationSegment[]
   error?: string
 }
 
