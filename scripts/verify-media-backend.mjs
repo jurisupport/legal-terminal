@@ -165,6 +165,7 @@ try {
   const previousStat = await stat(local)
   await writeFile(local, 'new-video-contents')
   await utimes(local, previousStat.atime, previousStat.mtime)
+  assert.equal((await call(a, 'check', { path: local, versionId: first.versionId })).changed, true, 'same-size local overwrite with preserved mtime is detected through change time')
   const second = await call(a, 'open', { path: local, requestId: 'force', force: true })
   assert.notEqual(first.versionId, second.versionId)
   assert.equal(await (await request(first.url)).text(), 'old-video-contents', 'open review is immutable')

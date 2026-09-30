@@ -16,7 +16,7 @@ export const MEDIA_SCHEME = {
 const MAX_CACHE_BYTES = 2 * 1024 ** 3
 const MAX_CAPTURE_BYTES = 5 * 1024 ** 2
 const EPHEMERAL_GRACE_MS = 10_000
-type Signature = { size: number; mtimeMs: number }
+type Signature = { size: number; mtimeMs: number; ctimeMs?: number }
 interface Record extends MediaVersion { signature: string; file: string; ephemeral: boolean; accessedAt: number; observedAt: number }
 interface Transfer {
   controller: AbortController
@@ -38,7 +38,8 @@ let metadataQueue: Promise<unknown> = Promise.resolve()
 let cleanupTimer: ReturnType<typeof setTimeout> | undefined
 const cacheRoot = (): string => join(app.getPath('userData'), 'media-review')
 const filesRoot = (): string => join(cacheRoot(), 'files')
-const signature = (s: Signature): string => `${s.size}:${s.mtimeMs}`
+// Windows copies can preserve size and mtime; local change time still identifies the replacement.
+const signature = (s: Signature): string => `${s.size}:${s.mtimeMs}${s.ctimeMs === undefined ? '' : ':' + s.ctimeMs}`
 const recordKey = (path: string, version: string): string => `${path}\0${version}`
 const fileName = (path: string, version: string): string => createHash('sha256').update(recordKey(path, version)).digest('hex') + '.media'
 const filePath = (record: Record): string => join(filesRoot(), record.file)
@@ -62,9 +63,9 @@ function sourcePath(value: unknown): string {
 }
 
 async function sourceStat(path: string): Promise<Signature> {
-  const info = isRemote(path) ? await rfsStat(path) : await stat(path).then((s) => ({ size: s.size, mtimeMs: s.mtimeMs, isDir: !s.isFile() }))
+  const info = isRemote(path) ? await rfsStat(path) : await stat(path).then((s) => ({ size: s.size, mtimeMs: s.mtimeMs, ctimeMs: s.ctimeMs, isDir: !s.isFile() }))
   if (info.isDir || !Number.isSafeInteger(info.size) || info.size <= 0) throw new Error('비어 있지 않은 일반 미디어 파일만 열 수 있습니다.')
-  return { size: info.size, mtimeMs: info.mtimeMs ?? 0 }
+  return { size: info.size, mtimeMs: info.mtimeMs ?? 0, ...('ctimeMs' in info && typeof info.ctimeMs === 'number' ? { ctimeMs: info.ctimeMs } : {}) }
 }
 
 function publicVersion(record: Record): MediaVersion {
@@ -144,7 +145,7 @@ async function localSnapshot(path: string, destination: string, before: Signatur
   if (size !== before.size || signature(before) !== signature(after) || original.ino !== after.ino || original.ctimeMs !== after.ctimeMs) {
     throw new Error('복사 중 원본 미디어가 변경되었습니다. 렌더링 완료 후 다시 여세요.')
   }
-  return { size, mtimeMs: before.mtimeMs, sha256: hash.digest('hex') }
+  return { size, mtimeMs: before.mtimeMs, ctimeMs: before.ctimeMs, sha256: hash.digest('hex') }
 }
 
 function reportProgress(transfer: Transfer, downloadedBytes: number, totalBytes: number): void {
