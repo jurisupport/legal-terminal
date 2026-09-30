@@ -39,7 +39,7 @@ let metadataQueue: Promise<unknown> = Promise.resolve()
 let cleanupTimer: ReturnType<typeof setTimeout> | undefined
 const cacheRoot = (): string => join(app.getPath('userData'), 'media-review')
 const filesRoot = (): string => join(cacheRoot(), 'files')
-// Windows copies can preserve size and mtime; local change time still identifies the replacement.
+// Local timestamps supplement native notifications; some copies preserve every stat field.
 const signature = (s: Signature): string => `${s.size}:${s.mtimeMs}${s.ctimeMs === undefined ? '' : ':' + s.ctimeMs}`
 const recordKey = (path: string, version: string): string => `${path}\0${version}`
 const fileName = (path: string, version: string): string => createHash('sha256').update(recordKey(path, version)).digest('hex') + '.media'

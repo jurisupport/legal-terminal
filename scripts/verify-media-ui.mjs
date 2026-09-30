@@ -16,6 +16,9 @@ async function electronCheck({ root, temp, output }) {
   const fs = require('node:fs/promises')
   const path = require('node:path')
   const assert = require('node:assert/strict')
+  let frozenSource
+  const realStat = fs.stat.bind(fs)
+  fs.stat = (file, ...args) => frozenSource?.path === file ? Promise.resolve(frozenSource.info) : realStat(file, ...args)
   app.setPath('userData', path.join(temp, 'profile'))
   require(path.join(root, 'out/main/index.js'))
   // No provider process or model request is created by the UI fixture.
@@ -107,6 +110,7 @@ async function electronCheck({ root, temp, output }) {
     await screenshot('media-review-min-window')
     checks.push('Minimum main-window layout without horizontal clipping')
 
+    frozenSource = { path: sample, info: await realStat(sample) }
     await fs.copyFile(path.join(temp, 'replacement.mp4'), sample)
     await wait("document.querySelector('.media-viewer')?.textContent.includes('원본이 변경되었습니다')", 'Changed file candidate detection')
     assert.equal(await run('return testMedia().src'), original.url, 'Candidate change must not auto-replace review')
@@ -115,7 +119,7 @@ async function electronCheck({ root, temp, output }) {
     const newer = await run('return testMedia().src')
     await run(`const select=document.querySelector('.media-viewer [aria-label="리뷰 버전"]');const choices=[...select.options].filter(option=>option.value!==select.value);select.value=choices[0].value;select.dispatchEvent(new Event('change',{bubbles:true}));`)
     await wait(`testMedia()?.src!==${JSON.stringify(newer)} && testMedia()?.readyState>=2`, 'Previous revision selection')
-    checks.push('Candidate detection without auto-replacement, forced refresh, previous revision')
+    checks.push('Native change notification with every stat field frozen, no auto-replacement, forced refresh, previous revision')
 
     await run("testMedia().currentTime=1.6")
     await wait('!testMedia().seeking', 'Move away before attachment reveal')
