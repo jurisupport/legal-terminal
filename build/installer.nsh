@@ -19,3 +19,8 @@
 !macro customUnInstallCheckCurrentUser
   !insertmacro _continueWhenLegacyUninstallerFails "current-user"
 !macroend
+
+# This assisted-installer hook expands before both install/uninstall per-user paths.
+!macro customInstallMode
+  !include "safePerUserInstallMode.nsh"
+!macroend

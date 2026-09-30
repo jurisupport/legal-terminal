@@ -11,7 +11,7 @@ assert.equal(process.platform, 'win32', 'Installed-app verification requires Win
 assert.equal(process.env.GITHUB_ACTIONS, 'true', 'Use a disposable GitHub-hosted runner')
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 // Resolve TEMP's DOS 8.3 alias before passing the program path to Windows firewall.
-const temp = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'legal-terminal-installed-')))
+const temp = await fs.realpath(await fs.mkdtemp(path.join(process.env.RUNNER_TEMP || os.tmpdir(), 'legal-terminal-installed-')))
 const installDir = path.join(temp, 'app')
 const executable = path.join(installDir, 'legal-terminal.exe')
 const profile = path.join(temp, 'profile')
