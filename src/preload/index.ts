@@ -1,5 +1,7 @@
 import type { JsUpcomingHearing, TodoAssigneesParams } from '../main/jurisupport'
 import type { CaseManagementState, CaseManagementPatch } from '../shared/caseManagement'
+import type { RemotionPreviewOptions, RemotionPreviewSelection, RemotionPreviewResult } from '../shared/remotionPreview'
+import type { MediaApi, MediaSelection, MediaViewState } from '../shared/media'
 import type { AgentWorkspaceContext } from '../shared/agentWorkspaceContext'
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
 
@@ -120,10 +122,11 @@ interface TerminalTabPayload {
 interface DocumentTabPayload {
   id?: string
   title: string
-  kind?: 'markdown' | 'mdview' | 'file' | 'pdf' | 'image' | 'hwp' | 'docx' | 'csv' | 'settings' | 'hearing'
+  kind?: 'markdown' | 'mdview' | 'file' | 'pdf' | 'image' | 'hwp' | 'docx' | 'csv' | 'settings' | 'hearing' | 'media'
   caseTabId?: string
   path?: string
   side?: 'left' | 'right'
+  mediaState?: MediaViewState
 }
 
 type TabPayload =
@@ -148,10 +151,11 @@ interface TabMoveResult {
 interface WorkspaceDocTabPayload {
   id: string
   title: string
-  kind: 'markdown' | 'mdview' | 'file' | 'pdf' | 'image' | 'hwp' | 'docx' | 'csv' | 'settings' | 'hearing'
+  kind: 'markdown' | 'mdview' | 'file' | 'pdf' | 'image' | 'hwp' | 'docx' | 'csv' | 'settings' | 'hearing' | 'media'
   caseTabId?: string
   path?: string
   side?: 'left' | 'right'
+  mediaState?: MediaViewState
 }
 
 interface WorkspaceCaseTabPayload {
@@ -602,7 +606,8 @@ interface TodoTerminalResult {
 }
 
 interface AgentAttachment {
-  kind: 'file' | 'folder' | 'selection' | 'pdf-page-range' | 'terminal-snippet'
+  kind: 'file' | 'folder' | 'selection' | 'pdf-page-range' | 'terminal-snippet' | 'media-range'
+  media?: MediaSelection
   label: string
   path?: string
   origin?: 'local' | 'remote'
@@ -742,7 +747,37 @@ interface UpdateCheckResult {
 
 let fsWatchSeq = 0
 
+const media: MediaApi = {
+  forwardAsk: (input) => ipcRenderer.invoke('media:forwardAsk', input),
+  onAsk: (callback) => {
+    const listener = (_event: unknown, request: Parameters<typeof callback>[0]): void => callback(request)
+    ipcRenderer.on('media:ask', listener)
+    return () => ipcRenderer.removeListener('media:ask', listener)
+  },
+  open: (input) => ipcRenderer.invoke('media:open', input),
+  release: (token) => ipcRenderer.invoke('media:release', token),
+  cancel: (requestId) => ipcRenderer.invoke('media:cancel', requestId),
+  versions: (path) => ipcRenderer.invoke('media:versions', path),
+  check: (input) => ipcRenderer.invoke('media:check', input),
+  saveCapture: (input) => ipcRenderer.invoke('media:saveCapture', input),
+  onProgress: (callback) => {
+    const listener = (_event: unknown, progress: Parameters<typeof callback>[0]): void => callback(progress)
+    ipcRenderer.on('media:progress', listener)
+    return () => ipcRenderer.removeListener('media:progress', listener)
+  }
+}
+
 const api = {
+  media,
+  remotion: {
+    open: (options: RemotionPreviewOptions): Promise<RemotionPreviewResult> => ipcRenderer.invoke('remotion:open', options),
+    close: (sessionId: string): Promise<void> => ipcRenderer.invoke('remotion:close', sessionId),
+    onSelection: (callback: (selection: RemotionPreviewSelection) => void): (() => void) => {
+      const listener = (_event: unknown, selection: RemotionPreviewSelection): void => callback(selection)
+      ipcRenderer.on('remotion:selection', listener)
+      return () => ipcRenderer.removeListener('remotion:selection', listener)
+    }
+  },
   app: {
     info: (): Promise<{
       version: string

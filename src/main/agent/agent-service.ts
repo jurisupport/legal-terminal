@@ -1,3 +1,4 @@
+import { normalizeMediaSelection, mediaSelectionText } from '../../shared/media'
 import type { IpcMain, WebContents } from 'electron'
 import { randomUUID } from 'crypto'
 import { execFile, spawn, type ChildProcessWithoutNullStreams } from 'child_process'
@@ -5165,6 +5166,8 @@ function renderPrompt(input: AgentSendInput): string {
         )
       }
       if (attachment.range) parts.push(`range=${JSON.stringify(attachment.range)}`)
+      const media = normalizeMediaSelection(attachment.media)
+      if (attachment.kind === 'media-range' && media) parts.push(mediaSelectionText(media))
       if (attachment.text) parts.push(`text=${attachment.text}`)
       if (attachment.content !== undefined) {
         const marker = `LEGAL_TERMINAL_ATTACHMENT_${index + 1}_CONTENT`

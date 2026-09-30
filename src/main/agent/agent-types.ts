@@ -1,3 +1,4 @@
+import type { MediaSelection } from '../../shared/media'
 import type { AgentWorkspaceContext } from '../../shared/agentWorkspaceContext'
 
 export type AgentPermissionMode = 'ask' | 'plan' | 'acceptEdits' | 'bypassPermissions' | 'dontAsk'
@@ -15,7 +16,8 @@ export interface AgentSshConn {
 }
 
 export interface AgentAttachment {
-  kind: 'file' | 'folder' | 'selection' | 'pdf-page-range' | 'terminal-snippet'
+  kind: 'file' | 'folder' | 'selection' | 'pdf-page-range' | 'terminal-snippet' | 'media-range'
+  media?: MediaSelection
   label: string
   path?: string
   origin?: 'local' | 'remote'

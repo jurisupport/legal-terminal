@@ -1,3 +1,5 @@
+import { mediaMimeType, mediaSelectionKey, formatMediaTime, normalizeMediaSelection, type MediaAskRequest, type MediaSelection, type MediaViewState } from '../../shared/media'
+import MediaViewer from './viewer/MediaViewer'
 import {
   Fragment,
   useCallback,
@@ -314,6 +316,7 @@ const sshConnFromProfile = (profile: SshProfile): SshConn => ({
 })
 
 interface DocTab {
+  mediaState?: MediaViewState
   id: string
   title: string
   kind:
@@ -323,6 +326,7 @@ interface DocTab {
     | 'file'
     | 'pdf'
     | 'image'
+    | 'media'
     | 'hwp'
     | 'docx'
     | 'csv'
@@ -637,6 +641,7 @@ const RESTORABLE_DOC_KINDS = new Set<DocTab['kind']>([
   'file',
   'pdf',
   'image',
+  'media',
   'hwp',
   'docx',
   'csv',
@@ -648,7 +653,7 @@ const isRestorableDocKind = (value: unknown): value is DocTab['kind'] =>
   typeof value === 'string' && RESTORABLE_DOC_KINDS.has(value as DocTab['kind'])
 
 const normalizeDocKind = (kind: DocTab['kind'], path?: string): DocTab['kind'] =>
-  path && docKindForPath(path) === 'mdview' ? 'mdview' : kind
+  path && mediaMimeType(path) ? 'media' : path && docKindForPath(path) === 'mdview' ? 'mdview' : kind
 
 const isWorkspaceMode = (value: unknown): value is Mode =>
   value === 'explorer' || value === 'cases' || value === 'viewer' || value === 'todos'
@@ -966,6 +971,7 @@ const markdownRenameName = (title: string, currentName: string): string => {
 
 const docKindForPath = (path: string): DocTab['kind'] => {
   const lower = path.toLowerCase()
+  if (mediaMimeType(lower)) return 'media'
   if (lower.endsWith('.pdf')) return 'pdf'
   if (/\.(png|jpe?g|gif|webp|bmp|svg|ico|tiff?|avif)$/.test(lower)) return 'image'
   if (/\.(hwp|hwpx)$/.test(lower)) return 'hwp'
@@ -1195,6 +1201,7 @@ const toWorkspaceDoc = (tab: DocTab): WorkspaceDocTabPayload | null => {
     kind: tab.kind as WorkspaceDocTabPayload['kind'],
     caseTabId: tab.caseTabId,
     path: tab.path,
+    mediaState: tab.mediaState,
     side: docSide(tab)
   }
 }
@@ -1208,6 +1215,7 @@ const toDocTab = (tab: WorkspaceDocTabPayload): DocTab | null => {
     kind: normalizeDocKind(tab.kind, tab.path),
     caseTabId: tab.caseTabId,
     path: tab.path,
+    mediaState: tab.mediaState,
     side: tab.side ?? 'left'
   }
 }
@@ -1220,6 +1228,7 @@ const docTabDragPayload = (tab: DocTab, side: DockSide = docSide(tab)): TabPaylo
     kind: normalizeDocKind(tab.kind, tab.path) as DocumentTabPayload['kind'],
     caseTabId: tab.caseTabId,
     path: tab.path,
+    mediaState: tab.mediaState,
     side
   }
   return { kind: 'doc', tab: doc, path: doc.path, title: doc.title, side }
@@ -1561,7 +1570,9 @@ const sameAgentDraft = (a: AgentDraftState | undefined, b: AgentDraftState): boo
   !!a && a.input === b.input && a.attachments === b.attachments
 
 const agentAttachmentKey = (attachment: AgentAttachment): string =>
-  attachment.kind === 'selection'
+  attachment.kind === 'media-range' && attachment.media
+    ? `media:${mediaSelectionKey(attachment.media)}`
+    : attachment.kind === 'selection'
     ? `${attachment.kind}:${attachment.label}:${attachment.text ?? ''}`
     : `${attachment.kind}:${attachment.path ?? attachment.label}`
 
@@ -1600,6 +1611,7 @@ export default function App(): JSX.Element {
   const [caseDocumentUpdates, setCaseDocumentUpdates] = useState<Record<string, CaseDocumentUpdates>>({})
   const docTabsRef = useRef<DocTab[]>(docTabs)
   const dirtyDocsRef = useRef<Set<string>>(dirtyDocs)
+  const [mediaReveals, setMediaReveals] = useState<Record<string, { selection: MediaSelection; nonce: number }>>({})
   const [markdownRevealRequests, setMarkdownRevealRequests] = useState<Record<string, MarkdownRevealRequest>>({})
   const markdownRevealSeqRef = useRef(0)
   const markdownSaveHandlersRef = useRef<Map<string, MarkdownSaveHandler>>(new Map())
@@ -2514,6 +2526,11 @@ export default function App(): JSX.Element {
     }
     if (!docId) return
     const path = source.path ?? existing?.path
+    if (attachment.kind === 'media-range' && attachment.media) {
+      if (attachment.media.compositionId) return // The immutable captured frame is the quoted source.
+      setMediaReveals((current) => ({ ...current, [docId]: { selection: attachment.media!, nonce: ++jumpNonce.current } }))
+      return
+    }
     if (isPdfQuote && path) {
       setPdfJump({ docId, path, page, nonce: ++jumpNonce.current })
       return
@@ -2711,7 +2728,7 @@ export default function App(): JSX.Element {
       return
     }
     const id = payload?.id && !docTabs.some((t) => t.id === payload.id) ? payload.id : newId()
-    const tab: DocTab = { id, title, kind, caseTabId: caseTabIdValue, path, side }
+    const tab: DocTab = { id, title, kind, caseTabId: caseTabIdValue, path, side, mediaState: payload?.mediaState }
     setDocTabs((tabs) => [...tabs, tab])
     setActiveDoc(tab.id)
     setWorkActive(side, docKey(tab.id))
@@ -4397,6 +4414,90 @@ export default function App(): JSX.Element {
     setTermFocusNonce((current) => ({ ...current, [term.id]: (current[term.id] ?? 0) + 1 }))
   }
 
+  const mediaProjectDir = (sourcePath: string): string | undefined => {
+    const remote = parseRemoteUri(sourcePath)
+    const target = activeTermTab
+    if (target && (remote ? target.profileId === remote.profileId : !target.ssh)) {
+      const folder = target.profileId && target.ssh ? remoteUri(target.profileId, target.cwd) : target.cwd
+      if (pathBelongsToCaseFolder(sourcePath, folder)) return folder
+    }
+    return remote ? remoteUri(remote.profileId, parentRemotePath(remote.path)) : parentLocalPath(sourcePath)
+  }
+
+  const askMedia = async (request: MediaAskRequest): Promise<'attached' | 'forwarded'> => {
+    const selection = normalizeMediaSelection(request.selection)
+    if (!selection) throw new Error('선택한 미디어 정보를 확인할 수 없습니다.')
+    if (docOnly) {
+      await window.lt.media.forwardAsk(request)
+      return 'forwarded'
+    }
+    const candidate = resolveClaudeAgentTargetTab(visibleTermTabs, activeTerm, activeWork) ?? activeTermTab
+    const target = isAgentTab(activeTermTab) ? activeTermTab : isAgentTab(candidate) ? candidate : createClaudeAgentForPrompt(selection.sourcePath)
+    if (!target) throw new Error('미디어를 질문할 Agent 작업을 먼저 열어 주세요.')
+    const remote = parseRemoteUri(selection.sourcePath)
+    if ((remote && target.profileId !== remote.profileId) || (!remote && target.ssh)) {
+      throw new Error('이 미디어와 같은 로컬/SSH 작업환경의 Agent를 선택해 주세요.')
+    }
+    if (!(await confirmCaseFileScope(target, selection.sourcePath))) throw new Error('미디어 첨부를 취소했습니다.')
+    let capturePath = selection.capturePath
+    let captureUri: string | undefined
+    if (request.capture?.byteLength) {
+      const targetDir = target.ssh && target.profileId ? remoteUri(target.profileId, target.cwd) : target.cwd
+      const saved = await window.lt.media.saveCapture({ bytes: request.capture, targetDir })
+      captureUri = saved.path
+      capturePath = parseRemoteUri(saved.path)?.path ?? saved.path
+    }
+    const media = { ...selection, capturePath }
+    const sourceName = fileNameFromPath(selection.sourcePath)
+    const rangeLabel = selection.start !== undefined && selection.end !== undefined
+      ? `${formatMediaTime(selection.start)}–${formatMediaTime(selection.end)}` : formatMediaTime(selection.time)
+    const sourceDoc = docTabsRef.current.find((doc) => doc.path === selection.sourcePath || doc.mediaState?.sourcePath === selection.sourcePath)
+    queueAgentAttachment(target, {
+      kind: 'media-range', label: `${sourceName} · ${rangeLabel}`, media,
+      path: remote?.path ?? selection.sourcePath, origin: remote ? 'remote' : 'local', access: 'workspace-path',
+      source: selection.compositionId && captureUri
+        ? { path: captureUri, title: `${selection.compositionId} · 프레임 ${selection.frame}` }
+        : { docId: sourceDoc?.id, path: selection.sourcePath, title: sourceName },
+      text: `선택한 리뷰 버전: ${selection.versionId}`
+    }, '선택한 장면/구간을 다음과 같이 수정해줘: ')
+    if (capturePath) queueAgentAttachment(target, {
+      kind: 'file', label: `화면 캡처 · ${formatMediaTime(selection.captureTime ?? selection.time)}`,
+      path: capturePath, origin: remote ? 'remote' : 'local', access: 'workspace-path',
+      text: '사용자가 보고 있던 미디어 프레임입니다. 실제 이미지 읽기 도구로 확인하세요.'
+    })
+    return 'attached'
+  }
+  const askMediaRef = useRef(askMedia)
+  askMediaRef.current = askMedia
+  useEffect(() => {
+    if (docOnly) return
+    return window.lt.media.onAsk((request) => {
+      void askMediaRef.current(request).catch((error) => window.lt.dialog.alert(error instanceof Error ? error.message : String(error)))
+    })
+  }, [])
+
+  const openRemotion = async (projectDir?: string): Promise<void> => {
+    if (!projectDir) { await window.lt.dialog.alert('Remotion 프로젝트 폴더를 먼저 열어 주세요.'); return }
+    try {
+      const result = await window.lt.remotion.open({ projectDir })
+      if (!result.ok) await window.lt.dialog.alert(result.error || 'Remotion 미리보기를 열지 못했습니다.')
+    } catch (error) { await window.lt.dialog.alert(error instanceof Error ? error.message : String(error)) }
+  }
+  useEffect(() => window.lt.remotion.onSelection((preview) => {
+    try {
+      if (!/^data:image\/(png|jpeg);base64,/.test(preview.captureDataUrl) || preview.captureDataUrl.length > 7 * 1024 * 1024) throw new Error('Remotion 캡처 이미지를 확인할 수 없습니다.')
+      const bytes = Uint8Array.from(atob(preview.captureDataUrl.split(',')[1]), (char) => char.charCodeAt(0))
+      void askMediaRef.current({
+        selection: {
+          sourcePath: preview.sourcePath, versionId: preview.version,
+          time: preview.frame / preview.fps, captureTime: preview.frame / preview.fps,
+          ...(preview.endFrame !== undefined ? { start: preview.startFrame / preview.fps, end: preview.endFrame / preview.fps } : {}),
+          frame: preview.frame, fps: preview.fps, compositionId: preview.compositionId
+        }, capture: bytes
+      }).catch((error) => window.lt.dialog.alert(error instanceof Error ? error.message : String(error)))
+    } catch (error) { void window.lt.dialog.alert(error instanceof Error ? error.message : String(error)) }
+  }), [])
+
   const selectionAttachmentLabel = (docName?: string): string => {
     const source = docName?.trim() || '선택 영역'
     selectionAttachmentSeqRef.current += 1
@@ -4886,7 +4987,8 @@ export default function App(): JSX.Element {
     const docs = (snapshot.docs ?? []).map((doc) => ({
       ...doc,
       caseTabId: undefined,
-      path: remoteWorkspacePath(doc.path, profileId)
+      path: remoteWorkspacePath(doc.path, profileId),
+      mediaState: doc.mediaState ? { ...doc.mediaState, sourcePath: remoteWorkspacePath(doc.mediaState.sourcePath, profileId) } : undefined
     }))
     const terminals = (snapshot.terminals ?? []).map((term) => ({
       ...term,
@@ -7173,6 +7275,19 @@ export default function App(): JSX.Element {
           />
         )
       )}
+      {tab?.kind === 'media' && tab.path && (
+        <MediaViewer
+          key={tab.id}
+          path={tab.path}
+          active={docOnly ? activeDoc === tab.id : visibleDocTabs.some((item) => item.id === tab.id) && activeWorkKeyForSide(docSide(tab)) === docKey(tab.id)}
+          projectDir={mediaProjectDir(tab.path)}
+          initialState={tab.mediaState}
+          reveal={mediaReveals[tab.id]}
+          onStateChange={(state) => setDocTabs((tabs) => tabs.map((item) => item.id === tab.id ? { ...item, mediaState: state } : item))}
+          onAsk={askMedia}
+          onRemotionPreview={() => void openRemotion(mediaProjectDir(tab.path!))}
+        />
+      )}
       {tab?.kind === 'image' && (
         <ImageViewer
           key={tab.path}
@@ -7347,6 +7462,7 @@ export default function App(): JSX.Element {
       record={panelRecord}
       refreshNonce={treeRefresh}
       onRefresh={() => setTreeRefresh((current) => current + 1)}
+      onRemotionPreview={() => void openRemotion(activeDraftsFolder)}
       onOpenFile={openFile}
       onDropTo={copyFilesTo}
       onMove={moveEntry}
@@ -7687,11 +7803,14 @@ export default function App(): JSX.Element {
     const activeParsed = parseWorkKey(activeKey)
     const activeDocForPane =
       activeParsed?.kind === 'doc' ? docs.find((t) => t.id === activeParsed.id) : undefined
-    const mountedDocs = docs.filter(
+    const mountedDocs = [...docs, ...docTabs.filter((tab) =>
+      tab.kind === 'media' && docSide(tab) === side && !docs.some((item) => item.id === tab.id)
+    )].filter(
       (t) =>
         t.id === activeDocForPane?.id ||
         t.kind === 'mdview' ||
         t.kind === 'markdown' ||
+        t.kind === 'media' ||
         t.kind === 'hearing'
     )
     const visibleTermId = activeParsed?.kind === 'terminal' ? activeParsed.id : ''
@@ -8193,6 +8312,13 @@ export default function App(): JSX.Element {
             run: () => void restoreWorkspace(false)
           },
           {
+            id: 'remotion-preview',
+            label: 'Remotion 미리보기',
+            detail: '현재 프로젝트의 영상을 렌더링 전에 확인',
+            keywords: '영상 쇼츠 preview',
+            run: () => { void openRemotion(activeDraftsFolder) }
+          },
+          {
             id: 'settings',
             label: '설정',
             detail: '앱 설정 열기',
@@ -8222,7 +8348,12 @@ export default function App(): JSX.Element {
               if (shouldFocusDocContainer(target)) e.currentTarget.focus()
             }}
           >
-            {renderDocContent(activeDocTab)}
+            {activeDocTab?.kind !== 'media' && renderDocContent(activeDocTab)}
+            {docTabs.filter((doc) => doc.kind === 'media').map((doc) => (
+              <div key={doc.id} style={{ display: doc.id === activeDoc ? 'block' : 'none', height: '100%', minHeight: 0 }}>
+                {renderDocContent(doc)}
+              </div>
+            ))}
           </div>
         </div>
         <div className="statusbar">
@@ -9376,6 +9507,7 @@ function DocsPanel({
   record,
   refreshNonce,
   onRefresh,
+  onRemotionPreview,
   onOpenFile,
   onDropTo,
   onMove,
@@ -9420,6 +9552,7 @@ function DocsPanel({
   record: ParsedRecord | null
   refreshNonce: number
   onRefresh: () => void
+  onRemotionPreview: () => void
   onOpenFile: (path: string, name: string) => void
   onDropTo: (dir: string, files: FileList) => void
   onMove: (src: string, destDir: string) => void
@@ -9545,6 +9678,9 @@ function DocsPanel({
                   onClick={onPickDrafts}
                 >
                   <IconSaveAs size={15} />
+                </ExplorerToolButton>
+                <ExplorerToolButton label="Remotion 미리보기" tooltip="현재 프로젝트의 Remotion 미리보기" disabled={!draftsFolder} onClick={onRemotionPreview}>
+                  <span aria-hidden="true">▶</span>
                 </ExplorerToolButton>
                 <ExplorerToolButton
                   label="폴더 새로고침"

@@ -1,4 +1,8 @@
-import { app, BrowserWindow, shell, ipcMain, dialog, screen, session, Menu, clipboard, Notification, type WebContents } from 'electron'
+import { openRemotionPreview, closeRemotionPreview, disposeRemotionPreviews } from './remotionPreview'
+import type { RemotionPreviewOptions } from '../shared/remotionPreview'
+import { MEDIA_SCHEME, registerMediaIpc, registerMediaProtocol } from './media'
+import { normalizeMediaSelection, type MediaAskRequest } from '../shared/media'
+import { app, protocol, BrowserWindow, shell, ipcMain, dialog, screen, session, Menu, clipboard, Notification, type WebContents } from 'electron'
 import { spawn } from 'child_process'
 import { createHash } from 'crypto'
 import { join, basename, dirname, extname, isAbsolute, resolve, sep, posix } from 'path'
@@ -86,6 +90,8 @@ import {
   type WorkspaceSnapshot
 } from './workspace'
 import { disposeAgentSessions, registerAgentIpc } from './agent/agent-service'
+
+protocol.registerSchemesAsPrivileged([MEDIA_SCHEME])
 
 let mainWindow: BrowserWindow | null = null
 let updateCheckStarted = false
@@ -2430,6 +2436,25 @@ ipcMain.handle('fs:saveClipboardImage', async (_e, p: { data: Uint8Array; mimeTy
   return { path: filePath }
 })
 
+ipcMain.handle('remotion:open', async (event, options: RemotionPreviewOptions) => {
+  const owner = BrowserWindow.fromWebContents(event.sender)
+  if (!owner || event.senderFrame !== event.sender.mainFrame) throw new Error('미리보기를 열 작업 창을 찾을 수 없습니다.')
+  return openRemotionPreview(options, owner, (selection) => {
+    if (!event.sender.isDestroyed()) event.sender.send('remotion:selection', selection)
+  })
+})
+ipcMain.handle('remotion:close', (event, id: string) => closeRemotionPreview(id, event.sender.id))
+
+ipcMain.handle('media:forwardAsk', async (event, request: MediaAskRequest) => {
+  const source = BrowserWindow.fromWebContents(event.sender)
+  if (!source || !mainWindow || mainWindow.isDestroyed() || mainWindow === source) throw new Error('질문을 전달할 기본 창을 찾지 못했습니다.')
+  if (!normalizeMediaSelection(request?.selection)) throw new Error('잘못된 미디어 선택 정보입니다.')
+  if (request.capture && (!(request.capture instanceof Uint8Array) || request.capture.byteLength > 5 * 1024 * 1024)) throw new Error('캡처 이미지가 너무 큽니다.')
+  mainWindow.webContents.send('media:ask', request)
+  mainWindow.show()
+  mainWindow.focus()
+})
+
 ipcMain.handle('fs:readBytes', async (event, filePath: string) => {
   try {
     const buf = isRemote(filePath)
@@ -2881,6 +2906,7 @@ ipcMain.on('pty:detach', (e, { id }: { id: string }) => detachPty(id, e.sender))
 ipcMain.on('pty:kill', (_e, { id }: { id: string }) => killPty(id))
 
 app.on('before-quit', () => {
+  disposeRemotionPreviews()
   disposeAgentSessions()
   killAllPty()
   disposeRemote()
@@ -2888,6 +2914,8 @@ app.on('before-quit', () => {
 })
 
 app.whenReady().then(() => {
+  registerMediaProtocol(session.defaultSession)
+  registerMediaIpc(ipcMain)
   // Windows 토스트 알림에는 AppUserModelID가 필요하다 (electron-builder appId와 일치).
   if (process.platform === 'win32') app.setAppUserModelId('kr.lawpid.legalterminal')
   applyDockIcon()

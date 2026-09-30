@@ -1,0 +1,74 @@
+import React, {useEffect, useRef, useState} from 'react';
+import {createRoot} from 'react-dom/client';
+import {Player} from '@remotion/player';
+import * as imported from __COMPONENT__;
+const config = __CONFIG__;
+const Component = imported[config.exportName || 'default'];
+if (!Component) throw new Error('Remotion component export not found: ' + (config.exportName || 'default'));
+const bootstrap = window.__LT_PREVIEW__;
+function Preview() {
+  const player = useRef(null);
+  const stage = useRef(null);
+  const buffering = useRef(false);
+  const decodedTimes = useRef(new WeakMap());
+  const [frame,setFrame] = useState(Math.min(bootstrap.frame || 0,config.durationInFrames-1));
+  const [start,setStart] = useState(null);
+  const [end,setEnd] = useState(null);
+  const [busy,setBusy] = useState(false);
+  const [status,setStatus] = useState('');
+  const [rate,setRate] = useState(1);
+  useEffect(() => {
+    const ref = player.current;
+    const update = e => setFrame(e.detail.frame);
+    const waiting=()=>{buffering.current=true};
+    const resume=()=>{buffering.current=false};
+    ref.addEventListener('frameupdate',update);ref.addEventListener('waiting',waiting);ref.addEventListener('resume',resume);
+    const callbacks=new Map();
+    const seeks=new Map();
+    const observe=()=>{for(const video of stage.current.querySelectorAll('video')){if(callbacks.has(video)||!video.requestVideoFrameCallback)continue;const seeking=()=>decodedTimes.current.delete(video);video.addEventListener('seeking',seeking);seeks.set(video,seeking);const present=(_now,metadata)=>{decodedTimes.current.set(video,metadata.mediaTime);callbacks.set(video,video.requestVideoFrameCallback(present))};callbacks.set(video,video.requestVideoFrameCallback(present))}};
+    const observer=new MutationObserver(observe);observer.observe(stage.current,{childList:true,subtree:true});observe();
+    return () => {ref.removeEventListener('frameupdate',update);ref.removeEventListener('waiting',waiting);ref.removeEventListener('resume',resume);observer.disconnect();for(const [video,id] of callbacks)video.cancelVideoFrameCallback(id);for(const [video,listener] of seeks)video.removeEventListener('seeking',listener)};
+  },[]);
+  const seek = n => {if(!busy && Number.isInteger(n) && n >= 0 && n < config.durationInFrames) {player.current.pause();player.current.seekTo(n);setFrame(n)}};
+  const ask = async () => {
+    setBusy(true);setStatus('화면을 첨부하는 중…');
+    try {
+      player.current.pause();
+      const selectedFrame = player.current.getCurrentFrame();
+      const deadline=Date.now()+10000;
+      const wait=ms=>new Promise(resolve=>setTimeout(resolve,ms));
+      const assets=Promise.all([document.fonts.ready,...[...stage.current.querySelectorAll('img')].map(img=>img.decode())]);
+      await Promise.race([assets,wait(10000).then(()=>{throw Error('이미지 또는 폰트를 아직 불러오지 못했습니다. 잠시 후 다시 첨부하세요.')})]);
+      await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+      while(true){
+        const videos=[...stage.current.querySelectorAll('video')].filter(video=>video.getBoundingClientRect().width>0&&video.getBoundingClientRect().height>0);
+        if(videos.some(video=>video.error))throw Error('영상 소스를 재생할 수 없습니다. 소스 오류를 확인하세요.');
+        const ready=!buffering.current&&!player.current.isBuffering?.()&&videos.every(video=>!video.seeking&&video.readyState>=2&&(!video.requestVideoFrameCallback||Math.abs((decodedTimes.current.get(video)??Infinity)-video.currentTime)<0.075));
+        if(ready)break;
+        if(Date.now()>=deadline)throw Error('선택 프레임의 영상을 아직 불러오지 못했습니다. 잠시 후 다시 첨부하세요.');
+        await wait(25);
+      }
+      await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+      if(player.current.getCurrentFrame()!==selectedFrame)throw Error('캡처 중 프레임이 바뀌었습니다. 다시 첨부하세요.');
+      const rect = stage.current.getBoundingClientRect();
+      const response = await fetch(bootstrap.base+'selection', {method:'POST',headers:{'Content-Type':'application/json','X-LT-Preview':bootstrap.token},body:JSON.stringify({frame:selectedFrame,startFrame:start ?? selectedFrame,...(end === null?{}:{endFrame:end}),rect:{x:rect.x,y:rect.y,width:rect.width,height:rect.height}})});
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || '화면 첨부에 실패했습니다.');
+      setStatus('선택한 장면을 앱으로 전달했습니다. 대화창에서 첨부 상태를 확인하세요.');
+    } catch (error) {setStatus(error.message)} finally {setBusy(false)}
+  };
+  return <main>
+    <header><strong>{config.compositionId}</strong><span>{config.width} × {config.height} · {config.fps} fps</span><button disabled={busy} onClick={async()=>{setBusy(true);setStatus('변경한 소스를 다시 준비하는 중…');try{const response=await fetch(bootstrap.base+'rebuild',{method:'POST',headers:{'X-LT-Preview':bootstrap.token}});if(!response.ok)throw Error((await response.json()).error);location.search='?frame='+frame}catch(error){setStatus(error.message);setBusy(false)}}}>소스 변경 불러오기</button></header>
+    <section className="stage" ref={stage} style={{aspectRatio:`${config.width} / ${config.height}`}}>
+      <Player ref={player} component={Component} inputProps={config.props || {}} compositionWidth={config.width} compositionHeight={config.height} durationInFrames={config.durationInFrames} fps={config.fps} initialFrame={Math.min(bootstrap.frame || 0,config.durationInFrames-1)} playbackRate={rate} controls={false} style={{width:'100%',height:'100%'}} errorFallback={({error})=><div role="alert">{error.message}</div>}/>
+    </section>
+    <fieldset disabled={busy}>
+      <div className="row"><button onClick={()=>player.current.toggle()}>재생 / 일시정지</button><button onClick={()=>seek(frame-1)} disabled={frame===0}>이전 프레임</button><button onClick={()=>seek(frame+1)} disabled={frame===config.durationInFrames-1}>다음 프레임</button><label>속도 <select value={rate} onChange={e=>setRate(Number(e.target.value))}>{[0.5,1,1.5,2].map(n=><option key={n} value={n}>{n}×</option>)}</select></label><label>음량 <input aria-label="음량" type="range" min="0" max="1" step="0.05" defaultValue="1" onChange={e=>player.current.setVolume(Number(e.target.value))}/></label></div>
+      <label className="row">프레임 <input aria-label="프레임" type="number" min="0" max={config.durationInFrames-1} value={frame} onChange={e=>seek(Number(e.target.value))}/><span>{(frame/config.fps).toFixed(3)}초 / {(config.durationInFrames/config.fps).toFixed(3)}초</span></label>
+      <input className="timeline" aria-label="재생 위치" type="range" min="0" max={config.durationInFrames-1} value={frame} onChange={e=>seek(Number(e.target.value))}/>
+      <div className="row"><button onClick={()=>{setStart(frame);if(end!==null&&end<=frame)setEnd(null)}}>여기부터</button><button disabled={start===null || frame<start} onClick={()=>setEnd(frame+1)}>여기까지</button><button disabled={start===null&&end===null} onClick={()=>{setStart(null);setEnd(null)}}>구간 해제</button><span>{start===null?'현재 프레임':`${start} → ${end ?? '…'} 프레임 (끝 제외)`}</span><button className="ask" onClick={ask}>이 장면 AI에게 질문</button></div>
+    </fieldset>
+    <p role="status">{status}</p><footer>수정은 AI 입력창에서 요청하세요. 화면 캡처는 현재 미리보기 크기이며, 최종 출력 파일과 별도로 검토합니다.</footer>
+  </main>;
+}
+createRoot(document.getElementById('root')).render(<Preview/>);

@@ -1,5 +1,7 @@
 /// <reference types="vite/client" />
 import type { CaseManagementState, CaseManagementPatch } from '../../shared/caseManagement'
+import type { RemotionPreviewOptions, RemotionPreviewSelection, RemotionPreviewResult } from '../../shared/remotionPreview'
+import type { MediaApi, MediaSelection, MediaViewState } from '../../shared/media'
 import type { AgentWorkspaceContext } from '../../shared/agentWorkspaceContext'
 
 export interface SshConn {
@@ -117,10 +119,11 @@ export interface TerminalTabPayload {
 export interface DocumentTabPayload {
   id?: string
   title: string
-  kind?: 'markdown' | 'mdview' | 'file' | 'pdf' | 'image' | 'hwp' | 'docx' | 'csv' | 'settings' | 'hearing'
+  kind?: 'markdown' | 'mdview' | 'file' | 'pdf' | 'image' | 'hwp' | 'docx' | 'csv' | 'settings' | 'hearing' | 'media'
   caseTabId?: string
   path?: string
   side?: 'left' | 'right'
+  mediaState?: MediaViewState
 }
 
 export type TabPayload =
@@ -145,10 +148,11 @@ export interface TabMoveResult {
 export interface WorkspaceDocTabPayload {
   id: string
   title: string
-  kind: 'markdown' | 'mdview' | 'file' | 'pdf' | 'image' | 'hwp' | 'docx' | 'csv' | 'settings' | 'hearing'
+  kind: 'markdown' | 'mdview' | 'file' | 'pdf' | 'image' | 'hwp' | 'docx' | 'csv' | 'settings' | 'hearing' | 'media'
   caseTabId?: string
   path?: string
   side?: 'left' | 'right'
+  mediaState?: MediaViewState
 }
 
 export interface WorkspaceCaseTabPayload {
@@ -459,7 +463,8 @@ export interface AppSettings {
 }
 
 export interface AgentAttachment {
-  kind: 'file' | 'folder' | 'selection' | 'pdf-page-range' | 'terminal-snippet'
+  kind: 'file' | 'folder' | 'selection' | 'pdf-page-range' | 'terminal-snippet' | 'media-range'
+  media?: MediaSelection
   label: string
   path?: string
   origin?: 'local' | 'remote'
@@ -769,6 +774,12 @@ export interface TodoTerminalResult {
 }
 
 export interface LtApi {
+  remotion: {
+    open(options: RemotionPreviewOptions): Promise<RemotionPreviewResult>
+    close(sessionId: string): Promise<void>
+    onSelection(callback: (selection: RemotionPreviewSelection) => void): () => void
+  }
+  media: MediaApi
   js: {
     onTokenChanged: (cb: () => void) => () => void
     upcomingHearings: () => Promise<{ ok: boolean; hearings?: JsUpcomingHearing[]; fetchedAt?: string; error?: string; complete?: boolean }>

@@ -75,7 +75,13 @@
     "verify:case-management-app": "node scripts/verify-case-management-app.mjs && node scripts/verify-todo-app.mjs && node scripts/verify-case-management-ui.mjs && node scripts/verify-hearing-followups.mjs",
     "verify:desktop": "node scripts/verify-nsis-user-path.mjs && node scripts/verify-installed-windows-cleanup.mjs && npm run typecheck && npm run verify:hearing-diarization && npm run verify:agent-runtime && npm run verify:todo-summary && npm run verify:todo-files && npm run verify:agent-case-context && npm run verify:agent-mcp && npm run verify:agent-todo && npm run verify:inline-selection && npm run verify:case-management && npm run verify:node-pty && npm run build && npm run verify:case-management-app",
     "verify:installed-windows": "node scripts/verify-installed-windows.mjs",
-    "verify:hearing-diarization": "node --experimental-strip-types --no-warnings scripts/verify-hearing-diarization.mjs"
+    "verify:hearing-diarization": "node --experimental-strip-types --no-warnings scripts/verify-hearing-diarization.mjs",
+    "verify:media": "node --experimental-strip-types --no-warnings scripts/verify-media.mjs",
+    "verify:media-backend": "node scripts/verify-media-backend.mjs",
+    "verify:media-viewer": "node scripts/verify-media-viewer.mjs",
+    "verify:remotion-preview": "node scripts/verify-remotion-preview.mjs",
+    "verify:media-ui": "node scripts/verify-media-ui.mjs",
+    "verify:remotion-render": "node scripts/verify-remotion-render.mjs"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.3.270",

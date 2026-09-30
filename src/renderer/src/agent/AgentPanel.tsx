@@ -1,3 +1,4 @@
+import { normalizeMediaSelection, mediaSelectionKey } from '../../../shared/media'
 import type { AgentWorkspaceContext } from '../../../shared/agentWorkspaceContext'
 import { isAgentTaskMutation } from '../../../shared/agentTodo'
 import {
@@ -1177,6 +1178,7 @@ function dataTransferPaths(dataTransfer: DataTransfer): string[] {
 }
 
 function attachmentKindLabel(kind: AgentAttachment['kind']): string {
+  if (kind === 'media-range') return '미디어'
   if (kind === 'folder') return '폴더'
   if (kind === 'selection') return '선택'
   if (kind === 'pdf-page-range') return 'PDF'
@@ -1185,6 +1187,7 @@ function attachmentKindLabel(kind: AgentAttachment['kind']): string {
 }
 
 function attachmentIdentity(attachment: AgentAttachment): string {
+  if (attachment.kind === 'media-range' && attachment.media) return `media:${mediaSelectionKey(attachment.media)}`
   if (attachment.kind === 'selection') return `${attachment.kind}:${attachment.label}:${attachment.text ?? ''}`
   return `${attachment.kind}:${attachment.path ?? attachment.label}`
 }
@@ -1202,6 +1205,7 @@ function appendUniqueAttachments(current: AgentAttachment[], additions: AgentAtt
 }
 
 function attachmentReferenceText(attachment: AgentAttachment): string {
+  if (attachment.kind === 'media-range') return `「${attachment.label}」 구간에 대해 `
   if (attachment.kind === 'selection') return `「${attachment.label}」 선택 부분에 대해 `
   if (attachment.kind === 'folder') return `「${attachment.label}」 폴더에 대해 `
   if (attachment.kind === 'pdf-page-range') return `「${attachment.label}」 PDF 범위에 대해 `
@@ -1300,14 +1304,18 @@ function normalizeAgentAttachments(value: unknown): AgentAttachment[] {
           kind !== 'folder' &&
           kind !== 'selection' &&
           kind !== 'pdf-page-range' &&
-          kind !== 'terminal-snippet')
+          kind !== 'terminal-snippet' &&
+          kind !== 'media-range')
       )
         return []
       const range = asRecord(attachment.range)
+      const media = normalizeMediaSelection(attachment.media)
+      if (kind === 'media-range' && !media) return []
       return [
         {
           kind,
           label,
+          media,
           path: stringValue(attachment.path),
           origin: attachmentOrigin(attachment.origin),
           access: attachmentAccess(attachment.access),
