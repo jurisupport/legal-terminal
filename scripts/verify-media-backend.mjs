@@ -58,7 +58,9 @@ const remote = await load('main/remoteFs.ts', {
   './remoteDirListCache': { invalidateRemoteDirListCache() {} },
   './remoteFileCache': { readRemoteFileCache: async () => undefined, rememberRemoteFileCache() {}, invalidateRemoteFileCache() {} }
 }, '\nexport { connect as connectForTest, sftpRequest as sftpRequestForTest }\n')
-const mediaMocks = { electron, './settings': settings, './remoteFs': remote, '../shared/media': shared }
+let frozenSource
+const filePromises = require('fs/promises')
+const mediaMocks = { electron, './settings': settings, './remoteFs': remote, '../shared/media': shared, 'fs/promises': { ...filePromises, stat: (file, ...args) => frozenSource?.path === file ? Promise.resolve(frozenSource.info) : filePromises.stat(file, ...args) } }
 const fastGrace = (source) => source.replace('const EPHEMERAL_GRACE_MS = 10_000', 'const EPHEMERAL_GRACE_MS = 50')
 const media = await load('main/media.ts', mediaMocks, '', fastGrace)
 const handlers = new Map()
@@ -163,9 +165,12 @@ try {
   assert.equal((await request(first.url, undefined, 'HEAD')).headers.get('content-length'), '18')
   for (const range of ['bytes=3-2', 'bytes=99-', 'bytes=-0', 'bytes=0-1,3-4', 'items=0-1', 'bytes=-999999999999999999999']) assert.equal((await request(first.url, range)).status, 416, range)
   const previousStat = await stat(local)
+  frozenSource = { path: local, info: previousStat }
   await writeFile(local, 'new-video-contents')
   await utimes(local, previousStat.atime, previousStat.mtime)
-  assert.equal((await call(a, 'check', { path: local, versionId: first.versionId })).changed, true, 'same-size local overwrite with preserved mtime is detected through change time')
+  for (let i = 0; i < 50 && !(await call(a, 'check', { path: local, versionId: first.versionId })).changed; i++) await tick()
+  assert.equal((await call(a, 'check', { path: local, versionId: first.versionId })).changed, true, 'native file notification detects replacement even when every stat field is frozen')
+  frozenSource = undefined
   const second = await call(a, 'open', { path: local, requestId: 'force', force: true })
   assert.notEqual(first.versionId, second.versionId)
   assert.equal(await (await request(first.url)).text(), 'old-video-contents', 'open review is immutable')
