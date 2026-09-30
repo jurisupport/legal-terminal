@@ -382,7 +382,7 @@ async function checkMedia(input: { path: string; versionId: string; projectDir?:
   try {
     const metadata = isRemote(manifestPath) ? await rfsStat(manifestPath) : await stat(manifestPath)
     if (metadata.size > 64 * 1024) return { changed, completed: false }
-    const raw = isRemote(manifestPath) ? await rfsReadBytes(manifestPath) : await readFile(manifestPath)
+    const raw = isRemote(manifestPath) ? await rfsReadBytes(manifestPath, undefined, { fresh: true }) : await readFile(manifestPath)
     const manifest = JSON.parse(raw.toString('utf8'))
     const done = manifest?.completed
     if (manifest.version !== 1 || !['ffmpeg', 'remotion'].includes(manifest.engine) || !done || typeof done.version !== 'string' || !done.version || typeof done.path !== 'string' || !Number.isFinite(Date.parse(done.completedAt))) {

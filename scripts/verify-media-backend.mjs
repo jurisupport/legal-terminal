@@ -53,10 +53,11 @@ const hostKeys = await load('main/sshHostKeys.ts', { electron: {
     return { response: acceptHostKey ? 1 : 0 }
   } }
 } })
+let staleMarkerCache
 const remote = await load('main/remoteFs.ts', {
   './settings': settings, './sshConnectionPool': pool, './sshHostKeys': hostKeys,
   './remoteDirListCache': { invalidateRemoteDirListCache() {} },
-  './remoteFileCache': { readRemoteFileCache: async () => undefined, rememberRemoteFileCache() {}, invalidateRemoteFileCache() {} }
+  './remoteFileCache': { readRemoteFileCache: async (_namespace, key) => key.includes('.legal-terminal/media.json') ? staleMarkerCache : undefined, rememberRemoteFileCache() {}, invalidateRemoteFileCache() {} }
 }, '\nexport { connect as connectForTest, sftpRequest as sftpRequestForTest }\n')
 let frozenSource
 const filePromises = require('fs/promises')
@@ -301,9 +302,11 @@ try {
   await utimes(join(serverRoot, 'skew-two.mp4'), skewTime + 1, skewTime + 1)
   await mkdir(join(serverRoot, '.legal-terminal'), { recursive: true })
   await writeFile(join(serverRoot, '.legal-terminal/media.json'), JSON.stringify({ version: 1, engine: 'remotion', completed: { version: 'next', path: 'skew-two.mp4', completedAt: new Date((skewTime + 2) * 1000).toISOString() } }))
+  staleMarkerCache = Buffer.from(JSON.stringify({ version: 1, engine: 'remotion', completed: { version: 'stale', path: 'missing-old.mp4', completedAt: new Date(0).toISOString() } }))
   const skewCheck = await call(a, 'check', { path: skew.sourcePath, versionId: skew.versionId, projectDir: 'ssh://test/' })
   assert.equal(skewCheck.completed, true, 'remote clock 24 hours behind local still detects completion')
-  assert.equal(skewCheck.path, 'ssh://test/skew-two.mp4')
+  assert.equal(skewCheck.path, 'ssh://test/skew-two.mp4', 'completion records bypass stale document cache even when metadata collides')
+  staleMarkerCache = undefined
   console.log('Consistency: mid-transfer source mutation rejected; remote-clock completion compared within source clock domain')
 
   const uploadBytes = Uint8Array.from(Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aB1cAAAAASUVORK5CYII=', 'base64'))

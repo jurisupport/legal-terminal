@@ -871,7 +871,8 @@ export async function rfsDownloadToFile(
 
 export async function rfsReadBytes(
   uri: string,
-  onProgress?: (progress: RfsReadProgress) => void
+  onProgress?: (progress: RfsReadProgress) => void,
+  options: { fresh?: boolean } = {}
 ): Promise<Buffer> {
   const { profileId, path } = parseRemote(uri)
   const sftp = await getSftp(profileId)
@@ -886,7 +887,7 @@ export async function rfsReadBytes(
   }
   const st = await sftpStat(sftp, actualPath)
   const cacheKey = remoteFileCacheKey(profileId, actualPath, remoteFileStatSignature(st))
-  const cached = await readRemoteFileCache(REMOTE_FILE_CACHE_NAMESPACE, cacheKey)
+  const cached = options.fresh ? undefined : await readRemoteFileCache(REMOTE_FILE_CACHE_NAMESPACE, cacheKey)
   if (cached) return cached
   const progress = (downloadedBytes: number): void =>
     onProgress?.({ totalBytes: st.size, downloadedBytes })
