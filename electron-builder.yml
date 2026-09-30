@@ -55,7 +55,7 @@ nsis:
   oneClick: false
   perMachine: false
   allowToChangeInstallationDirectory: true
-  include: build/installer.nsh
+  include: build/customInstaller.nsh
   shortcutName: legal-terminal
   artifactName: legal-terminal-Setup.exe
 
