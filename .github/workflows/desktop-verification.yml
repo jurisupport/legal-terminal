@@ -1,0 +1,55 @@
+name: Desktop verification
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Desktop (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-15]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install dependencies including native optional binaries
+        run: npm ci --include=optional
+      - name: Verify installer scripts
+        run: node scripts/verify-windows-installer.mjs
+      - name: Verify desktop and case-management runtime
+        run: npm run verify:desktop
+      - name: Package Windows without publishing
+        if: runner.os == 'Windows'
+        run: npx electron-builder --win --publish never
+      - name: Verify installed Windows application
+        if: runner.os == 'Windows'
+        run: npm run verify:installed-windows
+      - name: Package macOS without publishing
+        if: runner.os == 'macOS'
+        run: npx electron-builder --mac zip --arm64 --publish never
+      - name: Upload runtime evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-runtime-${{ matrix.os }}
+          path: .omx/screenshots/*
+          if-no-files-found: warn
+      - name: Upload verified installers
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-installers-${{ matrix.os }}
+          path: |
+            dist/legal-terminal-Setup.exe
+            dist/legal-terminal-portable.exe
+            dist/legal-terminal-mac-arm64.zip
+          if-no-files-found: error
+          retention-days: 7
