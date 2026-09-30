@@ -1,6 +1,6 @@
 # Resolve the per-user template wrapper before any page/function macros expand.
 # Keep this file distinct from electron-builder's own installer.nsh.
-!define LT_NSIS_TEMPLATES "${__FILEDIR__}/../node_modules/app-builder-lib/templates/nsis"
+!define LT_NSIS_TEMPLATES "${__FILEDIR__}\..\node_modules\app-builder-lib\templates\nsis"
 !addincludedir "${LT_NSIS_TEMPLATES}"
 !cd "${__FILEDIR__}"
 
