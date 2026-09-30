@@ -112,20 +112,30 @@ async function electronCheck({ root, temp, output }) {
 
     frozenSource = { path: sample, info: await realStat(sample) }
     await fs.copyFile(path.join(temp, 'replacement.mp4'), sample)
-    await wait("document.querySelector('.media-viewer')?.textContent.includes('원본이 변경되었습니다')", 'Changed file candidate detection')
     assert.equal(await run('return testMedia().src'), original.url, 'Candidate change must not auto-replace review')
     await run("testButton('원본 다시 읽기').click()")
     await wait(`testMedia()?.src!==${JSON.stringify(original.url)} && testMedia()?.readyState>=2`, 'Explicit revision refresh')
     const newer = await run('return testMedia().src')
     await run(`const select=document.querySelector('.media-viewer [aria-label="리뷰 버전"]');const choices=[...select.options].filter(option=>option.value!==select.value);select.value=choices[0].value;select.dispatchEvent(new Event('change',{bubbles:true}));`)
     await wait(`testMedia()?.src!==${JSON.stringify(newer)} && testMedia()?.readyState>=2`, 'Previous revision selection')
-    checks.push('Native change notification with every stat field frozen, no auto-replacement, forced refresh, previous revision')
+    checks.push('Explicit reread with every stat field frozen, no auto-replacement, previous revision')
 
     await run("testMedia().currentTime=1.6")
     await wait('!testMedia().seeking', 'Move away before attachment reveal')
     await run("[...document.querySelectorAll('.agent-attachments.pending .agent-attachment-chip')].find(item=>item.textContent.includes('0:00.400–0:00.900')).click()")
     await wait('testMedia()?.readyState>=2 && Math.abs(testMedia().currentTime-.9)<.02', 'Attachment restores quoted version and time')
     checks.push('Media attachment click restores quoted revision/time')
+
+    const { publishMedia } = await import(require('node:url').pathToFileURL(path.join(root, 'scripts/publish-media.mjs')).href)
+    const beforePublish = await run('return testMedia().src')
+    const published = await publishMedia(path.dirname(sample), 'ffmpeg', 'movie.mp4', 'render.py')
+    await wait("!!testButton('새 버전 보기')", 'Explicit completed revision publication')
+    assert.equal(await run('return testMedia().src'), beforePublish, 'Publication cannot replace the active review automatically')
+    await run("testButton('새 버전 보기').click()")
+    await wait(`testMedia()?.readyState>=2 && testMedia().src!==${JSON.stringify(beforePublish)}`, 'Published new output playback')
+    const publishedPath = path.join(path.dirname(sample), published.completed.path)
+    assert.equal(await run(`return JSON.parse(document.querySelector('.media-viewer [aria-label="리뷰 버전"]').value)[0]`), publishedPath)
+    checks.push('Unique completed output + atomic manifest updates review independent of original file metadata')
 
     open(audio, 'media-fixture-audio')
     await wait("testMedia()?.tagName==='AUDIO' && testMedia().readyState>=2", 'Native WAV playback')

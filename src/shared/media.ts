@@ -26,6 +26,7 @@ export interface MediaProgress {
 }
 
 export interface MediaSelection {
+  projectDir?: string
   sourcePath: string
   versionId: string
   time: number
@@ -87,6 +88,7 @@ export function normalizeMediaSelection(value: unknown): MediaSelection | undefi
   if ((v.start !== undefined || v.end !== undefined) && (!nonnegative(v.start) || !nonnegative(v.end) || v.end <= v.start)) return undefined
   return {
     sourcePath: v.sourcePath, versionId: v.versionId, time: v.time,
+    ...(typeof v.projectDir === 'string' && v.projectDir ? { projectDir: v.projectDir } : {}),
     ...(nonnegative(v.start) && nonnegative(v.end) ? { start: v.start, end: v.end } : {}),
     ...(nonnegative(v.captureTime) ? { captureTime: v.captureTime } : {}),
     ...(typeof v.capturePath === 'string' ? { capturePath: v.capturePath } : {}),
@@ -111,7 +113,9 @@ export function mediaSelectionText(selection: MediaSelection): string {
     selection.capturePath
       ? 'capturePath의 이미지를 실제 이미지 읽기 도구로 확인하세요. 한 장의 캡처가 구간 전체를 나타내는 것은 아닙니다.'
       : '캡처 이미지가 없습니다. 영상·음성을 직접 확인하지 않았다면 보고 들었다고 단정하지 마세요.',
-    '음성 전사문은 자동 첨부되지 않았습니다. 요청된 수정은 제작 소스에 반영하고 완성된 새 버전을 보존하세요.'
+    '음성 전사문은 자동 첨부되지 않았습니다. 요청된 수정은 제작 소스에 반영하고 완성된 새 버전을 보존하세요.',
+    '수정본을 만들 때는 기존 출력 파일을 덮어쓰지 말고 매번 고유한 새 파일명으로 저장하세요. 렌더 명령이 성공한 뒤에만 projectDir(없으면 현재 작업 폴더)의 .legal-terminal/media.json을 원자적으로 갱신하세요.',
+    '완료 기록 형식: {\"version\":1,\"engine\":\"ffmpeg\",\"entry\":\"제작 소스의 상대 경로\",\"completed\":{\"version\":\"새 고유 버전 ID\",\"path\":\"프로젝트 내부의 새 출력 상대 경로\",\"completedAt\":\"실제 완료 시각의 ISO 문자열\"}}. Remotion이면 engine을 remotion으로 지정합니다.'
   ].join('\n')
 }
 

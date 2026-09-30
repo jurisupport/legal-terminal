@@ -1,8 +1,8 @@
 import { app, nativeImage, type IpcMain, type Session, type WebContents } from 'electron'
 import { createHash, randomUUID } from 'crypto'
-import { createReadStream, createWriteStream, watch, type FSWatcher } from 'fs'
+import { createReadStream, createWriteStream } from 'fs'
 import { mkdir, readFile, readdir, realpath, rename, rm, stat, statfs, writeFile } from 'fs/promises'
-import { basename, dirname, isAbsolute, join, posix, resolve } from 'path'
+import { isAbsolute, join, posix, resolve } from 'path'
 import { Readable, Transform } from 'stream'
 import { pipeline } from 'stream/promises'
 import { getSettings } from './settings'
@@ -16,7 +16,7 @@ export const MEDIA_SCHEME = {
 const MAX_CACHE_BYTES = 2 * 1024 ** 3
 const MAX_CAPTURE_BYTES = 5 * 1024 ** 2
 const EPHEMERAL_GRACE_MS = 10_000
-type Signature = { size: number; mtimeMs: number; ctimeMs?: number }
+type Signature = { size: number; mtimeMs: number }
 interface Record extends MediaVersion { signature: string; file: string; ephemeral: boolean; accessedAt: number; observedAt: number }
 interface Transfer {
   controller: AbortController
@@ -32,15 +32,13 @@ const tokens = new Map<string, { owner: number; record: Record }>()
 const requests = new Map<string, AbortController>()
 const transfers = new Map<string, Transfer>()
 const watchedSenders = new Set<number>()
-const sourceWatchers = new Map<string, FSWatcher>()
 let loaded: Promise<void> | undefined
 let reservedBytes = 0
 let metadataQueue: Promise<unknown> = Promise.resolve()
 let cleanupTimer: ReturnType<typeof setTimeout> | undefined
 const cacheRoot = (): string => join(app.getPath('userData'), 'media-review')
 const filesRoot = (): string => join(cacheRoot(), 'files')
-// Local timestamps supplement native notifications; some copies preserve every stat field.
-const signature = (s: Signature): string => `${s.size}:${s.mtimeMs}${s.ctimeMs === undefined ? '' : ':' + s.ctimeMs}`
+const signature = (s: Signature): string => `${s.size}:${s.mtimeMs}`
 const recordKey = (path: string, version: string): string => `${path}\0${version}`
 const fileName = (path: string, version: string): string => createHash('sha256').update(recordKey(path, version)).digest('hex') + '.media'
 const filePath = (record: Record): string => join(filesRoot(), record.file)
@@ -64,9 +62,9 @@ function sourcePath(value: unknown): string {
 }
 
 async function sourceStat(path: string): Promise<Signature> {
-  const info = isRemote(path) ? await rfsStat(path) : await stat(path).then((s) => ({ size: s.size, mtimeMs: s.mtimeMs, ctimeMs: s.ctimeMs, isDir: !s.isFile() }))
+  const info = isRemote(path) ? await rfsStat(path) : await stat(path).then((s) => ({ size: s.size, mtimeMs: s.mtimeMs, isDir: !s.isFile() }))
   if (info.isDir || !Number.isSafeInteger(info.size) || info.size <= 0) throw new Error('비어 있지 않은 일반 미디어 파일만 열 수 있습니다.')
-  return { size: info.size, mtimeMs: info.mtimeMs ?? 0, ...('ctimeMs' in info && typeof info.ctimeMs === 'number' ? { ctimeMs: info.ctimeMs } : {}) }
+  return { size: info.size, mtimeMs: info.mtimeMs ?? 0 }
 }
 
 function publicVersion(record: Record): MediaVersion {
@@ -146,7 +144,7 @@ async function localSnapshot(path: string, destination: string, before: Signatur
   if (size !== before.size || signature(before) !== signature(after) || original.ino !== after.ino || original.ctimeMs !== after.ctimeMs) {
     throw new Error('복사 중 원본 미디어가 변경되었습니다. 렌더링 완료 후 다시 여세요.')
   }
-  return { size, mtimeMs: before.mtimeMs, ctimeMs: before.ctimeMs, sha256: hash.digest('hex') }
+  return { size, mtimeMs: before.mtimeMs, sha256: hash.digest('hex') }
 }
 
 function reportProgress(transfer: Transfer, downloadedBytes: number, totalBytes: number): void {
@@ -214,37 +212,10 @@ async function download(path: string, before: Signature, transfer: Transfer): Pr
   }
 }
 
-// CopyFile can preserve every timestamp on Windows. Observe the parent directory so
-// in-place writes and atomic replacements both invalidate metadata-based cache reuse.
-function watchSource(path: string): void {
-  if (isRemote(path) || sourceWatchers.has(path)) return
-  const filename = (value: string): string => process.platform === 'win32' ? value.normalize('NFC').toLowerCase() : value.normalize('NFC')
-  try {
-    const watcher = watch(dirname(path), { persistent: false }, (_event, name) => {
-      if (name && filename(String(name)) !== filename(basename(path))) return
-      for (const record of records.values()) if (record.sourcePath === path) record.signature = ''
-    })
-    sourceWatchers.set(path, watcher)
-    watcher.once('error', () => {
-      watcher.close()
-      if (sourceWatchers.get(path) === watcher) sourceWatchers.delete(path)
-    })
-  } catch { /* Metadata checks and explicit reread remain available on unwatched filesystems. */ }
-}
-
-function releaseSourceWatchers(): void {
-  const activePaths = new Set([...tokens.values()].map(({ record }) => record.sourcePath))
-  for (const [path, watcher] of sourceWatchers) if (!activePaths.has(path)) {
-    watcher.close()
-    sourceWatchers.delete(path)
-  }
-}
-
 function pin(sender: WebContents, record: Record): MediaSnapshot {
   if (sender.isDestroyed()) throw new Error('미디어 탭이 닫혔습니다.')
   const token = randomUUID()
   tokens.set(token, { owner: sender.id, record })
-  watchSource(record.sourcePath)
   record.accessedAt = Date.now()
   return { ...publicVersion(record), token, url: `lt-media://snapshot/${token}` }
 }
@@ -330,7 +301,6 @@ async function releaseOwner(owner: number, token?: string): Promise<void> {
     value.record.accessedAt = Date.now()
     tokens.delete(id)
   }
-  releaseSourceWatchers()
   await ensureLoaded()
   await serialized(async () => { await prune(); await flushIndex() })
   // Leave enough time for a moved/detached tab to obtain its own token.
@@ -419,7 +389,7 @@ async function checkMedia(input: { path: string; versionId: string; projectDir?:
       return { changed, completed: false }
     }
     const completedPath = childPath(directory, done.path)
-    if (!mediaMimeType(completedPath)) return { changed, completed: false }
+    if (!mediaMimeType(completedPath) || completedPath === path) return { changed, completed: false }
     const actual = isRemote(completedPath) ? await rfsRealpath(completedPath) : await realpath(completedPath)
     const root = isRemote(directory) ? await rfsRealpath(directory) : await realpath(directory)
     if (!actual.startsWith(root.replace(/[\\/]+$/, '') + (!isRemote(directory) && process.platform === 'win32' ? '\\' : '/'))) return { changed, completed: false }
@@ -427,7 +397,7 @@ async function checkMedia(input: { path: string; versionId: string; projectDir?:
     const completionTime = Date.parse(done.completedAt)
     // A stale success marker cannot bless a newer file that is still being rendered.
     const newerLocalCompletion = isRemote(directory) || completionTime >= (record.observedAt ?? record.createdAt)
-    const completed = newerLocalCompletion && completionTime + 1 >= completedStat.mtimeMs && (completedPath !== path ? completionTime > record.mtimeMs : changed)
+    const completed = newerLocalCompletion && completionTime + 1 >= completedStat.mtimeMs && completionTime > record.mtimeMs
     return completed ? { changed: true, completed: true, path: completedPath } : { changed, completed: false }
   } catch { return { changed, completed: false } }
 }
@@ -492,7 +462,6 @@ export function registerMediaIpc(ipc: IpcMain): void {
     if (cleanupTimer) clearTimeout(cleanupTimer)
     for (const controller of requests.values()) controller.abort()
     tokens.clear()
-    releaseSourceWatchers()
     for (const record of records.values()) record.accessedAt = 0
     void ensureLoaded().then(() => serialized(async () => { await prune(); await flushIndex() })).catch(() => {})
   })

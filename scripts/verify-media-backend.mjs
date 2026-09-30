@@ -168,11 +168,10 @@ try {
   frozenSource = { path: local, info: previousStat }
   await writeFile(local, 'new-video-contents')
   await utimes(local, previousStat.atime, previousStat.mtime)
-  for (let i = 0; i < 50 && !(await call(a, 'check', { path: local, versionId: first.versionId })).changed; i++) await tick()
-  assert.equal((await call(a, 'check', { path: local, versionId: first.versionId })).changed, true, 'native file notification detects replacement even when every stat field is frozen')
-  frozenSource = undefined
+  assert.equal((await call(a, 'check', { path: local, versionId: first.versionId })).changed, false, 'identical metadata must not pretend to prove a replacement')
   const second = await call(a, 'open', { path: local, requestId: 'force', force: true })
-  assert.notEqual(first.versionId, second.versionId)
+  assert.notEqual(first.versionId, second.versionId, 'explicit reread detects content even with every stat field frozen')
+  frozenSource = undefined
   assert.equal(await (await request(first.url)).text(), 'old-video-contents', 'open review is immutable')
   assert.equal(await (await request(second.url)).text(), 'new-video-contents')
   const diskIndex = JSON.parse(await readFile(join(mediaRoot, 'media-review/index.json'), 'utf8'))
@@ -195,10 +194,14 @@ try {
 
   await mkdir(join(root, '.legal-terminal'))
   const manifestPath = join(root, '.legal-terminal/media.json')
-  await writeFile(local, 'completed-render')
-  let manifest = { version: 1, engine: 'ffmpeg', completed: { version: 'v2', path: 'clip.mp4', completedAt: new Date().toISOString() } }
+  await writeFile(join(root, 'completed-v2.mp4'), 'completed-render')
+  let manifest = { version: 1, engine: 'ffmpeg', completed: { version: 'v2', path: 'completed-v2.mp4', completedAt: new Date().toISOString() } }
   await writeFile(manifestPath, JSON.stringify(manifest))
   assert.equal((await call(a, 'check', { path: local, versionId: second.versionId, projectDir: root })).completed, true)
+  manifest.completed.path = 'clip.mp4'
+  await writeFile(manifestPath, JSON.stringify(manifest))
+  assert.equal((await call(a, 'check', { path: local, versionId: second.versionId, projectDir: root })).completed, false, 'completion publication must identify an immutable new output path')
+  manifest.completed.path = 'completed-v2.mp4'
   manifest.completed.completedAt = new Date(0).toISOString()
   await writeFile(manifestPath, JSON.stringify(manifest))
   assert.equal((await call(a, 'check', { path: local, versionId: second.versionId, projectDir: root })).completed, false)

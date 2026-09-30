@@ -346,6 +346,7 @@ export default function MediaViewer({ path, active: visible = true, projectDir, 
           <button type="button" className="media-viewer-ask" disabled={!range || asking || !onAsk} onClick={() => { void ask(true) }}>이 구간 질문</button>
         </div>
         {range && <p className="media-viewer-notice">선택 {formatMediaTime(range.start)}–{formatMediaTime(range.end)}{!isAudio && ' · 현재 화면 한 장이 함께 첨부됩니다.'}</p>}
+        <p className="media-viewer-notice">새 버전은 렌더 완료 기록으로 확인합니다. 직접 덮어쓴 파일은 원본 다시 읽기를 눌러 주세요.</p>
         <p className="media-viewer-source" title={snapshot?.sourcePath ?? path}>{snapshot?.sourcePath ?? path}</p>
       </div>
     </section>

@@ -15,6 +15,9 @@ for (const invalid of [{ time: NaN }, { time: Infinity }, { time: -1 }, { start:
 }
 assert.match(mediaSelectionText({ ...selection, capturePath: '/shorts/frame.jpg' }), /이미지를 실제 이미지 읽기 도구/)
 assert.match(mediaSelectionText(selection), /전사문은 자동 첨부되지/)
+assert.equal(normalizeMediaSelection({ ...selection, projectDir: '/shorts' }).projectDir, '/shorts')
+assert.match(mediaSelectionText(selection), /고유한 새 파일명/)
+assert.match(mediaSelectionText(selection), /\.legal-terminal\/media\.json/)
 assert.equal(mediaMimeType('/test/쇼츠.MP4'), 'video/mp4')
 assert.equal(mediaMimeType('/test/readme.md'), undefined)
 assert.equal(formatMediaTime(59.9996), '1:00.000')
