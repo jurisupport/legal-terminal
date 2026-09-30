@@ -4,6 +4,9 @@ import type {
   CaseSessionSummary,
   FolderActivity,
   JsCase,
+  JsTodo,
+  JsUpcomingHearing,
+  TodoCapabilities,
   SshProfile,
   WorkLogItem
 } from '../env'
@@ -12,13 +15,21 @@ import CaseContextMenu, { type CaseContextMenuState } from './CaseContextMenu'
 import CaseActivityTimeline from './CaseActivityTimeline'
 import WorkLogView from './WorkLogView'
 import { agoLabel, fmtDate, nextHearing, partyNames } from './caseUtils'
-import { loadCaseActivity, loadFolderActivity } from './caseActivityCache'
+import { invalidateCaseActivity, loadCaseActivity, loadFolderActivity } from './caseActivityCache'
 import {
   clearCaseListCache,
   listCasesCached,
   readCachedCaseList,
   type CaseListParams
 } from './caseListCache'
+
+import { buildCaseManagement, emptyCaseManagementUi } from '../../../shared/caseManagement'
+import { kstDateKey } from '../../../shared/todoSummary'
+import type { TodoSnapshot } from './useTodoSnapshot'
+import type { CaseManagementUiController } from './useCaseManagementUi'
+import CaseTaskPanel from './CaseTaskPanel'
+import CaseRecovery from './CaseRecovery'
+import { TodoDialog } from './TodoDetails'
 
 const SIGNUP_URL = 'https://jurisupport.com/signup'
 const CASES_URL = 'https://jurisupport.com/cases'
@@ -62,7 +73,7 @@ function caseListParams(q?: string, refresh = false, status = 'active'): CaseLis
 }
 
 /** JuriSupport(본체) 사건 대시보드. 좌클릭=작업환경 열기, 우클릭=컨텍스트 메뉴. */
-export default function CasesDashboard({
+function CasesDashboardContent({
   onOpenWorkspace,
   onOpenDefault,
   onOpenRemote,
@@ -73,8 +84,14 @@ export default function CasesDashboard({
   onHearingRecord,
   onResumeSession,
   onResumePath,
-  onChanged
+  onChanged, snapshot, caseUi, onStartTask, onAskNextAction, onOpenTodos, hearings
 }: {
+  snapshot?: TodoSnapshot
+  caseUi?: CaseManagementUiController
+  onStartTask?: (todo: JsTodo) => void | Promise<void>
+  onAskNextAction?: (todo: JsTodo) => void
+  onOpenTodos?: (caseId: string) => void
+  hearings?: JsUpcomingHearing[]
   onOpenWorkspace: (c: JsCase) => void
   onOpenDefault?: (c: JsCase) => void
   onOpenRemote?: (c: JsCase, profile: SshProfile) => void
@@ -93,12 +110,20 @@ export default function CasesDashboard({
   ) => void
   onChanged?: () => void
 }): JSX.Element {
+  const [taskCase, setTaskCase] = useState<JsCase | null>(null)
+  const [recoveryCases, setRecoveryCases] = useState<JsCase[] | null>(null)
+  const [capabilities, setCapabilities] = useState<TodoCapabilities | null>(null)
+  const loadGeneration = useRef(0)
+  useEffect(() => () => { loadGeneration.current++ }, [])
+  const changedTasks = (): void => { snapshot?.refresh(); onChanged?.() }
   const [tokenReady, setTokenReady] = useState<boolean | null>(null)
   // 토큰이 저장돼 있는데 복호화가 안 되는 상태(앱 업데이트 후 키체인 접근 거부) — 재입력 안내용
   const [tokenLocked, setTokenLocked] = useState(false)
   const [cases, setCases] = useState<JsCase[] | null>(
     () => readCachedCaseList({ status: 'active' }) ?? null
   )
+  const management = buildCaseManagement(cases ?? [], snapshot?.todos ?? [], caseUi?.state?.ui ?? emptyCaseManagementUi())
+  const rowsByCase = new Map(management.cases.map((row) => [row.case.id, row]))
   const [err, setErr] = useState('')
   const [loading, setLoading] = useState(false)
   const [search, setSearch] = useState('')
@@ -128,11 +153,13 @@ export default function CasesDashboard({
   }
 
   const refreshActivity = (cs: JsCase[]): void => {
-    void loadCaseActivity(cs).then((a) => setActivity(a))
-    void loadFolderActivity(cs).then((f) => setFolders(f))
+    const expected = loadGeneration.current
+    void loadCaseActivity(cs).then((a) => { if (expected === loadGeneration.current) setActivity(a) }).catch(() => {})
+    void loadFolderActivity(cs).then((f) => { if (expected === loadGeneration.current) setFolders(f) }).catch(() => {})
   }
 
   const load = (q?: string, refresh = false, nextStatus = status): void => {
+    const expected = ++loadGeneration.current
     const params = caseListParams(q, refresh, nextStatus)
     const cached = refresh ? undefined : readCachedCaseList(params)
     if (cached) {
@@ -146,19 +173,24 @@ export default function CasesDashboard({
     setErr('')
     listCasesCached(params)
       .then((r) => {
+        if (expected !== loadGeneration.current) return
         if (r.ok) {
           setCases(r.cases ?? [])
           refreshActivity(r.cases ?? [])
         } else setErr(r.error ?? '불러오기 실패')
       })
-      .finally(() => setLoading(false))
+      .catch((e) => { if (expected === loadGeneration.current) setErr(String(e)) })
+      .finally(() => { if (expected === loadGeneration.current) setLoading(false) })
   }
 
   useEffect(() => {
+    let alive = true
     const applyTokenStatus = (st: 'ok' | 'missing' | 'locked', refresh: boolean): void => {
+      if (!alive) return
       setTokenLocked(st === 'locked')
       setTokenReady(st === 'ok')
       if (st !== 'ok') return
+      void window.lt.todo.capabilities().then((r) => setCapabilities(r.ok ? r.capabilities ?? null : null)).catch(() => setCapabilities(null))
       if (refresh) {
         clearCaseListCache()
         load(undefined, true)
@@ -170,7 +202,7 @@ export default function CasesDashboard({
       void window.lt.js.tokenStatus().then((st) => applyTokenStatus(st, true))
     }
     window.addEventListener(JS_TOKEN_UPDATED_EVENT, onTokenUpdated)
-    return () => window.removeEventListener(JS_TOKEN_UPDATED_EVENT, onTokenUpdated)
+    return () => { alive = false; if (searchTimer.current) clearTimeout(searchTimer.current); window.removeEventListener(JS_TOKEN_UPDATED_EVENT, onTokenUpdated) }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
@@ -344,6 +376,7 @@ export default function CasesDashboard({
       </div>
 
       <div className="dash-scroll">
+      {snapshot && <div className="case-management-tools"><button className="todo-small" disabled={loading || snapshot.loading || !!snapshot.error || !caseUi?.state} onClick={() => { const expected = loadGeneration.current; setErr(''); void listCasesCached({ refresh: true }).then((result) => { if (expected !== loadGeneration.current) return; if (!result.ok || !result.cases) throw new Error(result.error || '정리할 사건 조회 실패'); snapshot.refresh(); setRecoveryCases(result.cases) }).catch((e) => setErr(String(e))) }}>한 사건씩 정리{caseUi?.state?.ui.recovery.caseId ? ' 이어가기' : ''}</button>{snapshot.error && <p className="dash-err" role="alert">할일 조회 실패: {snapshot.error} · 이전 자료가 표시될 수 있습니다.</p>}{caseUi?.error && <p className="dash-err" role="alert">{caseUi.error} <button className="todo-small" onClick={() => void caseUi.refresh()}>선택 다시 불러오기</button></p>}</div>}
       {loading && !cases && <p className="muted pad">불러오는 중…</p>}
       {err && (
         <p className="dash-err pad">
@@ -374,6 +407,8 @@ export default function CasesDashboard({
 
       <div className="dash-list">
         {visibleCases?.map((c) => {
+          const row = rowsByCase.get(c.id)
+          const next = row?.nextTask
           const h = nextHearing(c)
           const client = partyNames(c.parties, 'client')
           const opponent = partyNames(c.parties, 'opponent')
@@ -420,6 +455,12 @@ export default function CasesDashboard({
                   <span className="case-hdate">{h.when}</span> {h.note}
                 </div>
               )}
+              {snapshot && <div className="case-next-task" onClick={(e) => e.stopPropagation()}>
+                <strong>{next ? `${row?.selectionKind === 'selected' ? '선택한 다음 할일' : row?.selectionKind === 'waiting' ? '기다리는 중' : '추천 다음 할일'} · ${next.title}` : snapshot.loading || !snapshot.todos ? '다음 할일 조회 중…' : '조회 가능한 다음 할일 없음'}</strong>
+                {next && <p className="muted small">{next.assigneeName ? `담당 ${next.assigneeName} · ` : ''}{next.dueDate ? `기한 ${kstDateKey(next.dueDate) || '날짜 확인 필요'}` : '계획 미정'}{next.waitingFor ? ` · 대기 ${next.waitingFor} · ${next.reviewAt ? `재확인 ${kstDateKey(next.reviewAt) || '날짜 확인 필요'}` : '재확인일 확인 필요'}` : ''}</p>}
+                {!!row?.reasons.length && <p className="todo-warning">{row.reasons.join(' · ')}</p>}
+                <div className="todo-actions">{next && onStartTask && <button className="todo-primary" onClick={() => { void Promise.resolve().then(() => onStartTask(next)).catch((e) => setErr(String(e))) }}>이어서 작업</button>}{!next && <button className="todo-small" onClick={() => openDefault(c)}>사건 작업환경 열기</button>}<button className="todo-small" onClick={() => setTaskCase(c)}>다음 할일 선택·새 할일</button>{onOpenTodos && <button className="todo-small" onClick={() => onOpenTodos(c.id)}>전체 업무 보기</button>}</div>
+              </div>}
               {act && act.sessions.length > 0 && (
                 <div className="case-activity">
                   {act.sessions.slice(0, 2).map((s) => (
@@ -438,7 +479,7 @@ export default function CasesDashboard({
                       toggleHistory(c.id)
                     }}
                   >
-                    작업 이력 {act.total}건 {historyOpen[c.id] ? '▴' : '▾'}
+                    AI 작업 이력 {act.total}건 {historyOpen[c.id] ? '▴' : '▾'}
                   </button>
                 </div>
               )}
@@ -515,6 +556,8 @@ export default function CasesDashboard({
         </>
       )}
 
+      {taskCase && snapshot && <TodoDialog title={`${taskCase.caseName || taskCase.caseNumber || '사건'} · 할일`} onClose={() => setTaskCase(null)}>{caseUi?.error && <p className="dash-err" role="alert">{caseUi.error} <button className="todo-small" onClick={() => void caseUi.refresh()}>선택 다시 불러오기</button></p>}<CaseTaskPanel c={taskCase} todos={management.openTasks.filter((todo) => todo.caseId === taskCase.id)} caseUi={caseUi} capabilities={capabilities} onChanged={changedTasks} onStartTask={onStartTask} onAskNextAction={onAskNextAction} /></TodoDialog>}
+      {recoveryCases && snapshot && caseUi && <CaseRecovery cases={recoveryCases} snapshot={snapshot} caseUi={caseUi} capabilities={capabilities} hearings={hearings} onClose={() => setRecoveryCases(null)} onChanged={changedTasks} onStartTask={onStartTask} onAskNextAction={onAskNextAction} />}
       {menu && (
         <CaseContextMenu
           menu={menu}
@@ -532,4 +575,10 @@ export default function CasesDashboard({
       )}
     </div>
   )
+}
+
+export default function CasesDashboard(props: Parameters<typeof CasesDashboardContent>[0]): JSX.Element {
+  const [account, setAccount] = useState(0)
+  useEffect(() => { const reset = (): void => { clearCaseListCache(); invalidateCaseActivity(); setAccount((value) => value + 1) }; window.addEventListener(JS_TOKEN_UPDATED_EVENT, reset); return () => window.removeEventListener(JS_TOKEN_UPDATED_EVENT, reset) }, [])
+  return <CasesDashboardContent key={account} {...props} />
 }

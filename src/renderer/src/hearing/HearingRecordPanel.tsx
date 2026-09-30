@@ -6,7 +6,9 @@ import {
   useState,
   type KeyboardEvent
 } from 'react'
-import type { JsHearing } from '../env'
+import type { JsHearing, JsTodo } from '../env'
+import { TodoDialog } from '../dashboard/TodoDetails'
+import { setTodoDate } from '../../../shared/todoSummary'
 import { isCommittedEnter, isImeComposing } from '../ime'
 import { insertDictationText, isDictationShortcut } from './dictationText'
 import { shouldKeepPendingRecord } from './loadPolicy'
@@ -71,6 +73,12 @@ interface HearingRecordTemplate {
   speakers: HearingSpeaker[]
 }
 
+interface HearingFollowupLink {
+  action: string
+  source: string
+  todoId?: string
+}
+
 interface HearingRecordData {
   version: 1
   id: string
@@ -84,8 +92,9 @@ interface HearingRecordData {
   createdAt: string
   updatedAt: string
   jsSync?: {
-    syncedAt: string
+    syncedAt?: string
     todoId?: string
+    followups?: HearingFollowupLink[]
   }
 }
 
@@ -107,6 +116,7 @@ export interface HearingRecordPanelProps {
   initialHearing?: JsHearing
   initialPath?: string
   visible?: boolean
+  onTasksChanged?: () => void
   onSavedPath?: (path: string, title: string) => void
   onOpenReport?: (path: string, title: string) => void
   onSummarizeReport?: (path: string, title: string) => void
@@ -417,7 +427,7 @@ function mergePendingRecord(
       ]
     },
     updatedAt: new Date().toISOString(),
-    jsSync: undefined
+    jsSync: loaded.jsSync
   }
 }
 
@@ -505,6 +515,120 @@ function buildReport(record: HearingRecordData): string {
     .join('\n')
 }
 
+function HearingFollowupDialog({ recordId, caseId, action, link, saveLink, onClose, onTasksChanged }: {
+  recordId: string
+  caseId: string
+  action: string
+  link?: HearingFollowupLink
+  saveLink: (link: HearingFollowupLink) => Promise<string>
+  onClose: () => void
+  onTasksChanged?: () => void
+}): JSX.Element {
+  const source = link?.source || `기일기록 후속 출처: ${JSON.stringify({ recordId, action })}`
+  const [title, setTitle] = useState(action)
+  const [due, setDue] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [message, setMessage] = useState('')
+  const [matches, setMatches] = useState<JsTodo[] | null>(null)
+  const [reviewed, setReviewed] = useState(false)
+  const [attempted, setAttempted] = useState(!!link)
+  const [opened, setOpened] = useState<JsTodo | null>(null)
+  const [assignees, setAssignees] = useState<{ id: string; name: string }[]>([])
+  const [assigneeId, setAssigneeId] = useState('')
+  const alive = useRef(true)
+  const saving = useRef(false)
+  const knownId = useRef(link?.todoId)
+  useEffect(() => {
+    alive.current = true
+    const invalidate = (): void => { alive.current = false; onClose() }
+    window.addEventListener('lt-js-token-updated', invalidate)
+    return () => { alive.current = false; window.removeEventListener('lt-js-token-updated', invalidate) }
+  }, [onClose])
+
+  const lookup = async (): Promise<JsTodo[]> => {
+    const response = await window.lt.todo.list({ caseId, fields: 'full', includeClosed: true, enrichCaseDetails: false })
+    if (!response.ok || !Array.isArray(response.todos)) throw new Error(response.error || '원 기록의 후속 할일 조회 실패')
+    return response.todos.filter((todo) => todo.caseId === caseId && todo.notes?.split('\n').includes(source))
+  }
+  const run = async (work: () => Promise<void>): Promise<void> => {
+    if (saving.current || !alive.current) return
+    saving.current = true; setBusy(true); setMessage('')
+    try { await work() } catch (error) {
+      if (alive.current) setMessage(error instanceof Error ? error.message : String(error))
+    } finally { saving.current = false; if (alive.current) setBusy(false) }
+  }
+  const openTask = async (id: string): Promise<void> => {
+    const response = await window.lt.todo.get(id)
+    if (!alive.current) return
+    if (!response.ok || !response.todo || response.todo.id !== id || response.todo.caseId !== caseId || !response.todo.notes?.split('\n').includes(source)) {
+      throw new Error(response.error || '원 기록과 같은 사건의 할일인지 확인할 수 없습니다. 다시 조회하세요.')
+    }
+    knownId.current = id
+    setOpened(response.todo)
+    await saveLink({ action, source, todoId: id })
+    if (alive.current) onTasksChanged?.()
+  }
+  const review = (): void => { void run(async () => {
+    const rows = await lookup()
+    if (!alive.current) return
+    setMatches(rows); setReviewed(false)
+    setMessage(rows.length ? '원 기록에서 만든 할일을 확인하고 열어 주세요.' : '같은 원 기록의 할일이 조회되지 않았습니다. 다른 화면의 생성 결과도 확인한 뒤 재시도하세요.')
+  }) }
+  useEffect(() => {
+    if (link?.todoId) void run(() => openTask(link.todoId!))
+    else if (link) review()
+    // This dialog is keyed by record and action; a saved link must not restart its request.
+  }, [])
+
+  const create = (): void => { void run(async () => {
+    if (knownId.current) { await openTask(knownId.current); return }
+    if (!title.trim() || (attempted && (matches === null || !reviewed || matches.length))) return
+    const dueDate = due ? setTodoDate(null, due) : undefined
+    // Recheck the source immediately before every POST, including explicit retries.
+    const existing = await lookup()
+    if (!alive.current) return
+    if (existing.length) { setMatches(existing); setAttempted(true); setReviewed(false); return }
+    const path = await saveLink({ action, source })
+    if (!alive.current) return
+    setAttempted(true); setMatches(null); setReviewed(false)
+    try {
+      const response = await window.lt.todo.create({
+        type: 'todo', status: 'pending', title: title.trim(), caseId, dueDate,
+        ...(assigneeId ? { assigneeId } : {}),
+        notes: `${source}\n원 기록: ${path}\n원 조치: ${action}\n기일기록 저장은 이 후속 업무의 완료를 뜻하지 않습니다.`,
+        evidence: [{ kind: 'file', uri: path, label: '기일기록', status: 'candidate', reason: '할일 생성 출처 · 완료 근거 아님' }]
+      })
+      if (!alive.current) return
+      if (!response.ok || !response.todo?.id) throw new Error(response.error || '생성 결과를 확인할 수 없습니다.')
+      knownId.current = response.todo.id
+      await openTask(response.todo.id)
+    } catch (error) {
+      if (!alive.current) return
+      // A timeout may follow a committed write. Never assume it is safe to POST again.
+      const rows = await lookup()
+      if (!alive.current) return
+      setMatches(rows); setReviewed(false)
+      setMessage(`생성 결과 확인 필요: ${error instanceof Error ? error.message : String(error)}. 원 기록으로 다시 조회했습니다.`)
+      onTasksChanged?.()
+    }
+  }) }
+
+  return <TodoDialog title="기일 후속 할일" onClose={onClose}>
+    <p>기일기록 저장과 별도로, 선택한 다음 조치를 열린 할일로 등록합니다.</p>
+    {opened ? <section aria-label="연결된 할일"><strong>{opened.title}</strong><p>상태: {opened.status} · 담당: {opened.assigneeName || '미지정'} · 기한: {opened.dueDate || '미정'}</p><p>할일 ID: {opened.id}</p><p>{opened.notes}</p></section> : <fieldset disabled={busy}>
+      <legend>등록할 항목 확인</legend>
+      <label>할일 제목 <input value={title} maxLength={300} onChange={(event) => setTitle(event.target.value)} /></label>
+      <label>기한 (선택) <input type="date" value={due} onChange={(event) => setDue(event.target.value)} /></label>
+      {!due && <p>기한 미정으로 등록합니다. 기일 내용에서 날짜를 추정하지 않습니다.</p>}
+      <label>담당자 <select value={assigneeId} onChange={(event) => setAssigneeId(event.target.value)}><option value="">기본 담당자</option>{assignees.map((person) => <option key={person.id} value={person.id}>{person.name}</option>)}</select></label>
+      <button className="todo-small" onClick={() => void run(async () => { const response = await window.lt.todo.assignees({ caseId }); if (!alive.current) return; if (!response.ok || !response.assignees) throw new Error(response.error || '담당 후보 조회 실패'); setAssignees(response.assignees) })}>담당 후보 조회</button>
+      {attempted && <div><button className="todo-small" onClick={review}>원 기록으로 다시 조회</button>{matches?.map((todo) => <p key={todo.id}><button className="todo-small" onClick={() => void run(() => openTask(todo.id))}>{todo.title} · {todo.status} · 기존 할일 열기</button></p>)}{matches?.length === 0 && <label><input type="checkbox" checked={reviewed} onChange={(event) => setReviewed(event.target.checked)} />조회 결과와 다른 화면을 확인했으며 다시 생성합니다.</label>}</div>}
+      <button className="todo-primary" disabled={!title.trim() || (attempted && !knownId.current && (matches === null || !!matches.length || !reviewed))} onClick={create}>{knownId.current ? '기존 할일 열기' : attempted ? '확인 후 다시 생성' : '열린 할일 생성'}</button>
+    </fieldset>}
+    {busy && <p role="status">확인 중…</p>}{message && <p role="alert">{message}</p>}
+  </TodoDialog>
+}
+
 export default function HearingRecordPanel({
   draftsDir,
   initialCase,
@@ -513,12 +637,15 @@ export default function HearingRecordPanel({
   visible = true,
   onSavedPath,
   onOpenReport,
-  onSummarizeReport
+  onSummarizeReport,
+  onTasksChanged
 }: HearingRecordPanelProps): JSX.Element {
   const [record, setRecord] = useState<HearingRecordData>(() =>
     createInitialRecord(initialCase, initialHearing)
   )
   const [recordPath, setRecordPath] = useState(initialPath)
+  const [followupAction, setFollowupAction] = useState<{ recordId: string; caseId: string; action: string } | null>(null)
+  const closeFollowup = useCallback(() => setFollowupAction(null), [])
   const [draft, setDraft] = useState('')
   const [requestDraft, setRequestDraft] = useState('')
   const [speakerFormOpen, setSpeakerFormOpen] = useState(false)
@@ -531,6 +658,14 @@ export default function HearingRecordPanel({
     !draftsDir && !initialPath ? '사건 정보 불러오는 중 · 바로 입력 가능' : ''
   )
   const [lastSavedAt, setLastSavedAt] = useState('')
+  const jsGeneration = useRef(0)
+  const jsSyncBusy = useRef(false)
+  useEffect(() => {
+    const invalidate = (): void => { jsGeneration.current++; setJsStatus('idle'); setJsMessage('') }
+    invalidate()
+    window.addEventListener('lt-js-token-updated', invalidate)
+    return () => { jsGeneration.current++; window.removeEventListener('lt-js-token-updated', invalidate) }
+  }, [record.id, record.case.jsId])
   const [jsStatus, setJsStatus] = useState<JsSyncStatus>('idle')
   const [jsMessage, setJsMessage] = useState('')
   const [dictationState, setDictationState] = useState<DictationState>('idle')
@@ -1415,10 +1550,15 @@ export default function HearingRecordPanel({
   }
 
   const syncToJuriSupport = async (): Promise<void> => {
+    if (jsSyncBusy.current) return
+    jsSyncBusy.current = true
+    const generation = jsGeneration.current
+    const current = (): boolean => generation === jsGeneration.current && latestRecordRef.current.id === record.id && latestRecordRef.current.case.jsId === record.case.jsId
     setJsStatus('syncing')
     setJsMessage('JuriSupport 할일 생성 중')
     try {
       await saveRecord()
+      if (!current()) return
       const title = [
         '[기일기록]',
         ymd(dateFromHearing(record.hearing)),
@@ -1439,18 +1579,31 @@ export default function HearingRecordPanel({
         partyNames: record.case.partyNames,
         notes: buildReport(record)
       })
+      if (!current()) return
       if (!result.ok) throw new Error(result.error || 'JuriSupport 반영 실패')
       const syncedAt = new Date().toISOString()
       touch((current) => ({
         ...current,
-        jsSync: { syncedAt, todoId: result.todo?.id }
+        jsSync: { ...current.jsSync, syncedAt, todoId: result.todo?.id }
       }))
+      onTasksChanged?.()
       setJsStatus('synced')
       setJsMessage(result.todo?.id ? `JuriSupport 할일 #${result.todo.id} 생성됨` : 'JuriSupport 할일로 반영됨')
     } catch (error) {
-      setJsStatus('error')
-      setJsMessage(error instanceof Error ? error.message : String(error))
+      if (current()) { setJsStatus('error'); setJsMessage(error instanceof Error ? error.message : String(error)) }
+    } finally { jsSyncBusy.current = false }
+  }
+
+  const saveFollowupLink = async (link: HearingFollowupLink): Promise<string> => {
+    const current = latestRecordRef.current
+    if (current.id !== record.id || current.case.jsId !== record.case.jsId) throw new Error('사건이 변경되었습니다. 다시 열어 주세요.')
+    const next: HearingRecordData = {
+      ...current, updatedAt: new Date().toISOString(),
+      jsSync: { ...current.jsSync, followups: [...(current.jsSync?.followups ?? []).filter((item) => item.action !== link.action), link] }
     }
+    latestRecordRef.current = next
+    setRecord(next)
+    return saveRecord(next)
   }
 
   const sortedEntries = useMemo(() => record.entries, [record.entries])
@@ -1458,6 +1611,11 @@ export default function HearingRecordPanel({
 
   return (
     <div className="hearing-panel">
+      {followupAction !== null && followupAction.recordId === record.id && followupAction.caseId === record.case.jsId && record.case.jsId && <HearingFollowupDialog
+        key={`${record.id}:${record.case.jsId}:${followupAction.action}`} recordId={record.id} caseId={record.case.jsId}
+        action={followupAction.action} link={record.jsSync?.followups?.find((item) => item.action === followupAction.action)}
+        saveLink={saveFollowupLink} onClose={closeFollowup} onTasksChanged={onTasksChanged}
+      />}
       <div className="hearing-head">
         <div className="hearing-head-main">
           <div className="hearing-title">{recordTitle}</div>
@@ -1490,10 +1648,11 @@ export default function HearingRecordPanel({
           </button>
           <button
             className="hearing-small-btn"
-            title="보고서 내용을 JuriSupport 사건의 완료된 할일로 생성"
+            title="기일기록 전문을 완료된 기록으로 저장합니다. 다음 조치는 별도로 등록하세요."
+            disabled={jsStatus === 'syncing'}
             onClick={() => void syncToJuriSupport()}
           >
-            JS 반영
+            기록 JS 반영
           </button>
         </div>
       </div>
@@ -1726,7 +1885,10 @@ export default function HearingRecordPanel({
               {(record.result.nextActions ?? []).map((action, index) => (
                 <span key={`${action}-${index}`} className="hearing-next-action">
                   {action}
-                  <button onClick={() => removeNextAction(index)}>×</button>
+                  <button className="hearing-small-btn" disabled={!record.case.jsId || loadState !== 'idle'} onClick={() => setFollowupAction({ recordId: record.id, caseId: record.case.jsId!, action })}>
+                    {record.jsSync?.followups?.some((item) => item.action === action && item.todoId) ? '기존 할일 열기' : '후속 할일 확인'}
+                  </button>
+                  <button aria-label={`${action} 삭제`} onClick={() => removeNextAction(index)}>×</button>
                 </span>
               ))}
             </div>

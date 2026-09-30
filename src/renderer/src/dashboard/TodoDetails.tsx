@@ -55,6 +55,10 @@ export default function TodoDetails({ todo, parentTitle, capabilities, onChanged
   const [editing, setEditing] = useState(false)
   const [due, setDue] = useState('')
   const [review, setReview] = useState('')
+  const [waitingEditing, setWaitingEditing] = useState(false)
+  const [waitingFor, setWaitingFor] = useState('')
+  const [waitingReview, setWaitingReview] = useState('')
+  const waitingSupported = !!capabilities?.updateFields.includes('waitingFor') && !!capabilities?.updateFields.includes('reviewAt')
   const [candidates, setCandidates] = useState<TodoEvidence[] | null>(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
@@ -62,9 +66,20 @@ export default function TodoDetails({ todo, parentTitle, capabilities, onChanged
   const [followup, setFollowup] = useState('')
   const [followupDue, setFollowupDue] = useState('')
   const [confirmed, setConfirmed] = useState(false)
-  const run = async (fn: () => Promise<void>): Promise<void> => { if (busy) return; setBusy(true); setError(''); try { await fn() } catch (e) { setError(String(e)) } finally { setBusy(false) } }
+  const [assignees, setAssignees] = useState<{ id: string; name: string }[] | null>(null)
+  const [assigneeId, setAssigneeId] = useState(todo.assigneeId || '')
+  const saving = useRef(false)
+  const run = async (fn: () => Promise<void>): Promise<void> => { if (saving.current) return; saving.current = true; setBusy(true); setError(''); try { await fn() } catch (e) { setError(String(e)) } finally { saving.current = false; setBusy(false) } }
+  const saveWaiting = (resume = false): void => { void run(async () => {
+    if (!waitingSupported) throw new Error('현재 연결은 대기 저장을 지원하지 않습니다.')
+    if (!resume && (!waitingFor.trim() || waitingFor.trim().length > 500 || !kstDateKey(waitingReview))) throw new Error('대기 사유(500자 이내)와 재확인일을 입력하세요.')
+    const r = await window.lt.todo.update(todo.id, { waitingFor: resume ? null : waitingFor.trim(), reviewAt: resume ? null : setTodoDate(todo.reviewAt, waitingReview), version: todo.version })
+    if (!r.ok) throw new Error(r.error || '대기 저장 실패. 입력을 유지했습니다.')
+    setWaitingEditing(false); onChanged()
+  }) }
   const saveDates = (): void => { void run(async () => {
-    const patch = { dueDate: due ? setTodoDate(todo.dueDate, due) : null, ...(capabilities?.updateFields.includes('reviewAt') ? { reviewAt: review ? setTodoDate(todo.reviewAt, review) : null } : {}) }
+    if (todo.waitingFor?.trim() && capabilities?.updateFields.includes('reviewAt') && !review) throw new Error('대기 중에는 재확인일이 필요합니다. 대기를 끝내려면 다시 시작을 사용하세요.')
+    const patch = { version: todo.version, dueDate: due ? setTodoDate(todo.dueDate, due) : null, ...(capabilities?.updateFields.includes('reviewAt') ? { reviewAt: review ? setTodoDate(todo.reviewAt, review) : null } : {}) }
     const r = await window.lt.todo.update(todo.id, patch)
     if (!r.ok) throw new Error(r.error || '날짜 저장 실패')
     setEditing(false); onChanged()
@@ -88,7 +103,12 @@ export default function TodoDetails({ todo, parentTitle, capabilities, onChanged
   }) }
   return <div className="todo-details" onClick={(e) => e.stopPropagation()}>
     <div className="todo-actions"><button className="todo-small" disabled={busy} onClick={() => { setDue(kstDateKey(todo.dueDate) || ''); setReview(kstDateKey(todo.reviewAt) || ''); setEditing(!editing) }}>기한·재확인 변경</button>{capabilities?.evidenceSuggestions && <button className="todo-small" disabled={busy} onClick={loadEvidence}>완료 근거 확인</button>}</div>
+    {todo.waitingFor?.trim() && <p className="todo-warning">기다리는 중 · {todo.waitingFor} · {todo.reviewAt ? `재확인 ${kstDateKey(todo.reviewAt) || '날짜 확인 필요'}` : '재확인일 확인 필요'}</p>}
+    <div className="todo-actions"><button className="todo-small" disabled={busy || !waitingSupported} onClick={() => { setWaitingFor(todo.waitingFor || ''); setWaitingReview(kstDateKey(todo.reviewAt) || ''); setWaitingEditing(!waitingEditing) }}>기다리는 중</button>{todo.waitingFor?.trim() && <button className="todo-small" disabled={busy || !waitingSupported} onClick={() => saveWaiting(true)}>다시 시작</button>}{!waitingSupported && <span className="muted small">현재 연결은 대기 저장을 지원하지 않습니다.</span>}</div>
+    {waitingEditing && <fieldset disabled={busy}><legend>기다리는 중 · 실제 기한은 유지됩니다</legend><label>대기 대상·사유 <input value={waitingFor} maxLength={500} onChange={(e) => setWaitingFor(e.target.value)} placeholder="의뢰인 계좌내역 회신" /></label><label>재확인일 <input type="date" value={waitingReview} onChange={(e) => setWaitingReview(e.target.value)} /></label><button className="todo-primary" disabled={!waitingFor.trim() || !waitingReview} onClick={() => saveWaiting()}>대기 저장</button> <button className="todo-small" onClick={() => setWaitingEditing(false)}>취소</button></fieldset>}
     {editing && <fieldset disabled={busy}><legend>날짜 변경 · 한국 시간</legend><label>기한 <input type="date" value={due} onChange={(e) => setDue(e.target.value)} /></label><label>재확인 <input type="date" value={review} disabled={!capabilities?.updateFields.includes('reviewAt')} onChange={(e) => setReview(e.target.value)} /></label><p className="muted small">기존 시각은 유지됩니다. {todo.dueDate && `기한: ${new Date(todo.dueDate).toLocaleString('ko-KR', { timeZone: 'Asia/Seoul' })}`}</p>{!capabilities?.updateFields.includes('reviewAt') && <p className="muted small">현재 연결은 재확인일 저장을 지원하지 않습니다.</p>}{!due && !review && <p className="todo-warning">기한·재확인일 없이 저장됩니다.</p>}<button className="todo-primary" onClick={saveDates}>저장</button> <button className="todo-small" onClick={() => setEditing(false)}>취소</button></fieldset>}
+    <div className="todo-actions">{todo.assigneeName && <span className="muted small">담당 {todo.assigneeName}</span>}{capabilities?.taskAssignees && capabilities.updateFields.includes('assigneeId') && <button className="todo-small" disabled={busy} onClick={() => void run(async () => { const result = await window.lt.todo.assignees({ taskId: todo.id }); if (!result.ok || !result.assignees) throw new Error(result.error || '담당 후보 조회 실패'); setAssignees(result.assignees); setAssigneeId(todo.assigneeId || '') })}>담당 조정</button>}</div>
+    {assignees && <fieldset disabled={busy}><legend>허용된 담당자로 변경</legend><label>담당자 <select value={assigneeId} onChange={(e) => setAssigneeId(e.target.value)}><option value="" disabled>담당자 선택</option>{todo.assigneeId && !assignees.some((person) => person.id === todo.assigneeId) && <option value={todo.assigneeId} disabled>{todo.assigneeName || '현재 담당자'}</option>}{assignees.map((person) => <option key={person.id} value={person.id}>{person.name}</option>)}</select></label>{!assignees.length && <p className="muted small">변경 가능한 담당자가 없습니다.</p>}<button className="todo-primary" disabled={!assignees.some((person) => person.id === assigneeId) || assigneeId === todo.assigneeId} onClick={() => void run(async () => { const result = await window.lt.todo.update(todo.id, { assigneeId, version: todo.version }); if (!result.ok) throw new Error(result.error || '담당 변경 실패'); setAssignees(null); onChanged() })}>담당 저장</button> <button className="todo-small" onClick={() => setAssignees(null)}>취소</button></fieldset>}
     {todo.parentId && <p className="muted small">상위 할일: {parentTitle || '연결된 상위 할일'}</p>}
     {!!todo.children?.length && <p className="muted small">자식 할일 {todo.children.length}건 · {todo.children.map((child) => child.title).join(', ')}</p>}
     {candidates !== null && <fieldset disabled={busy}><legend>완료 근거 후보</legend><p className="muted small">원문을 확인한 뒤 완료 여부를 결정하세요. 초안·제출대기는 제출 확인이 필요합니다.</p>{!candidates.length && <p>추가 근거 없음 · 완료 여부 확인 불가</p>}{candidates.map((candidate, index) => <div className="todo-evidence" key={`${candidate.kind}-${candidate.id || index}`}><strong>{candidate.label}</strong><span>{candidate.occurredAt && kstDateKey(candidate.occurredAt)} · {candidate.reason || '직접 확인 필요'}</span><div className="todo-actions"><button className="todo-small" onClick={() => {

@@ -60,11 +60,14 @@ assert.match(
   /onResume\(p\.sessionId, p\.cwd \?\? filterCwd,/,
   'resume must use the cwd recorded in the transcript instead of the current filter cwd'
 )
-assert.match(
-  app,
-  /const existing = termTabs\.find\(\(t\) => !t\.ssh && t\.cwd === drafts\)/,
-  'a case id alone must not relabel an agent tab that belongs to another folder'
-)
+const reusePredicate = app.match(/const existing = termTabsRef\.current\.find\((\(t\) =>[\s\S]+?)\)\n    let term:/)?.[1]
+assert.ok(reusePredicate, 'case workspace reuse predicate must exist')
+const reuses = new Function('drafts', 'c', `return ${reusePredicate}`)('/drafts/shared', { id: 'case-a' })
+assert.equal(reuses({ cwd: '/drafts/shared', jsId: 'case-a' }), true)
+assert.equal(reuses({ cwd: '/drafts/other', jsId: 'case-a' }), false, 'case ID alone cannot relabel another folder')
+assert.equal(reuses({ cwd: '/drafts/shared', jsId: 'case-b' }), false, 'shared folder cannot relabel another case')
+assert.equal(reuses({ cwd: '/drafts/shared', contextKind: 'global' }), false, 'global work keeps its scope')
+assert.equal(reuses({ cwd: '/drafts/shared' }), true, 'unlinked folder can acquire its verified case identity')
 assert.match(
   app,
   /matched && !pathBelongsToCaseFolder\(drafts, matched\)/,
