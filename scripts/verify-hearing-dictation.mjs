@@ -43,6 +43,12 @@ assert.deepEqual(insertDictationText('보존', '   ', 1, 1), { value: '보존', 
 assert.equal(shouldUseDictationCorrection('기일은 9월 12일입니다.', '기일은 9월 13일입니다.'), false)
 assert.equal(shouldUseDictationCorrection('제출하지 않았습니다.', '제출했습니다.'), false)
 assert.equal(shouldUseDictationCorrection('서울 중앙 지법입니다.', '서울중앙지법입니다.'), true)
+assert.equal(shouldUseDictationCorrection('다음 기일에 뵙겠습니다', '다음 기일에 뵙겠습니다.'), true)
+assert.equal(shouldUseDictationCorrection('인정합니다.', '부인합니다.'), false)
+assert.equal(shouldUseDictationCorrection(
+  '제가 말씀드릴 내용은 합의 조건을 모두 확인한 뒤 서명하겠다는 것입니다.',
+  '제가 말씀드릴 내용은 합의 조건을 확인한 뒤 서명하겠다는 것입니다.'
+), false, '단어가 빠진 교정문은 길이가 비슷해도 거절해야 한다')
 assert.equal(shouldUseDictationCorrection('원문', ''), false)
 assert.equal(shouldUseDictationCorrection('원문', '완전히 다른 새로운 문장입니다.'), false)
 

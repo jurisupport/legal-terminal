@@ -12032,7 +12032,7 @@ function SettingsView({ onSync }: { onSync: (init: SyncModalInit) => void }): JS
         </div>
         <div className="setting-value">
           <code>
-            {dictationKeyStatus === 'ok' && '연결됨 (암호화 저장됨)'}
+            {dictationKeyStatus === 'ok' && '키 저장됨 (암호화) · API 연결·잔액 미확인'}
             {dictationKeyStatus === 'missing' && '미설정'}
             {dictationKeyStatus === 'locked' && '불러오기 실패 — 다시 붙여넣기 필요'}
             {dictationKeyStatus === 'unavailable' && '암호 저장소를 사용할 수 없음'}

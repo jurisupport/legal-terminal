@@ -95,6 +95,18 @@ for (const response of [
 }
 assert.match(result.error, /시간 초과/)
 
+for (const diarize of [false, true]) {
+  requests = []
+  responses = [{ status: 429, body: JSON.stringify({ error: {
+    message: 'You have no credits remaining.', type: 'insufficient_quota', code: 'credit_balance_exhausted'
+  } }) }]
+  result = await api.transcribe({ ...input, diarize })
+  assert.equal(result.ok, false)
+  assert.match(result.error, /크레딧.*소진/)
+  assert.match(result.error, /충전.*다시 시도/)
+  assert.equal(requests.length, 1, '잔액 부족은 자동 재시도하지 않아야 한다')
+}
+
 // The existing short dictation request and guarded correction remain unchanged.
 requests = []
 responses = [{ body: JSON.stringify({ text: '기일은 9월 12일입니다.' }) },
@@ -119,6 +131,16 @@ responses = [{ body: JSON.stringify({ text: '기일은 9월 12일입니다.' }) 
 result = await api.transcribe({ ...input, diarize: false })
 assert.equal(result.corrected, false)
 assert.equal(result.text, '기일은 9월 12일입니다.')
+for (const [raw, corrected] of [
+  ['인정합니다.', '부인합니다.'],
+  ['합의 조건을 모두 확인한 뒤 서명하겠다는 것입니다.', '합의 조건을 확인한 뒤 서명하겠다는 것입니다.']
+]) {
+  responses = [{ body: JSON.stringify({ text: raw }) },
+    { body: JSON.stringify({ output_text: corrected }) }]
+  result = await api.transcribe({ ...input, diarize: false })
+  assert.equal(result.text, raw, '교정이 내용을 바꾸거나 누락하면 원래 전사문을 돌려줘야 한다')
+  assert.equal(result.corrected, false)
+}
 console.log('hearing diarization request, segments, validation, and ordinary dictation verified')
 
 // A disk read may finish after one pending row has expanded into several speakers.

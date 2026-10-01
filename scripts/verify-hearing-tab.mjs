@@ -207,6 +207,8 @@ try {
   )
   await page.locator('.activity-item[title="설정"]').click()
   await page.locator('.setting-label', { hasText: 'OpenAI API 키' }).waitFor()
+  assert.match(await page.locator('.setting-row', { has: page.locator('.setting-label', { hasText: 'OpenAI API 키' }) }).textContent(),
+    /키 저장됨.*API 연결·잔액 미확인/, '키 복호화 성공을 API 연결 성공으로 표시하면 안 된다')
   await page
     .locator('[data-work-side="left"] button[title="문서를 오른쪽으로 이동"]')
     .click()
@@ -631,6 +633,45 @@ try {
   await page.waitForFunction((expected) => document.querySelectorAll('.hearing-message').length === expected, diarizationEntryOffset + 16)
   await diarizeToggle.uncheck()
   console.log('speaker groups remain distinct across recordings; failed recordings are retried without interrupting new recordings')
+
+  const ordinaryRetryIndex = await app.evaluate(() => globalThis.__hearingTranscriptions.length)
+  await speakerPicker.selectOption('court')
+  await composer.fill('재시도할 초안')
+  await dictationButton.click()
+  await shellPanel.locator('.hearing-dictation-btn.recording').waitFor()
+  await dictationButton.click()
+  const ordinaryRetryRow = messages.last()
+  await ordinaryRetryRow.getByRole('status').waitFor()
+  const ordinaryRetryCount = await messages.count()
+  await resolveDictation(ordinaryRetryIndex, { ok: false, error: 'OpenAI API 크레딧이 소진되었습니다. 충전 후 다시 시도해 주세요.' })
+  await ordinaryRetryRow.getByRole('button', { name: '전사 재시도', exact: true }).click()
+  await ordinaryRetryRow.getByRole('status').waitFor()
+  await speakerPicker.selectOption('prosecutor')
+  await composer.fill('재시도 중 새 초안')
+  await resolveDictation(ordinaryRetryIndex + 1, { rejection: '재시도 중 연결 끊김' })
+  await ordinaryRetryRow.getByRole('button', { name: '전사 재시도', exact: true }).waitFor()
+  assert.match(await ordinaryRetryRow.getByRole('status').textContent(), /재시도 중 연결 끊김/)
+  assert.equal(await ordinaryRetryRow.locator('textarea').inputValue(), '재시도할 초안')
+  assert.equal(await messages.count(), ordinaryRetryCount, '재시도 실패가 대화 항목을 추가하면 안 된다')
+  await ordinaryRetryRow.getByRole('button', { name: '전사 재시도', exact: true }).evaluate((button) => {
+    button.click()
+    button.click()
+  })
+  const retryContext = await resolveDictation(ordinaryRetryIndex + 2, { ok: true, text: '복구된 발언', corrected: false })
+  await page.waitForFunction(() => document.querySelector('.hearing-message:last-child textarea')?.value === '재시도할 초안 복구된 발언')
+  assert.equal(retryContext.speaker, '재판부')
+  assert.equal(await ordinaryRetryRow.getByRole('combobox').inputValue(), 'court')
+  assert.equal(await composer.inputValue(), '재시도 중 새 초안')
+  assert.equal(await messages.count(), ordinaryRetryCount)
+  assert.equal(await app.evaluate(() => globalThis.__hearingTranscriptions.length), ordinaryRetryIndex + 3,
+    '재시도 버튼을 연속 클릭해도 같은 녹음을 중복 전송하면 안 된다')
+  assert.equal(await ordinaryRetryRow.getByRole('button', { name: '전사 재시도', exact: true }).count(), 0)
+  assert.ok(await app.evaluate((_electron, index) => {
+    const original = globalThis.__hearingTranscriptions[index].payload
+    return original.diarize === false && globalThis.__hearingTranscriptions.slice(index + 1).every(({ payload }) =>
+      payload.diarize === false && Buffer.from(original.audio).equals(Buffer.from(payload.audio)))
+  }, ordinaryRetryIndex), '일반 받아쓰기도 재녹음 없이 원래 음성으로 재시도해야 한다')
+  console.log('ordinary dictation survives quota and repeated connection failures, deduplicates retries, and preserves audio, speaker, and drafts')
 
   await page.locator('.activity-item[title*="새 사건 추가"]').click()
   await page.locator('.new-case-recent-row', { hasText: recent.name }).click()

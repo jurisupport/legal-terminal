@@ -1,5 +1,5 @@
-function compactLength(text: string): number {
-  return text.replace(/\s+/g, '').length
+function spokenContent(text: string): string {
+  return text.normalize('NFKC').replace(/[\s.,!?。！？]/g, '')
 }
 
 function protectedTokens(text: string): string[] {
@@ -15,7 +15,5 @@ export function shouldUseDictationCorrection(rawText: string, correctedText: str
   const corrected = correctedText.trim()
   if (!raw || !corrected) return false
   if (protectedTokens(raw).join('\u0000') !== protectedTokens(corrected).join('\u0000')) return false
-  const rawLength = compactLength(raw)
-  const lengthLimit = Math.max(3, Math.ceil(rawLength * 0.15))
-  return Math.abs(rawLength - compactLength(corrected)) <= lengthLimit
+  return spokenContent(raw) === spokenContent(corrected)
 }

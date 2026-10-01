@@ -891,7 +891,7 @@ export default function HearingRecordPanel({
           pendingDictationsRef.current.delete(entry.id)
         }
       }
-      if (session.diarize) retryDictationsRef.current.set(entry.id, request)
+      retryDictationsRef.current.set(entry.id, request)
       await request()
     },
     [focusInput, releaseDictationMedia, touch]
