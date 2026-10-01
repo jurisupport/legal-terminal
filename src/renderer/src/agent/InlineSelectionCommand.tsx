@@ -45,8 +45,9 @@ export default function InlineSelectionCommand(props: Props): JSX.Element {
   }, [props.targetId, sending])
   useLayoutEffect(() => {
     if (!props.domRange) return
-    CSS.highlights.set('inline-command-source', new Highlight(props.domRange))
-    return () => { CSS.highlights.delete('inline-command-source') }
+    const highlights = props.domRange.startContainer.ownerDocument?.defaultView?.CSS.highlights ?? CSS.highlights
+    highlights.set('inline-command-source', new Highlight(props.domRange))
+    return () => { highlights.delete('inline-command-source') }
   }, [props.domRange])
   useLayoutEffect(() => {
     const element = textarea.current
@@ -58,6 +59,8 @@ export default function InlineSelectionCommand(props: Props): JSX.Element {
     const element = popup.current
     if (!element) return
     const pane = props.sourceElement?.closest('.work-pane')
+    const sourceDocument = props.domRange?.startContainer.ownerDocument
+    const sourceFrame = sourceDocument?.defaultView?.frameElement
     let anchorRange = props.domRange
     const place = (): void => {
       const rect = element.getBoundingClientRect()
@@ -67,8 +70,14 @@ export default function InlineSelectionCommand(props: Props): JSX.Element {
       const maxRight = Math.min(window.innerWidth - 8, (bounds?.right ?? window.innerWidth) - 16)
       const minTop = Math.max(8, (bounds?.top ?? 0) + 8)
       const maxBottom = Math.min(window.innerHeight - 8, (bounds?.bottom ?? window.innerHeight) - 8)
-      const anchor = sourceVisible && anchorRange?.startContainer.isConnected && !anchorRange.collapsed
+      const anchorRect = sourceVisible && anchorRange?.startContainer.isConnected && !anchorRange.collapsed
         ? anchorRange.getBoundingClientRect() : undefined
+      const frameRect = sourceFrame?.getBoundingClientRect()
+      const anchor = anchorRect ? {
+        left: anchorRect.left + (frameRect?.left ?? 0) + (sourceFrame?.clientLeft ?? 0),
+        top: anchorRect.top + (frameRect?.top ?? 0) + (sourceFrame?.clientTop ?? 0),
+        bottom: anchorRect.bottom + (frameRect?.top ?? 0) + (sourceFrame?.clientTop ?? 0)
+      } : undefined
       const width = Math.max(0, Math.min(600, maxRight - minLeft))
       const left = Math.max(minLeft, Math.min(anchor?.left ?? props.x - width / 2, maxRight - width))
       const below = (anchor?.bottom ?? props.y) + 10
@@ -81,7 +90,8 @@ export default function InlineSelectionCommand(props: Props): JSX.Element {
     observer.observe(element)
     if (pane) observer.observe(pane)
     const node = anchorRange?.commonAncestorContainer
-    const pdfLayer = (node instanceof Element ? node : node?.parentElement)?.closest<HTMLElement>('.textLayer')
+    const pdfLayer = sourceDocument === document
+      ? (node instanceof Element ? node : node?.parentElement)?.closest<HTMLElement>('.textLayer') : undefined
     let sourceObserver: MutationObserver | undefined
     if (pdfLayer && anchorRange && !anchorRange.collapsed) {
       const page = pdfLayer.dataset.pdfPage, path = pdfLayer.dataset.pdfPath, pageText = pdfLayer.textContent
@@ -113,11 +123,13 @@ export default function InlineSelectionCommand(props: Props): JSX.Element {
       sourceObserver.observe(pdfLayer, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ['data-pdf-page', 'data-pdf-path'] })
     }
     document.addEventListener('scroll', place, true)
+    sourceDocument?.addEventListener('scroll', place, true)
     window.addEventListener('resize', place)
     return () => {
       observer.disconnect()
       sourceObserver?.disconnect()
       document.removeEventListener('scroll', place, true)
+      sourceDocument?.removeEventListener('scroll', place, true)
       window.removeEventListener('resize', place)
     }
   }, [props.x, props.y, props.domRange, props.sourceElement])

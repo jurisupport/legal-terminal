@@ -95,7 +95,9 @@ curl -fsSL https://github.com/jurisupport/legal-terminal/releases/latest/downloa
 
 ## 이번 업데이트
 
-최신 릴리스: [v0.1.245](https://github.com/jurisupport/legal-terminal/releases/tag/v0.1.245)
+최신 릴리스: [v0.1.246](https://github.com/jurisupport/legal-terminal/releases/tag/v0.1.246)
+
+- **HTML 선택 인용**: HTML 미리보기에서도 드래그한 문장에 바로 지시하거나 우클릭으로 Agent에 인용합니다. 파일 출처를 함께 전달하고 스크립트 실행은 차단합니다.
 
 - **영상·음성 리뷰**: 파일을 앱에서 재생하고 장면·구간을 선택해 캡처와 함께 Agent에 질문합니다.
 - **원격 미디어와 버전 비교**: SSH 영상은 디스크로 내려받아 재생하고, 전송 취소·수정본 전환·이전 버전 비교를 지원합니다.

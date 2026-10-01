@@ -7265,7 +7265,8 @@ export default function App(): JSX.Element {
       {tab?.kind === 'welcome' && <Welcome recent={recent} onOpen={openRecent} summary={todoSummary} />}
       {tab?.kind === 'file' && tab.path && (
         isHtmlPath(tab.path) ? (
-          <HtmlView key={tab.path} path={tab.path} />
+          <HtmlView key={tab.path} path={tab.path} onAsk={askClaude}
+            onInline={docOnly ? undefined : openInlineSelection} inlineOpen={Boolean(inlineSelection)} />
         ) : (
           <FileView
             key={tab.path}
@@ -9130,13 +9131,16 @@ const SELECTION_ACTION_EXCLUDE_SELECTOR =
 const SELECTION_ACTION_CONTROL_SELECTOR = '.sel-actions, .ctx-menu, .inline-selection-command'
 
 const elementFromSelectionNode = (node: Node | null | undefined): Element | null =>
-  node instanceof Element ? node : (node?.parentElement ?? null)
+  node?.nodeType === Node.ELEMENT_NODE ? node as Element : (node?.parentElement ?? null)
 
 const isSelectionActionControl = (target: EventTarget | null): boolean =>
   target instanceof Element && !!target.closest(SELECTION_ACTION_CONTROL_SELECTOR)
 
 const canShowSelectionActions = (element: Element | null): boolean => {
   if (!element) return false
+  if (element.ownerDocument.defaultView?.frameElement?.matches('.html-frame')) {
+    return !element.closest('button, input, textarea, select')
+  }
   if (element.closest(SELECTION_ACTION_EXCLUDE_SELECTOR)) return false
   return !!element.closest(SELECTION_ACTION_TARGET_SELECTOR)
 }
@@ -9151,11 +9155,13 @@ const selectionSourceForElement = (
   text: string,
   detail?: TextSelectionOverlayDetail | null
 ): ClaudeSelectionSource | undefined => {
+  const sourceElement = element?.ownerDocument.defaultView?.frameElement ?? element
   const docId =
-    closestHTMLElement(element as HTMLElement | null, '[data-doc-id]')?.dataset.docId ??
+    closestHTMLElement(sourceElement as HTMLElement | null, '[data-doc-id]')?.dataset.docId ??
     detail?.editorDraftId
   const range = detail?.range
   if (!docId && !range) return undefined
+  if (sourceElement !== element) return { docId, text }
   const pdfLayer = element?.closest<HTMLElement>('.textLayer[data-pdf-page]')
   const page = Number(pdfLayer?.dataset.pdfPage)
   const selection = element?.ownerDocument.defaultView?.getSelection()
@@ -9193,9 +9199,15 @@ const quoteAgentPanelSelection = (opts?: ClaudeAskOptions): boolean => {
 
 type SelectionAskHandler = (text: string, opts?: ClaudeAskOptions) => void
 type SelectionActionBox = TextSelectionOverlayDetail & { askOpts?: ClaudeAskOptions; sourceElement?: HTMLElement }
+type SelectionActionProps = {
+  onAsk: SelectionAskHandler
+  selectionDocument?: Document
+  onInline?: (box: SelectionActionBox) => void
+  inlineOpen?: boolean
+}
 
 // 본문에서 텍스트 선택 후 우클릭 → 컨텍스트 메뉴 (Claude/법제처/법고을/엘박스)
-function SelectionMenu({ onAsk }: { onAsk: SelectionAskHandler }): JSX.Element | null {
+function SelectionMenu({ onAsk, selectionDocument = document }: SelectionActionProps): JSX.Element | null {
   const [menu, setMenu] = useState<{
     x: number
     y: number
@@ -9208,16 +9220,16 @@ function SelectionMenu({ onAsk }: { onAsk: SelectionAskHandler }): JSX.Element |
   const editorSelectionRef = useRef<TextSelectionOverlayDetail | null>(null)
 
   useEffect(() => {
+    const sourceFrame = selectionDocument.defaultView?.frameElement
     const onCtx = (e: MouseEvent): void => {
-      const sel = window.getSelection()
-      const target = e.target instanceof Element ? e.target : null
+      const sel = selectionDocument.getSelection()
+      const target = elementFromSelectionNode(e.target as Node | null)
       const anchor = elementFromSelectionNode(sel?.anchorNode)
       const el = anchor ?? target
       const editorDetail = editorSelectionRef.current
       const targetEditor = target?.closest('.cm-editor') ?? null
       const anchorEditor = anchor?.closest('.cm-editor') ?? null
-      const activeEditor =
-        document.activeElement instanceof Element ? document.activeElement.closest('.cm-editor') : null
+      const activeEditor = selectionDocument.activeElement?.closest('.cm-editor') ?? null
       const contextEditor = targetEditor ?? anchorEditor
       const isEditorContext =
         !!contextEditor && (anchorEditor === contextEditor || activeEditor === contextEditor)
@@ -9225,15 +9237,16 @@ function SelectionMenu({ onAsk }: { onAsk: SelectionAskHandler }): JSX.Element |
       const text = (markdown ?? sel?.toString() ?? '').trim()
       if (!text || !canShowSelectionActions(el)) return // 선택 없으면 기본 메뉴
       const selectionSource = selectionSourceForElement(el, text, markdown ? editorDetail : null)
+      const frameRect = sourceFrame?.getBoundingClientRect()
       e.preventDefault()
       setMenu({
-        x: e.clientX,
-        y: e.clientY,
+        x: e.clientX + (frameRect?.left ?? 0) + (sourceFrame?.clientLeft ?? 0),
+        y: e.clientY + (frameRect?.top ?? 0) + (sourceFrame?.clientTop ?? 0),
         text,
         queryText: markdown ? markdownToPlainText(markdown) || text : text,
         markdown,
         editorDraftId: editorDetail?.editorDraftId,
-        askOpts: askOptionsForSelectionElement(el, selectionSource)
+        askOpts: askOptionsForSelectionElement(sourceFrame ?? el, selectionSource)
       })
     }
     const onEditorSelection = (event: Event): void => {
@@ -9241,17 +9254,21 @@ function SelectionMenu({ onAsk }: { onAsk: SelectionAskHandler }): JSX.Element |
       editorSelectionRef.current = detail?.markdown?.trim() ? detail : null
     }
     const close = (): void => setMenu(null)
-    document.addEventListener('contextmenu', onCtx)
+    selectionDocument.addEventListener('contextmenu', onCtx)
+    selectionDocument.addEventListener('click', close)
+    selectionDocument.addEventListener('scroll', close, true)
+    if (!sourceFrame) window.addEventListener(TEXT_SELECTION_OVERLAY_EVENT, onEditorSelection)
     document.addEventListener('click', close)
     document.addEventListener('scroll', close, true)
-    window.addEventListener(TEXT_SELECTION_OVERLAY_EVENT, onEditorSelection)
     return () => {
-      document.removeEventListener('contextmenu', onCtx)
+      selectionDocument.removeEventListener('contextmenu', onCtx)
+      selectionDocument.removeEventListener('click', close)
+      selectionDocument.removeEventListener('scroll', close, true)
       document.removeEventListener('click', close)
       document.removeEventListener('scroll', close, true)
       window.removeEventListener(TEXT_SELECTION_OVERLAY_EVENT, onEditorSelection)
     }
-  }, [])
+  }, [selectionDocument])
 
   if (!menu) return null
   const q = encodeURIComponent(menu.queryText)
@@ -9313,11 +9330,7 @@ function SelectionMenu({ onAsk }: { onAsk: SelectionAskHandler }): JSX.Element |
 }
 
 // 본문에서 텍스트를 선택하면 떠오르는 "Claude에 묻기" 버튼
-function SelectionAsk({ onAsk, onInline, inlineOpen = false }: {
-  onAsk: SelectionAskHandler
-  onInline?: (box: SelectionActionBox) => void
-  inlineOpen?: boolean
-}): JSX.Element | null {
+function SelectionAsk({ onAsk, onInline, inlineOpen = false, selectionDocument = document }: SelectionActionProps): JSX.Element | null {
   const [box, setBox] = useState<SelectionActionBox | null>(null)
   const boxRef = useRef(box)
   boxRef.current = box
@@ -9326,35 +9339,36 @@ function SelectionAsk({ onAsk, onInline, inlineOpen = false }: {
     const openFromKey = (event: KeyboardEvent): void => {
       if (event.isComposing || event.keyCode === 229 || inlineOpen ||
           !(event.metaKey || event.ctrlKey) || event.key.toLowerCase() !== 'j') return
-      if (event.target instanceof Element && event.target.closest('.agent-panel, .terminal-surface, input, textarea, select')) return
+      if (elementFromSelectionNode(event.target as Node | null)?.closest(selectionDocument === document ? '.agent-panel, .terminal-surface, input, textarea, select' : 'input, textarea, select')) return
       const selected = boxRef.current
       if (!selected?.askOpts?.selectionSource?.docId) return
       event.preventDefault()
       event.stopPropagation()
       onInline(selected)
     }
-    document.addEventListener('keydown', openFromKey, true)
-    return () => document.removeEventListener('keydown', openFromKey, true)
-  }, [onInline, inlineOpen])
+    selectionDocument.addEventListener('keydown', openFromKey, true)
+    return () => selectionDocument.removeEventListener('keydown', openFromKey, true)
+  }, [onInline, inlineOpen, selectionDocument])
 
   useEffect(() => {
+    const sourceFrame = selectionDocument.defaultView?.frameElement
     let frame = 0
     let pointerSelecting = false
     let pendingEditorDetail: TextSelectionOverlayDetail | null = null
 
     const updateFromSelection = (): void => {
       if (document.activeElement?.closest('.inline-selection-command')) return
-      const sel = window.getSelection()
+      const sel = selectionDocument.getSelection()
       const text = sel?.toString() ?? ''
       const visibleText = text.trim()
       if (!sel || sel.rangeCount === 0 || !visibleText) {
-        if (!(document.activeElement instanceof Element) || !document.activeElement.closest('.cm-editor')) {
+        if (!selectionDocument.activeElement?.closest('.cm-editor')) {
           setBox(null)
         }
         return
       }
       const el = elementFromSelectionNode(sel.anchorNode)
-      if (!canShowSelectionActions(el)) {
+      if (!canShowSelectionActions(el) || (sourceFrame && !sourceFrame.getClientRects().length)) {
         setBox(null)
         return
       }
@@ -9363,16 +9377,17 @@ function SelectionAsk({ onAsk, onInline, inlineOpen = false }: {
         setBox(null)
         return
       }
+      const frameRect = sourceFrame?.getBoundingClientRect()
       setBox({
-        x: rect.left + rect.width / 2,
-        y: rect.top - 6,
-        bottom: rect.bottom,
+        x: rect.left + rect.width / 2 + (frameRect?.left ?? 0) + (sourceFrame?.clientLeft ?? 0),
+        y: rect.top - 6 + (frameRect?.top ?? 0) + (sourceFrame?.clientTop ?? 0),
+        bottom: rect.bottom + (frameRect?.top ?? 0) + (sourceFrame?.clientTop ?? 0),
         domRange: sel.getRangeAt(0).cloneRange(),
-        sourceElement: el?.closest<HTMLElement>('[data-doc-id]') ?? undefined,
+        sourceElement: (sourceFrame ?? el)?.closest<HTMLElement>('[data-doc-id]') ?? undefined,
         text,
         count: Array.from(visibleText).length,
         askOpts: askOptionsForSelectionElement(
-          el,
+          sourceFrame ?? el,
           selectionSourceForElement(el, visibleText)
         )
       })
@@ -9404,6 +9419,7 @@ function SelectionAsk({ onAsk, onInline, inlineOpen = false }: {
     const onPointerDown = (event: PointerEvent): void => {
       if (!event.isPrimary || event.button !== 0) return
       if (isSelectionActionControl(event.target)) return
+      if (frame) cancelAnimationFrame(frame)
       pointerSelecting = true
       pendingEditorDetail = null
       setBox(null)
@@ -9417,6 +9433,7 @@ function SelectionAsk({ onAsk, onInline, inlineOpen = false }: {
       else scheduleUpdate()
     }
     const onPointerCancel = (): void => {
+      if (frame) cancelAnimationFrame(frame)
       pointerSelecting = false
       pendingEditorDetail = null
       setBox(null)
@@ -9431,26 +9448,41 @@ function SelectionAsk({ onAsk, onInline, inlineOpen = false }: {
       applyEditorDetail(detail)
     }
 
-    document.addEventListener('pointerup', onPointerUp)
-    document.addEventListener('pointerdown', onPointerDown)
-    document.addEventListener('pointercancel', onPointerCancel)
-    document.addEventListener('dragstart', onPointerCancel, true)
-    document.addEventListener('selectionchange', scheduleUpdate)
-    document.addEventListener('keyup', scheduleUpdate)
+    const onOuterPointerDown = (event: PointerEvent): void => {
+      if (!isSelectionActionControl(event.target)) onPointerCancel()
+    }
+
+    selectionDocument.addEventListener('pointerup', onPointerUp)
+    selectionDocument.addEventListener('pointerdown', onPointerDown)
+    selectionDocument.addEventListener('pointercancel', onPointerCancel)
+    selectionDocument.addEventListener('dragstart', onPointerCancel, true)
+    selectionDocument.addEventListener('selectionchange', scheduleUpdate)
+    selectionDocument.addEventListener('keyup', scheduleUpdate)
+    if (sourceFrame) {
+      selectionDocument.addEventListener('scroll', onPointerCancel, true)
+      document.addEventListener('scroll', onPointerCancel, true)
+      document.addEventListener('pointerdown', onOuterPointerDown)
+      window.addEventListener('resize', onPointerCancel)
+    } else {
+      window.addEventListener(TEXT_SELECTION_OVERLAY_EVENT, onEditorSelection)
+    }
     window.addEventListener('blur', onPointerCancel)
-    window.addEventListener(TEXT_SELECTION_OVERLAY_EVENT, onEditorSelection)
     return () => {
       if (frame) cancelAnimationFrame(frame)
-      document.removeEventListener('pointerup', onPointerUp)
-      document.removeEventListener('pointerdown', onPointerDown)
-      document.removeEventListener('pointercancel', onPointerCancel)
-      document.removeEventListener('dragstart', onPointerCancel, true)
-      document.removeEventListener('selectionchange', scheduleUpdate)
-      document.removeEventListener('keyup', scheduleUpdate)
+      selectionDocument.removeEventListener('pointerup', onPointerUp)
+      selectionDocument.removeEventListener('pointerdown', onPointerDown)
+      selectionDocument.removeEventListener('pointercancel', onPointerCancel)
+      selectionDocument.removeEventListener('dragstart', onPointerCancel, true)
+      selectionDocument.removeEventListener('selectionchange', scheduleUpdate)
+      selectionDocument.removeEventListener('keyup', scheduleUpdate)
+      selectionDocument.removeEventListener('scroll', onPointerCancel, true)
+      document.removeEventListener('scroll', onPointerCancel, true)
+      document.removeEventListener('pointerdown', onOuterPointerDown)
+      window.removeEventListener('resize', onPointerCancel)
       window.removeEventListener('blur', onPointerCancel)
       window.removeEventListener(TEXT_SELECTION_OVERLAY_EVENT, onEditorSelection)
     }
-  }, [])
+  }, [selectionDocument])
 
   if (!box || inlineOpen) return null
   const centerDraftId = box.editorDraftId
@@ -9484,7 +9516,7 @@ function SelectionAsk({ onAsk, onInline, inlineOpen = false }: {
           if (onInline && box.askOpts?.selectionSource?.docId) onInline(box)
           else if (!quoteAgentPanelSelection(box.askOpts)) onAsk(box.text, box.askOpts)
           setBox(null)
-          window.getSelection()?.removeAllRanges()
+          selectionDocument.getSelection()?.removeAllRanges()
         }}
       >
         {onInline && box.askOpts?.selectionSource?.docId ? '이 부분에 지시 · ⌘/Ctrl+J' : '✳ Claude에 묻기'}
@@ -11140,6 +11172,7 @@ function localFileBaseHref(path: string): string | undefined {
 
 const HTML_VIEWER_DEFAULT_STYLE = `<style data-lt-html-viewer-defaults>
 :root { color-scheme: light; }
+::highlight(inline-command-source) { background-color: rgba(98, 170, 245, 0.35); }
 html {
   min-height: 100%;
   background: #f3f4f6;
@@ -11203,8 +11236,9 @@ function htmlWithLocalBase(html: string, path: string): string {
     : tags + html
 }
 
-function HtmlView({ path }: { path: string }): JSX.Element {
+function HtmlView({ path, onAsk, onInline, inlineOpen }: SelectionActionProps & { path: string }): JSX.Element {
   const remoteVersion = useRemoteFileVersion(path)
+  const [selectionDocument, setSelectionDocument] = useState<Document | null>(null)
   const [mode, setMode] = useState<'render' | 'code'>('render')
   const [state, setState] = useState<{ loading: boolean; text: string; truncated: boolean; err: string }>({
     loading: true,
@@ -11274,10 +11308,13 @@ function HtmlView({ path }: { path: string }): JSX.Element {
       <iframe
         className="html-frame"
         title={fileNameFromPath(path)}
-        sandbox=""
+        sandbox="allow-same-origin"
         referrerPolicy="no-referrer"
         srcDoc={htmlWithLocalBase(state.text, path)}
+        onLoad={(event) => setSelectionDocument(event.currentTarget.contentDocument)}
       />
+      {selectionDocument && <SelectionAsk onAsk={onAsk} onInline={onInline} inlineOpen={inlineOpen} selectionDocument={selectionDocument} />}
+      {selectionDocument && <SelectionMenu onAsk={onAsk} selectionDocument={selectionDocument} />}
     </div>
   )
 }
