@@ -75,7 +75,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: release-runtime-macos-${{ matrix.arch }}
-          path: .omx/screenshots/**
+          path: |
+            .omx/screenshots/**
+            output/playwright/html-quote/**
           if-no-files-found: warn
 
       - name: Package macOS
@@ -127,7 +129,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: release-runtime-windows-x64
-          path: .omx/screenshots/**
+          path: |
+            .omx/screenshots/**
+            output/playwright/html-quote/**
           if-no-files-found: warn
 
       - name: Upload Windows

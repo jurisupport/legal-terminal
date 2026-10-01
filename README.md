@@ -95,7 +95,7 @@ curl -fsSL https://github.com/jurisupport/legal-terminal/releases/latest/downloa
 
 ## 이번 업데이트
 
-최신 릴리스: [v0.1.246](https://github.com/jurisupport/legal-terminal/releases/tag/v0.1.246)
+최신 릴리스: [v0.1.247](https://github.com/jurisupport/legal-terminal/releases/tag/v0.1.247)
 
 - **HTML 선택 인용**: HTML 미리보기에서도 드래그한 문장에 바로 지시하거나 우클릭으로 Agent에 인용합니다. 파일 출처를 함께 전달하고 스크립트 실행은 차단합니다.
 

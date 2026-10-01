@@ -93,22 +93,26 @@ async function electronCheck({ root, temp, output, channels }) {
       d.getElementById('unsafe').click();
       check(!d.body.dataset.scriptRan && !d.body.dataset.handlerRan, 'Inline scripts and event handlers stay blocked');
     `)
+    // Aim inside the boundary glyphs; paragraph edges have platform-dependent hit testing.
     const drag = await run(`
       const frame = document.querySelector('.html-frame'), d = frame.contentDocument, r = d.createRange();
-      r.selectNodeContents(d.getElementById('quote'));
-      const text = r.getBoundingClientRect(), bounds = frame.getBoundingClientRect();
-      return { x: Math.floor(bounds.left + frame.clientLeft + text.left), endX: Math.ceil(bounds.left + frame.clientLeft + text.right), y: Math.round(bounds.top + frame.clientTop + text.top + text.height / 2) };
+      const text = d.getElementById('quote').firstChild, bounds = frame.getBoundingClientRect();
+      r.setStart(text, 0); r.setEnd(text, 1); const first = r.getBoundingClientRect();
+      r.setStart(text, text.length - 1); r.setEnd(text, text.length); const last = r.getBoundingClientRect();
+      return { x: Math.round(bounds.left + frame.clientLeft + first.left + 1), endX: Math.round(bounds.left + frame.clientLeft + last.right - 1), y: Math.round(bounds.top + frame.clientTop + first.top + first.height / 2), endY: Math.round(bounds.top + frame.clientTop + last.top + last.height / 2) };
     `)
     w.webContents.sendInputEvent({ type: 'mouseMove', x: drag.x, y: drag.y })
     w.webContents.sendInputEvent({ type: 'mouseDown', button: 'left', clickCount: 1, x: drag.x, y: drag.y })
     for (let step = 1; step <= 8; step++) {
-      w.webContents.sendInputEvent({ type: 'mouseMove', button: 'left', x: Math.round(drag.x + (drag.endX - drag.x) * step / 8), y: drag.y })
+      w.webContents.sendInputEvent({ type: 'mouseMove', button: 'left', x: Math.round(drag.x + (drag.endX - drag.x) * step / 8), y: Math.round(drag.y + (drag.endY - drag.y) * step / 8) })
       await pause()
     }
-    w.webContents.sendInputEvent({ type: 'mouseUp', button: 'left', clickCount: 1, x: drag.endX, y: drag.y })
+    w.webContents.sendInputEvent({ type: 'mouseUp', button: 'left', clickCount: 1, x: drag.endX, y: drag.endY })
     await wait("visible('.sel-actions button').length === 1", 'Real pointer drag creates HTML selection action')
     await run(`
-      check(document.querySelector('.html-frame').contentDocument.getSelection().toString() === '대금은 계약일로부터 30일 이내에 지급한다.', 'Real pointer drag selects the HTML passage');
+      const selected = document.querySelector('.html-frame').contentDocument.getSelection().toString();
+      if (selected !== '대금은 계약일로부터 30일 이내에 지급한다.') throw Error('Real pointer drag selects the HTML passage: ' + JSON.stringify({ selected, drag: ${JSON.stringify(drag)} }));
+      check(true, 'Real pointer drag selects the HTML passage');
       const f = document.querySelector('.html-frame').getBoundingClientRect(), box = visible('.sel-actions')[0].getBoundingClientRect();
       check(box.left >= f.left && box.right <= innerWidth && box.top >= f.top && box.bottom <= f.bottom, 'HTML selection action uses parent viewport coordinates');
     `)
