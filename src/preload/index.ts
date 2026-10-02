@@ -1210,8 +1210,12 @@ const api = {
       location: AutomaticWorkspaceLocation
     ): Promise<WorkspaceSaveResult & { remoteError?: string }> =>
       ipcRenderer.invoke('workspace:autoSave', { snapshot, location }),
-    autoLoad: (location: AutomaticWorkspaceLocation): Promise<AutomaticWorkspaceLoadResult> =>
-      ipcRenderer.invoke('workspace:autoLoad', location),
+    autoLoad: (location: AutomaticWorkspaceLocation, observe?: boolean): Promise<AutomaticWorkspaceLoadResult> =>
+      ipcRenderer.invoke('workspace:autoLoad', location, observe),
+    autoList: (ssh?: SshConn, includeClosed?: boolean): Promise<{ ok: boolean; snapshots?: WorkspaceSnapshot[]; error?: string }> =>
+      ipcRenderer.invoke('workspace:autoList', ssh, includeClosed),
+    autoObserve: (location: AutomaticWorkspaceLocation, snapshot: WorkspaceSnapshot): Promise<void> =>
+      ipcRenderer.invoke('workspace:autoObserve', location, snapshot),
     exportFile: (snapshot: WorkspaceSnapshot): Promise<WorkspaceSaveResult> =>
       ipcRenderer.invoke('workspace:exportFile', snapshot),
     importFile: (): Promise<WorkspaceLoadResult> => ipcRenderer.invoke('workspace:importFile')

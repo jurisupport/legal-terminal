@@ -82,6 +82,8 @@ import {
 import { decodeTextBuffer } from './textEncoding'
 import {
   loadAutomaticWorkspace,
+  listAutomaticWorkspaces,
+  observeAutomaticWorkspace,
   listWorkspaceSnapshots,
   loadWorkspaceSnapshot,
   saveAutomaticWorkspace,
@@ -953,11 +955,15 @@ ipcMain.handle('workspace:list', () => listWorkspaceSnapshots())
 ipcMain.handle('workspace:load', (_e, id?: string) => loadWorkspaceSnapshot(id))
 ipcMain.handle(
   'workspace:autoSave',
-  (_e, p: { snapshot: WorkspaceSnapshot; location: AutomaticWorkspaceLocation }) =>
-    saveAutomaticWorkspace(p.snapshot, p.location)
+  (e, p: { snapshot: WorkspaceSnapshot; location: AutomaticWorkspaceLocation }) =>
+    saveAutomaticWorkspace(p.snapshot, p.location, e.sender.id)
 )
-ipcMain.handle('workspace:autoLoad', (_e, location: AutomaticWorkspaceLocation) =>
-  loadAutomaticWorkspace(location)
+ipcMain.handle('workspace:autoLoad', (e, location: AutomaticWorkspaceLocation, observe?: boolean) =>
+  loadAutomaticWorkspace(location, e.sender.id, observe)
+)
+ipcMain.handle('workspace:autoList', (_e, ssh?: SshProfile, includeClosed?: boolean) => listAutomaticWorkspaces(ssh, includeClosed))
+ipcMain.handle('workspace:autoObserve', (e, location: AutomaticWorkspaceLocation, snapshot: WorkspaceSnapshot) =>
+  observeAutomaticWorkspace(location, snapshot, e.sender.id)
 )
 ipcMain.handle('workspace:exportFile', async (e, snapshot: WorkspaceSnapshot) => {
   const win = BrowserWindow.fromWebContents(e.sender)

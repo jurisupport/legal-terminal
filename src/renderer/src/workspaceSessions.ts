@@ -2,12 +2,17 @@ import type { WorkspaceSnapshot } from './env'
 
 type Terminal = WorkspaceSnapshot['terminals'][number]
 
-const terminalKey = (term: Terminal): string =>
+const terminalScope = (term: Terminal): string =>
   [
-    term.cwd,
-    term.agentProvider ?? term.autoAgent ?? (term.autoClaude ? 'claude' : term.kind ?? 'terminal'),
-    term.resumeSessionId ?? `tab:${term.id}`
+    term.ssh ? `${term.ssh.user}@${term.ssh.host}:${term.ssh.port ?? 22}` : 'local',
+    term.cwd.normalize('NFC').replace(/[\\/]+$/, ''),
+    term.jsId ?? '',
+    term.kind ?? 'terminal',
+    term.agentProvider ?? term.autoAgent ?? (term.kind === 'agent' || term.autoClaude ? 'claude' : 'terminal')
   ].join('\0')
+
+const terminalKey = (term: Terminal): string =>
+  `${terminalScope(term)}\0${term.resumeSessionId || `tab:${term.id}`}`
 
 export function workspaceSessionKeys(snapshot: WorkspaceSnapshot): string[] {
   return (snapshot.terminals ?? []).map(terminalKey).sort()
@@ -31,14 +36,31 @@ export function mergeWorkspaceSessions(
   remote: WorkspaceSnapshot
 ): WorkspaceSnapshot {
   const terminals = [...(local.terminals ?? [])]
-  const terminalKeys = new Set(terminals.map(terminalKey))
+  const terminalKeys = new Map(terminals.map((term, index) => [terminalKey(term), index]))
+  const stableIds = new Map(terminals.map((term, index) => [`${terminalScope(term)}\0${term.id}`, index]))
   const terminalIds = new Set(terminals.map((term) => term.id))
+  const remoteIds = new Map<string, string>()
   for (const term of remote.terminals ?? []) {
-    if (terminalKeys.has(terminalKey(term))) continue
+    const stableIndex = stableIds.get(`${terminalScope(term)}\0${term.id}`)
+    const index = terminalKeys.get(terminalKey(term)) ??
+      (stableIndex !== undefined && (!term.resumeSessionId || !terminals[stableIndex].resumeSessionId)
+        ? stableIndex : undefined)
+    if (index !== undefined) {
+      const existing = terminals[index]
+      if (!existing.resumeSessionId && term.resumeSessionId) {
+        terminals[index] = { ...existing, resumeSessionId: term.resumeSessionId,
+          sessionTitle: term.sessionTitle ?? existing.sessionTitle }
+        terminalKeys.set(terminalKey(terminals[index]), index)
+      }
+      remoteIds.set(term.id, existing.id)
+      continue
+    }
     const id = uniqueId(term.id, terminalIds)
     terminals.push({ ...term, id })
     terminalIds.add(id)
-    terminalKeys.add(terminalKey(term))
+    terminalKeys.set(terminalKey(term), terminals.length - 1)
+    stableIds.set(`${terminalScope(term)}\0${id}`, terminals.length - 1)
+    remoteIds.set(term.id, id)
   }
 
   const docs = [...(local.docs ?? [])]
@@ -58,6 +80,7 @@ export function mergeWorkspaceSessions(
     ...local,
     savedAt: local.savedAt >= remote.savedAt ? local.savedAt : remote.savedAt,
     docs,
-    terminals
+    terminals,
+    activeTerm: local.activeTerm ?? remoteIds.get(remote.activeTerm ?? '')
   }
 }

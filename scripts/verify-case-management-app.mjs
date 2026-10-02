@@ -32,7 +32,7 @@ function runApp({ root, temp, chosenDir, screenshot }) {
   const register = ipcMain.handle.bind(ipcMain)
   const originalOn = ipcMain.on.bind(ipcMain)
   ipcMain.on = (channel, callback) => originalOn(channel, channel === 'fs:watch' || channel.startsWith('pty:') ? () => {} : callback)
-  const realChannels = new Set(['app:info', 'app:setWindowTitle', 'tabs:ready', 'workspace:save', 'workspace:list', 'workspace:load', 'caseManagement:get', 'caseManagement:update', 'workspace:autoSave', 'workspace:autoLoad'])
+  const realChannels = new Set(['app:info', 'app:setWindowTitle', 'tabs:ready', 'workspace:save', 'workspace:list', 'workspace:load', 'caseManagement:get', 'caseManagement:update', 'workspace:autoSave', 'workspace:autoLoad', 'workspace:autoList', 'workspace:autoObserve'])
   ipcMain.handle = (channel, handler) => register(channel, async (event, ...args) => {
     const call = { channel, args }
     calls.push(call)

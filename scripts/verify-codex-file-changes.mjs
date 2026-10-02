@@ -107,13 +107,16 @@ handleCodexNotification(session, { method: 'thread/started', params: { thread: {
 assert.equal(session.codexThreadId, 'thread-1', 'a child must never overwrite the parent thread ID')
 const requests = []
 session.codexProcess = { stdin: { write: (line) => requests.push(JSON.parse(line)) } }
+session.codexExecutionProtected = true
+session.codexThreadReady = true
 session.cwd = '/case'
 const turnNotice = (method, threadId, id, status = 'completed') => handleCodexNotification(session, {
   method, params: { threadId, turn: { id, status } }
 })
 for (const withStartedNotification of [true, false]) {
   const turnId = withStartedNotification ? 'turn-with-start' : 'turn-from-response'
-  const run = runCodexAgentMessage(session, 'Review changes', new AbortController())
+  session.running = new AbortController()
+  const run = runCodexAgentMessage(session, 'Review changes', session.running)
   await new Promise((resolve) => setImmediate(resolve))
   const request = requests.at(-1)
   assert.equal(request.method, 'turn/start')

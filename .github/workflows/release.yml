@@ -62,6 +62,12 @@ jobs:
       - name: Verify desktop and case-management runtime
         run: npm run verify:desktop
 
+      - name: Verify cross-computer handover
+        run: |
+          npm run verify:workspace-sessions
+          npm run verify:agent-handover
+          npm run verify:agent-execution-lock
+
       - name: Verify HTML selection and quoting
         run: npm run verify:html-quote
 

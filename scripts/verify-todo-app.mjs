@@ -67,6 +67,7 @@ function runApp({ root, temp, chosenDir, screenshot }) {
     if (channel === 'sessions:current' || channel === 'case:getPairing' || channel === 'case:getJsPairing') return null
     if (channel === 'case:addHistory' || channel === 'sessions:remember') return undefined
     if (channel === 'workspace:autoLoad') return { ok: true }
+    if (channel === 'workspace:autoList') return { ok: true, snapshots: [] }
     if (channel === 'workspace:autoSave') return { ok: true, savedAt: new Date().toISOString() }
     if (channel === 'agent:create') {
       const options = args[0]

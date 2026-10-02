@@ -5,6 +5,7 @@ import { EventEmitter } from 'node:events'
 import vm from 'node:vm'
 import ts from 'typescript'
 import * as mcp from '../src/main/agent/agentMcp.ts'
+import * as executionLock from '../src/main/agent/agentExecutionLock.ts'
 import * as media from '../src/shared/media.ts'
 const token = 'synthetic-agent-jurisupport-secret-20260914'
 const connection = { token, epoch: 1, tools: ['list_tasks', 'get_task', 'update_task', 'create_task', 'delete_case', 'send_email'] }
@@ -49,6 +50,7 @@ const ctx={exports:serviceExports,console,process,Buffer,AbortController,URL,URL
     if(name==='@anthropic-ai/claude-agent-sdk')return{query}
     if(name==='../jurisupport')return{getAgentMcpConnection:async()=>({...connection,epoch}),agentMcpAccountEpoch:()=>epoch,onAgentMcpAccountChange:fn=>{accountChanged=fn},listTodos:async()=>[]}
     if(name==='./agentMcp')return mcp
+    if(name==='./agentExecutionLock')return executionLock
     if(name==='../../shared/media')return media
     if(name==='./agentPrompt')return{currentAgentContext:async()=>'',prependAgentContext:(_context,prompt)=>prompt}
     if(name==='../sessions')return{rememberSessionMeta:async()=>{},readSessionTokenUsage:async()=>null}

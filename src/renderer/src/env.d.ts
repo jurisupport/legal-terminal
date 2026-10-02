@@ -215,6 +215,11 @@ export interface WorkspaceSnapshot {
   workspaceId?: string
   workspaceLabel?: string
   workspaceDevice?: string
+  workspaceOpen?: boolean
+  workspaceReopen?: boolean
+  workspaceIntentId?: string
+  reopenAgentTabs?: TerminalTabPayload[]
+  closedAgentTabs?: import('../../shared/workspaceAgentTabs').SharedAgentTabIdentity[]
   mode: 'explorer' | 'cases' | 'viewer' | 'todos'
   docs: WorkspaceDocTabPayload[]
   terminals: TerminalTabPayload[]
@@ -1074,7 +1079,9 @@ export interface LtApi {
       snapshot: WorkspaceSnapshot,
       location: AutomaticWorkspaceLocation
     ) => Promise<WorkspaceSaveResult & { remoteError?: string }>
-    autoLoad: (location: AutomaticWorkspaceLocation) => Promise<AutomaticWorkspaceLoadResult>
+    autoLoad: (location: AutomaticWorkspaceLocation, observe?: boolean) => Promise<AutomaticWorkspaceLoadResult>
+    autoList: (ssh?: SshConn, includeClosed?: boolean) => Promise<{ ok: boolean; snapshots?: WorkspaceSnapshot[]; error?: string }>
+    autoObserve: (location: AutomaticWorkspaceLocation, snapshot: WorkspaceSnapshot) => Promise<void>
     exportFile: (snapshot: WorkspaceSnapshot) => Promise<WorkspaceSaveResult>
     importFile: () => Promise<WorkspaceLoadResult>
   }

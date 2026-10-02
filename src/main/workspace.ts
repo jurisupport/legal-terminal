@@ -3,8 +3,9 @@ import { createHash } from 'crypto'
 import { execFile, spawn } from 'child_process'
 import { homedir, hostname } from 'os'
 import { basename, dirname, isAbsolute, join } from 'path'
-import { mkdir, readFile, readdir, rename, writeFile } from 'fs/promises'
+import { mkdir, readFile, readdir, rename, rmdir, stat, writeFile } from 'fs/promises'
 import { buildSshArgs, type SshProfileLike } from './sshOptions'
+import { agentTabsOnly, mergeSharedAgentTabs } from '../shared/workspaceAgentTabs'
 
 export interface WorkspaceSnapshot {
   version: number
@@ -71,6 +72,12 @@ export interface AutomaticWorkspaceLoadResult {
   error?: string
 }
 
+export interface AutomaticWorkspaceListResult {
+  ok: boolean
+  snapshots?: WorkspaceSnapshot[]
+  error?: string
+}
+
 interface WorkspaceIndex {
   version: number
   entries: WorkspaceEntry[]
@@ -83,6 +90,13 @@ const SHARED_WORKSPACE_TIMEOUT_MS = 12_000
 const sshBin = process.platform === 'win32' ? 'ssh.exe' : 'ssh'
 let sharedWriteSeq = 0
 let workspaceIndexChain: Promise<unknown> = Promise.resolve()
+const knownSharedWorkspaces = new Map<string, WorkspaceSnapshot>()
+let sharedSaveChain: Promise<unknown> = Promise.resolve()
+
+function sharedLocationKey(location: AutomaticWorkspaceLocation, observerId: number): string {
+  const ssh = location.ssh
+  return `${observerId}\0${ssh ? `${ssh.user}@${ssh.host}:${ssh.port ?? 22}` : 'local'}\0${location.cwd}\0${location.caseId ?? ''}`
+}
 
 function withWorkspaceIndexLock<T>(fn: () => Promise<T>): Promise<T> {
   const run = workspaceIndexChain.then(fn, fn)
@@ -272,6 +286,55 @@ async function saveSharedLocal(snapshot: WorkspaceSnapshot, cwd: string, caseId?
 function sharedRemoteFile(cwd: string, caseId?: string): string {
   const key = caseId ? JSON.stringify(['case-workspace', cwd, caseId]) : cwd
   return `${createHash('sha256').update(key).digest('hex').slice(0, 24)}.json`
+}
+
+function workspaceSshCommand(ssh: SshProfileLike, command: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    execFile(sshBin, [...buildSshArgs(ssh, { usage: 'oneshot' }), command],
+      { timeout: SHARED_WORKSPACE_TIMEOUT_MS, windowsHide: true },
+      (error) => error ? reject(error) : resolve())
+  })
+}
+
+// The Android SFTP writer uses the same empty-directory lock. Atomic rename alone
+// cannot prevent two devices from reading the same old snapshot and losing a new tab.
+async function withSharedWorkspaceLock(location: AutomaticWorkspaceLocation, save: () => Promise<void>): Promise<void> {
+  const lock = `${sharedWorkspacePath(location.cwd, location.caseId)}.lock`
+  const remoteLock = `"$HOME/.claude/legal-terminal-workspaces/${sharedRemoteFile(location.cwd, location.caseId)}.lock"`
+  if (location.ssh) {
+    await workspaceSshCommand(location.ssh, [
+      'mkdir -p "$HOME/.claude/legal-terminal-workspaces" || exit 1',
+      `lock=${remoteLock}`,
+      'attempt=0',
+      'until mkdir "$lock" 2>/dev/null; do',
+      '  [ -d "$lock" ] || exit 1',
+      '  find "$lock" -prune -type d -mmin +2 -exec rmdir {} \\; 2>/dev/null',
+      '  attempt=$((attempt + 1))',
+      '  [ "$attempt" -lt 80 ] || exit 1',
+      '  sleep 0.1',
+      'done'
+    ].join('\n'))
+  } else {
+    await mkdir(dirname(lock), { recursive: true })
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        await mkdir(lock)
+        break
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
+        if (attempt >= 80) throw new Error('다른 기기가 에이전트 탭을 저장 중입니다. 다시 시도하세요.')
+        const info = await stat(lock).catch(() => undefined)
+        if (info && Date.now() - info.mtimeMs > 120_000) await rmdir(lock).catch(() => {})
+        await new Promise((resolve) => setTimeout(resolve, 100))
+      }
+    }
+  }
+  try {
+    await save()
+  } finally {
+    if (location.ssh) await workspaceSshCommand(location.ssh, `rmdir ${remoteLock}`).catch(() => {})
+    else await rmdir(lock).catch(() => {})
+  }
 }
 
 function loadSharedRemote(ssh: SshProfileLike, cwd: string, caseId?: string): Promise<WorkspaceLoadResult> {
@@ -516,7 +579,8 @@ export async function listWorkspaceSnapshots(): Promise<WorkspaceListResult> {
 
 export async function saveAutomaticWorkspace(
   snapshot: WorkspaceSnapshot,
-  location: AutomaticWorkspaceLocation
+  location: AutomaticWorkspaceLocation,
+  observerId = 0
 ): Promise<WorkspaceSaveResult & { remoteError?: string }> {
   if (location.caseId && !snapshotMatchesCase(snapshot, location.caseId)) {
     return { ok: false, error: '작업환경의 사건 정보가 일치하지 않아 저장하지 않았습니다.' }
@@ -525,13 +589,63 @@ export async function saveAutomaticWorkspace(
     ...snapshot,
     workspaceId: workspaceIdForLocation(location.cwd, location.profileId, location.caseId),
     workspaceLabel: snapshot.workspaceLabel || displayNameFromPath(location.cwd) || '사건 작업환경',
-    workspaceDevice: hostname()
+    workspaceDevice: hostname(),
+    workspaceOpen: snapshot.workspaceOpen !== false
   }
+  delete savedSnapshot.workspaceReopen
+  delete savedSnapshot.reopenAgentTabs
+  delete savedSnapshot.workspaceIntentId
   const local = await saveWorkspaceSnapshot(savedSnapshot)
   if (!local.ok) return local
   try {
-    if (location.ssh) await saveSharedRemote(location.ssh, location.cwd, savedSnapshot, location.caseId)
-    else await saveSharedLocal(savedSnapshot, location.cwd, location.caseId)
+    const shared = agentTabsOnly(savedSnapshot)
+    const sourceCase = asRecord(savedSnapshot.currentCase)
+    const records = asString(sourceCase?.records)
+    const remotePrefix = `ssh://${location.profileId}`
+    shared.currentCase = {
+      drafts: location.cwd,
+      name: savedSnapshot.workspaceLabel,
+      meta: location.caseId ? { ...asRecord(sourceCase?.meta), jsId: location.caseId } : sourceCase?.meta,
+      records: !location.ssh ? records
+        : records?.startsWith(`${remotePrefix}/`) ? records.slice(remotePrefix.length) : undefined
+    }
+    shared.terminals = (shared.terminals as Record<string, unknown>[]).map((term) => ({
+      ...term,
+      caseTabId: undefined,
+      ssh: undefined,
+      sshLabel: undefined,
+      profileId: undefined,
+      recordsFolder: undefined,
+      suggestedRecords: undefined,
+      suggestedRecordOptions: undefined
+    }))
+    const save = async (): Promise<void> => {
+      const current = await loadCaseWorkspace((caseId) => location.ssh
+        ? loadSharedRemote(location.ssh, location.cwd, caseId)
+        : loadSnapshotFile(sharedWorkspacePath(location.cwd, caseId)), location.caseId)
+      if (!current.ok) throw new Error(current.error)
+      const key = sharedLocationKey(location, observerId)
+      const applied = Array.isArray(current.snapshot?.appliedWorkspaceIntents)
+        ? current.snapshot.appliedWorkspaceIntents.filter((id): id is string => typeof id === 'string') : []
+      const intentId = asString(snapshot.workspaceIntentId)
+      const replay = !!intentId && applied.includes(intentId)
+      const reopened = agentTabsOnly({ version: 1, savedAt: shared.savedAt, terminals: replay ? [] : snapshot.reopenAgentTabs }).terminals as
+        { id: string; cwd: string; agentProvider?: string; resumeSessionId?: string }[]
+      const merged = mergeSharedAgentTabs(current.snapshot ?? undefined, shared,
+        shared.workspaceOpen === false ? undefined : knownSharedWorkspaces.get(key), reopened)
+      if (replay) merged.workspaceOpen = current.snapshot?.workspaceOpen
+      else if (current.snapshot?.workspaceOpen === false && snapshot.workspaceReopen !== true) merged.workspaceOpen = false
+      merged.appliedWorkspaceIntents = intentId && !replay ? [...applied, intentId] : applied
+      if (location.ssh) await saveSharedRemote(location.ssh, location.cwd, merged, location.caseId)
+      else await saveSharedLocal(merged, location.cwd, location.caseId)
+      // Track only this device's tabs; preserved unseen tabs must survive its next save too.
+      knownSharedWorkspaces.set(key, shared)
+    }
+    // ponytail: serialize workspace writes in this process; use per-host queues if saves become slow.
+    const lockedSave = (): Promise<void> => withSharedWorkspaceLock(location, save)
+    const pending = sharedSaveChain.then(lockedSave, lockedSave)
+    sharedSaveChain = pending.catch(() => undefined)
+    await pending
     return local
   } catch (e) {
     // 로컬 자동 저장은 성공했으므로 복원 가능하다. 원격 실패만 별도로 알려 다음 변경 때 재시도한다.
@@ -539,8 +653,58 @@ export async function saveAutomaticWorkspace(
   }
 }
 
+// Discovery is read-only. Background reads are acknowledged only after applying
+// their exact snapshot in the renderer. Old manual backups are not open cases.
+export async function listAutomaticWorkspaces(ssh?: SshProfileLike, includeClosed = false): Promise<AutomaticWorkspaceListResult> {
+  try {
+    let contents: string[]
+    if (ssh) {
+      const command = [
+        'for file in "$HOME/.claude/legal-terminal-workspaces/"*.json; do',
+        '  [ -f "$file" ] || continue',
+        "  printf '\\036'",
+        '  cat "$file" || exit 1',
+        'done'
+      ].join('\n')
+      const output = await new Promise<string>((resolve, reject) => {
+        execFile(sshBin, [...buildSshArgs(ssh, { usage: 'oneshot' }), command],
+          { timeout: SHARED_WORKSPACE_TIMEOUT_MS, windowsHide: true, maxBuffer: SHARED_WORKSPACE_MAX_BYTES },
+          (error, stdout) => error ? reject(error) : resolve(stdout))
+      })
+      contents = output.split('\x1e').filter((part) => part.trim())
+    } else {
+      const dir = dirname(sharedWorkspacePath(''))
+      const names = await readdir(dir).catch((error: NodeJS.ErrnoException) => {
+        if (error.code === 'ENOENT') return []
+        throw error
+      })
+      contents = await Promise.all(names.filter((name) => /^[a-f0-9]{24}\.json$/.test(name))
+        .map((name) => readFile(join(dir, name), 'utf8')))
+    }
+    const snapshots: WorkspaceSnapshot[] = []
+    for (const content of contents) {
+      try {
+        const snapshot: unknown = JSON.parse(content)
+        if (!isSnapshot(snapshot) || (snapshot.workspaceOpen !== true && !(includeClosed && snapshot.workspaceOpen === false))) continue
+        const source = asRecord(snapshot.currentCase)
+        if (!asString(source?.drafts)?.startsWith('/') || !asString(source?.name)) continue
+        const caseId = asString(asRecord(source?.meta)?.jsId)
+        if (caseId && !snapshotMatchesCase(snapshot, caseId)) continue
+        snapshots.push(agentTabsOnly(snapshot))
+      } catch {
+        // A damaged backup must not prevent other cases from being discovered.
+      }
+    }
+    return { ok: true, snapshots: snapshots.sort((a, b) => b.savedAt.localeCompare(a.savedAt)) }
+  } catch (error) {
+    return { ok: false, error: String(error) }
+  }
+}
+
 export async function loadAutomaticWorkspace(
-  location: AutomaticWorkspaceLocation
+  location: AutomaticWorkspaceLocation,
+  observerId = 0,
+  observe = true
 ): Promise<AutomaticWorkspaceLoadResult> {
   const local = await loadCaseWorkspace(
     (caseId) => loadWorkspaceSnapshot(workspaceIdForLocation(location.cwd, location.profileId, caseId)),
@@ -550,6 +714,7 @@ export async function loadAutomaticWorkspace(
     const shared = await loadCaseWorkspace(
       (caseId) => loadSnapshotFile(sharedWorkspacePath(location.cwd, caseId)), location.caseId
     )
+    if (observe && shared.ok && shared.snapshot) knownSharedWorkspaces.set(sharedLocationKey(location, observerId), shared.snapshot)
     return {
       ok: local.ok && shared.ok,
       local,
@@ -560,10 +725,23 @@ export async function loadAutomaticWorkspace(
   const remote = await loadCaseWorkspace(
     (caseId) => loadSharedRemote(location.ssh!, location.cwd, caseId), location.caseId
   )
+  if (observe && remote.ok && remote.snapshot) knownSharedWorkspaces.set(sharedLocationKey(location, observerId), remote.snapshot)
   return {
     ok: local.ok && remote.ok,
     local,
     remote,
     error: local.error || remote.error
   }
+}
+
+export function observeAutomaticWorkspace(
+  location: AutomaticWorkspaceLocation,
+  snapshot: WorkspaceSnapshot,
+  observerId = 0
+): void {
+  if (!isSnapshot(snapshot)) throw new Error('작업환경 파일 형식이 올바르지 않습니다.')
+  if (location.caseId && !snapshotMatchesCase(snapshot, location.caseId)) {
+    throw new Error('작업환경의 사건 정보가 일치하지 않아 적용하지 않았습니다.')
+  }
+  knownSharedWorkspaces.set(sharedLocationKey(location, observerId), agentTabsOnly(snapshot))
 }
