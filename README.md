@@ -89,19 +89,11 @@ curl -fsSL https://github.com/jurisupport/legal-terminal/releases/latest/downloa
 - Windows 포터블: [legal-terminal-portable.exe](https://github.com/jurisupport/legal-terminal/releases/latest/download/legal-terminal-portable.exe)
 - Mac Apple Silicon: [legal-terminal-mac-arm64.dmg](https://github.com/jurisupport/legal-terminal/releases/latest/download/legal-terminal-mac-arm64.dmg)
 - Mac Intel: [legal-terminal-mac-x64.zip](https://github.com/jurisupport/legal-terminal/releases/latest/download/legal-terminal-mac-x64.zip)
-- 최신 릴리스: [GitHub Releases](https://github.com/jurisupport/legal-terminal/releases/latest)
+- 최신 릴리스: [v0.1.250](https://github.com/jurisupport/legal-terminal/releases/tag/v0.1.250)
 
-기본 Claude Agent를 쓰려면 설치 후 일반 터미널에서 `claude`를 한 번 실행해 로그인합니다. Codex를 쓰려면 Codex CLI를 설치한 뒤 Agent 패널에서 **Codex**를 선택하고 로그인합니다.
-
-## 이번 업데이트
-
-최신 릴리스: [v0.1.249](https://github.com/jurisupport/legal-terminal/releases/tag/v0.1.249)
-
-- **컴퓨터 간 사건 이어가기**: 같은 서버에 연결한 앱에서 열린 사건과 AI 대화 탭을 자동으로 가져옵니다.
-- **기존 PC를 열어둔 채 전환**: 오래된 자동 저장이 다른 PC에서 닫은 탭을 되살리지 않습니다. 미저장 문서와 진행 중인 작업은 유지합니다.
-- **AI 중복 실행 방지**: 같은 대화를 실행 중이면 두 번째 요청에 안내하고 실제 실행이 끝난 뒤 이어갈 수 있습니다.
-
-두 컴퓨터 모두 새 버전으로 업데이트하고 같은 서버·사용자 계정에 연결하세요. 서버에 Python 3가 필요합니다. Codex의 보호된 실행은 공식 원격제어 연결을 사용하지 않습니다.
+- **원격 작업 유지**: 원격 Agent 패널의 Claude·Codex 작업은 노트북을 닫거나 앱·탭을 종료해도 원격 컴퓨터에서 계속됩니다.
+- **자동 재접속**: 앱을 다시 열거나 노트북이 깨어나면 기존 작업에 연결해 놓친 결과와 승인·질문을 복원합니다.
+- **명시적 중단**: 중단 버튼은 원격 실행과 하위 작업을 취소합니다. 연결 종료만으로는 취소하지 않습니다.
 
 ## 처음 쓰는 순서
 
@@ -140,6 +132,8 @@ curl -fsSL https://github.com/jurisupport/legal-terminal/releases/latest/downloa
 - 탭마다 Claude 또는 Codex를 선택하고 모델·추론 정도를 바꿀 수 있습니다. 대화 중 Agent를 바꾸면 기존 맥락을 새 탭으로 넘깁니다.
 - `@` 파일 첨부와 `/` 명령 자동완성, 사용량·진행 상태 표시를 지원합니다.
 - 기존 PTY 터미널과 저장된 Agent 세션 이어하기도 사용할 수 있습니다.
+- **원격 Agent 작업 유지**: SSH로 실행한 Claude·Codex Agent는 노트북을 닫거나 앱·탭을 닫아도 원격 컴퓨터에서 계속 작업합니다. 앱을 다시 열면 기존 작업과 놓친 출력을 불러오고, 승인·질문은 응답할 때까지 기다립니다. 작업을 취소하려면 **중단**을 누릅니다.
+- 이 기능은 **Agent 패널**에 적용됩니다. 원격 컴퓨터는 켜져 있어야 하며 Python 3가 필요합니다. 아직 전송하지 않은 대기 지시는 앱이 켜져 있을 때 전송됩니다. 원격 실행 기록은 원격 사용자 계정의 `~/.legal-terminal/agent-runs`에 보관됩니다.
 - 작업 중, 완료, 질문 대기 상태가 탭에 표시되고 알림음과 창 주의 요청을 지원합니다.
 
 ### 문서와 기록

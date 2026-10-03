@@ -68,6 +68,14 @@ jobs:
           npm run verify:agent-handover
           npm run verify:agent-execution-lock
 
+      - name: Verify durable remote Agent recovery
+        run: |
+          npm run verify:remote-agent-transport
+          npm run verify:agent-remote-recovery
+          npm run verify:agent-restored-history
+          npm run verify:agent-progress
+          npm run verify:agent-auth-queue
+
       - name: Verify HTML selection and quoting
         run: npm run verify:html-quote
 
@@ -115,6 +123,9 @@ jobs:
 
       - name: Verify desktop and case-management runtime
         run: npm run verify:desktop
+
+      - name: Verify restored Agent history
+        run: npm run verify:agent-restored-history
 
       - name: Verify HTML selection and quoting
         run: npm run verify:html-quote

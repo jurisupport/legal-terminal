@@ -2,7 +2,7 @@ import { openRemotionPreview, closeRemotionPreview, disposeRemotionPreviews } fr
 import type { RemotionPreviewOptions } from '../shared/remotionPreview'
 import { MEDIA_SCHEME, registerMediaIpc, registerMediaProtocol } from './media'
 import { normalizeMediaSelection, type MediaAskRequest } from '../shared/media'
-import { app, protocol, BrowserWindow, shell, ipcMain, dialog, screen, session, Menu, clipboard, Notification, type WebContents } from 'electron'
+import { app, protocol, BrowserWindow, shell, ipcMain, dialog, screen, session, Menu, clipboard, Notification, powerMonitor, type WebContents } from 'electron'
 import { spawn } from 'child_process'
 import { createHash } from 'crypto'
 import { join, basename, dirname, extname, isAbsolute, resolve, sep, posix } from 'path'
@@ -91,7 +91,7 @@ import {
   type AutomaticWorkspaceLocation,
   type WorkspaceSnapshot
 } from './workspace'
-import { disposeAgentSessions, registerAgentIpc } from './agent/agent-service'
+import { disposeAgentSessions, reconnectAgentSessions, registerAgentIpc } from './agent/agent-service'
 
 protocol.registerSchemesAsPrivileged([MEDIA_SCHEME])
 
@@ -2920,6 +2920,7 @@ app.on('before-quit', () => {
 })
 
 app.whenReady().then(() => {
+  powerMonitor.on('resume', reconnectAgentSessions)
   registerMediaProtocol(session.defaultSession)
   registerMediaIpc(ipcMain)
   // Windows 토스트 알림에는 AppUserModelID가 필요하다 (electron-builder appId와 일치).

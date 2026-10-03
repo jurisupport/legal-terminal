@@ -177,6 +177,7 @@ export interface AgentDraftState {
 
 interface TimelineItem {
   id: string
+  timestamp?: number
   kind:
     | 'user'
     | 'assistant'
@@ -1443,11 +1444,16 @@ function permissionDiffFromRequest(
 }
 
 function reduceTimeline(items: TimelineItem[], event: AgentEvent, agentLabel: string): TimelineItem[] {
+  if (event.type === 'session:restored') {
+    return historyBeforeRestoredTurn(items, numberValue(event.startedAt))
+  }
   if (event.type === 'message:user') {
+    const id = stringValue(event.messageId) ?? `user-${Date.now()}`
+    if (items.some((item) => item.id === id)) return items
     return [
       ...items,
       {
-        id: stringValue(event.messageId) ?? `user-${Date.now()}`,
+        id,
         kind: 'user',
         title: '나',
         text: stringValue(event.text) ?? '',
@@ -1812,8 +1818,15 @@ function transcriptToTimeline(transcript: SessionTranscript, agentLabel: string)
     id: `history-${message.id || `${transcript.sessionId}-${index}`}`,
     kind: message.role === 'assistant' ? 'assistant' : 'user',
     title: message.role === 'assistant' ? agentLabel : '나',
-    text: message.text
+    text: message.text,
+    timestamp: message.timestamp
   }))
+}
+
+function historyBeforeRestoredTurn(items: TimelineItem[], startedAt?: number): TimelineItem[] {
+  return startedAt === undefined ? items : items.filter((item) =>
+    !item.id.startsWith('history-') || item.timestamp === undefined || item.timestamp < startedAt
+  )
 }
 
 function forkTranscriptBody(transcript: SessionTranscript): string {
@@ -1987,6 +2000,7 @@ export default function AgentPanel({
   const openedAuthUrlsRef = useRef<Set<string>>(new Set())
   const copyFeedbackTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const loadedHistoryKeyRef = useRef<string | null>(null)
+  const restoredTurnStartedAtRef = useRef<number>()
   const handledAttachmentRequestIdsRef = useRef<Set<string>>(new Set())
   const promptHistoryRef = useRef<string[]>([])
   const promptHistoryIndexRef = useRef<number | null>(null)
@@ -2034,6 +2048,7 @@ export default function AgentPanel({
     if (providerRef.current === provider) return
     providerRef.current = provider
     loadedHistoryKeyRef.current = null
+    restoredTurnStartedAtRef.current = undefined
     handledAttachmentRequestIdsRef.current.clear()
     setItems([])
     setRuntimeSlashCommands([])
@@ -2239,6 +2254,9 @@ export default function AgentPanel({
   useEffect(() => {
     const off = window.lt.agent.onEvent((event) => {
       if (eventSessionId(event) !== id) return
+      if (event.type === 'session:restored') {
+        restoredTurnStartedAtRef.current = numberValue(event.startedAt)
+      }
       if (event.type === 'process:event' && isAgentTaskMutation(stringValue(event.toolName) ?? '') &&
         ['done', 'completed', 'error', 'failed', 'denied'].includes(stringValue(event.status) ?? '')) {
         const key = stringValue(event.processId)
@@ -2404,7 +2422,8 @@ export default function AgentPanel({
         )
         setItems((current) => {
           const existing = new Set(current.map((item) => item.id))
-          const missing = historyItems.filter((item) => !existing.has(item.id))
+          const missing = historyBeforeRestoredTurn(historyItems, restoredTurnStartedAtRef.current)
+            .filter((item) => !existing.has(item.id))
           if (missing.length === 0) return current
           return [...missing, ...current]
         })

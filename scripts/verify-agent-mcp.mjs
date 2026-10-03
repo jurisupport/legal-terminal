@@ -51,6 +51,9 @@ const ctx={exports:serviceExports,console,process,Buffer,AbortController,URL,URL
     if(name==='../jurisupport')return{getAgentMcpConnection:async()=>({...connection,epoch}),agentMcpAccountEpoch:()=>epoch,onAgentMcpAccountChange:fn=>{accountChanged=fn},listTodos:async()=>[]}
     if(name==='./agentMcp')return mcp
     if(name==='./agentExecutionLock')return executionLock
+    if(name==='./remoteAgentTransport')return{RemoteAgentTransport:class{
+      constructor(options){launches.push([options.sshBin,[...options.sshArgs,options.command]]);return nextProcess??new FakeProcess()}
+    }}
     if(name==='../../shared/media')return media
     if(name==='./agentPrompt')return{currentAgentContext:async()=>'',prependAgentContext:(_context,prompt)=>prompt}
     if(name==='../sessions')return{rememberSessionMeta:async()=>{},readSessionTokenUsage:async()=>null}

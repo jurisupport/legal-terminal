@@ -418,6 +418,7 @@ export interface SessionTranscriptMessage {
   id: string
   role: 'user' | 'assistant'
   text: string
+  timestamp?: number
 }
 
 export interface SessionTranscript {

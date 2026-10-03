@@ -49,7 +49,7 @@ let remoteProcess
 let queryFailure
 let onQueryMessage
 const queryPrompts = []
-runInNewContext(ts.transpileModule(`${serviceSource}\nexport const progressCheck = { sessions, handleSdkMessage, handleRemoteJsonLine, currentSessionStatus, startAgentTurn, runRemoteAgentMessage, handleCodexNotification, handleCodexJsonLine, runCodexAgentMessage, startCodexProcess, ensureCodexInitialized, ensureCodexThread };`, {
+runInNewContext(ts.transpileModule(`${serviceSource}\nexport const progressCheck = { sessions, handleSdkMessage, handleRemoteJsonLine, currentSessionStatus, startAgentTurn, runRemoteAgentMessage, handleCodexNotification, handleCodexJsonLine, runCodexAgentMessage, startCodexProcess, stopCodexProcess, ensureCodexInitialized, ensureCodexThread };`, {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 }
 }).outputText, {
   exports: serviceModule.exports, process, Buffer, AbortController, setTimeout, clearTimeout, setInterval, clearInterval,
@@ -84,6 +84,12 @@ runInNewContext(ts.transpileModule(`${serviceSource}\nexport const progressCheck
     if (name === './agentMcp') return { managedToolName: () => undefined }
     if (name === './agentProgress') return { codexTurnRunStatus, codexWorkStepStatus }
     if (name === './agentExecutionLock') return executionLock
+    if (name === './remoteAgentTransport') return { RemoteAgentTransport: class {
+      constructor() {
+        if (!remoteProcess) throw new Error('Unexpected remote transport')
+        return remoteProcess
+      }
+    } }
     if (name === '../sshOptions') return { buildSshArgs: () => [] }
     if (name.startsWith('.')) return {}
     return require(name)
@@ -549,3 +555,17 @@ clearTimeout(racingSession.workSummaryTimer)
 console.log('Codex process ownership: late turn cleanup preserves new execution, model lookup replacement cannot bypass protection')
 
 console.log('agent progress: local/SSH lifecycle, snapshot/steer/failure completion, Codex turn isolation/interruption, and execution process ownership ok')
+
+// Native child exit precedes close; wait for close before replacing its transport.
+const exitedBeforeClose = freshProcess()
+exitedBeforeClose.exitCode = 0
+exitedBeforeClose.stdin.writableEnded = true
+const closingSession = { codexProcess: exitedBeforeClose }
+let closeSettled = false
+const closing = serviceModule.exports.progressCheck.stopCodexProcess(closingSession).then(() => { closeSettled = true })
+await Promise.resolve()
+assert.equal(closeSettled, false, 'an exited current process must still wait for its close callback')
+exitedBeforeClose.emit('close', 0)
+await closing
+assert.equal(closeSettled, true)
+console.log('Codex replacement waits for native close after exit without starving event callbacks')

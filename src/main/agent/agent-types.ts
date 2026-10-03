@@ -244,6 +244,7 @@ export interface AgentRateLimitUsage {
 }
 
 export type AgentEvent =
+  | { type: 'session:restored'; sessionId: string; startedAt: number }
   | {
       type: 'session:init'
       sessionId: string

@@ -10,7 +10,7 @@ assert.match(authStatus, /queueMicrotask/)
 assert.match(authStatus, /startNextQueuedMessage\(session\)/)
 
 const send = service.match(/export function sendAgentMessage[\s\S]*?\n}/)?.[0] ?? ''
-const checking = send.match(/if \(session\.authStatus === 'checking'\)[\s\S]*?\n  }/)?.[0] ?? ''
+const checking = send.match(/if \(session\.authStatus === 'checking' \|\| session\.remoteRestoring\)[\s\S]*?\n  }/)?.[0] ?? ''
 assert.match(checking, /enqueueAgentMessage\(session, input,/)
 assert.match(checking, /return \{ ok: true \}/)
 assert.doesNotMatch(send, /로그인 상태를 확인 중입니다/)
