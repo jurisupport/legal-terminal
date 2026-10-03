@@ -53,6 +53,7 @@ import MarkdownEditor, {
 import { markdownToPlainText, writeMarkdownClipboard } from './markdownClipboard'
 import FindBar from './search/FindBar'
 import CasesDashboard, { JS_TOKEN_UPDATED_EVENT } from './dashboard/CasesDashboard'
+import SetupChecklist from './welcome/SetupChecklist'
 import { clearCaseListCache } from './dashboard/caseListCache'
 import UpcomingHearings from './dashboard/UpcomingHearings'
 import TodosDashboard from './dashboard/TodosDashboard'
@@ -9925,6 +9926,8 @@ function Welcome({
     <div className="welcome">
       <h1>legal-terminal</h1>
       <p className="subtitle">Claude Code · Markdown 준비서면 · 전자소송기록 뷰어 — 한 화면에서</p>
+
+      <SetupChecklist />
 
       {recent.length > 0 && (
         <div className="recent">

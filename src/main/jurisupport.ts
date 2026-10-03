@@ -108,6 +108,12 @@ export async function tokenStatus(): Promise<JsTokenStatus> {
   return (await getSettings()).jurisupportTokenEnc ? 'locked' : 'missing'
 }
 
+// 시작 화면용: 앱 자체에 저장된 토큰만 본다(Claude Code·Codex 등록분 제외).
+export async function appTokenState(): Promise<'stored' | 'locked' | 'none'> {
+  if (await getStoredToken()) return 'stored'
+  return (await getSettings()).jurisupportTokenEnc ? 'locked' : 'none'
+}
+
 // ── 저수준 HTTP ──
 async function rawPost(
   token: string,
