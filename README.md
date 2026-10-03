@@ -103,6 +103,8 @@ curl -fsSL https://github.com/jurisupport/legal-terminal/releases/latest/downloa
 
 ## 처음 쓰는 순서
 
+앱을 처음 열면 **시작하기** 탭의 **준비 상태**가 Claude Code 설치·로그인, JuriSupport 플러그인, JuriSupport 연결 키, 그리고 선택 도구(Codex 연결, 문장 다듬기, 전자소송 도구)를 한 번에 확인합니다. 빠진 것이 있으면 [jurisupport-plugins](https://github.com/jurisupport/jurisupport-plugins) 설치기나 연결 명령을 복사할 수 있고, 이 컴퓨터의 터미널에서 실행한 뒤 앱으로 돌아오면 상태가 다시 확인됩니다. 앱이 직접 설치하지는 않습니다.
+
 1. **legal-terminal 설치**
    - 위의 한 줄 설치 명령 또는 GitHub Release 파일을 사용합니다.
 

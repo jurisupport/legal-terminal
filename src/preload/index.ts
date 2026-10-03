@@ -1,4 +1,5 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
+import type { SetupStatus } from '../main/setupCheck'
 
 // 렌더러에 노출되는 좁은 API 표면. 이후 마일스톤에서
 // pty.* / ide.* / fs.* / sidecar.* / caseIndex.* 채널이 여기에 추가된다.
@@ -860,6 +861,8 @@ const api = {
     setToken: (token: string): Promise<void> => ipcRenderer.invoke('js:setToken', token),
     hasToken: (): Promise<boolean> => ipcRenderer.invoke('js:hasToken'),
     tokenStatus: (): Promise<'ok' | 'missing' | 'locked'> => ipcRenderer.invoke('js:tokenStatus'),
+    // 시작 화면 준비 상태(설치된 도구·연결 키)
+    setupStatus: (): Promise<SetupStatus> => ipcRenderer.invoke('setup:status'),
     listCases: (
       params?: {
         page?: number
