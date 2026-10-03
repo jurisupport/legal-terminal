@@ -14,6 +14,7 @@
     "build": "electron-vite build",
     "preview": "electron-vite preview",
     "typecheck": "tsc --noEmit -p tsconfig.json",
+    "verify:agent-token": "node --experimental-strip-types --no-warnings scripts/verify-agent-token.mjs",
     "verify:case-store": "node --experimental-strip-types --no-warnings scripts/verify-case-store.mjs",
     "verify:case-folder-safety": "node --experimental-strip-types --no-warnings scripts/verify-case-folder-safety.mjs",
     "verify:case-activity": "node --experimental-strip-types --no-warnings scripts/verify-case-activity.mjs",

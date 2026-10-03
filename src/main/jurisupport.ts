@@ -1,5 +1,6 @@
 import { app, safeStorage } from 'electron'
 import { readFile, writeFile, rm } from 'fs/promises'
+import { homedir } from 'os'
 import { join } from 'path'
 import { getSettings, setSettings } from './settings'
 import { imageInfo } from './imageSize'
@@ -11,6 +12,7 @@ import {
   type JsParty
 } from './jurisupportNormalize'
 import { parseRpc } from './mcpResponse'
+import { tokenFromClaudeConfig, tokenFromCodexConfig } from './agentToken'
 
 export type { JsCase, JsHearing, JsParty } from './jurisupportNormalize'
 
@@ -36,7 +38,7 @@ const PROGRESS_HEADER = '[진행 기록]'
 const todoCaseCache = new Map<string, JsCase | null>()
 
 // ── 토큰 저장/조회 (safeStorage 암호화, 불가 시 평문 폴백) ──
-export async function setToken(token: string): Promise<void> {
+async function storeToken(token: string): Promise<void> {
   let enc: string
   if (token && safeStorage.isEncryptionAvailable()) {
     enc = 'v1:' + safeStorage.encryptString(token).toString('base64')
@@ -44,12 +46,16 @@ export async function setToken(token: string): Promise<void> {
     enc = 'plain:' + token
   }
   await setSettings({ jurisupportTokenEnc: token ? enc : undefined })
+}
+
+export async function setToken(token: string): Promise<void> {
+  await storeToken(token)
   sessionId = null // 토큰 바뀌면 세션 무효화
   toolQueue = Promise.resolve()
   clearJuriSupportCaches()
 }
 
-async function getToken(): Promise<string | null> {
+async function getStoredToken(): Promise<string | null> {
   const enc = (await getSettings()).jurisupportTokenEnc
   if (!enc) return null
   if (enc.startsWith('v1:')) {
@@ -63,6 +69,30 @@ async function getToken(): Promise<string | null> {
   return null
 }
 
+async function readTextIfExists(path: string): Promise<string | null> {
+  try {
+    return await readFile(path, 'utf8')
+  } catch {
+    return null
+  }
+}
+
+// 설치기나 연결 스크립트가 Claude Code·Codex에 등록해 둔 토큰.
+// 앱에 토큰을 따로 붙여넣지 않아도 사건 대시보드가 바로 열리게 한다.
+async function readAgentToken(): Promise<string | null> {
+  const claudeDir = process.env.CLAUDE_CONFIG_DIR || homedir()
+  const claudeText = await readTextIfExists(join(claudeDir, '.claude.json'))
+  const fromClaude = claudeText ? tokenFromClaudeConfig(claudeText) : null
+  if (fromClaude) return fromClaude
+  const codexDir = process.env.CODEX_HOME || join(homedir(), '.codex')
+  const codexText = await readTextIfExists(join(codexDir, 'config.toml'))
+  return codexText ? tokenFromCodexConfig(codexText) : null
+}
+
+async function getToken(): Promise<string | null> {
+  return (await getStoredToken()) ?? (await readAgentToken())
+}
+
 export async function hasToken(): Promise<boolean> {
   return !!(await getToken())
 }
@@ -70,12 +100,12 @@ export async function hasToken(): Promise<boolean> {
 // 토큰 상태 구분 — 'locked'는 토큰이 저장돼 있지만 복호화가 안 되는 경우다.
 // (무서명 배포라 앱 업데이트 후 macOS 키체인이 Safe Storage 접근을 거부하면 발생)
 // 이때는 "미설정"이 아니라 "토큰을 다시 붙여넣어 주세요"를 안내해야 한다.
+// Claude Code·Codex에 등록된 토큰이 있으면 그것으로 이어 쓰므로 'ok'다.
 export type JsTokenStatus = 'ok' | 'missing' | 'locked'
 
 export async function tokenStatus(): Promise<JsTokenStatus> {
-  const enc = (await getSettings()).jurisupportTokenEnc
-  if (!enc) return 'missing'
-  return (await getToken()) ? 'ok' : 'locked'
+  if (await getToken()) return 'ok'
+  return (await getSettings()).jurisupportTokenEnc ? 'locked' : 'missing'
 }
 
 // ── 저수준 HTTP ──
@@ -110,6 +140,9 @@ async function rawPost(
   }
 }
 
+// 401/403 = 토큰 만료·폐기. 다른 실패(네트워크, 서버 오류)와 구분해 토큰 교체를 시도한다.
+class TokenRejectedError extends Error {}
+
 async function ensureSession(token: string): Promise<string> {
   const init = await rawPost(token, {
     jsonrpc: '2.0',
@@ -123,17 +156,34 @@ async function ensureSession(token: string): Promise<string> {
   })
   if (!init.sid) {
     const err = parseRpc(init.text)
-    throw new Error('MCP 초기화 실패: ' + (err?.error?.message ?? `HTTP ${init.status}`))
+    const message = 'MCP 초기화 실패: ' + (err?.error?.message ?? `HTTP ${init.status}`)
+    throw init.status === 401 || init.status === 403 ? new TokenRejectedError(message) : new Error(message)
   }
   await rawPost(token, { jsonrpc: '2.0', method: 'notifications/initialized' }, init.sid)
   return init.sid
 }
 
+// 세션을 열고 실제로 쓴 토큰을 돌려준다. 앱에 저장한 토큰이 거부되면(30일 만료·재발급)
+// Claude Code·Codex에 새로 등록된 토큰으로 한 번 더 시도하고, 통과하면 그 토큰을 저장한다.
+async function openSession(token: string): Promise<string> {
+  try {
+    sessionId = await ensureSession(token)
+    return token
+  } catch (e) {
+    if (!(e instanceof TokenRejectedError)) throw e
+    const agentToken = await readAgentToken()
+    if (!agentToken || agentToken === token) throw e
+    sessionId = await ensureSession(agentToken)
+    await storeToken(agentToken)
+    return agentToken
+  }
+}
+
 // 도구 호출 본체. 세션 만료 시 1회 재수립 후 재시도.
 async function callToolNow(name: string, args: Record<string, unknown>): Promise<unknown> {
-  const token = await getToken()
-  if (!token) throw new Error('JuriSupport 토큰이 설정되지 않았습니다.')
-  if (!sessionId) sessionId = await ensureSession(token)
+  const saved = await getToken()
+  if (!saved) throw new Error('JuriSupport 토큰이 설정되지 않았습니다.')
+  const token = sessionId ? saved : await openSession(saved)
 
   const call = (): Promise<{ status: number; sid: string | null; text: string }> =>
     rawPost(
@@ -169,9 +219,9 @@ async function callToolNow(name: string, args: Record<string, unknown>): Promise
 
 // MCP 서버가 제공하는 도구 목록. 사무실 프로필 도구 탐색에 쓴다.
 async function listMcpToolsNow(): Promise<{ name: string; description?: string }[]> {
-  const token = await getToken()
-  if (!token) throw new Error('JuriSupport 토큰이 설정되지 않았습니다.')
-  if (!sessionId) sessionId = await ensureSession(token)
+  const saved = await getToken()
+  if (!saved) throw new Error('JuriSupport 토큰이 설정되지 않았습니다.')
+  const token = sessionId ? saved : await openSession(saved)
 
   const call = (): Promise<{ status: number; sid: string | null; text: string }> =>
     rawPost(token, { jsonrpc: '2.0', id: 3, method: 'tools/list', params: {} }, sessionId)
