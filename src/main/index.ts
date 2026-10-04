@@ -19,6 +19,7 @@ import {
   setJsPairing
 } from './caseStore'
 import * as js from './jurisupport'
+import { setupStatus } from './setupCheck'
 import {
   clearRemoteDirCache as clearRemotePickerDirCache,
   invalidateRemoteDirCacheForProfile,
@@ -616,6 +617,7 @@ ipcMain.handle('dialog:openCase', async () => {
 ipcMain.handle('js:setToken', (_e, token: string) => js.setToken(token))
 ipcMain.handle('js:hasToken', () => js.hasToken())
 ipcMain.handle('js:tokenStatus', () => js.tokenStatus())
+ipcMain.handle('setup:status', () => setupStatus())
 ipcMain.handle('js:listCases', async (_e, params: Record<string, unknown>) => {
   try {
     return { ok: true, cases: await js.listCases(params ?? {}) }

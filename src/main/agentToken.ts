@@ -38,9 +38,13 @@ function tokenFromServer(value: unknown): string | null {
   return key ? bearerToken(headers[key]) : null
 }
 
+export type ClaudeTokenScope = 'user' | 'folder'
+
 // ~/.claude.json: 사용자 전체 등록(mcpServers)을 먼저 보고,
 // 없으면 예전 설치기가 폴더 단위로 남긴 등록(projects[경로].mcpServers)을 본다.
-export function tokenFromClaudeConfig(text: string): string | null {
+export function claudeConfigToken(
+  text: string
+): { token: string; scope: ClaudeTokenScope } | null {
   let root: Record<string, unknown> | null
   try {
     root = asObject(JSON.parse(text))
@@ -51,16 +55,20 @@ export function tokenFromClaudeConfig(text: string): string | null {
 
   const userServers = asObject(root.mcpServers)
   const userToken = userServers ? tokenFromServer(userServers.jurisupport) : null
-  if (userToken) return userToken
+  if (userToken) return { token: userToken, scope: 'user' }
 
   const projects = asObject(root.projects)
   if (!projects) return null
   for (const project of Object.values(projects)) {
     const servers = asObject(asObject(project)?.mcpServers)
     const token = servers ? tokenFromServer(servers.jurisupport) : null
-    if (token) return token
+    if (token) return { token, scope: 'folder' }
   }
   return null
+}
+
+export function tokenFromClaudeConfig(text: string): string | null {
+  return claudeConfigToken(text)?.token ?? null
 }
 
 // ~/.codex/config.toml의 [mcp_servers.jurisupport] 블록.
