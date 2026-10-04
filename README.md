@@ -115,7 +115,8 @@ curl -fsSL https://github.com/jurisupport/legal-terminal/releases/latest/downloa
    - 선택한 Agent 탭이 사건 폴더 기준으로 열립니다.
 
 4. **JuriSupport 사건 연동**
-   - 앱의 사건 화면에서 JuriSupport 토큰을 붙여넣습니다.
+   - [jurisupport-plugins](https://github.com/jurisupport/jurisupport-plugins) 설치기나 연결 스크립트로 Claude Code·Codex에 토큰을 등록했다면 따로 할 일이 없습니다. 앱이 그 토큰을 그대로 씁니다.
+   - 등록한 적이 없으면 앱의 사건 화면에서 JuriSupport 토큰을 붙여넣습니다.
    - 토큰은 JuriSupport 웹 → 프로필 → MCP 연결에서 발급합니다.
 
 5. **원격 사건을 쓰는 경우**
@@ -215,7 +216,7 @@ legal-terminal은 실제 `claude` CLI를 실행합니다. [`jurisupport-plugins`
 - `korean-law` MCP
 - PII 차단 훅
 
-사건 대시보드의 JuriSupport 토큰 연동은 위 플러그인 설치와 별개입니다. 사건·기일·당사자 대시보드를 쓰려면 앱의 사건 화면에서 JuriSupport MCP 토큰을 따로 연결합니다.
+사건 대시보드는 Claude Code(`~/.claude.json`)나 Codex(`~/.codex/config.toml`)에 등록된 JuriSupport MCP 토큰을 자동으로 씁니다. 앱에 저장한 토큰이 만료되어 거부되면 그 등록에서 새 토큰을 가져와 저장합니다. 어디에도 등록하지 않았다면 앱의 사건 화면에서 토큰을 붙여넣습니다.
 
 ## 개발
 
