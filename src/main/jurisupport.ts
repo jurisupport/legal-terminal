@@ -1,5 +1,6 @@
 import { app, safeStorage } from 'electron'
 import { readFile, writeFile, rm } from 'fs/promises'
+import { homedir } from 'os'
 import { join } from 'path'
 import { getSettings, setSettings } from './settings'
 import { imageInfo } from './imageSize'
@@ -12,6 +13,7 @@ import {
 } from './jurisupportNormalize'
 import { parseRpc } from './mcpResponse'
 import { kstDateKey, setTodoDate } from '../shared/todoSummary'
+import { tokenFromClaudeConfig, tokenFromCodexConfig } from './agentToken'
 
 export type { JsCase, JsHearing, JsParty } from './jurisupportNormalize'
 
@@ -28,6 +30,7 @@ export function onAgentMcpAccountChange(listener: () => void): () => void {
 export function agentMcpAccountEpoch(): number { return accountEpoch }
 let accountEpoch = 0
 let changingCredentials = 0
+let activeToken: string | null | undefined
 let sessionId: string | null = null
 let toolQueue: Promise<void> = Promise.resolve()
 // Leave headroom below the API's 100 requests/minute; the shared queue also covers detail reads.
@@ -62,13 +65,14 @@ export async function setToken(token: string): Promise<void> {
     changingCredentials--
     accountEpoch++ // Invalidate requests begun during credential persistence, including failures.
     sessionId = null
+    activeToken = undefined
     toolQueue = Promise.resolve()
     nextMcpPostAt = 0
     clearJuriSupportCaches()
   }
 }
 
-async function getToken(): Promise<string | null> {
+async function getStoredToken(): Promise<string | null> {
   const enc = (await getSettings()).jurisupportTokenEnc
   if (!enc) return null
   if (enc.startsWith('v1:')) {
@@ -90,11 +94,48 @@ export async function getAgentMcpConnection(): Promise<{ token: string; epoch: n
   if (/[\x00-\x1f\x7f]/.test(token)) throw new Error('JuriSupport 토큰 형식을 확인해 주세요.')
   try {
     const tools = await listMcpTools()
-    if (epoch !== accountEpoch) throw new Error('JuriSupport 계정이 변경되었습니다.')
+    if (changingCredentials || epoch !== accountEpoch) throw new Error('JuriSupport 계정이 변경되었습니다.')
     return { token, epoch, tools: tools.map((tool) => tool.name) }
   } catch (error) {
     throw new Error(String(error instanceof Error ? error.message : error).split(token).join('[token redacted]'))
   }
+}
+
+async function readTextIfExists(path: string): Promise<string | null> {
+  try {
+    return await readFile(path, 'utf8')
+  } catch {
+    return null
+  }
+}
+
+// 설치기나 연결 스크립트가 Claude Code·Codex에 등록해 둔 토큰.
+// 앱에 토큰을 따로 붙여넣지 않아도 사건 대시보드가 바로 열리게 한다.
+async function readAgentToken(): Promise<string | null> {
+  const claudeDir = process.env.CLAUDE_CONFIG_DIR || homedir()
+  const claudeText = await readTextIfExists(join(claudeDir, '.claude.json'))
+  const fromClaude = claudeText ? tokenFromClaudeConfig(claudeText) : null
+  if (fromClaude) return fromClaude
+  const codexDir = process.env.CODEX_HOME || join(homedir(), '.codex')
+  const codexText = await readTextIfExists(join(codexDir, 'config.toml'))
+  return codexText ? tokenFromCodexConfig(codexText) : null
+}
+
+async function getToken(): Promise<string | null> {
+  const epoch = accountEpoch
+  const token = (await getStoredToken()) ?? (await readAgentToken())
+  if (changingCredentials || epoch !== accountEpoch) throw new Error('계정이 변경되었습니다. 다시 조회해 주세요.')
+  // Agent config files can change outside this app; do not reuse another account's session/caches.
+  if (activeToken !== undefined && activeToken !== token) {
+    accountEpoch++
+    sessionId = null
+    toolQueue = Promise.resolve()
+    nextMcpPostAt = 0
+    clearJuriSupportCaches()
+    activeToken = token
+    for (const listener of agentAccountListeners) listener()
+  } else activeToken = token
+  return token
 }
 
 export async function hasToken(): Promise<boolean> {
@@ -104,12 +145,18 @@ export async function hasToken(): Promise<boolean> {
 // 토큰 상태 구분 — 'locked'는 토큰이 저장돼 있지만 복호화가 안 되는 경우다.
 // (무서명 배포라 앱 업데이트 후 macOS 키체인이 Safe Storage 접근을 거부하면 발생)
 // 이때는 "미설정"이 아니라 "토큰을 다시 붙여넣어 주세요"를 안내해야 한다.
+// Claude Code·Codex에 등록된 토큰이 있으면 그것으로 이어 쓰므로 'ok'다.
 export type JsTokenStatus = 'ok' | 'missing' | 'locked'
 
 export async function tokenStatus(): Promise<JsTokenStatus> {
-  const enc = (await getSettings()).jurisupportTokenEnc
-  if (!enc) return 'missing'
-  return (await getToken()) ? 'ok' : 'locked'
+  if (await getToken()) return 'ok'
+  return (await getSettings()).jurisupportTokenEnc ? 'locked' : 'missing'
+}
+
+// 시작 화면용: 앱 자체에 저장된 토큰만 본다(Claude Code·Codex 등록분 제외).
+export async function appTokenState(): Promise<'stored' | 'locked' | 'none'> {
+  if (await getStoredToken()) return 'stored'
+  return (await getSettings()).jurisupportTokenEnc ? 'locked' : 'none'
 }
 
 // ── 저수준 HTTP ──
@@ -162,6 +209,9 @@ async function rawPost(
   }
 }
 
+// 401/403 authentication failures may recover from an agent-registered token.
+class TokenRejectedError extends Error {}
+
 async function ensureSession(token: string, epoch: number): Promise<void> {
   const init = await rawPost(token, {
     jsonrpc: '2.0',
@@ -173,20 +223,43 @@ async function ensureSession(token: string, epoch: number): Promise<void> {
       clientInfo: { name: 'legal-terminal', version: '0.0.1' }
     }
   }, undefined, epoch)
-  if (!init.sid) {
+  if (!init.sid || init.status === 401 || init.status === 403) {
     const err = parseRpc(init.text)
-    throw new Error('MCP 초기화 실패: ' + (err?.error?.message ?? `HTTP ${init.status}`))
+    const message = 'MCP 초기화 실패: ' + (err?.error?.message ?? `HTTP ${init.status}`)
+    throw init.status === 401 || init.status === 403 ? new TokenRejectedError(message) : new Error(message)
   }
   await rawPost(token, { jsonrpc: '2.0', method: 'notifications/initialized' }, init.sid, epoch)
   if (changingCredentials || epoch !== accountEpoch) throw new Error('계정이 변경되었습니다. 다시 조회해 주세요.')
   sessionId = init.sid
 }
 
+// 세션을 열고 실제로 쓴 토큰을 돌려준다. 앱에 저장한 토큰이 거부되면(30일 만료·재발급)
+// Claude Code·Codex에 새로 등록된 토큰으로 한 번 더 시도하고, 통과하면 그 토큰을 저장한다.
+async function openSession(token: string, epoch: number): Promise<string> {
+  try {
+    await ensureSession(token, epoch)
+    return token
+  } catch (e) {
+    if (!(e instanceof TokenRejectedError)) throw e
+    const agentToken = await readAgentToken()
+    if (changingCredentials || epoch !== accountEpoch) throw new Error('계정이 변경되었습니다. 다시 조회해 주세요.')
+    if (!agentToken || agentToken === token) throw e
+    await ensureSession(agentToken, epoch)
+    try {
+      await setToken(agentToken)
+    } finally {
+      for (const listener of agentAccountListeners) listener()
+    }
+    // Never replay a queued mutation under an account discovered during recovery.
+    throw new Error('Agent에 등록된 새 JuriSupport 연결 키로 갱신했습니다. 목록을 새로 조회한 뒤 다시 시도해 주세요.')
+  }
+}
+
 // 도구 호출 본체. 세션 만료 시 1회 재수립 후 재시도.
 async function callToolNow(name: string, args: Record<string, unknown>, epoch: number): Promise<unknown> {
-  const token = await getToken()
-  if (!token) throw new Error('JuriSupport 토큰이 설정되지 않았습니다.')
-  if (!sessionId) await ensureSession(token, epoch)
+  const saved = await getToken()
+  if (!saved) throw new Error('JuriSupport 토큰이 설정되지 않았습니다.')
+  const token = sessionId ? saved : await openSession(saved, epoch)
 
   const call = (): Promise<{ status: number; sid: string | null; text: string }> =>
     rawPost(
@@ -198,8 +271,8 @@ async function callToolNow(name: string, args: Record<string, unknown>, epoch: n
 
   let resp = await call()
   let rpc = parseRpc(resp.text)
-  if (rpc?.error && /session/i.test(rpc.error.message || '')) {
-    await ensureSession(token, epoch)
+  if (resp.status === 401 || resp.status === 403 || (rpc?.error && /session/i.test(rpc.error.message || ''))) {
+    await openSession(token, epoch)
     resp = await call()
     rpc = parseRpc(resp.text)
   }
@@ -226,17 +299,17 @@ type McpToolInfo = { name: string; description?: string; inputSchema?: { propert
 
 // MCP 서버가 제공하는 도구 목록. 사무실 프로필과 지원 필드 탐색에 쓴다.
 async function listMcpToolsNow(epoch: number): Promise<McpToolInfo[]> {
-  const token = await getToken()
-  if (!token) throw new Error('JuriSupport 토큰이 설정되지 않았습니다.')
-  if (!sessionId) await ensureSession(token, epoch)
+  const saved = await getToken()
+  if (!saved) throw new Error('JuriSupport 토큰이 설정되지 않았습니다.')
+  const token = sessionId ? saved : await openSession(saved, epoch)
 
   const call = (): Promise<{ status: number; sid: string | null; text: string }> =>
     rawPost(token, { jsonrpc: '2.0', id: 3, method: 'tools/list', params: {} }, sessionId, epoch)
 
   let resp = await call()
   let rpc = parseRpc(resp.text)
-  if (rpc?.error && /session/i.test(rpc.error.message || '')) {
-    await ensureSession(token, epoch)
+  if (resp.status === 401 || resp.status === 403 || (rpc?.error && /session/i.test(rpc.error.message || ''))) {
+    await openSession(token, epoch)
     resp = await call()
     rpc = parseRpc(resp.text)
   }

@@ -66,6 +66,7 @@ import FindBar from './search/FindBar'
 import CasesDashboard, { JS_TOKEN_UPDATED_EVENT } from './dashboard/CasesDashboard'
 import ProjectsDashboard from './dashboard/ProjectsDashboard'
 import type { Project, ProjectCaseLink, ProjectFolderLink } from '../../shared/project'
+import SetupChecklist from './welcome/SetupChecklist'
 import { clearCaseListCache } from './dashboard/caseListCache'
 import UpcomingHearings from './dashboard/UpcomingHearings'
 import { isActiveHearing } from './dashboard/hearings'
@@ -11392,6 +11393,8 @@ function Welcome({
       <h1>legal-terminal</h1>
       <p className="subtitle">사건기록부터 준비서면까지, 한 화면에서.</p>
       {summary}
+
+      <SetupChecklist />
 
       {recent.length > 0 && (
         <div className="recent">

@@ -5,6 +5,29 @@ import type { MediaApi, MediaSelection, MediaViewState } from '../../shared/medi
 import type { AgentWorkspaceContext } from '../../shared/agentWorkspaceContext'
 import type { Project, ProjectInput } from '../../shared/project'
 
+export type SetupItemState = 'ok' | 'warn' | 'missing' | 'off'
+
+export interface SetupAction {
+  label: string
+  kind: 'install' | 'connect' | 'link'
+  command?: string
+  url?: string
+}
+
+export interface SetupItem {
+  id: 'claude' | 'plugin' | 'connection' | 'codex' | 'polish' | 'ecourt'
+  label: string
+  state: SetupItemState
+  detail: string
+  optional?: boolean
+  actions: SetupAction[]
+}
+
+export interface SetupStatus {
+  items: SetupItem[]
+  ready: boolean
+}
+
 export interface SshConn {
   host: string
   user: string
@@ -798,6 +821,7 @@ export interface LtApi {
     hasToken: () => Promise<boolean>
     hearingSummary: () => Promise<{ ok: boolean; summary?: { todayCount: number; weekCount: number; fetchedAt: string }; error?: string }>
     tokenStatus: () => Promise<'ok' | 'missing' | 'locked'>
+    setupStatus: () => Promise<SetupStatus>
     listCases: (params?: {
       page?: number
       limit?: number

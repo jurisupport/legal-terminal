@@ -42,6 +42,7 @@ function runApp({ root, temp, chosenDir, screenshot }) {
       call.result = result
       return result
     }
+    if (channel === 'setup:status') return { items: [], ready: true }
     if (channel === 'settings:get') return settings
     if (channel === 'settings:set') return Object.assign(settings, args[0])
     if (channel === 'ssh:listDir') {
@@ -73,7 +74,8 @@ function runApp({ root, temp, chosenDir, screenshot }) {
     if (channel === 'case:history' || channel === 'fs:list' || channel === 'fs:listPdfs' || channel === 'sessions:list') return []
     if (channel === 'fs:listDocumentDrafts') return { ok: true, entries: [] }
     if (channel === 'sessions:current' || channel === 'case:getPairing' || channel === 'case:getJsPairing') return null
-    if (channel === 'case:addHistory' || channel === 'sessions:remember') return undefined
+    if (channel === 'case:addHistory') return []
+    if (channel === 'sessions:remember') return undefined
     if (channel === 'workspace:autoLoad') return { ok: true }
     if (channel === 'workspace:autoSave') return { ok: true, savedAt: new Date().toISOString() }
     if (channel === 'agent:create') {

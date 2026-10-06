@@ -46,15 +46,17 @@ function runApp({ root, temp, screenshot }) {
   global.fetch = async () => { throw Error('External network blocked by test') }
   const handle = ipcMain.handle.bind(ipcMain), on = ipcMain.on.bind(ipcMain)
   ipcMain.on = (channel, callback) => on(channel, channel.startsWith('fs:') || channel.startsWith('pty:') ? () => {} : callback)
-  const real = new Set(['app:info', 'app:setWindowTitle', 'tabs:ready'])
+  const real = new Set(['app:info', 'app:setWindowTitle', 'tabs:ready', 'caseManagement:get', 'caseManagement:update'])
   ipcMain.handle = (channel, handler) => handle(channel, async (event, ...args) => {
     calls.push({ channel, args })
     if (real.has(channel)) return handler(event, ...args)
+    if (channel === 'setup:status') return { items: [], ready: true }
     if (channel === 'settings:get') return { sshProfiles: [activeProfile], notifyDone: false }
     if (channel === 'case:history' || channel === 'case:addHistory') return history
     if (channel === 'js:tokenStatus') return { hasToken: false, error: null }
     if (channel === 'js:hasToken') return false
     if (channel === 'js:listCases') return { ok: true, cases: [] }
+    if (channel === 'js:upcomingHearings') return { ok: true, hearings: [], complete: true, fetchedAt: new Date().toISOString() }
     if (channel === 'js:hearingSummary') return { ok: true, summary: { todayCount: 0, weekCount: 0 } }
     if (channel === 'todo:list') return { ok: true, todos: [] }
     if (channel === 'todo:capabilities') return { ok: true, capabilities: {} }

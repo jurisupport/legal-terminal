@@ -7,7 +7,7 @@ import ts from 'typescript'
 const require = createRequire(import.meta.url)
 const compile = (path) => ts.transpileModule(readFileSync(new URL(path, import.meta.url), 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText
 const modules = {}
-for (const [name, path] of [['./jurisupportNormalize', '../src/main/jurisupportNormalize.ts'], ['./mcpResponse', '../src/main/mcpResponse.ts'], ['../shared/todoSummary', '../src/shared/todoSummary.ts']]) {
+for (const [name, path] of [['./agentToken', '../src/main/agentToken.ts'], ['./jurisupportNormalize', '../src/main/jurisupportNormalize.ts'], ['./mcpResponse', '../src/main/mcpResponse.ts'], ['../shared/todoSummary', '../src/shared/todoSummary.ts']]) {
   const exported = {}
   new Function('require', 'exports', compile(path))(require, exported)
   modules[name] = exported

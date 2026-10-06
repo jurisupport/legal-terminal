@@ -14,6 +14,8 @@
     "build": "electron-vite build",
     "preview": "electron-vite preview",
     "typecheck": "tsc --noEmit -p tsconfig.json",
+    "verify:agent-token": "node --experimental-strip-types --no-warnings scripts/verify-agent-token.mjs",
+    "verify:setup-check": "node --experimental-strip-types --no-warnings scripts/verify-setup-check.mjs",
     "verify:case-store": "node --experimental-strip-types --no-warnings scripts/verify-case-store.mjs",
     "verify:case-folder-safety": "node --experimental-strip-types --no-warnings scripts/verify-case-folder-safety.mjs",
     "verify:case-activity": "node --experimental-strip-types --no-warnings scripts/verify-case-activity.mjs",
@@ -96,7 +98,8 @@
     "verify:project-agent-ui": "electron-vite build && node scripts/verify-project-ui.mjs --agent",
     "verify:project-session-scope": "node --experimental-strip-types --no-warnings scripts/verify-project-session-scope.mjs",
     "verify:remote-hardening": "node scripts/verify-remote-hardening.mjs",
-    "verify:file-drag": "node scripts/verify-file-drag.mjs"
+    "verify:file-drag": "node scripts/verify-file-drag.mjs",
+    "verify:release-additions": "npm run verify:agent-token && npm run verify:setup-check && npm run verify:project-store && npm run verify:project-agent && npm run verify:project-agent-runtime && npm run verify:project-session-scope && npm run verify:file-drag && node scripts/verify-project-ui.mjs && node scripts/verify-project-ui.mjs --agent && node scripts/verify-case-sidebar-ui.mjs"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.3.270",

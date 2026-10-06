@@ -4,6 +4,7 @@ import vm from 'node:vm'
 import ts from 'typescript'
 import * as summary from '../src/shared/todoSummary.ts'
 import { parseRpc } from '../src/main/mcpResponse.ts'
+import * as agentToken from '../src/main/agentToken.ts'
 const { kstDateKey, setTodoDate, filterTodos, summarizeTodos, todoTags } = summary
 const now = '2026-09-12T00:00:00+09:00'
 const todo = (id, extra = {}) => ({ id, title: id, type: 'todo', status: 'pending', ...extra })
@@ -37,12 +38,14 @@ function adapter(handler, toolSchemas=modernTools, hooks={}) {
   }
   const exports={}
   const code=ts.transpileModule(readFileSync(new URL('../src/main/jurisupport.ts',import.meta.url),'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText
-  const context={exports, module:{exports}, console:{warn(){}}, Buffer, Date:Clock, Promise, Map, Set, JSON, String, Number, Object, Array, Error, AbortController, setTimeout:fakeTimeout, clearTimeout:timer=>timers.delete(timer),
+  const context={exports, module:{exports}, process:{env:{}}, console:{warn(){}}, Buffer, Date:Clock, Promise, Map, Set, JSON, String, Number, Object, Array, Error, AbortController, setTimeout:fakeTimeout, clearTimeout:timer=>timers.delete(timer),
     require(name) {
       if(name==='electron')return {app:{getPath:()=>'/tmp'},safeStorage:{isEncryptionAvailable:()=>false}}
       if(name==='./settings')return {getSettings:async()=>settings,setSettings:async(p)=>{await hooks.beforeSettings?.();settings={...settings,...p}}}
       if(name==='fs/promises')return {rm:async()=>{}}
       if(name==='path')return {join:(...v)=>v.join('/')}
+      if(name==='./agentToken')return agentToken
+      if(name==='os')return {homedir:()=>'/nonexistent-todo-summary-home'}
       if(name==='./mcpResponse')return {parseRpc}
       if(name==='../shared/todoSummary')return summary
       if(name==='./jurisupportNormalize')return {normalizeCase:x=>x,normalizeCaseList:x=>x}

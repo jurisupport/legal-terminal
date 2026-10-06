@@ -43,6 +43,7 @@ function runApp({ root, temp }) {
   ipcMain.handle = (channel, handler) => handle(channel, async (event, ...args) => {
     calls.push({ channel, args })
     if (real.has(channel)) return handler(event, ...args)
+    if (channel === 'setup:status') return { items: [], ready: true }
     if (channel === 'settings:get') return { sshProfiles: [profile], notifyDone: false }
     if (channel === 'case:history' || channel === 'case:addHistory') return [recent]
     if (channel === 'js:tokenStatus') return { hasToken: false, error: null }

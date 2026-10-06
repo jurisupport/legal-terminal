@@ -39,7 +39,8 @@ function runApp({ root, temp, screenshotDir, agentSmoke }) {
   ipcMain.handle = (channel, handler) => handle(channel, async (event, ...args) => {
     calls.push({ channel, args })
     if (channel === 'projects:save' && failSave) throw Error('검증용 저장 실패')
-    if (channel.startsWith('projects:') || ['app:info', 'app:setWindowTitle', 'tabs:ready'].includes(channel)) return handler(event, ...args)
+    if (channel.startsWith('projects:') || ['app:info', 'app:setWindowTitle', 'tabs:ready', 'caseManagement:get', 'caseManagement:update'].includes(channel)) return handler(event, ...args)
+    if (channel === 'setup:status') return { items: [], ready: true }
     if (channel === 'settings:get') return { sshProfiles: profiles, notifyDone: false, agentDefaultProvider: agentSmoke ? 'codex' : 'claude' }
     if (channel === 'dialog:pickFolder') return cancelFolder ? null : pickedFolder
     if (channel === 'ssh:listDir') return { ok: true, cwd: args[0].path === '~/research' ? '/home/lawyer/research' : '/home/lawyer', entries: [] }
@@ -48,6 +49,7 @@ function runApp({ root, temp, screenshotDir, agentSmoke }) {
     if (channel === 'js:hasToken') return connected
     if (channel === 'js:listCases') return { ok: true, cases: connected ? [jsCase] : [] }
     if (channel === 'js:getCase') return { ok: true, case: jsCase }
+    if (channel === 'js:upcomingHearings') return { ok: true, hearings: [], complete: true, fetchedAt: new Date().toISOString() }
     if (channel === 'js:hearingSummary') return { ok: true, summary: { todayCount: 0, weekCount: 0 } }
     if (channel === 'todo:list') return { ok: true, todos: [] }
     if (channel === 'todo:capabilities') return { ok: true, capabilities: {} }

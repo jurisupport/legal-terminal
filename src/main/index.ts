@@ -30,6 +30,7 @@ import { configureProjectAgent, getProjectWorkspace, disposeProjectMcp } from '.
 import type { ProjectInput } from '../shared/project'
 import * as js from './jurisupport'
 import { pairedFileEvidence, containsCaseNumber, FILE_EVIDENCE_ENTRY_LIMIT } from './todoFileEvidence'
+import { setupStatus } from './setupCheck'
 import {
   clearRemoteDirCache as clearRemotePickerDirCache,
   invalidateRemoteDirCacheForProfile,
@@ -776,6 +777,7 @@ ipcMain.handle('js:hearingSummary', async () => {
   try { return { ok: true, summary: await js.hearingSummary() } }
   catch (e) { return { ok: false, error: String(e instanceof Error ? e.message : e) } }
 })
+ipcMain.handle('setup:status', () => setupStatus())
 ipcMain.handle('js:listCases', async (_e, params: Record<string, unknown>) => {
   try {
     return { ok: true, cases: await js.listCases(params ?? {}) }

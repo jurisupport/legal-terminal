@@ -32,6 +32,8 @@ async function electronCheck({ root, temp, output, channels, pdf }) {
   let failure = false, sendRelease, holdSend = false, createRelease, holdCreate = false
   for (const channel of channels) ipcMain.handle(channel, async (ipc, ...args) => {
     calls.push({ channel, args })
+    if (channel === 'caseManagement:get') return { ok: true, state: { generation: 'fixture', revision: 0, ui: { selectedTaskByCase: {}, focus: null, previousFocus: null, recovery: { caseId: null, seenCaseIds: [] } } } }
+    if (channel === 'setup:status') return { items: [], ready: true }
     if (channel === 'settings:get' || channel === 'settings:set') return settings
     if (channel === 'app:info') return { platform: process.platform, version: 'UI fixture', homeDirectory: '/synthetic' }
     if (channel === 'dialog:message') return args[0] === 'confirm'
@@ -116,7 +118,7 @@ async function electronCheck({ root, temp, output, channels, pdf }) {
     await selectText()
     await run(keyboard ? `document.dispatchEvent(new KeyboardEvent('keydown', {key:'j',${keyboard === 'meta' ? 'metaKey' : 'ctrlKey'}:true,bubbles:true,cancelable:true}))` : `click(visible('.sel-actions button').find(button => button.textContent.includes('이 부분에 지시')))`)
     await wait("!!popup()", 'Inline popup')
-    await pause()
+    await wait("document.activeElement === popup()?.querySelector('textarea')", 'Inline input focus')
   }
   const fill = text => run(`setValue(popup().querySelector('textarea'), ${JSON.stringify(text)})`)
   const enter = () => run(`popup().querySelector('textarea').dispatchEvent(new KeyboardEvent('keydown', {key:'Enter',bubbles:true,cancelable:true}))`)
@@ -262,6 +264,7 @@ async function electronCheck({ root, temp, output, channels, pdf }) {
     assertFixture(sends().length===beforeIme, 'ShiftEnter inserts newline without sending')
     failure=true; await fill('실패하면 보존할 입력'); await enter()
     await wait("popup()?.querySelector('[role=alert]')?.textContent.includes('합성 전송 실패')", 'Server failure visible')
+    await wait("document.activeElement === popup()?.querySelector('textarea')", 'Failed send restores input focus')
     await run(`check(popup().querySelector('textarea').value==='실패하면 보존할 입력','Server failure preserves instruction and popup'); check(document.activeElement===popup().querySelector('textarea'),'Failed send returns focus to inline input')`)
     await screenshot('inline-command-error')
     failure=false; await event('a1',{type:'status',status:'working'})

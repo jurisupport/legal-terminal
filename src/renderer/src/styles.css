@@ -2744,6 +2744,144 @@ body {
   background: var(--bg-alt);
 }
 
+/* 준비 상태(시작하기 탭) */
+.setup {
+  margin: 0 0 28px;
+  max-width: 640px;
+}
+.setup-head {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+.setup-head .recent-title {
+  margin: 0;
+}
+.setup-summary {
+  font-size: 12px;
+  color: var(--fg-muted);
+  flex: 1;
+}
+.setup-ready .setup-summary {
+  color: #89d185;
+}
+.setup-link {
+  border: none;
+  background: transparent;
+  color: var(--link);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  padding: 0;
+}
+.setup-link:hover {
+  color: var(--link-hover);
+}
+.setup-link:disabled {
+  color: var(--fg-muted);
+  cursor: default;
+}
+.setup-install {
+  padding: 12px 14px;
+  margin-bottom: 10px;
+  border: 1px solid var(--accent);
+  border-radius: 5px;
+  background: color-mix(in srgb, var(--accent) 12%, var(--bg-alt));
+}
+.setup-install p {
+  margin: 0 0 8px;
+  font-size: 13px;
+  line-height: 1.6;
+}
+.setup-command {
+  display: block;
+  margin-bottom: 10px;
+  padding: 6px 8px;
+  border-radius: 3px;
+  background: var(--bg);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+.setup-primary {
+  padding: 7px 14px;
+  border: none;
+  border-radius: 4px;
+  background: var(--accent);
+  color: var(--accent-fg);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.setup-primary:hover {
+  filter: brightness(1.15);
+}
+.setup-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.setup-item {
+  display: flex;
+  gap: 10px;
+  padding: 8px 12px;
+  background: var(--bg-alt);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+}
+.setup-icon {
+  width: 16px;
+  flex-shrink: 0;
+  text-align: center;
+  font-weight: 700;
+}
+.setup-ok .setup-icon {
+  color: #89d185;
+}
+.setup-warn .setup-icon {
+  color: #cca700;
+}
+.setup-missing .setup-icon {
+  color: #f48771;
+}
+.setup-off .setup-icon {
+  color: var(--fg-muted);
+}
+.setup-body {
+  flex: 1;
+  min-width: 0;
+}
+.setup-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.setup-detail {
+  margin-top: 2px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--fg-muted);
+}
+.setup-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.setup-actions .recent-more {
+  margin-top: 6px;
+  padding: 4px 10px;
+}
+.setup-hint {
+  margin: 8px 0 0;
+  font-size: 12px;
+  color: var(--fg-muted);
+}
+
 .welcome-list code,
 .terminal-placeholder code {
   background: var(--bg-alt);

@@ -25,6 +25,8 @@ async function electronCheck({ root, temp, output, channels }) {
   const settings = { sshProfiles: [], draftsRoot: '/synthetic', notificationSound: 'none' }
   for (const channel of channels) ipcMain.handle(channel, (_event, ...args) => {
     calls.push({ channel, args })
+    if (channel === 'caseManagement:get') return { ok: true, state: { generation: 'fixture', revision: 0, ui: { selectedTaskByCase: {}, focus: null, previousFocus: null, recovery: { caseId: null, seenCaseIds: [] } } } }
+    if (channel === 'setup:status') return { items: [], ready: true }
     if (channel === 'settings:get' || channel === 'settings:set') return settings
     if (channel === 'app:info') return { platform: process.platform, version: 'UI fixture', homeDirectory: '/synthetic' }
     if (channel === 'dialog:message') return args[0] === 'confirm' ? confirm : undefined
@@ -43,6 +45,7 @@ async function electronCheck({ root, temp, output, channels }) {
     if (['fs:list', 'fs:listPdfs', 'case:history', 'case:addHistory', 'sessions:list', 'sessions:byFolder', 'sessions:workLog'].includes(channel)) return []
     if (channel === 'sessions:byCase') return {}
     if (channel === 'sessions:transcript' || channel === 'sessions:current') return null
+    if (channel === 'js:hasToken') return false
     if (channel === 'js:tokenStatus' || channel === 'dictation:keyStatus') return 'missing'
     if (channel === 'js:listCases') return { ok: true, cases: [] }
     if (channel === 'js:listHearings') return { ok: true, hearings: [] }

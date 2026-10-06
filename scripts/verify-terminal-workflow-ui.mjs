@@ -45,6 +45,8 @@ async function electronCheck({ root, temp, output, channels, pdf }) {
   const settings = { sshProfiles: [], draftsRoot: '/synthetic', notificationSound: 'none', agentDefaultProvider: 'claude' }
   for (const channel of channels) ipcMain.handle(channel, (_event, ...args) => {
     calls.push({ channel, args })
+    if (channel === 'caseManagement:get') return { ok: true, state: { generation: 'fixture', revision: 0, ui: { selectedTaskByCase: {}, focus: null, previousFocus: null, recovery: { caseId: null, seenCaseIds: [] } } } }
+    if (channel === 'setup:status') return { items: [], ready: true }
     if (channel === 'settings:get' || channel === 'settings:set') return settings
     if (channel === 'app:info') return { platform: process.platform, version: 'UI fixture', homeDirectory: '/synthetic' }
     if (channel === 'fs:readBytes') return Uint8Array.from(Buffer.from(pdf, 'base64')).buffer
@@ -52,6 +54,7 @@ async function electronCheck({ root, temp, output, channels, pdf }) {
     if (['fs:list', 'fs:listPdfs', 'case:history', 'case:addHistory', 'sessions:list', 'sessions:byFolder', 'sessions:workLog'].includes(channel)) return []
     if (channel === 'sessions:byCase') return {}
     if (channel === 'sessions:transcript' || channel === 'sessions:current') return null
+    if (channel === 'js:hasToken') return false
     if (channel === 'js:tokenStatus' || channel === 'dictation:keyStatus') return 'missing'
     if (channel === 'js:listCases') return { ok: true, cases: [] }
     if (channel === 'js:listHearings') return { ok: true, hearings: [] }
@@ -112,7 +115,9 @@ async function electronCheck({ root, temp, output, channels, pdf }) {
       document.dispatchEvent(new Event('selectionchange'));
     `)
     await wait("visible('.sel-actions button').length > 0", 'Selection action')
-    await run(`click('.sel-actions button')`)
+    await run(`visible('.textLayer span').find(el => el.textContent.includes('Quoted payment')).dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, clientX: 100, clientY: 220 }))`)
+    await wait("visible('.ctx-item').some(el => el.textContent.includes('Claude'))", 'Quote context action')
+    await run(`visible('.ctx-item').find(el => el.textContent.includes('Claude')).click()`)
     await wait("visible('.agent-attachment-chip').some(el => el.textContent.includes('PDF 2쪽'))", 'Page-labelled attachment')
     await run(`
       const chip = visible('.agent-attachment-chip')[0];
