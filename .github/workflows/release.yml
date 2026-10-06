@@ -4,7 +4,12 @@ on:
   push:
     tags:
       - 'v*'
-  workflow_dispatch: {} # 수동 실행 가능
+  workflow_dispatch:
+    inputs:
+      windows_preflight:
+        description: 'Verify and package Windows without publishing a release'
+        type: boolean
+        default: false
 
 permissions:
   contents: write # Release 생성/업로드 권한
@@ -20,6 +25,7 @@ jobs:
         run: node scripts/verify-windows-installer.mjs
 
       - name: Ensure release exists
+        if: ${{ startsWith(github.ref, 'refs/tags/v') && !inputs.windows_preflight }}
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
@@ -35,12 +41,13 @@ jobs:
           gh release upload "$tag" install-mac.sh install.ps1 install-windows.ps1 --clobber
 
   build-macos:
+    if: ${{ !inputs.windows_preflight }}
     name: macOS (${{ matrix.arch }})
     needs: create-release
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
-      max-parallel: 1
+      max-parallel: 2
       matrix:
         include:
           - os: macos-15-intel
@@ -55,6 +62,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+          cache: npm
 
       - name: Install dependencies
         run: npm ci --include=optional
@@ -101,6 +109,7 @@ jobs:
         run: npx electron-builder --mac ${{ matrix.mac_targets }} --${{ matrix.arch }} --publish never
 
       - name: Upload macOS
+        if: ${{ startsWith(github.ref, 'refs/tags/v') && !inputs.windows_preflight }}
         run: |
           gh release upload "$GITHUB_REF_NAME" dist/legal-terminal-mac-${{ matrix.arch }}.* --clobber
           if [[ "${{ matrix.arch }}" == "arm64" ]]; then
@@ -120,6 +129,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+          cache: npm
 
       - name: Install dependencies
         run: npm ci --include=optional
@@ -158,12 +168,14 @@ jobs:
           if-no-files-found: warn
 
       - name: Upload Windows
+        if: ${{ startsWith(github.ref, 'refs/tags/v') && !inputs.windows_preflight }}
         run: gh release upload $env:GITHUB_REF_NAME dist/legal-terminal-Setup.exe dist/legal-terminal-Setup.exe.blockmap dist/legal-terminal-portable.exe dist/latest.yml --clobber
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
 
   finalize-release:
+    if: ${{ startsWith(github.ref, 'refs/tags/v') && !inputs.windows_preflight }}
     name: Publish release
     needs: [build-macos, build-windows]
     runs-on: ubuntu-latest

@@ -141,7 +141,15 @@ try {
   const noRemotePairing = await call('project_context')
   assert.equal(noRemotePairing.sources.some((source) => source.caseKey === 'remote-case' && source.kind === 'case-records'), false, 'remote cases never fall back to the local case pairing')
   assert.equal((await call('project_read_file', { sourceId: paired.id, path: 'facts.md' })).failed, true)
-  assert.ok((await getProjectAgentContext(project.id)).includes(separate), 'every send gets current pairings')
+  for (const pairingPath of ['/cases/공통 자료', String.raw`C:\Cases\공통 자료`, String.raw`\\server\share\공통 자료`, separate]) {
+    pairings = { 'case-1': { drafts: pairingPath } }
+    const promptContext = await getProjectAgentContext(project.id)
+    const block = promptContext.match(/<legal-terminal-project-context>\n[^\n]*\n([^\n]+)\n/)
+    assert.ok(block, 'project context contains a JSON data line inside its context block')
+    const data = JSON.parse(block[1])
+    assert.equal(data.sources.find((source) => source.caseKey === 'linked-case' && source.kind === 'case-drafts')?.path,
+      pairingPath, 'every send includes the current pairing after JSON decoding on any platform')
+  }
   const noteInput = { note: '자료 비교 후 가압류 검토', expectedUpdatedAt: project.updatedAt, nextAction: '담보 자료 확인', sources: [{ sourceId: local.id, path: 'facts.md', startLine: 2, endLine: 3 }] }
   const remembered = await call('project_record_note', noteInput)
   assert.equal(remembered.saved, true)

@@ -95,7 +95,7 @@ curl -fsSL https://github.com/jurisupport/legal-terminal/releases/latest/downloa
 
 ## 이번 업데이트
 
-최신 릴리스: [v0.1.252](https://github.com/jurisupport/legal-terminal/releases/tag/v0.1.252)
+최신 릴리스: [v0.1.253](https://github.com/jurisupport/legal-terminal/releases/tag/v0.1.253)
 
 - **프로젝트와 AI 작업**: 여러 사건과 로컬·SSH 참고 폴더를 한 프로젝트에 연결하고, 공통 목표·메모를 참고하는 Claude·Codex 대화를 시작하거나 이어갑니다.
 - **사건별 작업 탐색**: 사이드바에서 열어본 사건과 최근 대화를 찾아 이어가고, 확인 대기·완료 상태를 확인합니다.
