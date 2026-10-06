@@ -159,7 +159,7 @@ function runApp({ root, temp, screenshotDir, agentSmoke }) {
         assert.equal(first.workspaceContext.projectId, id)
         assert.equal(first.provider, 'codex')
         assert.equal(first.ssh, undefined)
-        assert.equal(first.cwd.startsWith(fs.realpathSync(path.join(temp, 'profile'))), true)
+        assert.equal(first.cwd.startsWith(fs.realpathSync.native(path.join(temp, 'profile')) + path.sep), true, 'project workspace stays under the canonical app profile, including Windows short-path aliases')
         assert.notEqual(first.cwd, caseDir)
         assert.match(first.context, /프로젝트 작업 범위/)
         assert.equal(calls.some(call => call.channel === 'agent:send'), false, 'opening a project never submits a prompt')
