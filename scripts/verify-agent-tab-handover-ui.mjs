@@ -58,6 +58,7 @@ function runApp({ root, temp }) {
     if (channel === 'sessions:remember') return undefined
     if (channel === 'sessions:transcript') return { sessionId: 'phone-session', messages: [{ role: 'user', text: '폰에서 보낸 질문' }] }
     if (channel === 'workspace:autoList') return { ok: true, snapshots: args[0] ? [...sharedCases.values()].filter((s) => s.workspaceOpen || args[1]) : [] }
+    if (channel === 'workspace:list') return { ok: true, entries: [] }
     if (channel === 'workspace:autoLoad') {
       const saved = sharedCases.get(args[0].cwd)
       if (args[1] !== false && saved) knownTabs.set(args[0].cwd, structuredClone(saved))
@@ -100,8 +101,12 @@ function runApp({ root, temp }) {
   ;(async () => {
     try {
       await ready
+      await wait(() => evaluate(`!!document.querySelector('.case-sidebar-case')`))
+      assert.equal(sessions.size, 0, 'discovery leaves cases collapsed and agents unloaded')
+      assert.equal(calls.some((call) => call.channel === 'workspace:autoLoad' || call.channel === 'sessions:list'), false)
+      await evaluate(`document.querySelector('.case-sidebar-case').click()`)
       await wait(() => sessions.has('mobile-agent'))
-      assert.ok(calls.some((call) => call.channel === 'workspace:autoList'), 'startup discovers the open case without user clicks')
+      assert.ok(calls.some((call) => call.channel === 'workspace:autoList'), 'startup discovers case names')
       assert.equal(sessions.get('mobile-agent').resumeSessionId, 'phone-session')
       assert.equal(sessions.get('mobile-agent').ssh.host, profile.host)
       assert.equal(await evaluate(`document.body.innerText.includes('열리면 안 되는 문서') || document.body.innerText.includes('열리면 안 되는 터미널')`), false)
@@ -130,8 +135,9 @@ function runApp({ root, temp }) {
         activeTerm: undefined, docs: [], terminals: [] })
       snapshot.terminals.push({ id: 'new-remote-agent', title: '다른 컴퓨터의 새 대화', kind: 'agent', cwd,
         agentProvider: 'claude', resumeSessionId: 'new-remote-conversation' })
-      await evaluate(`window.dispatchEvent(new Event('focus'))`)
-      await wait(() => calls.some((call) => call.channel === 'workspace:autoLoad' && call.args[0].cwd === otherPath))
+      await evaluate(`window.dispatchEvent(new Event('online'))`)
+      await wait(() => evaluate(`document.body.innerText.includes('다른 컴퓨터의 사건')`))
+      assert.equal(calls.some((call) => call.channel === 'workspace:autoLoad' && call.args[0].cwd === otherPath), false, 'newly discovered cases stay unloaded')
       await wait(() => evaluate(`document.body.innerText.includes('다른 컴퓨터의 새 대화')`))
       assert.equal(await evaluate(`[...document.querySelectorAll('.tab.active')].some(tab => tab.innerText.includes('폰에서 열린 대화'))`), true,
         'focus refresh keeps the existing active agent')
@@ -152,8 +158,9 @@ function runApp({ root, temp }) {
       await wait(() => evaluate(`!document.body.innerText.includes('폰에서 열린 대화')`))
       assert.equal(snapshot.workspaceOpen, false, 'background flush preserves the other computer’s case close')
       snapshot.workspaceOpen = true
-      await evaluate(`window.dispatchEvent(new Event('focus'))`)
-      await wait(() => evaluate(`document.querySelector('.activity-item[title^="사건탭"]')?.innerText.includes('2')`))
+      await evaluate(`window.dispatchEvent(new Event('online'))`)
+      await wait(() => evaluate(`document.querySelectorAll('.case-sidebar-case').length === 2`))
+      assert.equal(await evaluate(`!![...document.querySelectorAll('.tab')].find(tab => tab.innerText.includes('폰에서 열린 대화'))`), false, 'remote reopen does not eagerly reactivate a case')
       assert.equal(calls.some((call) => call.channel === 'agent:send' || call.channel === 'dialog:message'), false)
       assert.deepEqual(errors, [])
       console.log('agent tab UI: startup discovery, focus refresh, empty cases, preserved focus, SSH restoration and repeat-open dedupe OK')

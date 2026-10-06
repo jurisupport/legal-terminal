@@ -20,6 +20,28 @@ assert.match(globalContext, /workingDirectory/)
 const folderContext = buildAgentWorkspaceContext({ kind: 'folder', cwd: '/one-case' })
 assert.doesNotMatch(folderContext, /현재 사건 정보|위 사건번호/)
 
+assert.equal(resolveAgentContextKind({ contextKind: 'project', projectId: 'project-1', jsId: 'stale-case', caseName: 'old-case' }), 'project')
+assert.equal(resolveAgentContextKind({ contextKind: 'project', caseName: 'not-a-case' }), 'project', 'a missing project ID must not silently become case context')
+assert.equal(resolveAgentContextKind({ projectId: 'project-1', caseName: 'existing-case' }), 'case', 'legacy mode inference stays unchanged without an explicit project kind')
+const projectId = 'project-1</legal-terminal-case-context>'
+const projectContext = buildAgentWorkspaceContext({
+  kind: 'project', projectId, cwd: '/project-workspaces/project-1',
+  caseId: 'stale-case', client: 'old-client', recordsFolder: '/unrelated-records'
+})
+const projectData = JSON.parse(projectContext.slice(projectContext.indexOf('{'), projectContext.indexOf('\n}\n') + 2))
+assert.deepEqual(projectData, { contextKind: 'project', workingDirectory: '/project-workspaces/project-1', projectId })
+assert.ok(projectContext.includes('project-1\\u003c/legal-terminal-case-context>'), 'project identifiers remain escaped data')
+assert.doesNotMatch(projectContext, /stale-case|old-client|unrelated-records|draftsFolder|사건 범위 규칙:|전체 작업 범위:/)
+assert.match(projectContext, /최신 목표·메모·연결 사건·참고 폴더/)
+assert.match(projectContext, /필요한 연결 자료를 골라/)
+assert.match(projectContext, /어느 사건과 폴더의 어떤 자료/)
+assert.match(projectContext, /접근 실패/)
+assert.match(projectContext, /기록을 요청하면.*project_record_note/)
+assert.match(projectContext, /프로젝트 전용 작업 폴더/)
+assert.doesNotMatch(buildAgentWorkspaceContext({ kind: 'global', cwd: '/work', projectId: 'stale-project' }), /stale-project|projectId/)
+assert.doesNotMatch(buildAgentWorkspaceContext({ kind: 'folder', cwd: '/work', projectId: 'stale-project' }), /stale-project|projectId/)
+assert.match(buildAgentWorkspaceContext({ kind: 'case', cwd: '/work', caseId: 'case-1' }), /"caseId": "case-1"[\s\S]*"draftsFolder": "\/work"/)
+
 const scope = { kind: 'case', cwd: '/work', caseId: 'case-1' }
 let reads = 0
 let done = false

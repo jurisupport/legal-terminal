@@ -3,6 +3,7 @@ import type { CaseManagementState, CaseManagementPatch } from '../shared/caseMan
 import type { RemotionPreviewOptions, RemotionPreviewSelection, RemotionPreviewResult } from '../shared/remotionPreview'
 import type { MediaApi, MediaSelection, MediaViewState } from '../shared/media'
 import type { AgentWorkspaceContext } from '../shared/agentWorkspaceContext'
+import type { Project, ProjectInput } from '../shared/project'
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
 
 // 렌더러에 노출되는 좁은 API 표면. 이후 마일스톤에서
@@ -88,7 +89,8 @@ interface PtyCreateOpts {
 
 interface TerminalTabPayload {
   selectedTaskId?: string
-  contextKind?: 'case' | 'global' | 'folder'
+  contextKind?: 'case' | 'global' | 'folder' | 'project'
+  projectId?: string
   todoManagement?: boolean
   id: string
   title: string
@@ -160,7 +162,7 @@ interface WorkspaceDocTabPayload {
 
 interface WorkspaceCaseTabPayload {
   selectedTaskId?: string
-  contextKind?: 'case' | 'global' | 'folder'
+  contextKind?: 'case' | 'global' | 'folder' | 'project'
   id: string
   name: string
   drafts: string
@@ -168,7 +170,8 @@ interface WorkspaceCaseTabPayload {
   suggestedRecords?: string
   suggestedRecordOptions?: FolderMatchSuggestion[]
   meta?: {
-    contextKind?: 'case' | 'global' | 'folder'
+    contextKind?: 'case' | 'global' | 'folder' | 'project'
+    projectId?: string
     jsId?: string
     court?: string
     caseNumber?: string
@@ -321,6 +324,7 @@ interface AutomaticWorkspaceLoadResult {
 }
 
 interface SessionSearchContext {
+  projectId?: string
   query?: string
   displayTitle?: string
   caseNumber?: string
@@ -585,7 +589,8 @@ interface TodoMutationInput extends TodoStatusOptions {
 }
 
 interface TodoTerminalContext {
-  contextKind?: 'case' | 'global' | 'folder'
+  contextKind?: 'case' | 'global' | 'folder' | 'project'
+  projectId?: string
   terminalId?: string
   cwd?: string
   jsId?: string
@@ -746,6 +751,18 @@ interface UpdateCheckResult {
 }
 
 let fsWatchSeq = 0
+
+type DragEntry = { source: string; file: string }
+type PreparedDrag = { ok: boolean; id?: string; entries?: DragEntry[]; error?: string }
+const dragSources = new Map<string, string>()
+const dragPathKey = (path: string): string => {
+  const key = path.replace(/\\/g, '/').normalize('NFC')
+  return process.platform === 'win32' ? key.toLowerCase() : key
+}
+const rememberDragSources = (entries: DragEntry[]): void => {
+  for (const entry of entries) dragSources.set(dragPathKey(entry.file), entry.source)
+}
+ipcRenderer.on('fs:dragPrepared', (_event, entries: DragEntry[]) => rememberDragSources(entries))
 
 const media: MediaApi = {
   forwardAsk: (input) => ipcRenderer.invoke('media:forwardAsk', input),
@@ -984,6 +1001,21 @@ const api = {
     ): Promise<{ ok: boolean; path?: string; error?: string }> =>
       ipcRenderer.invoke('fs:createFile', { dir, name, content }),
     pathForFile: (file: File): string => webUtils.getPathForFile(file),
+    prepareDrag: async (paths: string[]): Promise<PreparedDrag> => {
+      const result: PreparedDrag = await ipcRenderer.invoke('fs:prepareDrag', paths)
+      if (result.ok && result.entries) rememberDragSources(result.entries)
+      return result
+    },
+    startDrag: (id: string): void => ipcRenderer.send('fs:startDrag', id),
+    dragPathsForFiles: (files: File[]): string[] => {
+      const paths = files.map((file) => dragSources.get(dragPathKey(webUtils.getPathForFile(file))))
+      return paths.length && paths.every((path): path is string => !!path) ? paths : []
+    },
+    onDragError: (cb: (message: string) => void): (() => void) => {
+      const listener = (_event: Electron.IpcRendererEvent, message: string): void => cb(message)
+      ipcRenderer.on('fs:dragError', listener)
+      return () => ipcRenderer.removeListener('fs:dragError', listener)
+    },
     listPdfs: (dir: string): Promise<{ name: string; path: string }[]> =>
       ipcRenderer.invoke('fs:listPdfs', dir),
     readText: (
@@ -1002,6 +1034,18 @@ const api = {
       | { ok: true; size: number; isDir: boolean; mtimeMs?: number }
       | { ok: false; error: string }
     > => ipcRenderer.invoke('fs:stat', filePath)
+  },
+  projects: {
+    workspace: (id: string): Promise<{ cwd: string; project: Project }> => ipcRenderer.invoke('projects:workspace', id),
+    list: (): Promise<Project[]> => ipcRenderer.invoke('projects:list'),
+    save: (input: ProjectInput): Promise<Project> => ipcRenderer.invoke('projects:save', input),
+    remove: (id: string, expectedUpdatedAt?: string): Promise<void> =>
+      ipcRenderer.invoke('projects:remove', id, expectedUpdatedAt),
+    onChanged: (callback: () => void): (() => void) => {
+      const listener = (): void => callback()
+      ipcRenderer.on('projects:changed', listener)
+      return () => ipcRenderer.removeListener('projects:changed', listener)
+    }
   },
   case: {
     getPairing: (drafts: string): Promise<string | undefined> =>

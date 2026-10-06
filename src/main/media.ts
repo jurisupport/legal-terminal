@@ -1,7 +1,7 @@
 import { app, nativeImage, type IpcMain, type Session, type WebContents } from 'electron'
 import { createHash, randomUUID } from 'crypto'
 import { createReadStream, createWriteStream } from 'fs'
-import { mkdir, readFile, readdir, realpath, rename, rm, stat, statfs, writeFile } from 'fs/promises'
+import { copyFile, mkdir, readFile, readdir, realpath, rename, rm, stat, statfs, writeFile } from 'fs/promises'
 import { isAbsolute, join, posix, resolve } from 'path'
 import { Readable, Transform } from 'stream'
 import { pipeline } from 'stream/promises'
@@ -43,7 +43,7 @@ const recordKey = (path: string, version: string): string => `${path}\0${version
 const fileName = (path: string, version: string): string => createHash('sha256').update(recordKey(path, version)).digest('hex') + '.media'
 const filePath = (record: Record): string => join(filesRoot(), record.file)
 
-// ponytail: only metadata is serialized; separate transfers stream concurrently. Use a database if the index grows beyond a few thousand reviews.
+// ponytail: metadata and local exports are serialized; remote transfers stream concurrently. Use per-record export pins if local copies delay cache operations.
 function serialized<T>(fn: () => Promise<T>): Promise<T> {
   const next = metadataQueue.then(fn)
   metadataQueue = next.catch(() => {})
@@ -100,6 +100,25 @@ function ensureLoaded(): Promise<void> {
     }
   })()
   return loaded
+}
+
+export async function copyCachedMedia(value: string, destination: string): Promise<boolean> {
+  if (!mediaMimeType(value)) return false
+  const path = sourcePath(value)
+  await ensureLoaded()
+  if (![...records.values()].some((record) => record.sourcePath === path)) return false
+  const current = await sourceStat(path).catch(() => undefined)
+  if (!current) return false
+  return serialized(async () => {
+    const record = [...records.values()]
+      .filter((item) => item.sourcePath === path && item.signature === signature(current))
+      .sort((a, b) => b.observedAt - a.observedAt)[0]
+    if (!record || !await stat(filePath(record)).then((s) => s.isFile() && s.size === record.size).catch(() => false)) return false
+    // Keep eviction and replacement from changing the snapshot during the copy.
+    await copyFile(filePath(record), destination)
+    record.accessedAt = Date.now()
+    return true
+  })
 }
 
 function protectedRecords(): Set<Record> {

@@ -1,6 +1,7 @@
 import { openRemotionPreview, closeRemotionPreview, disposeRemotionPreviews } from './remotionPreview'
+import { registerFileDragIpc } from './fileDrag'
 import type { RemotionPreviewOptions } from '../shared/remotionPreview'
-import { MEDIA_SCHEME, registerMediaIpc, registerMediaProtocol } from './media'
+import { MEDIA_SCHEME, copyCachedMedia, registerMediaIpc, registerMediaProtocol } from './media'
 import { normalizeMediaSelection, type MediaAskRequest } from '../shared/media'
 import { app, protocol, BrowserWindow, shell, ipcMain, dialog, screen, session, Menu, clipboard, Notification, powerMonitor, type WebContents } from 'electron'
 import { spawn } from 'child_process'
@@ -24,6 +25,9 @@ import {
   allJsPairings,
   setJsPairing
 } from './caseStore'
+import { ProjectStore } from './projectStore'
+import { configureProjectAgent, getProjectWorkspace, disposeProjectMcp } from './projectAgent'
+import type { ProjectInput } from '../shared/project'
 import * as js from './jurisupport'
 import { pairedFileEvidence, containsCaseNumber, FILE_EVIDENCE_ENTRY_LIMIT } from './todoFileEvidence'
 import {
@@ -43,12 +47,14 @@ import {
   rfsListPdfs,
   rfsReadBytes,
   rfsWriteText,
+  RemoteFileConflict,
   rfsWriteBytes,
   rfsMkdir,
   rfsCreateFile,
   rfsMove,
   rfsRename,
   rfsStat,
+  rfsRealpath,
   rfsDelete,
   clearRemoteDirCache as clearRemoteFsDirCache,
   disposeRemote,
@@ -116,6 +122,8 @@ function applyDockIcon(): void {
   const iconPath = getAppIconPath()
   if (iconPath && process.platform === 'darwin' && app.dock) app.dock.setIcon(iconPath)
 }
+
+registerFileDragIpc(ipcMain, getAppIconPath)
 
 async function checkForUpdates(win: BrowserWindow): Promise<void> {
   try {
@@ -1039,6 +1047,43 @@ ipcMain.handle('case:history', () => listHistory())
 ipcMain.handle('case:addHistory', (_e, entry: { drafts: string; records?: string; name: string }) =>
   addHistory(entry)
 )
+
+// ── 프로젝트 IPC ──
+const projectStore = new ProjectStore(join(app.getPath('userData'), 'projects.json'))
+function notifyProjectsChanged(): void {
+  for (const win of BrowserWindow.getAllWindows()) {
+    if (!win.isDestroyed() && !win.webContents.isDestroyed()) win.webContents.send('projects:changed')
+  }
+}
+configureProjectAgent({
+  store: projectStore,
+  workspaceRoot: join(app.getPath('userData'), 'project-workspaces'),
+  changed: notifyProjectsChanged,
+  pairings: allJsPairings,
+  caseDetails: js.getCase,
+  list: async (path) => isRemote(path)
+    ? rfsList(path, { refresh: true, prefetch: false, followSymlinks: false })
+    : (await readLocalDirEntries(path)).filter((entry) => !entry.isSymbolicLink()).map((entry) => ({ name: entry.name, path: join(path, entry.name), isDir: entry.isDirectory() })),
+  stat: async (path) => {
+    if (isRemote(path)) return rfsStat(path)
+    const info = await stat(path)
+    return { size: info.size, isDir: info.isDirectory(), mtimeMs: info.mtimeMs }
+  },
+  realpath: (path) => isRemote(path) ? rfsRealpath(path) : realpath(path),
+  readBytes: (path) => isRemote(path) ? rfsReadBytes(path) : readLocalBytes(path),
+  officeText: (path, bytes) => extname(path).toLowerCase() === '.docx' ? extractDocxText(bytes) : extractHwpText(bytes, extname(path).toLowerCase())
+})
+ipcMain.handle('projects:list', () => projectStore.list())
+ipcMain.handle('projects:workspace', (_event, id: string) => getProjectWorkspace(id))
+ipcMain.handle('projects:save', async (_event, input: ProjectInput) => {
+  const project = await projectStore.save(input)
+  notifyProjectsChanged()
+  return project
+})
+ipcMain.handle('projects:remove', async (_event, id: string, expectedUpdatedAt?: string) => {
+  await projectStore.remove(id, expectedUpdatedAt)
+  notifyProjectsChanged()
+})
 
 // ── 파일시스템 IPC (탐색기) ──
 const TEXT_EXT = new Set([
@@ -2260,20 +2305,22 @@ async function downloadRemotePlanWithProgress(
       destPath
     })
     await mkdir(dirname(file.destPath), { recursive: true })
-    await writeFile(
-      file.destPath,
-      await rfsReadBytes(file.source, (progress) =>
-        onProgress({
-          phase: 'downloading',
-          totalFiles,
-          completedFiles,
-          currentFile: file.label,
-          destPath,
-          totalBytes: progress.totalBytes,
-          downloadedBytes: progress.downloadedBytes
-        })
+    if (!await copyCachedMedia(file.source, file.destPath)) {
+      await writeFile(
+        file.destPath,
+        await rfsReadBytes(file.source, (progress) =>
+          onProgress({
+            phase: 'downloading',
+            totalFiles,
+            completedFiles,
+            currentFile: file.label,
+            destPath,
+            totalBytes: progress.totalBytes,
+            downloadedBytes: progress.downloadedBytes
+          })
+        )
       )
-    )
+    }
     completedFiles += 1
     onProgress({
       phase: 'downloading',
@@ -2834,6 +2881,7 @@ ipcMain.handle('fs:saveAs', async (_e, p: { content: string; defaultPath?: strin
 
 ipcMain.handle('fs:writeText', async (_e, p: { path: string; content: string; expected?: FileSignature }) => {
   try {
+    if (isRemote(p.path)) return { ok: true, stat: await rfsWriteText(p.path, p.content, p.expected) }
     if (p.expected) {
       const current = await statFileSignature(p.path)
       if (!sameFileSignature(current, p.expected)) {
@@ -2845,10 +2893,10 @@ ipcMain.handle('fs:writeText', async (_e, p: { path: string; content: string; ex
         }
       }
     }
-    if (isRemote(p.path)) await rfsWriteText(p.path, p.content)
-    else await writeFile(p.path, p.content, 'utf8')
+    await writeFile(p.path, p.content, 'utf8')
     return { ok: true, stat: await statFileSignature(p.path).catch(() => undefined) }
   } catch (e) {
+    if (e instanceof RemoteFileConflict) return { ok: false, conflict: true, stat: e.stat, error: e.message }
     return { ok: false, error: String(e) }
   }
 })
@@ -2912,6 +2960,7 @@ ipcMain.on('pty:detach', (e, { id }: { id: string }) => detachPty(id, e.sender))
 ipcMain.on('pty:kill', (_e, { id }: { id: string }) => killPty(id))
 
 app.on('before-quit', () => {
+  void disposeProjectMcp()
   disposeRemotionPreviews()
   disposeAgentSessions()
   killAllPty()

@@ -1,5 +1,5 @@
 import { Client, type ClientChannel, type SFTPWrapper, type Stats, utils } from 'ssh2'
-import { createHash } from 'crypto'
+import { createHash, randomUUID } from 'crypto'
 import { open, readFile, rm } from 'fs/promises'
 import { existsSync } from 'fs'
 import { Transform } from 'stream'
@@ -339,7 +339,7 @@ async function buildConfig(p: SshProfile): Promise<Record<string, unknown>> {
     host: p.host,
     port: p.port || 22,
     username: p.user,
-    readyTimeout: 20000,
+    readyTimeout: 60000,
     keepaliveInterval: 20000
   }
   // agent (Windows OpenSSH 명명 파이프 또는 SSH_AUTH_SOCK)
@@ -1253,24 +1253,93 @@ exit 1
   if (result.code !== 0) throw remoteExitError(result, `ssh 종료 코드 ${result.code}`)
 }
 
-export async function rfsWriteText(uri: string, content: string): Promise<void> {
-  const { profileId, path } = parseRemote(uri)
+interface RemoteFileSignature {
+  size: number
+  mtimeMs?: number
+}
+
+export class RemoteFileConflict extends Error {
+  readonly stat?: RemoteFileSignature
+
+  constructor(current?: Stats) {
+    super('파일이 외부에서 변경되어 저장을 중단했습니다.')
+    this.stat = current && { size: current.size, mtimeMs: current.mtime * 1000 }
+  }
+}
+
+export async function rfsWriteText(
+  uri: string,
+  content: string,
+  expected?: RemoteFileSignature
+): Promise<RemoteFileSignature> {
+  const { profileId, path: requestedPath } = parseRemote(uri)
   const sftp = await getSftp(profileId)
-  await new Promise<void>((resolve, reject) =>
-    sftp.writeFile(path, content, { encoding: 'utf8' }, (err) => (err ? reject(err) : resolve()))
+  // Follow existing symlinks instead of replacing the link itself.
+  const path = await sftpRequest<string>(sftp, (done) =>
+    sftp.realpath(requestedPath, (err, resolved) => {
+      if (err && (err as Error & { code?: number }).code !== 2) done(err)
+      else done(undefined, err ? requestedPath : resolved)
+    })
   )
+  const readCurrent = (): Promise<Stats | undefined> => sftpStat(sftp, path).catch((err) => {
+    if (err.code === 2) return undefined
+    throw err
+  })
+  const original = await readCurrent()
+  if (expected && (!original || original.size !== expected.size ||
+    Math.abs(original.mtime * 1000 - (expected.mtimeMs ?? 0)) >= 1)) {
+    throw new RemoteFileConflict(original)
+  }
+  if (original && !original.isFile()) throw new Error('일반 파일만 저장할 수 있습니다.')
+  const temporary = posix.join(posix.dirname(path), `.legal-terminal-${randomUUID()}.tmp`)
+  const data = Buffer.from(content, 'utf8')
+  const handle = await sftpRequest<Buffer>(sftp, (done) => sftp.open(temporary, 'wx', 0o600, done))
+  let uploaded: Stats
+  try {
+    try {
+      await sftpRequest<void>(sftp, (done) =>
+        sftp.write(handle, data, 0, data.length, 0, (err) => done(err))
+      )
+      if (original) {
+        const created = await sftpRequest<Stats>(sftp, (done) => sftp.fstat(handle, done))
+        if (created.uid !== original.uid || created.gid !== original.gid) {
+          await sftpRequest<void>(sftp, (done) => sftp.fchown(handle, original.uid, original.gid, done))
+        }
+        await sftpRequest<void>(sftp, (done) => sftp.fchmod(handle, original.mode & 0o7777, done))
+      }
+    } finally {
+      await sftpRequest<void>(sftp, (done) => sftp.close(handle, done), 2_000)
+    }
+    uploaded = await sftpStat(sftp, temporary)
+    if (uploaded.size !== data.length) throw new Error('원격 임시 파일의 크기가 일치하지 않아 저장을 중단했습니다.')
+    const current = await readCurrent()
+    // ponytail: SFTP seconds/size cannot detect equal signatures or the final rename race; use server revisions/locks for that.
+    if (original ? !current || current.size !== original.size || current.mtime !== original.mtime || current.mode !== original.mode || current.uid !== original.uid || current.gid !== original.gid : current) {
+      throw new RemoteFileConflict(current)
+    }
+    await sftpRequest<void>(sftp, (done) => {
+      if (original) sftp.ext_openssh_rename(temporary, path, done)
+      else sftp.rename(temporary, path, done) // Standard SFTP rename refuses an existing destination.
+    }).catch((error) => {
+      throw new Error(`원격 파일 교체를 완료하지 못했습니다. 다른 이름으로 저장하세요. (${String(error)})`)
+    })
+  } finally {
+    await sftpRequest<void>(sftp, (done) => sftp.unlink(temporary, done), 2_000).catch(() => {})
+  }
   invalidateRemoteDirCache(profileId, posix.dirname(path))
   invalidateRemoteFileContentCache(profileId, path)
-  const st = await sftpStat(sftp, path).catch(() => undefined)
-  if (st) {
-    rememberRemoteFileCache(
-      REMOTE_FILE_CACHE_NAMESPACE,
-      remoteFileCacheKey(profileId, path, remoteFileStatSignature(st)),
-      Buffer.from(content)
-    )
+  if (path !== requestedPath) {
+    invalidateRemoteDirCache(profileId, posix.dirname(requestedPath))
+    invalidateRemoteFileContentCache(profileId, requestedPath)
   }
+  rememberRemoteFileCache(
+    REMOTE_FILE_CACHE_NAMESPACE,
+    remoteFileCacheKey(profileId, path, remoteFileStatSignature(uploaded)),
+    data
+  )
   noteRemoteLocalMutation(posix.dirname(path))
   scheduleRemoteAutoPush(profileId, path)
+  return { size: uploaded.size, mtimeMs: uploaded.mtime * 1000 }
 }
 
 // 바이너리 업로드: destDirUri 하위에 name으로 저장 → 저장된 URI 반환
@@ -1313,7 +1382,8 @@ export async function rfsStat(
 export async function rfsRealpath(uri: string): Promise<string> {
   const { profileId, path } = parseRemote(uri)
   const sftp = await getSftp(profileId)
-  const resolved = await sftpRequest<string>(sftp, (done) => sftp.realpath(path, done))
+  const actualPath = await resolveRemotePath(sftp, path)
+  const resolved = await sftpRequest<string>(sftp, (done) => sftp.realpath(actualPath, done))
   return makeRemote(profileId, resolved)
 }
 

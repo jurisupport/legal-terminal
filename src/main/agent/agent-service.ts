@@ -3,7 +3,7 @@ import type { IpcMain, WebContents } from 'electron'
 import { createHash, randomUUID } from 'crypto'
 import { execFile, spawn, type ChildProcessWithoutNullStreams } from 'child_process'
 import { existsSync } from 'fs'
-import { mkdir } from 'fs/promises'
+import { mkdir, realpath } from 'fs/promises'
 import { tmpdir } from 'os'
 import { basename, dirname, join, relative } from 'path'
 import { readSessionTokenUsage, rememberSessionMeta } from '../sessions'
@@ -49,6 +49,8 @@ import { currentAgentContext, prependAgentContext } from './agentPrompt'
 import type { AgentWorkspaceContext } from '../../shared/agentWorkspaceContext'
 import { listTodos, getAgentMcpConnection, agentMcpAccountEpoch, onAgentMcpAccountChange } from '../jurisupport'
 import { MANAGED_MCP, MANAGED_MCP_ENV, managedToolName, managedToolDecision, managedMcpApproval, managedDisallowedTools, claudeManagedServers, codexManagedConfig, redactManagedSecrets, type ManagedMcpConnection } from './agentMcp'
+import { acquireProjectMcp, releaseProjectMcp, disposeProjectMcp, getProjectAgentContext, getProjectWorkspace } from '../projectAgent'
+import { PROJECT_MCP, PROJECT_MCP_ENV, projectToolName, projectToolDecision, projectMcpToken, projectDisallowedTools, claudeProjectServers, codexProjectConfig, type ProjectMcpConnection } from './projectMcpConfig'
 import { codexTurnRunStatus, codexWorkStepStatus } from './agentProgress'
 import { AGENT_BUSY_MESSAGE, agentExecutionArgs, agentExecutionCommand } from './agentExecutionLock'
 import { RemoteAgentTransport, probeRemoteAgentRun, type RemoteAgentOptions, type RemoteAgentRunInfo } from './remoteAgentTransport'
@@ -122,6 +124,8 @@ interface AgentSession {
   context?: string
   workspaceContext?: AgentWorkspaceContext
   managedMcp?: ManagedMcpConnection
+  projectMcp?: ProjectMcpConnection
+  projectMcpReady?: boolean
   managedAccountInvalid?: boolean
   managedMcpReady?: boolean
   managedSecrets?: Set<string>
@@ -208,6 +212,54 @@ onAgentMcpAccountChange(() => {
 function assertManagedAccount(session: AgentSession): void {
   if (session.workspaceContext?.todoManagement === false || session.managedAccountInvalid || (session.managedMcp && session.managedMcp.epoch !== agentMcpAccountEpoch())) {
     throw new Error('JuriSupport 계정이 변경되었습니다. 새 할일 Agent를 열어 주세요.')
+  }
+}
+
+function projectSessionError(session: Pick<AgentSession, 'workspaceContext' | 'source'>, next?: AgentWorkspaceContext): string | undefined {
+  const current = session.workspaceContext
+  if (current?.kind !== 'project' && next?.kind !== 'project') return
+  if (session.source !== 'local') return '프로젝트 Agent는 이 컴퓨터에서 실행해야 합니다.'
+  if (!current?.projectId || current.kind !== 'project' || current.todoManagement !== undefined ||
+      (next && (next.kind !== 'project' || next.projectId !== current.projectId || next.todoManagement !== undefined))) {
+    return '프로젝트 작업 범위가 변경되었습니다. 해당 프로젝트에서 새 대화를 열어 주세요.'
+  }
+}
+
+async function prepareProjectContext(session: AgentSession): Promise<string> {
+  const error = projectSessionError(session)
+  if (error) throw new Error(error)
+  const projectId = session.workspaceContext!.projectId!
+  try {
+    const workspace = await getProjectWorkspace(projectId)
+    if (await realpath(session.cwd) !== await realpath(workspace.cwd)) throw new Error('프로젝트 전용 작업 폴더가 일치하지 않습니다. 프로젝트에서 대화를 다시 열어 주세요.')
+    const context = await getProjectAgentContext(projectId)
+    if (sessions.get(session.id) !== session || session.running?.signal.aborted) throw new Error('프로젝트 대화가 닫혔습니다.')
+    if (!session.projectMcp) {
+      session.projectMcp = await acquireProjectMcp(session.id, projectId, {
+        canWrite: () => sessions.get(session.id) === session && Boolean(session.running && !session.running.signal.aborted) &&
+          session.permissionMode !== 'plan' && session.permissionMode !== 'dontAsk',
+        approveWrite: async (input) => {
+          const running = session.running
+          if (!running || running.signal.aborted || sessions.get(session.id) !== session) return false
+          const result = await requestPermission(session, `mcp__${PROJECT_MCP}__project_record_note`, input, {
+            signal: running.signal, toolUseID: randomUUID(), title: '프로젝트 메모 기록'
+          })
+          return result.behavior === 'allow' && session.running === running && !running.signal.aborted &&
+            sessions.get(session.id) === session && projectToolDecision(`mcp__${PROJECT_MCP}__project_record_note`, session.permissionMode) !== 'deny'
+        }
+      })
+      if (sessions.get(session.id) !== session || session.running?.signal.aborted) throw new Error('프로젝트 대화가 닫혔습니다.')
+      session.managedSecrets ??= new Set()
+      session.managedSecrets.add(projectMcpToken(session.projectMcp))
+      if (session.codexProcess) await stopCodexProcess(session)
+      session.codexMcpMode = undefined
+    }
+    return context
+  } catch (error) {
+    releaseProjectMcp(session.id)
+    session.projectMcp = undefined
+    session.projectMcpReady = false
+    throw error
   }
 }
 
@@ -583,6 +635,7 @@ function cleanEnv(): Record<string, string | undefined> {
     if (key.startsWith('CLAUDE_CODE_')) continue
     if (CLAUDE_AUTH_ENV_KEYS.has(key)) continue
     if (key === 'ENABLE_IDE_INTEGRATION') continue
+    if (key === PROJECT_MCP_ENV) continue
     env[key] = value
   }
   env.CLAUDE_AGENT_SDK_CLIENT_APP = `legal-terminal/${process.env.npm_package_version ?? 'dev'}`
@@ -1997,7 +2050,7 @@ function rememberCodexTokenUsage(session: AgentSession, params: Record<string, u
   session.tokenUsage = {
     turns: Math.max(session.tokenUsage.turns, session.codexTokenUsageTurnIds?.size ?? 0, last ? 1 : 0),
     inputTokens: total.inputTokens,
-    outputTokens: total.outputTokens + total.reasoningOutputTokens,
+    outputTokens: total.outputTokens,
     cacheCreationInputTokens: 0,
     cacheReadInputTokens: total.cachedInputTokens,
     totalTokens: total.totalTokens,
@@ -2006,12 +2059,13 @@ function rememberCodexTokenUsage(session: AgentSession, params: Record<string, u
     updatedAt: now
   }
   const modelContextWindow = numberValue(usage.modelContextWindow)
-  if (modelContextWindow && modelContextWindow > 0) {
+  session.contextUsage = undefined
+  if (last && modelContextWindow && modelContextWindow > 0) {
     session.contextUsage = {
-      totalTokens: total.totalTokens,
+      totalTokens: last.totalTokens,
       maxTokens: modelContextWindow,
-      remainingTokens: Math.max(0, modelContextWindow - total.totalTokens),
-      percentage: Math.min(100, Math.max(0, (total.totalTokens / modelContextWindow) * 100)),
+      remainingTokens: Math.max(0, modelContextWindow - last.totalTokens),
+      percentage: Math.min(100, Math.max(0, (last.totalTokens / modelContextWindow) * 100)),
       model: session.model,
       updatedAt: now
     }
@@ -2771,7 +2825,7 @@ function startCodexProcess(session: AgentSession, protectExecution = false, rest
           protectExecution && process.platform !== 'win32' ? [...agentExecutionArgs(session), codexBin, 'app-server'] : ['app-server'], {
           cwd: session.cwd,
           windowsHide: true,
-          env: { ...cleanEnv(), ...(session.managedMcp ? { [MANAGED_MCP_ENV]: session.managedMcp.token } : {}) }
+          env: { ...cleanEnv(), ...(session.managedMcp ? { [MANAGED_MCP_ENV]: session.managedMcp.token } : {}), ...(session.projectMcp ? { [PROJECT_MCP_ENV]: projectMcpToken(session.projectMcp) } : {}) }
         })
   session.codexProcess = proc
   session.codexInitialized = false
@@ -2846,19 +2900,20 @@ async function ensureCodexThread(session: AgentSession, protectExecution = false
   assertManagedAccount(session)
   while (protectExecution && session.codexProcess && !session.codexExecutionProtected) await stopCodexProcess(session)
   if (execution && session.codexExecutionProtected) execution.process = session.codexProcess
-  if (session.codexThreadId && session.codexProcess && session.codexThreadReady && (!session.managedMcp || session.codexMcpMode === session.permissionMode)) return session.codexThreadId
+  if (session.codexThreadId && session.codexProcess && session.codexThreadReady && (!(session.managedMcp || session.projectMcp) || session.codexMcpMode === session.permissionMode)) return session.codexThreadId
   startCodexProcess(session, protectExecution)
   const proc = session.codexProcess
   if (execution) execution.process = proc
   await ensureCodexInitialized(session)
   if (session.codexProcess !== proc) throw new Error('실행 연결이 변경되었습니다. 다시 보내 주세요.')
-  const managedConfig = session.managedMcp ? codexManagedConfig(session.managedMcp, session.permissionMode) : undefined
-  if (managedConfig) {
+  const managedConfig = session.projectMcp ? codexProjectConfig(session.projectMcp, session.permissionMode)
+    : session.managedMcp ? codexManagedConfig(session.managedMcp, session.permissionMode) : undefined
+  if (managedConfig && session.managedMcp) {
     const current = asRecord(await codexRequest(session, 'config/read', { includeLayers: false }))
     const configuredServers = asRecord(asRecord(current?.config)?.mcp_servers)
     for (const name of Object.keys(configuredServers ?? {})) {
       if (name === MANAGED_MCP) continue
-      if (!/^[a-zA-Z0-9_-]+$/.test(name)) throw new Error('기존 MCP 설정 이름을 안전하게 분리할 수 없습니다. 할일 전용 MCP 연결을 시작하지 않았습니다.')
+      if (!/^[a-zA-Z0-9_-]+$/.test(name)) throw new Error('기존 MCP 설정 이름을 안전하게 분리할 수 없습니다. 전용 MCP 연결을 시작하지 않았습니다.')
       managedConfig[`mcp_servers.${name}.enabled`] = false
     }
     assertManagedAccount(session)
@@ -2885,6 +2940,7 @@ async function ensureCodexThread(session: AgentSession, protectExecution = false
   session.codexThreadReady = true
   session.codexMcpMode = session.permissionMode
   if (session.managedMcp) session.managedMcpReady = true
+  if (session.projectMcp) session.projectMcpReady = true
   assertManagedAccount(session)
   emit(session, {
     type: 'session:init',
@@ -3327,6 +3383,7 @@ function handleCodexNotification(session: AgentSession, message: Record<string, 
   const itemType = stringValue(asRecord(params.item)?.type)
   if (turnId && turnId !== session.codexTurnWaiter?.turnId && method.startsWith('item/') &&
     itemType !== 'collabAgentToolCall' && itemType !== 'subAgentActivity') return
+  if (turnId && session.codexTurnWaiter && turnId !== session.codexTurnWaiter.turnId && method === 'thread/tokenUsage/updated') return
   if (method === 'thread/settings/updated') {
     const settings = asRecord(params.threadSettings)
     const model = stringValue(settings?.model)
@@ -4235,6 +4292,8 @@ export function sendAgentAuthInput(sessionId: string, input: AgentAuthInput): Ag
 }
 
 function shouldAutoAllow(session: AgentSession, toolName: string): boolean {
+  const project = projectToolDecision(toolName, session.permissionMode)
+  if (project) return project === 'allow' && Boolean(session.projectMcp) && !projectSessionError(session)
   const managed = managedToolDecision(toolName, session.permissionMode)
   if (managed) return managed === 'allow' && !session.managedAccountInvalid && session.managedMcp?.epoch === agentMcpAccountEpoch()
   if (session.permissionMode === 'bypassPermissions') return true
@@ -4258,6 +4317,7 @@ function requestPermission(
     toolUseID: string
   }
 ): Promise<PermissionResult> {
+  if (projectToolName(toolName) && (!session.projectMcp || projectSessionError(session) || projectToolDecision(toolName, session.permissionMode) === 'deny')) return Promise.resolve({ behavior: 'deny', message: '이 프로젝트 연결에서 허용되지 않은 작업입니다.' })
   if (managedToolName(toolName) && (session.managedAccountInvalid || session.managedMcp?.epoch !== agentMcpAccountEpoch() || managedToolDecision(toolName, session.permissionMode) === 'deny')) return Promise.resolve({ behavior: 'deny', message: '이 할일 연결에서 허용되지 않은 작업입니다.' })
   if (isAskUserQuestionTool(toolName)) {
     return new Promise<PermissionResult>((resolve) => {
@@ -4499,6 +4559,8 @@ function prefetchClaudeSlashCommands(session: AgentSession): void {
 
 export function createAgentSession(opts: AgentCreateOptions, webContents: WebContents): AgentCommandResult {
   const existing = sessions.get(opts.id)
+  const projectError = projectSessionError(existing ?? { source: opts.source ?? 'local', workspaceContext: opts.workspaceContext }, opts.workspaceContext)
+  if (projectError) return { ok: false, error: projectError }
   if (existing) {
     existing.context = opts.context?.trim() || existing.context
     if (opts.workspaceContext) existing.workspaceContext = opts.workspaceContext
@@ -4728,7 +4790,12 @@ export function setAgentModel(sessionId: string, model?: string, reasoningEffort
   if (session.provider === 'claude' && reasoningEffort && !claudeEffort(reasoningEffort)) {
     return { ok: false, error: '지원하지 않는 Claude reasoning effort입니다.' }
   }
-  session.model = model?.trim() || undefined
+  const nextModel = model?.trim() || undefined
+  if (session.model !== nextModel) {
+    session.contextUsage = undefined
+    emitUsageUpdate(session)
+  }
+  session.model = nextModel
   session.reasoningEffort = reasoningEffort?.trim() || undefined
   const label = [
     `모델: ${session.model ?? '기본값'}`,
@@ -4836,7 +4903,7 @@ async function runCodexSlashCommand(
     await ensureCodexInitialized(session)
 
     if (name === '/mcp') {
-      if (session.workspaceContext?.todoManagement) return inspectAgentMcpStatus(session.id)
+      if (session.workspaceContext?.todoManagement || session.workspaceContext?.kind === 'project') return inspectAgentMcpStatus(session.id)
       const threadId = session.codexThreadId
       const result = await codexRequest(session, 'mcpServerStatus/list', {
         limit: 100,
@@ -5128,6 +5195,11 @@ function startNextQueuedMessage(session: AgentSession): void {
 }
 
 function startAgentTurn(session: AgentSession, input: AgentSendInput, codexCommand?: '/compact' | '/review'): void {
+  const projectError = projectSessionError(session, input.workspaceContext)
+  if (projectError) {
+    emit(session, { type: 'error', sessionId: session.id, message: projectError, recoverable: true })
+    return
+  }
   if (session.workspaceContext?.todoManagement === false || input.workspaceContext?.todoManagement === false) {
     emit(session, { type: 'error', sessionId: session.id, message: '종료된 할일 연결입니다. 새 할일 Agent를 열어 주세요.', recoverable: true })
     return
@@ -5174,6 +5246,7 @@ function startAgentTurn(session: AgentSession, input: AgentSendInput, codexComma
     try {
       await session.usageHydration
       assertManagedAccount(session)
+      const projectContext = workspaceContext?.kind === 'project' ? await prepareProjectContext(session) : undefined
       if (workspaceContext?.todoManagement && !session.managedMcp) {
         const connection = await getAgentMcpConnection()
         if (!connection) throw new Error('할일 Agent를 사용하려면 앱에서 JuriSupport에 연결해 주세요.')
@@ -5189,9 +5262,10 @@ function startAgentTurn(session: AgentSession, input: AgentSendInput, codexComma
         assertManagedAccount(session)
       }
       if (abortController.signal.aborted || session.running !== abortController) return
-      const context = workspaceContext
+      const baseContext = workspaceContext
         ? await currentAgentContext(workspaceContext, (caseId) => listTodos({ caseId, openOnly: true, enrichCaseDetails: false }), abortController.signal)
         : session.context
+      const context = [baseContext, projectContext].filter(Boolean).join('\n\n')
       if (abortController.signal.aborted || session.running !== abortController || sessions.get(session.id) !== session) return
       const prompt = prependAgentContext(context, renderPrompt(input))
       if (session.source === 'ssh') {
@@ -5212,6 +5286,7 @@ function startAgentTurn(session: AgentSession, input: AgentSendInput, codexComma
         return
       }
       if (session.managedMcp) session.managedMcpReady = false
+      if (session.projectMcp) session.projectMcpReady = false
       if (session.source === 'ssh') {
         await runRemoteAgentMessage(session, prompt, abortController)
         return
@@ -5237,7 +5312,7 @@ function startAgentTurn(session: AgentSession, input: AgentSendInput, codexComma
           effort: claudeEffort(session.reasoningEffort),
           tools: session.tools,
           allowedTools: session.allowedTools,
-          disallowedTools: [...(session.disallowedTools ?? []), ...(session.managedMcp ? managedDisallowedTools(session.managedMcp, session.permissionMode) : [])],
+          disallowedTools: [...(session.disallowedTools ?? []), ...(session.managedMcp ? managedDisallowedTools(session.managedMcp, session.permissionMode) : []), ...(session.projectMcp ? projectDisallowedTools(session.permissionMode) : [])],
           pathToClaudeCodeExecutable: packagedClaudeAgentSdkExecutable(),
           ...(process.platform !== 'win32' ? {
             spawnClaudeCodeProcess: (options: import('@anthropic-ai/claude-agent-sdk').SpawnOptions) => {
@@ -5270,22 +5345,26 @@ function startAgentTurn(session: AgentSession, input: AgentSendInput, codexComma
         }
       })
       claudeQuery = response
-      if (session.managedMcp) {
-        await withTimeout(response.initializationResult(), '할일 Agent 초기화')
+      if (session.managedMcp || session.projectMcp) {
+        const project = Boolean(session.projectMcp)
+        const label = project ? '프로젝트' : 'JuriSupport'
+        await withTimeout(response.initializationResult(), `${label} Agent 초기화`)
         assertManagedAccount(session)
-        const configured = await withTimeout(response.setMcpServers(claudeManagedServers(session.managedMcp, session.permissionMode)), 'JuriSupport 도구 연결')
-        if (Object.keys(configured.errors).length) throw new Error('JuriSupport 도구 연결 실패: ' + Object.values(configured.errors).join('; '))
-        const status = (await withTimeout(response.mcpServerStatus(), 'JuriSupport 연결 확인')).find((server) => server.name === MANAGED_MCP)
-        if (status?.status !== 'connected') throw new Error('JuriSupport 도구 연결을 확인할 수 없습니다.')
+        const servers = session.projectMcp ? claudeProjectServers(session.projectMcp, session.permissionMode) : claudeManagedServers(session.managedMcp!, session.permissionMode)
+        const configured = await withTimeout(response.setMcpServers(servers), `${label} 도구 연결`)
+        if (Object.keys(configured.errors).length) throw new Error(`${label} 도구 연결 실패: ` + Object.values(configured.errors).join('; '))
+        const status = (await withTimeout(response.mcpServerStatus(), `${label} 연결 확인`)).find((server) => server.name === (project ? PROJECT_MCP : MANAGED_MCP))
+        if (status?.status !== 'connected') throw new Error(`${label} 도구 연결을 확인할 수 없습니다.`)
         assertManagedAccount(session)
-        session.managedMcpReady = true
+        if (project) session.projectMcpReady = true
+        else session.managedMcpReady = true
       }
       setupSucceeded = true
       managedReady?.()
       const pollContextUsage = (): void => {
         if (contextUsagePending || abortController.signal.aborted || !contextUsageActive) return
         contextUsagePending = true
-        void withTimeout(response.getContextUsage(), '컨텍스트 사용량 확인', 5000)
+        void withTimeout(response.getContextUsage({ detail: 'summary' }), '컨텍스트 사용량 확인', 5000)
           .then((usage) => {
             if (!abortController.signal.aborted && contextUsageActive) rememberContextUsage(session, usage)
           })
@@ -5304,7 +5383,16 @@ function startAgentTurn(session: AgentSession, input: AgentSendInput, codexComma
         handleSdkMessage(session, sdkMessage)
         if (sdkMessage.type === 'result') sawResult = true
         else if ((sdkMessage.type === 'assistant' || sdkMessage.type === 'stream_event') && !sdkMessage.parent_tool_use_id) sawResult = false
-        if (sawResult && !hasRunningClaudeTasks(session)) endClaudeInput?.()
+        if (sawResult && !hasRunningClaudeTasks(session) && contextUsageActive) {
+          contextUsageActive = false
+          if (contextUsageTimer) clearInterval(contextUsageTimer)
+          const usage = await withTimeout(response.getContextUsage({ detail: 'summary' }), '최종 컨텍스트 사용량 확인', 5000).catch(() => undefined)
+          if (!abortController.signal.aborted && session.running === abortController) {
+            session.contextUsage = normalizeContextUsage(usage)
+            emitUsageUpdate(session)
+          }
+          endClaudeInput?.()
+        }
       }
       if (!abortController.signal.aborted && session.running === abortController && !hasRunningClaudeTasks(session)) {
         emit(session, { type: 'status', sessionId, status: 'idle' })
@@ -5350,6 +5438,8 @@ function startAgentTurn(session: AgentSession, input: AgentSendInput, codexComma
 export function sendAgentMessage(sessionId: string, input: AgentSendInput): AgentCommandResult {
   const session = sessions.get(sessionId)
   if (!session) return { ok: false, error: 'Agent 세션을 찾을 수 없습니다.' }
+  const projectError = projectSessionError(session, input.workspaceContext)
+  if (projectError) return { ok: false, error: projectError }
   if (session.authProcess) return { ok: false, error: '로그인 절차가 진행 중입니다.' }
   if (isEmptyAgentInput(input)) {
     return { ok: false, error: '전송할 프롬프트나 첨부가 필요합니다.' }
@@ -5390,6 +5480,12 @@ export function sendAgentMessage(sessionId: string, input: AgentSendInput): Agen
 export function inspectAgentMcpStatus(sessionId: string): AgentCommandResult {
   const session = sessions.get(sessionId)
   if (!session) return { ok: false, error: 'Agent 세션을 찾을 수 없습니다.' }
+  if (session.workspaceContext?.kind === 'project') {
+    emitProcessEvent(session, 'project-mcp-status', '프로젝트 자료 연결', session.projectMcpReady
+      ? '최근 요청에서 프로젝트 도구 연결을 확인했습니다. 매 요청마다 최신 목표·메모·연결 자료를 확인합니다.'
+      : '프로젝트 요청을 보내면 자료 도구를 연결하고 연결 성공 후 실행합니다.', 'completed')
+    return { ok: true }
+  }
   if (session.workspaceContext?.todoManagement === false) return { ok: false, error: '종료된 할일 연결입니다. 새 할일 Agent를 열어 주세요.' }
   if (session.workspaceContext?.todoManagement) {
     if (session.managedAccountInvalid) return { ok: false, error: '계정이 변경되었습니다. 새 할일 Agent를 열어 주세요.' }
@@ -5616,6 +5712,9 @@ export function closeAgentSession(sessionId: string, webContents?: WebContents):
     session.viewers.delete(webContents.id)
     if (session.viewers.size > 0) return { ok: true }
   }
+  releaseProjectMcp(sessionId)
+  session.projectMcp = undefined
+  session.projectMcpReady = false
   // 탭을 닫으면 디바운스를 기다리지 않고 "한 일/다음" 요약을 즉시 남긴다 (best effort).
   if (session.workSummaryTimer) {
     clearTimeout(session.workSummaryTimer)
@@ -5659,6 +5758,7 @@ export function closeAgentSession(sessionId: string, webContents?: WebContents):
 
 export function disposeAgentSessions(): void {
   for (const id of [...sessions.keys()]) closeAgentSession(id)
+  disposeProjectMcp()
 }
 
 export function reconnectAgentSessions(): void {

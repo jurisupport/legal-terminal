@@ -64,6 +64,16 @@ const filePromises = require('fs/promises')
 const mediaMocks = { electron, './settings': settings, './remoteFs': remote, '../shared/media': shared, 'fs/promises': { ...filePromises, stat: (file, ...args) => frozenSource?.path === file ? Promise.resolve(frozenSource.info) : filePromises.stat(file, ...args) } }
 const fastGrace = (source) => source.replace('const EPHEMERAL_GRACE_MS = 10_000', 'const EPHEMERAL_GRACE_MS = 50')
 const media = await load('main/media.ts', mediaMocks, '', fastGrace)
+const downloads = await load('main/index.ts', { './media': media, './remoteFs': remote }, '', (source) => {
+  const parsed = ts.createSourceFile('index.ts', source, ts.ScriptTarget.Latest, true)
+  const download = parsed.statements.find((node) => ts.isFunctionDeclaration(node) && node.name?.text === 'downloadRemotePlanWithProgress')
+  assert.ok(download, 'Exercise the shared single/multiple/folder download implementation')
+  return `import { mkdir, writeFile } from 'fs/promises';
+import { dirname } from 'path';
+import { rfsReadBytes } from './remoteFs';
+import { copyCachedMedia } from './media';
+export ${download.getText(parsed)}`
+})
 const handlers = new Map()
 media.registerMediaIpc({ handle: (name, fn) => handlers.set(name, fn) })
 const sender = (id) => Object.assign(new EventEmitter(), { id, isDestroyed: () => false, send() {} })
@@ -240,13 +250,38 @@ try {
   const cached = await call(a, 'open', { path: remotePath, requestId: 'cached' })
   assert.equal(cached.versionId, downloaded.versionId)
   assert.equal(reads.get('/slow.mp4'), 1, 'cache hit skips remote body')
+  const savedPath = join(root, 'exports', 'slow.mp4')
+  const save = async (source, destination = savedPath) => {
+    const updates = []
+    assert.equal(await downloads.downloadRemotePlanWithProgress({ dirs: [], files: [{ source, destPath: destination, label: 'saved' }] }, destination, (update) => updates.push(update)), 1)
+    assert.equal(updates.at(-1).completedFiles, 1, 'cache copies finish normal save progress')
+    return readFile(destination)
+  }
+  assert.equal(sha(await save(remotePath)), downloaded.versionId, 'saved file matches the viewed bytes')
+  assert.equal(reads.get('/slow.mp4'), 1, 'saving a viewed video must not download its body again')
   const reconnect = sender(3)
   const restoredHandlers = new Map()
   const restarted = await load('main/media.ts', mediaMocks)
   restarted.registerMediaIpc({ handle: (name, fn) => restoredHandlers.set(name, fn) })
   const restored = await restoredHandlers.get('media:open')({ sender: reconnect }, { path: remotePath, requestId: 'restored', versionId: downloaded.versionId })
   assert.equal(restored.versionId, downloaded.versionId, 'metadata survives restart')
+  assert.equal(await restarted.copyCachedMedia(remotePath, savedPath), true, 'persisted cache also supports saving')
+  assert.equal(reads.get('/slow.mp4'), 1, 'saving after restart skips the remote body')
   console.log('SFTP: shared transfer, independent cancellation, zero-body cache hit and persisted version lookup pass')
+
+  await writeFile(join(serverRoot, 'unseen.mp4'), 'unseen-media')
+  await writeFile(join(serverRoot, 'notes.txt'), 'plain-document')
+  const exportDir = join(root, 'batch')
+  const batchUpdates = []
+  assert.equal(await downloads.downloadRemotePlanWithProgress({
+    dirs: [exportDir],
+    files: ['slow.mp4', 'unseen.mp4', 'notes.txt'].map((name) => ({ source: `ssh://test/${name}`, destPath: join(exportDir, name), label: name }))
+  }, exportDir, (update) => batchUpdates.push(update)), 3)
+  assert.equal(sha(await readFile(join(exportDir, 'slow.mp4'))), downloaded.versionId)
+  assert.equal(await readFile(join(exportDir, 'unseen.mp4'), 'utf8'), 'unseen-media')
+  assert.equal(await readFile(join(exportDir, 'notes.txt'), 'utf8'), 'plain-document')
+  assert.equal(reads.get('/slow.mp4'), 1, 'mixed batch reuses only the available media cache')
+  assert.equal(batchUpdates.at(-1).completedFiles, 3)
 
   await writeFile(join(serverRoot, 'same-signature.mp4'), 'content-one')
   const fixedTime = Math.floor(Date.now() / 1000)
@@ -261,6 +296,29 @@ try {
   const stillCurrent = await call(a, 'open', { path: signatureOld.sourcePath, requestId: 'still-current' })
   assert.equal(stillCurrent.versionId, signatureNew.versionId, 'visiting old history must not select stale same-signature snapshot')
   assert.equal(reads.get('/same-signature.mp4'), 2, 'latest forced version reused without body download')
+  assert.equal((await save(signatureOld.sourcePath)).toString(), 'content-two', 'saving uses the latest observed version even after visiting history')
+  assert.equal(reads.get('/same-signature.mp4'), 2)
+  await writeFile(join(serverRoot, 'same-signature.mp4'), 'content-new')
+  await utimes(join(serverRoot, 'same-signature.mp4'), fixedTime + 2, fixedTime + 2)
+  assert.equal((await save(signatureOld.sourcePath)).toString(), 'content-new', 'mtime change rejects stale cache with the same size')
+  assert.equal(reads.get('/same-signature.mp4'), 3)
+  await writeFile(join(serverRoot, 'same-signature.mp4'), 'longer-new-content')
+  await utimes(join(serverRoot, 'same-signature.mp4'), fixedTime, fixedTime)
+  assert.equal((await save(signatureOld.sourcePath)).toString(), 'longer-new-content', 'size change rejects stale cache with the same mtime')
+  assert.equal(reads.get('/same-signature.mp4'), 4)
+  const latest = await call(a, 'open', { path: signatureOld.sourcePath, requestId: 'export-latest', force: true })
+  const cacheIndex = JSON.parse(await readFile(join(mediaRoot, 'media-review/index.json'), 'utf8'))
+  const latestBody = join(mediaRoot, 'media-review/files', cacheIndex.records.find((record) => record.versionId === latest.versionId).file)
+  await writeFile(latestBody, 'truncated')
+  assert.equal((await save(latest.sourcePath)).toString(), 'longer-new-content', 'incomplete cache falls back to the source')
+  await rm(latestBody)
+  assert.equal((await save(latest.sourcePath)).toString(), 'longer-new-content', 'deleted cache falls back to the source')
+  assert.equal(reads.get('/same-signature.mp4'), 7)
+  await writeFile(join(serverRoot, 'same-signature.mp4'), '')
+  assert.equal((await save(latest.sourcePath)).length, 0, 'an emptied source still follows normal download behavior')
+  await assert.rejects(media.copyCachedMedia(remotePath, exportDir), /EISDIR|EPERM|EACCES/, 'destination failures must propagate')
+  assert.equal(reads.get('/slow.mp4'), 1, 'destination errors must not trigger another transfer')
+  console.log('Saving: no repeat download, mixed batches, persisted/latest cache, changed/missing cache fallback and destination errors pass')
 
   const cancelled = call(a, 'open', { path: remotePath, requestId: 'cancel-last', force: true })
   const cancelledCheck = assert.rejects(cancelled, /취소|abort/i)
@@ -318,6 +376,8 @@ try {
   cacheEnabled = false
   await writeFile(join(serverRoot, 'ephemeral.mp3'), 'audio-preview')
   const ephemeral = await call(a, 'open', { path: 'ssh://test/ephemeral.mp3', requestId: 'ephemeral' })
+  assert.equal((await save(ephemeral.sourcePath)).toString(), 'audio-preview')
+  assert.equal(reads.get('/ephemeral.mp3'), 1, 'open playback cache is reusable when persistent caching is disabled')
   await call(a, 'release', ephemeral.token)
   const moved = await call(b, 'open', { path: ephemeral.sourcePath, requestId: 'moved', versionId: ephemeral.versionId })
   assert.equal(moved.versionId, ephemeral.versionId, 'short detach/reopen gap keeps ephemeral review')

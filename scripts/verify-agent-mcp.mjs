@@ -5,6 +5,7 @@ import { EventEmitter } from 'node:events'
 import vm from 'node:vm'
 import ts from 'typescript'
 import * as mcp from '../src/main/agent/agentMcp.ts'
+import * as projectMcp from '../src/main/agent/projectMcpConfig.ts'
 import * as executionLock from '../src/main/agent/agentExecutionLock.ts'
 import * as media from '../src/shared/media.ts'
 const token = 'synthetic-agent-jurisupport-secret-20260914'
@@ -50,6 +51,8 @@ const ctx={exports:serviceExports,console,process,Buffer,AbortController,URL,URL
     if(name==='@anthropic-ai/claude-agent-sdk')return{query}
     if(name==='../jurisupport')return{getAgentMcpConnection:async()=>({...connection,epoch}),agentMcpAccountEpoch:()=>epoch,onAgentMcpAccountChange:fn=>{accountChanged=fn},listTodos:async()=>[]}
     if(name==='./agentMcp')return mcp
+    if(name==='./projectMcpConfig')return projectMcp
+    if(name==='../projectAgent')return{releaseProjectMcp:()=>{},disposeProjectMcp:()=>{}}
     if(name==='./agentExecutionLock')return executionLock
     if(name==='./remoteAgentTransport')return{RemoteAgentTransport:class{
       constructor(options){launches.push([options.sshBin,[...options.sshArgs,options.command]]);return nextProcess??new FakeProcess()}

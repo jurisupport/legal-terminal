@@ -84,6 +84,7 @@ interface ParsedHead {
 }
 
 export interface SessionSearchContext {
+  projectId?: string
   query?: string
   displayTitle?: string
   caseNumber?: string
@@ -378,6 +379,7 @@ function matchIndexedSession(
   cwdAliases = new Set([comparablePath(cwd)])
 ): boolean {
   if (pathMatchesAny(meta.cwd, cwdAliases)) return true
+  if (context?.projectId) return false
   const needles = [
     context?.query,
     context?.caseNumber,

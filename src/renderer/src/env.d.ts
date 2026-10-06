@@ -3,6 +3,7 @@ import type { CaseManagementState, CaseManagementPatch } from '../../shared/case
 import type { RemotionPreviewOptions, RemotionPreviewSelection, RemotionPreviewResult } from '../../shared/remotionPreview'
 import type { MediaApi, MediaSelection, MediaViewState } from '../../shared/media'
 import type { AgentWorkspaceContext } from '../../shared/agentWorkspaceContext'
+import type { Project, ProjectInput } from '../../shared/project'
 
 export interface SshConn {
   host: string
@@ -85,7 +86,8 @@ export interface PtyCreateOpts {
 
 export interface TerminalTabPayload {
   selectedTaskId?: string
-  contextKind?: 'case' | 'global' | 'folder'
+  contextKind?: 'case' | 'global' | 'folder' | 'project'
+  projectId?: string
   todoManagement?: boolean
   id: string
   title: string
@@ -157,7 +159,7 @@ export interface WorkspaceDocTabPayload {
 
 export interface WorkspaceCaseTabPayload {
   selectedTaskId?: string
-  contextKind?: 'case' | 'global' | 'folder'
+  contextKind?: 'case' | 'global' | 'folder' | 'project'
   id: string
   name: string
   drafts: string
@@ -165,7 +167,8 @@ export interface WorkspaceCaseTabPayload {
   suggestedRecords?: string
   suggestedRecordOptions?: FolderMatchSuggestion[]
   meta?: {
-    contextKind?: 'case' | 'global' | 'folder'
+    contextKind?: 'case' | 'global' | 'folder' | 'project'
+    projectId?: string
     jsId?: string
     court?: string
     caseNumber?: string
@@ -323,6 +326,7 @@ export interface DictationTranscribeResult {
 }
 
 export interface SessionSearchContext {
+  projectId?: string
   query?: string
   displayTitle?: string
   caseNumber?: string
@@ -759,7 +763,8 @@ export interface TodoMutationInput extends TodoStatusOptions {
 }
 
 export interface TodoTerminalContext {
-  contextKind?: 'case' | 'global' | 'folder'
+  contextKind?: 'case' | 'global' | 'folder' | 'project'
+  projectId?: string
   terminalId?: string
   cwd?: string
   jsId?: string
@@ -948,6 +953,15 @@ export interface LtApi {
       content?: string
     ) => Promise<{ ok: boolean; path?: string; error?: string }>
     pathForFile: (file: File) => string
+    prepareDrag: (paths: string[]) => Promise<{
+      ok: boolean
+      id?: string
+      entries?: { source: string; file: string }[]
+      error?: string
+    }>
+    startDrag: (id: string) => void
+    dragPathsForFiles: (files: File[]) => string[]
+    onDragError: (cb: (message: string) => void) => () => void
     listPdfs: (dir: string) => Promise<{ name: string; path: string }[]>
     readText: (filePath: string) => Promise<{
       ext: string
@@ -980,6 +994,13 @@ export interface LtApi {
       inProgress?: boolean
       error?: string
     }>
+  }
+  projects: {
+    workspace: (id: string) => Promise<{ cwd: string; project: Project }>
+    list: () => Promise<Project[]>
+    save: (input: ProjectInput) => Promise<Project>
+    remove: (id: string, expectedUpdatedAt?: string) => Promise<void>
+    onChanged: (callback: () => void) => () => void
   }
   case: {
     getPairing: (drafts: string) => Promise<string | undefined>

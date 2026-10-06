@@ -1,4 +1,4 @@
-export type AgentContextKind = 'case' | 'global' | 'folder'
+export type AgentContextKind = 'case' | 'global' | 'folder' | 'project'
 
 export interface AgentWorkspaceContext {
   kind: AgentContextKind
@@ -6,6 +6,7 @@ export interface AgentWorkspaceContext {
   todoManagement?: boolean
   cwd: string
   appVersion?: string
+  projectId?: string
   caseId?: string
   selectedTaskId?: string
   court?: string
@@ -18,23 +19,34 @@ export interface AgentWorkspaceContext {
 
 export function resolveAgentContextKind(source: {
   contextKind?: AgentContextKind
+  projectId?: string
   jsId?: string
   caseNumber?: string
   caseName?: string
 }): AgentContextKind {
+  if (source.contextKind === 'project') return 'project'
   if (source.contextKind === 'global') return 'global'
   if (source.jsId || source.caseNumber || source.caseName || source.contextKind === 'case') return 'case'
   return 'folder'
 }
 
 export function buildAgentWorkspaceContext(context: AgentWorkspaceContext): string {
-  const { kind, cwd, appVersion, ...caseData } = context
+  const { kind, cwd, appVersion, projectId, ...caseData } = context
   const data = {
     contextKind: kind,
     appVersion,
-    ...(kind === 'case' ? { ...caseData, draftsFolder: cwd } : { workingDirectory: cwd })
+    ...(kind === 'case' ? { ...caseData, draftsFolder: cwd }
+      : kind === 'project' ? { workingDirectory: cwd, projectId } : { workingDirectory: cwd })
   }
-  const rules = kind === 'global'
+  const rules = kind === 'project'
+    ? `프로젝트 작업 범위:
+- projectId로 지정된 프로젝트의 최신 목표·메모·연결 사건·참고 폴더를 프로젝트 도구로 확인하세요. 이름만으로 다른 프로젝트나 사건을 선택하지 마세요.
+- 질문에 필요한 연결 자료를 골라 읽으세요. 연결된 모든 파일을 처음부터 일괄로 읽지 마세요.
+- 사건별 사실·주장·증거를 구분하고, 판단마다 어느 사건과 폴더의 어떤 자료를 근거로 삼았는지 밝히세요.
+- 접근할 수 없는 자료는 접근 실패로 알리세요. 자료가 비어 있거나 없다고 단정하지 마세요.
+- 사용자가 판단이나 결정의 기록을 요청하면 확인한 내용과 근거 출처를 project_record_note로 프로젝트 메모에 남기세요.
+- 새 산출물은 workingDirectory의 프로젝트 전용 작업 폴더에 저장하세요. 사용자가 요청한 범위를 넘어 연결 사건의 기록·서면을 일괄 수정하지 마세요.`
+    : kind === 'global'
     ? `전체 작업 범위:
 - 특정 사건을 전제로 하지 않는 사건 횡단 작업입니다. 작업을 위해 사건 작성서류 폴더를 자동 생성하지 마세요.
 - 항목별 사건 식별정보와 근거를 확인하고, 다른 사건의 자료를 혼합하지 마세요.

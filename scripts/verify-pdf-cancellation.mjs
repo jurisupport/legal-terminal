@@ -105,6 +105,7 @@ function harness(path = '/records/test.pdf') {
   render()
   return {
     reads, tasks, workers, ports, statuses, outlines,
+    setProps(update) { Object.assign(props, update); dirty = true; render() },
     async flush() { await new Promise(setImmediate); render(); await new Promise(setImmediate); render() },
     click(label) {
       const matches = nodes(tree).filter((node) => node.type === 'button' && text(node).trim() === label)
@@ -230,4 +231,17 @@ for (const password of [false, true]) {
   h.unmount()
 }
 
-console.log('PDF cancellation: stalled reads, stale success/failure, parser/password worker cleanup, remote polling, and retry passed')
+// A citation may arrive before PDF bytes/parsing finish; loading must not reset its requested page.
+for (const requested of [2, 12]) {
+  const h = harness()
+  h.setProps({ jumpTo: { path: '/records/test.pdf', page: requested, nonce: 1 } })
+  await loaded(h)
+  assert.equal(h.statuses.at(-1).page, Math.min(requested, 3), 'pending quote navigation survives loading and clamps to page count')
+  h.setProps({ jumpTo: { path: '/records/another.pdf', page: 1, nonce: 2 } })
+  assert.equal(h.statuses.at(-1).page, Math.min(requested, 3), 'a jump for another PDF must not affect this viewer')
+  h.setProps({ jumpTo: { path: '/records/test.pdf', page: 1, nonce: 3 } })
+  assert.equal(h.statuses.at(-1).page, 1, 'a loaded viewer must navigate to a new citation')
+  h.unmount()
+}
+
+console.log('PDF cancellation and citation navigation: stalled reads, cleanup, retry, pending page jumps, and document isolation passed')

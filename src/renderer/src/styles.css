@@ -158,6 +158,36 @@ body {
   min-height: 0;
   border-right: none;
 }
+.side-view-switch {
+  display: flex;
+  flex-shrink: 0;
+  gap: 4px;
+  padding: 8px;
+  border-bottom: 1px solid var(--border);
+}
+.side-view-switch button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  flex: 1;
+  padding: 7px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--fg-muted);
+  font: inherit;
+  cursor: pointer;
+}
+.side-view-switch button[aria-pressed='true'],
+.side-view-switch button:hover {
+  background: var(--bg);
+  color: var(--fg);
+}
+.side-view-switch button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
 .work-pane {
   display: flex;
   flex-direction: column;
@@ -166,6 +196,40 @@ body {
   background: var(--bg);
   position: relative;
 }
+.case-management-nav {
+  display: flex;
+  flex-shrink: 0;
+  gap: 4px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-alt);
+}
+.case-management-nav button,
+.project-open-button {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border: 0;
+  border-radius: 6px;
+  color: var(--fg-muted);
+  background: transparent;
+  font: inherit;
+  cursor: pointer;
+}
+.case-management-nav button[aria-pressed='true'],
+.project-open-button[aria-pressed='true'] {
+  color: var(--fg);
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+}
+.case-management-nav button:hover,
+.project-open-button:hover { color: var(--fg); background: var(--bg-activity); }
+.case-management-nav button:focus-visible,
+.project-open-button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.project-open-button { flex-shrink: 0; margin: 0 8px 6px; }
+.shell.project-management > .work-left { grid-column: workleft-start / workright-end; }
+.shell.project-management > .work-right,
+.shell.project-management > .pane-resizer-work { display: none; }
 .work-left {
   grid-area: workleft;
   border-right: 1px solid var(--border);
@@ -356,6 +420,37 @@ body {
   max-height: calc(100vh - 92px);
   overflow: auto;
   padding: 6px;
+}
+.case-tabs-filter {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+}
+.case-tabs-filter label {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  cursor: pointer;
+}
+.case-tabs-filter input {
+  margin: 0;
+  accent-color: var(--accent);
+}
+.case-tabs-filter button {
+  padding: 4px 6px;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  background: transparent;
+  color: var(--fg);
+  cursor: pointer;
+}
+.case-tabs-filter button:disabled {
+  opacity: 0.45;
+  cursor: default;
 }
 .case-tabs-empty {
   min-height: 72px;

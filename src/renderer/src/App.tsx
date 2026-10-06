@@ -13,6 +13,7 @@ import {
   type ReactNode
 } from 'react'
 import Terminal from './terminal/Terminal'
+import CaseSidebar, { type SidebarCase, type SidebarTask } from './CaseSidebar'
 import AgentPanel, {
   DiffPreview,
   type AgentAttachmentRequest,
@@ -63,6 +64,8 @@ import MarkdownEditor, {
 import { markdownToPlainText, writeMarkdownClipboard } from './markdownClipboard'
 import FindBar from './search/FindBar'
 import CasesDashboard, { JS_TOKEN_UPDATED_EVENT } from './dashboard/CasesDashboard'
+import ProjectsDashboard from './dashboard/ProjectsDashboard'
+import type { Project, ProjectCaseLink, ProjectFolderLink } from '../../shared/project'
 import { clearCaseListCache } from './dashboard/caseListCache'
 import UpcomingHearings from './dashboard/UpcomingHearings'
 import { isActiveHearing } from './dashboard/hearings'
@@ -182,7 +185,7 @@ const DEFAULT_TERM_FONT_SIZE = 13
 const DEFAULT_MD_FONT_SIZE = 14
 const DEFAULT_AGENT_FONT_SIZE = 13
 const DEFAULT_AGENT_PROVIDER: AgentProvider = 'claude'
-const DEFAULT_SIDE_PANE_WIDTH = 220
+const DEFAULT_SIDE_PANE_WIDTH = 272
 const DEFAULT_EVIDENCE_PANE_WIDTH = 280
 const MIN_SIDE_PANE_WIDTH = 160
 const MIN_WORK_PANE_WIDTH = 220
@@ -377,6 +380,7 @@ interface TermTab {
   todoManagement?: boolean
   selectedTaskId?: string
   contextKind?: AgentContextKind
+  projectId?: string
   id: string
   title: string
   kind?: 'terminal' | 'agent'
@@ -411,7 +415,7 @@ interface TermTab {
 
 type WorkTabKind = 'doc' | 'terminal'
 type WorkTabKey = `${WorkTabKind}:${string}`
-type TermRunStatus = 'working' | 'done' | 'question'
+type TermRunStatus = 'idle' | 'working' | 'done' | 'question'
 
 const docSide = (tab?: DocTab): DockSide => tab?.side ?? 'left'
 const termSide = (tab?: TermTab): DockSide => tab?.side ?? 'right'
@@ -570,6 +574,7 @@ function useRemoteFileVersion(path?: string, intervalMs = 2500): number {
 }
 interface CaseMeta {
   contextKind?: AgentContextKind
+  projectId?: string
   jsId?: string
   court?: string
   caseNumber?: string
@@ -1000,6 +1005,7 @@ const sessionContextForTerm = (source?: TermTab, query = ''): SessionSearchConte
   if (!source && !query.trim()) return undefined
   return {
     query: query.trim() || undefined,
+    projectId: source?.contextKind === 'project' ? source.projectId : undefined,
     displayTitle: koreanSessionTitle(source),
     caseNumber: source?.caseNumber,
     caseName: source?.caseName,
@@ -1014,6 +1020,7 @@ const sessionContextForTerm = (source?: TermTab, query = ''): SessionSearchConte
 
 const agentWorkspaceContextForTerm = (source: TermTab, appVersion?: string): AgentWorkspaceContext => ({
   kind: resolveAgentContextKind(source),
+  projectId: source.projectId,
   todoManagement: source.todoManagement,
   cwd: source.cwd,
   appVersion,
@@ -1045,7 +1052,7 @@ const sessionRememberInput = (
   ssh: source.ssh
 })
 
-const sessionListCache = new Map<string, SessionListEntry[]>()
+const sessionListCache = new Map<string, { entries: SessionListEntry[]; fetchedAt: number }>()
 const sessionListInflight = new Map<string, Promise<SessionListEntry[]>>()
 
 const sessionListKey = (
@@ -1075,7 +1082,7 @@ const cachedPastSessions = (
   limit = 40
 ): SessionListEntry[] | undefined => {
   const context = sessionContextForTerm(source, query)
-  return sessionListCache.get(sessionListKey(cwd, source?.ssh, context, limit))
+  return sessionListCache.get(sessionListKey(cwd, source?.ssh, context, limit))?.entries
 }
 
 const loadPastSessions = (
@@ -1087,11 +1094,12 @@ const loadPastSessions = (
 ): Promise<SessionListEntry[]> => {
   const context = sessionContextForTerm(source, query)
   const key = sessionListKey(cwd, source?.ssh, context, limit)
+  const inflight = sessionListInflight.get(key)
+  if (inflight) return inflight
   if (!refresh) {
     const cached = sessionListCache.get(key)
-    if (cached) return Promise.resolve(cached)
-    const inflight = sessionListInflight.get(key)
-    if (inflight) return inflight
+    const freshMs = source?.ssh ? 3 * 60_000 : 60_000
+    if (cached && Date.now() - cached.fetchedAt < freshMs) return Promise.resolve(cached.entries)
   }
   const request = window.lt.sessions
     .list(cwd, source?.ssh, context, limit)
@@ -1116,7 +1124,7 @@ const loadPastSessions = (
             .catch(() => {})
         })
       }
-      sessionListCache.set(key, entries)
+      sessionListCache.set(key, { entries, fetchedAt: Date.now() })
       return entries
     })
     .finally(() => {
@@ -1126,14 +1134,14 @@ const loadPastSessions = (
   return request
 }
 
-// 사건/폴더를 열면 세션 목록에 더해 최근 세션 transcript까지 미리 받아둔다.
-// 에이전트 탭이 하나도 없어도 이어서 열기 시 히스토리가 즉시 보이게 하기 위함.
+// 원격에서는 목록만 읽고, 대화 본문은 작업을 선택할 때 불러온다.
 const PRELOAD_TRANSCRIPT_COUNT = 3
 
 const preloadPastSessions = (cwd?: string, source?: TermTab): void => {
   if (!cwd) return
   void loadPastSessions(cwd, source)
     .then((entries) => {
+      if (source?.ssh) return
       preloadSessionTranscripts(
         entries.slice(0, PRELOAD_TRANSCRIPT_COUNT).map((entry) => entry.sessionId),
         source?.ssh
@@ -1161,11 +1169,15 @@ const currentCaseSessionSource = (
     autoClaude: true,
     agentProvider: 'claude',
     contextKind: currentCase.meta?.contextKind,
+    projectId: currentCase.meta?.projectId,
     jsId: currentCase.meta?.jsId,
     court: currentCase.meta?.court,
     caseNumber: currentCase.meta?.caseNumber,
     caseName: currentCase.meta?.caseName,
     client: currentCase.meta?.client,
+    opponent: currentCase.meta?.opponent,
+    partyNames: currentCase.meta?.partyNames,
+    memo: currentCase.meta?.memo,
     ssh,
     sshLabel: currentCase.sshLabel ?? savedProfile?.label,
     profileId,
@@ -1177,6 +1189,7 @@ const todoContextForTerm = (term: TermTab): TodoTerminalContext => ({
   terminalId: term.id,
   cwd: term.cwd,
   contextKind: term.contextKind,
+  projectId: term.projectId,
   jsId: term.jsId,
   court: term.court,
   caseNumber: term.caseNumber,
@@ -1272,6 +1285,7 @@ const caseProfileKey = (source: CurrentCase): string =>
 
 const caseIdentityKey = (source: CurrentCase): string => {
   const profileKey = caseProfileKey(source)
+  if (source.meta?.contextKind === 'project') return `project:${source.meta.projectId ?? normalizedCasePathKey(source.drafts)}`
   if (source.meta?.contextKind === 'global') return `global:${profileKey}:${normalizedCasePathKey(source.remotePath ?? source.drafts)}`
   if (source.meta?.jsId) return `js:${profileKey}:${source.meta.jsId}`
   return `drafts:${profileKey}:${normalizedCasePathKey(source.remotePath ?? source.drafts)}`
@@ -1295,6 +1309,8 @@ const findCaseTab = (
   return tabs.find((tab) => caseIdentityKey(tab) === identity) ?? tabs.find((tab) =>
     !!path &&
     (tab.meta?.contextKind === 'global') === (source.meta?.contextKind === 'global') &&
+    (tab.meta?.contextKind === 'project') === (source.meta?.contextKind === 'project') &&
+    (source.meta?.contextKind !== 'project' || tab.meta?.projectId === source.meta.projectId) &&
     caseProfileKey(tab) === caseProfileKey(source) &&
     normalizedCasePathKey(tab.remotePath ?? tab.drafts) === path &&
     !(tab.meta?.jsId && source.meta?.jsId && tab.meta.jsId !== source.meta.jsId)
@@ -1574,6 +1590,10 @@ export default function App(): JSX.Element {
   const docOnly = window.location.hash.includes('docOnly')
   const termOnly = window.location.hash.includes('termOnly')
   const [mode, setMode] = useState<Mode>('explorer')
+  const [caseDashboardView, setCaseDashboardView] = useState<'cases' | 'projects'>('cases')
+  const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null)
+  const projectOpeningRef = useRef(new Map<string, Promise<void>>())
+  const projectManagementVisible = mode === 'cases' && caseDashboardView === 'projects'
   const [explorerVisible, setExplorerVisible] = useState(true)
   const [paneWidths, setPaneWidths] = useState<{
     side: number
@@ -1617,11 +1637,16 @@ export default function App(): JSX.Element {
   const [activeTerm, setActiveTerm] = useState<string>('')
   const [mountedTermIds, setMountedTermIds] = useState<Set<string>>(new Set())
   const [caseTabs, setCaseTabs] = useState<CaseWorkspaceTab[]>([])
+  const [discoveredCaseTabs, setDiscoveredCaseTabs] = useState<CaseWorkspaceTab[]>([])
+  const [savedCaseLabels, setSavedCaseLabels] = useState<WorkspaceEntry[]>([])
   const [activeCaseTabId, setActiveCaseTabId] = useState<string>('')
   const activeCaseTabIdRef = useRef(activeCaseTabId)
   activeCaseTabIdRef.current = activeCaseTabId
   const caseTabCycleOrderRef = useRef<string[]>([])
   const [caseTabsOpen, setCaseTabsOpen] = useState(false)
+  const [sidebarView, setSidebarView] = useState<'cases' | 'files'>('cases')
+  const [caseAttentionOnly, setCaseAttentionOnly] = useState(false)
+  const caseAttentionOrderRef = useRef<string[]>([])
   const [caseTabContextMenu, setCaseTabContextMenu] = useState<{
     x: number
     y: number
@@ -1677,6 +1702,7 @@ export default function App(): JSX.Element {
   const [retainedSharedCases, setRetainedSharedCases] = useState<Set<string>>(new Set())
   const refreshAutomaticCasesRef = useRef<() => Promise<void>>(async () => {})
   const automaticCasesLoadingRef = useRef(false)
+  const lastCaseDiscoveryRef = useRef(0)
   const [workspaceSyncError, setWorkspaceSyncError] = useState('')
   const autoWorkspaceSaveChainRef = useRef<Promise<void>>(Promise.resolve())
   const saveAllCaseWorkspacesRef = useRef<() => Promise<boolean>>(async () => true)
@@ -1701,10 +1727,18 @@ export default function App(): JSX.Element {
   const [notifyDone, setNotifyDone] = useState(true)
   // SSH 접속 프로필 + 접속 선택/원격 폴더 선택 모달 상태
   const [sshProfiles, setSshProfiles] = useState<SshProfile[]>([])
+  const workspaceHostsSignature = JSON.stringify(sshProfiles)
+  const workspaceHostsRef = useRef(workspaceHostsSignature)
+  workspaceHostsRef.current = workspaceHostsSignature
   const [workspaceSettingsReady, setWorkspaceSettingsReady] = useState(false)
   const [connMenu, setConnMenu] = useState(false)
   const [newCaseOpen, setNewCaseOpen] = useState(false)
   const [remotePick, setRemotePick] = useState<SshProfile | null>(null)
+  const [projectFolderPick, setProjectFolderPick] = useState<{
+    profile?: SshProfile
+    resolve: (folder: ProjectFolderLink | null) => void
+    reject: (error: unknown) => void
+  } | null>(null)
   const [draftsPick, setDraftsPick] = useState<{
     profile: SshProfile
     startPath?: string
@@ -1779,6 +1813,10 @@ export default function App(): JSX.Element {
       .catch(() => setBridgeStatus('preload 브리지 미연결'))
     window.lt?.settings.get().then(applySettings)
     window.lt?.case.history().then(setRecent)
+    // 이전 버전의 최근 사건에는 이름만 남아 있다. 로컬 저장본의 표시 정보만 보완한다.
+    void window.lt.workspace.list().then((result) => {
+      if (result.ok) setSavedCaseLabels(result.entries ?? [])
+    }).catch(() => {})
     const onSettingsUpdated = (e: Event): void => applySettings((e as CustomEvent<AppSettings>).detail)
     window.addEventListener(SETTINGS_UPDATED_EVENT, onSettingsUpdated)
     return () => window.removeEventListener(SETTINGS_UPDATED_EVENT, onSettingsUpdated)
@@ -1982,7 +2020,7 @@ export default function App(): JSX.Element {
   const activateDocTab = (id: string): void => {
     const tab = docTabs.find((t) => t.id === id)
     const caseTabIdValue = tab?.caseTabId ?? activeCaseTabId
-    clearCaseDocumentUpdates(caseTabIdValue)
+    clearCaseDocumentUpdates(caseTabIdValue, tab?.path)
     setActiveDoc(id)
     const side = docSide(tab)
     const key = docKey(id)
@@ -2023,7 +2061,6 @@ export default function App(): JSX.Element {
     const tab = termTabs.find((t) => t.id === id)
     const caseTabIdValue = tab?.caseTabId ?? activeCaseTabId
     if (tab?.caseTabId) setActiveCaseTabId(tab.caseTabId)
-    clearCaseDocumentUpdates(caseTabIdValue)
     setActiveTerm(id)
     const side = termSide(tab)
     const key = termKeyOf(id)
@@ -2420,12 +2457,15 @@ export default function App(): JSX.Element {
     setWorkActive('left', docKey(tab.id))
   }
 
-  const clearCaseDocumentUpdates = (caseTabIdValue: string | undefined): void => {
-    if (!caseTabIdValue) return
+  const clearCaseDocumentUpdates = (caseTabIdValue: string | undefined, path: string | undefined): void => {
+    if (!caseTabIdValue || !path) return
     setCaseDocumentUpdates((updates) => {
-      if (!updates[caseTabIdValue]) return updates
+      const current = updates[caseTabIdValue]
+      if (!current?.paths.includes(path)) return updates
       const next = { ...updates }
-      delete next[caseTabIdValue]
+      const paths = current.paths.filter((item) => item !== path)
+      if (paths.length) next[caseTabIdValue] = { ...current, paths }
+      else delete next[caseTabIdValue]
       return next
     })
   }
@@ -2445,7 +2485,11 @@ export default function App(): JSX.Element {
         let changed = false
         for (const path of paths) {
           const caseTabIdValue = explicitCaseTabId ?? inferCaseTabIdForPath(path, caseTabs)
-          if (!caseTabIdValue || !liveCaseTabIds.has(caseTabIdValue) || caseTabIdValue === activeCaseTabId) continue
+          if (!caseTabIdValue || !liveCaseTabIds.has(caseTabIdValue)) continue
+          const visible = caseTabIdValue === activeCaseTabId && docTabs.some((doc) =>
+            doc.path === path && caseIdForDoc(doc) === caseTabIdValue &&
+            activeWorkKeyForSide(docSide(doc)) === docKey(doc.id))
+          if (visible && document.hasFocus()) continue
           const current = next[caseTabIdValue]
           const pathSet = new Set(current?.paths ?? [])
           pathSet.add(path)
@@ -2457,7 +2501,7 @@ export default function App(): JSX.Element {
     }
     window.addEventListener(REMOTE_FILE_CHANGED_EVENT, onDocumentChanged)
     return () => window.removeEventListener(REMOTE_FILE_CHANGED_EVENT, onDocumentChanged)
-  }, [activeCaseTabId, caseTabs])
+  }, [activeCaseTabId, activeWork, caseTabs, docTabs, termTabs])
 
   const openFile = (
     path: string,
@@ -2476,6 +2520,7 @@ export default function App(): JSX.Element {
       activateDocTab(existing.id)
       return existing.id
     }
+    clearCaseDocumentUpdates(caseTabIdValue, path)
     const kind = docKindForPath(path)
     const tab: DocTab = { id: newId(), title: name, kind, caseTabId: caseTabIdValue, path, side }
     setDocTabs((t) => [...t, tab])
@@ -2579,6 +2624,7 @@ export default function App(): JSX.Element {
       name: t.title,
       meta: {
         contextKind: t.contextKind,
+        projectId: t.projectId,
         jsId: t.jsId,
         court: t.court,
         caseNumber: t.caseNumber,
@@ -2682,7 +2728,7 @@ export default function App(): JSX.Element {
     }
     const sessionSource = currentCaseSessionSource(source, sshProfiles)
     preloadPastSessions(sessionSource?.cwd, sessionSource)
-    void window.lt.case.addHistory({
+    if (source.meta?.contextKind !== 'project') void window.lt.case.addHistory({
       drafts: source.drafts,
       records: source.records,
       name: source.name
@@ -2713,7 +2759,7 @@ export default function App(): JSX.Element {
       registerCaseTabFromTerm(tab, true)
       setWorkActive(termSide(tab), termKeyOf(tab.id))
       preloadPastSessions(tab.cwd, tab)
-      void window.lt.case
+      if (receivedCase.meta?.contextKind !== 'project') void window.lt.case
         .addHistory({ drafts: receivedCase.drafts, records: receivedCase.records, name: receivedCase.name })
         .then(setRecent)
       return
@@ -2873,7 +2919,7 @@ export default function App(): JSX.Element {
     }
     setCurrentCase(source)
     registerCaseTab(source, activeTermId)
-    window.lt.case.addHistory({ drafts, records, name }).then(setRecent)
+    if (caseMeta?.contextKind !== 'project') window.lt.case.addHistory({ drafts, records, name }).then(setRecent)
   }
 
   // ── 사건 작업 탭 (기본: Agent Panel, 명시 fallback: PTY 터미널) ──
@@ -3378,6 +3424,7 @@ export default function App(): JSX.Element {
       renamed: !!title, // 과거 세션 제목을 그대로 쓰면 자동 갱신 안 함
       todoManagement: source?.todoManagement,
       contextKind: source?.contextKind ?? base?.meta?.contextKind,
+      projectId: source?.projectId ?? base?.meta?.projectId,
       jsId: source?.jsId,
       court: source?.court,
       caseNumber: source?.caseNumber,
@@ -3507,6 +3554,7 @@ export default function App(): JSX.Element {
       createdAt: Date.now(),
       todoManagement: cur.todoManagement,
       contextKind: cur.contextKind,
+      projectId: cur.projectId,
       jsId: cur.jsId,
       court: cur.court,
       caseNumber: cur.caseNumber,
@@ -3554,6 +3602,7 @@ export default function App(): JSX.Element {
       createdAt: Date.now(),
       todoManagement: cur?.todoManagement,
       contextKind: cur?.contextKind ?? currentCase?.meta?.contextKind,
+      projectId: cur?.projectId ?? currentCase?.meta?.projectId,
       jsId: cur?.jsId ?? currentCase?.meta?.jsId,
       court: cur?.court ?? currentCase?.meta?.court,
       caseNumber: cur?.caseNumber ?? currentCase?.meta?.caseNumber,
@@ -3885,10 +3934,14 @@ export default function App(): JSX.Element {
   // 컨벤션: 보고 있는 작업(탭 표시 + 창 포커스)은 조용히 넘어가고, 그 외에는 알린다.
   // 창 포커스 중 → 앱 내 알림음 + 토스트. 비포커스 → OS 네이티브 알림(소리·집중 모드는 OS가 결정) + 독 주목.
   const onTermStatus = (id: string, status: TermRunStatus): void => {
-    termStatusRef.current = new Map(termStatusRef.current).set(id, status)
+    const previousStatus = termStatusRef.current.get(id)
+    // 같은 렌더 사이에 done → idle이 도착해도 최신 완료 상태를 유지한다.
+    const nextStatus = status === 'idle' && previousStatus === 'done' ? 'done' : status
+    termStatusRef.current = new Map(termStatusRef.current).set(id, nextStatus)
     setTermStatus((m) => {
+      if (m.get(id) === nextStatus) return m
       const n = new Map(m)
-      n.set(id, status)
+      n.set(id, nextStatus)
       return n
     })
     const clearNotices = (): void => {
@@ -3900,6 +3953,10 @@ export default function App(): JSX.Element {
       })
       dismissToastForTerm(id)
       window.lt.app.dismissNotify(id)
+    }
+    if (status === 'idle') {
+      if (nextStatus !== 'done') clearNotices()
+      return
     }
     if (status === 'working') {
       clearNotices()
@@ -4798,12 +4855,16 @@ export default function App(): JSX.Element {
       agentProvider: t.kind === 'agent' ? resolveAgentProvider(t.agentProvider, ssh) : undefined,
       todoManagement: typeof t.todoManagement === 'boolean' ? t.todoManagement : undefined,
       selectedTaskId: typeof t.selectedTaskId === 'string' ? t.selectedTaskId : undefined,
-      contextKind: t.contextKind === 'global' || t.contextKind === 'case' || t.contextKind === 'folder' ? t.contextKind : undefined,
+      contextKind: t.contextKind === 'global' || t.contextKind === 'case' || t.contextKind === 'folder' || t.contextKind === 'project' ? t.contextKind : undefined,
+      projectId: typeof t.projectId === 'string' ? t.projectId : undefined,
       jsId: typeof t.jsId === 'string' ? t.jsId : undefined,
       court: typeof t.court === 'string' ? t.court : undefined,
       caseNumber: typeof t.caseNumber === 'string' ? t.caseNumber : undefined,
       caseName: typeof t.caseName === 'string' ? t.caseName : undefined,
       client: typeof t.client === 'string' ? t.client : undefined,
+      opponent: typeof t.opponent === 'string' ? t.opponent : undefined,
+      partyNames: typeof t.partyNames === 'string' ? t.partyNames : undefined,
+      memo: typeof t.memo === 'string' ? t.memo : undefined,
       sessionTitle: typeof t.sessionTitle === 'string' ? t.sessionTitle : undefined,
       renamed: !!t.renamed,
       createdAt: Date.now(),
@@ -4972,7 +5033,6 @@ export default function App(): JSX.Element {
     const nextCurrentCase = restoredCase ?? (activeTermTab ? currentCaseFromTerm(activeTermTab) : currentCase)
     setCurrentCase(nextCurrentCase)
     setActiveCaseTabId(nextActiveCaseTabId)
-    nextTerms.forEach((term) => preloadPastSessions(term.cwd, term))
     const restoredCaseSource = currentCaseSessionSource(nextCurrentCase, sshProfiles)
     if (restoredCaseSource) preloadPastSessions(restoredCaseSource.cwd, restoredCaseSource)
     if (snapshot.crop) {
@@ -5178,6 +5238,18 @@ export default function App(): JSX.Element {
       // Flush local closes before reading. Only applied responses are acknowledged
       // so a discarded read cannot turn an unseen remote tab into a local deletion.
       if (!(await saveAllCaseWorkspacesRef.current())) return
+      if (account !== todoAccountGeneration.current || workspaceHostsRef.current !== workspaceHostsSignature) return
+      // 열어 둔 사건만 최신화하고, 전체 사건 목록은 3분 동안 재사용한다.
+      if (Date.now() - lastCaseDiscoveryRef.current < 3 * 60_000) {
+        let failed = false
+        for (const tab of [...caseTabsRef.current]) {
+          if (account !== todoAccountGeneration.current || expectedTerms !== termTabsRef.current) return
+          if (!(await restoreAutomaticWorkspace(currentCaseFromCaseTab(tab), true))) failed = true
+          expectedTerms = termTabsRef.current
+        }
+        setWorkspaceSyncError(failed ? '사건탭 공유 실패 · 연결 후 다시 시도합니다' : '')
+        return
+      }
       // Query each host once even when it has multiple local profile names.
       const profiles = [...new Map(sshProfiles.map((profile) =>
         [`${profile.user}@${profile.host}:${profile.port ?? 22}`, profile])).values()]
@@ -5186,7 +5258,10 @@ export default function App(): JSX.Element {
         if (!result.ok) throw new Error(result.error)
         return { profile, result }
       }))
+      if (account !== todoAccountGeneration.current || workspaceHostsRef.current !== workspaceHostsSignature) return
       let failed = results.some((result) => result.status === 'rejected')
+      // 실패한 서버도 매 포커스마다 재접속하지 않는다. online 이벤트나 다음 주기에 재시도한다.
+      lastCaseDiscoveryRef.current = Date.now()
       for (const response of results) {
         if (response.status !== 'fulfilled') continue
         const { profile, result } = response.value
@@ -5207,13 +5282,12 @@ export default function App(): JSX.Element {
           const key = workspaceLocationKey(source)
           if (pendingCaseClosesRef.current.has(key)) continue
           const existing = findCaseTab(caseTabsRef.current, source)
-          if (snapshot.workspaceOpen === false && !existing) continue
           if (snapshot.workspaceOpen !== false) closedAutomaticCasesRef.current.delete(key)
           if (!existing) {
-            // Register the case first; the normal restore path supplies deduped agents.
-            restoreWorkspaceSnapshot({
-              ...agentTabsOnly(snapshot), terminals: [], currentCase: source
-            }, caseTabsRef.current.length === 0)
+            // 목록만 발견한다. 탭 복원과 자동 저장은 사용자가 사건을 열었을 때 시작한다.
+            const updatedAt = Date.parse(snapshot.savedAt) || 0
+            setDiscoveredCaseTabs((tabs) => upsertCaseTab(tabs, { ...caseTabFromCurrentCase(source), updatedAt }))
+            continue
           }
           if (!(await restoreAutomaticWorkspace(source, true))) failed = true
           expectedTerms = termTabsRef.current
@@ -5229,27 +5303,32 @@ export default function App(): JSX.Element {
       await autoWorkspaceSaveChainRef.current
     } finally {
       automaticCasesLoadingRef.current = false
+      if (workspaceHostsRef.current !== workspaceHostsSignature) void refreshAutomaticCasesRef.current()
     }
   }
 
-  const workspaceHostsSignature = JSON.stringify(sshProfiles)
   useEffect(() => {
     if (!workspaceSettingsReady || docOnly || termOnly) return
+    lastCaseDiscoveryRef.current = 0
     const refresh = (): void => { void refreshAutomaticCasesRef.current() }
+    const reconnect = (): void => {
+      lastCaseDiscoveryRef.current = 0
+      refresh()
+    }
     const flush = (): void => {
       autoWorkspaceSaveChainRef.current = autoWorkspaceSaveChainRef.current
         .then(async () => { await saveAllCaseWorkspacesRef.current() }).catch(() => {})
     }
     refresh()
     window.addEventListener('focus', refresh)
-    window.addEventListener('online', refresh)
+    window.addEventListener('online', reconnect)
     window.addEventListener('blur', flush)
     const timer = window.setInterval(() => {
       if (document.hasFocus()) refresh()
     }, 30_000)
     return () => {
       window.removeEventListener('focus', refresh)
-      window.removeEventListener('online', refresh)
+      window.removeEventListener('online', reconnect)
       window.removeEventListener('blur', flush)
       window.clearInterval(timer)
     }
@@ -5379,6 +5458,7 @@ export default function App(): JSX.Element {
 
   const openCaseListFromLauncher = (): void => {
     setNewCaseOpen(false)
+    setCaseDashboardView('cases')
     setMode('cases')
   }
 
@@ -6062,8 +6142,8 @@ export default function App(): JSX.Element {
     const targetTab = resolveClaudeAgentTargetTab(visibleTermTabs, activeTerm, activeWork) ?? activeTermTab
     const promptTarget = targetTab ?? sessionCaseSource
     void (async () => {
-      const d = docTabs.find((x) => x.id === activeDoc)
-      let docPath = opts?.docPath === null ? undefined : (opts?.docPath ?? d?.path)
+      const d = docTabsRef.current.find((x) => x.id === (opts?.selectionSource?.docId ?? activeDoc))
+      let docPath = opts?.docPath === null ? undefined : (opts?.docPath ?? opts?.selectionSource?.docPath ?? d?.path)
       let sourcePath = opts?.sourcePath
       let sourceTitle = opts?.sourceTitle
       // 대상 md 문서가 미저장 편집 중이면 작업본을 만들어 그걸 분석 기준으로 삼는다.
@@ -6100,14 +6180,17 @@ export default function App(): JSX.Element {
               text: opts.selectionSource.text ?? t
             }
           : undefined
-      if (t && isClaudeAgentTab(activeTermTab)) {
-        const attachment = selectionAttachmentForAgent(
-          t,
-          { docPath, docName, sourceLabel, selectionSource },
-          activeTermTab
-        )
-        queueAgentAttachment(activeTermTab, attachment, agentSelectionInputText(attachment))
-        return
+      if (t && !docOnly) {
+        const selectionTarget = isClaudeAgentTab(targetTab) ? targetTab : createClaudeAgentForPrompt(docPath)
+        if (selectionTarget) {
+          const attachment = selectionAttachmentForAgent(
+            t,
+            { docPath, docName, sourceLabel, selectionSource },
+            selectionTarget
+          )
+          queueAgentAttachment(selectionTarget, attachment, agentSelectionInputText(attachment))
+          return
+        }
       }
       const filePrompt =
         docPath && docName
@@ -6139,6 +6222,10 @@ export default function App(): JSX.Element {
       } else if (docName) {
         payload = filePrompt ? `${filePrompt}${opts?.instruction ? '' : '위 파일에 대해 '}` : `${ref} 파일에 대해 `
       } else return
+      const quotePage = selectionSource?.range?.startPage
+      if (typeof quotePage === 'number' && Number.isSafeInteger(quotePage) && quotePage > 0) {
+        payload = `인용 위치: PDF ${quotePage}쪽 (파일의 실제 쪽번호)\n${payload}`
+      }
       if (targetTab && !termTabsRef.current.some((term) => term.id === targetTab.id)) return
       sendClaude(payload, { displayText, contextPath: docPath, pasteOnly: true })
     })()
@@ -6354,8 +6441,11 @@ export default function App(): JSX.Element {
 
   // 독/작업표시줄 배지 = 미확인 완료·질문 개수
   useEffect(() => {
-    window.lt.app.setBadgeCount(termAttention.size)
-  }, [termAttention])
+    window.lt.app.setBadgeCount(new Set([
+      ...termAttention,
+      ...[...termStatus].filter(([, status]) => status === 'question').map(([id]) => id)
+    ]).size)
+  }, [termAttention, termStatus])
 
   // 창 포커스 복귀 → 화면에 보이는 작업의 알림(배지·토스트·OS 알림)은 확인한 것으로 처리.
   // OS 알림 클릭 → 해당 터미널/에이전트 탭으로 이동.
@@ -6397,10 +6487,9 @@ export default function App(): JSX.Element {
       tab.id === activeCaseTabId ||
       terms.some((term) => term.id === activeTerm) ||
       docs.some((doc) => doc.id === activeDoc)
-    const noticeTerms = active
-      ? []
-      : terms.filter((term) => termAttention.has(term.id) && !isTermVisibleInCurrentWorkspace(term.id))
-    const documentUpdateCount = active ? 0 : (documentUpdates?.paths.length ?? 0)
+    const noticeTerms = terms.filter((term) => termStatus.get(term.id) === 'question' ||
+      (termAttention.has(term.id) && termStatus.get(term.id) === 'done'))
+    const documentUpdateCount = documentUpdates?.paths.length ?? 0
     const working = terms.some((term) => termStatus.get(term.id) === 'working')
     const questionTaskCount = noticeTerms.filter((term) => termStatus.get(term.id) === 'question').length
     const doneTaskCount = noticeTerms.filter((term) => termStatus.get(term.id) === 'done').length
@@ -6409,6 +6498,7 @@ export default function App(): JSX.Element {
       tab,
       terms,
       docs,
+      noticeTerms,
       active,
       documentUpdateCount,
       documentUpdateLatestAt: documentUpdates?.latestAt,
@@ -6427,6 +6517,9 @@ export default function App(): JSX.Element {
               : '작업 탭 없음'
       }
   })
+  const visibleCaseTabRows = caseAttentionOnly
+    ? caseTabRows.filter((row) => row.questionTaskCount + row.doneTaskCount + row.documentUpdateCount > 0)
+    : caseTabRows
   const totalCaseDocumentUpdateCount = caseTabRows.reduce((sum, row) => sum + row.documentUpdateCount, 0)
   const totalCaseDoneTaskCount = caseTabRows.reduce((sum, row) => sum + row.doneTaskCount, 0)
   const totalCaseQuestionTaskCount = caseTabRows.reduce((sum, row) => sum + row.questionTaskCount, 0)
@@ -6472,37 +6565,260 @@ export default function App(): JSX.Element {
       tab.remotePath ?? tab.drafts
     ])
 
-  const openCaseTab = (tab: CaseWorkspaceTab): void => {
+  // 열린 탭과 열어본 사건을 같은 사건 식별 규칙으로 합쳐 탐색 목록을 만든다.
+  const sidebarCaseTabs = [...caseTabs]
+  for (const tab of discoveredCaseTabs) {
+    if (tab.profileId && !sshProfiles.some((profile) => profile.id === tab.profileId &&
+      sessionListKey('', sshConnFromProfile(profile)) === sessionListKey('', tab.ssh))) continue
+    if (!findCaseTab(sidebarCaseTabs, tab)) sidebarCaseTabs.push(tab)
+  }
+  for (const entry of recent) {
+    const remote = parseRemoteUri(entry.drafts)
+    const profile = remote ? sshProfiles.find((item) => item.id === remote.profileId) : undefined
+    const source: CurrentCase = {
+      ...entry,
+      profileId: remote?.profileId,
+      remotePath: remote?.path,
+      ssh: profile ? sshConnFromProfile(profile) : undefined,
+      sshLabel: profile?.label
+    }
+    const existing = findCaseTab(sidebarCaseTabs, source)
+    if (existing) {
+      // 대화 제목으로 갱신된 작업 탭 이름 대신 사건을 열 때 저장한 이름을 표시한다.
+      sidebarCaseTabs[sidebarCaseTabs.indexOf(existing)] = { ...existing, name: entry.name }
+      continue
+    }
+    sidebarCaseTabs.push({ ...caseTabFromCurrentCase(source), id: caseTabId(source, sidebarCaseTabs), updatedAt: entry.ts })
+  }
+  const sidebarCases: SidebarCase[] = sidebarCaseTabs.map((tab) => {
+    const saved = savedCaseLabels.find((entry) => entry.label === tab.name &&
+      entry.profileId === tab.profileId &&
+      normalizedCasePathKey(entry.cwd) === normalizedCasePathKey(tab.remotePath ?? tab.drafts) &&
+      (!tab.meta?.caseNumber || entry.caseNumber === tab.meta.caseNumber))
+    return {
+      id: tab.id,
+      title: [tab.meta?.caseNumber ?? saved?.caseNumber, tab.meta?.caseName ?? saved?.caseName].filter(Boolean).join(' ') || tab.name || '사건',
+      participants: tab.meta?.partyNames || [tab.meta?.client ?? saved?.client, tab.meta?.opponent].filter(Boolean).join(' / ') || undefined,
+      subtitle: caseTabSubtitle(tab),
+      active: tab.id === activeCaseTabId,
+      updatedAt: tab.updatedAt ?? 0,
+      historyKey: sessionListKey(tab.remotePath ?? tab.drafts, tab.ssh, sessionContextForTerm(currentCaseSessionSource(tab, sshProfiles))),
+      unavailable: !!tab.profileId && !tab.ssh,
+      tasks: termsForCaseTab(tab).map((term) => ({
+        id: term.id,
+        title: term.sessionTitle || term.title,
+        mtime: term.createdAt ?? 0,
+        sessionId: term.agentProvider === 'codex' ? undefined : term.resumeSessionId,
+        active: tab.id === activeCaseTabId && isTermVisibleInCurrentWorkspace(term.id),
+        status: termStatus.get(term.id) === 'working' ? '작업 중'
+          : termStatus.get(term.id) === 'question' ? '확인 대기'
+            : termAttention.has(term.id) ? '완료' : undefined
+      }))
+    }
+  })
+  const projectCaseChoices: ProjectCaseLink[] = sidebarCaseTabs
+    .filter((tab) => tab.meta?.contextKind !== 'global' && tab.meta?.contextKind !== 'folder' && tab.meta?.contextKind !== 'project')
+    .map((tab) => ({
+      key: tab.meta?.jsId ? `js:${tab.meta.jsId}` : `folder:${tab.profileId ?? 'local'}:${normalizedCasePathKey(tab.remotePath ?? tab.drafts)}`,
+      name: sidebarCases.find((item) => item.id === tab.id)?.title ?? tab.name,
+      jsId: tab.meta?.jsId,
+      caseNumber: tab.meta?.caseNumber,
+      court: tab.meta?.court,
+      drafts: tab.drafts,
+      records: tab.records,
+      profileId: tab.profileId,
+      remotePath: tab.remotePath
+    }))
+  const projectAgentVisible = projectManagementVisible && !!selectedProjectId &&
+    currentCase?.meta?.projectId === selectedProjectId && termTabs.some((term) =>
+      isAgentTab(term) && term.contextKind === 'project' && term.projectId === selectedProjectId && termSide(term) === 'right'
+    )
+  const openProjectWork = (project: Project, newConversation = false): Promise<void> => {
+    const pending = projectOpeningRef.current.get(project.id)
+    if (pending) return pending
+    const operation = (async (): Promise<void> => {
+      const { cwd, project: latest } = await window.lt.projects.workspace(project.id)
+      const source: CurrentCase = {
+        drafts: cwd, name: `프로젝트 · ${latest.name}`,
+        meta: { contextKind: 'project', projectId: latest.id }
+      }
+      markWorkspaceReopened(source)
+      const workspace = registerCaseTab(source)
+      setCurrentCase(source)
+      activeCaseTabIdRef.current = workspace.id
+      if (!(await restoreAutomaticWorkspace(source))) throw new Error('프로젝트 대화를 복원하지 못했습니다. 다시 시도해 주세요.')
+      const conversations = termTabsRef.current.filter((term) => isAgentTab(term) &&
+        term.contextKind === 'project' && term.projectId === latest.id && term.cwd === cwd && !term.ssh)
+      let tab = !newConversation
+        ? conversations.find((term) => term.id === activeTerm) ?? conversations.find((term) => term.id === workspace.activeTermId) ?? conversations[0]
+        : undefined
+      if (!tab) {
+        tab = createCase(cwd, source.name, undefined, undefined, source.meta, 'right')
+        // Keep rapid navigation and workspace persistence aware of a newly queued React tab.
+        termTabsRef.current = [...termTabsRef.current, tab]
+      }
+      const selected = { ...tab, side: 'right' as const }
+      setTermTabs((tabs) => tabs.map((item) => item.id === selected.id ? selected : item))
+      registerCaseTabFromTerm(selected, true)
+      setCurrentCase(source)
+      setActiveTerm(selected.id)
+      setWorkActive('right', termKeyOf(selected.id))
+      setTermFocusNonce((current) => bumpFocusNonce(current, selected.id))
+      setSelectedProjectId(latest.id)
+      setCaseDashboardView('projects')
+      setMode('cases')
+    })().finally(() => { projectOpeningRef.current.delete(project.id) })
+    projectOpeningRef.current.set(project.id, operation)
+    return operation
+  }
+  const showProjects = (): void => {
+    setCaseDashboardView('projects')
+    setMode('cases')
+    setExplorerVisible(true)
+  }
+  const pickProjectFolder = async (): Promise<ProjectFolderLink | null> => {
+    const settings = await window.lt.settings.get()
+    const profiles = settings.sshProfiles ?? []
+    setSshProfiles(profiles)
+    if (!profiles.length) return window.lt.dialog.pickFolder({ title: '프로젝트 참고 폴더 선택' })
+    return new Promise((resolve, reject) => setProjectFolderPick({ resolve, reject }))
+  }
+  const openProjectFolder = async (folder: ProjectFolderLink): Promise<void> => {
+    const remote = parseRemoteUri(folder.path)
+    const existing = sidebarCaseTabs.find((tab) =>
+      tab.meta?.contextKind !== 'global' && tab.profileId === remote?.profileId &&
+      normalizedCasePathKey(tab.remotePath ?? tab.drafts) === normalizedCasePathKey(remote?.path ?? folder.path)
+    )
+    // A reference can point at an existing case folder; preserve its known case identity.
+    if (existing && (!remote || existing.ssh)) {
+      if (caseTabs.some((tab) => tab.id === existing.id)) openCaseTab(existing)
+      else openCaseContext(currentCaseFromCaseTab(existing))
+      setSidebarView('files')
+      setMode('explorer')
+      return
+    }
+    if (remote) {
+      const settings = await window.lt.settings.get()
+      const profile = settings.sshProfiles?.find((item) => item.id === remote.profileId)
+      if (!profile) throw new Error('참고 폴더의 SSH 연결 설정을 찾을 수 없습니다. 설정에서 연결을 확인해 주세요.')
+      openRemoteCaseContext(profile, remote.path, folder.name, existing?.meta ?? { contextKind: 'folder' })
+    } else {
+      const result = await window.lt.fs.stat(folder.path)
+      if (!result.ok || !result.isDir) throw new Error('참고 폴더를 찾을 수 없습니다. 이동하거나 삭제되었는지 확인해 주세요.')
+      openCaseContext({ drafts: folder.path, name: folder.name, meta: { contextKind: 'folder' } })
+    }
+    setSidebarView('files')
+    setMode('explorer')
+  }
+  const openProjectCase = async (item: ProjectCaseLink): Promise<void> => {
+    const tab = sidebarCaseTabs.find((candidate) =>
+      candidate.profileId === item.profileId &&
+      (item.jsId ? candidate.meta?.jsId === item.jsId :
+        !!item.drafts && normalizedCasePathKey(candidate.drafts) === normalizedCasePathKey(item.drafts))
+    )
+    if (tab && (!tab.profileId || tab.ssh)) {
+      if (caseTabs.some((entry) => entry.id === tab.id)) openCaseTab(tab)
+      else {
+        openCaseContext(currentCaseFromCaseTab(tab))
+        setMode('explorer')
+      }
+      return
+    }
+    if (item.drafts || (item.profileId && item.remotePath)) {
+      const remote = item.drafts ? parseRemoteUri(item.drafts) : null
+      const profileId = item.profileId ?? remote?.profileId
+      const meta: CaseMeta = { jsId: item.jsId, caseNumber: item.caseNumber, court: item.court, caseName: item.name }
+      if (profileId) {
+        const settings = await window.lt.settings.get()
+        const profile = settings.sshProfiles?.find((entry) => entry.id === profileId)
+        if (!profile) throw new Error('이 사건의 SSH 연결 설정을 찾을 수 없습니다. 설정에서 연결을 확인해 주세요.')
+        const path = item.remotePath ?? remote?.path
+        if (!path) throw new Error('원격 사건의 작성서류 폴더를 확인해 주세요.')
+        openRemoteCaseContext(profile, path, item.name, meta, item.records)
+      } else {
+        if (!item.drafts) throw new Error('사건의 작성서류 폴더를 확인해 주세요.')
+        const result = await window.lt.fs.stat(item.drafts)
+        if (!result.ok || !result.isDir) throw new Error('사건 폴더를 찾을 수 없습니다. 사건을 다시 열고 프로젝트 연결을 수정해 주세요.')
+        openCaseContext({ drafts: item.drafts, records: item.records, name: item.name, meta })
+      }
+      setMode('explorer')
+      return
+    }
+    if (!item.jsId) throw new Error('열 수 있는 사건 정보가 없습니다. 프로젝트의 사건 연결을 수정해 주세요.')
+    const result = await window.lt.js.getCase(item.jsId)
+    if (!result.ok || !result.case) throw new Error(result.error || '사건을 불러오지 못했습니다. JuriSupport 연결을 확인해 주세요.')
+    const settings = await window.lt.settings.get()
+    const profiles = settings.sshProfiles ?? []
+    const profileId = caseOpenProfileId(resolveCaseOpenTarget(settings.caseOpenTarget, profiles))
+    const profile = profiles.find((entry) => entry.id === profileId)
+    if (profile) await openCaseRemote(result.case, profile)
+    else await openCaseWorkspace(result.case, true)
+  }
+  const sidebarSessionSource = (id: string): TermTab | undefined => {
+    const tab = sidebarCaseTabs.find((item) => item.id === id)
+    if (!tab || (tab.profileId && !tab.ssh)) return undefined
+    const source = currentCaseSessionSource(tab, sshProfiles)
+    return source ? { ...source, caseTabId: resolveCaseTabId(tab) } : undefined
+  }
+  const openSidebarTask = (caseId: string, task: SidebarTask): void => {
+    const tab = sidebarCaseTabs.find((item) => item.id === caseId)
+    if (!tab) return
+    const term = termsForCaseTab(tab).find((item) => item.id === task.id)
+    if (term) {
+      openCaseTab(tab, { side: termSide(term), key: termKeyOf(term.id) })
+      return
+    }
+    const source = sidebarSessionSource(caseId)
+    if (source && task.sessionId) {
+      openPastSession(task.sessionId, source.cwd, task.title, source)
+      setMode('explorer')
+    }
+  }
+  const newSidebarTask = (caseId: string): void => {
+    const tab = sidebarCaseTabs.find((item) => item.id === caseId)
+    if (!tab) return
+    if (tab.profileId) {
+      const saved = sshProfiles.find((profile) => profile.id === tab.profileId)
+      const profile = saved ?? (tab.ssh ? { ...tab.ssh, id: tab.profileId, label: tab.sshLabel ?? tab.name } : undefined)
+      const remotePath = tab.remotePath ?? parseRemoteUri(tab.drafts)?.path
+      if (!profile || !remotePath) {
+        void window.lt.dialog.alert('이 사건에 연결된 SSH 프로필을 찾을 수 없습니다. 설정에서 확인하세요.')
+        return
+      }
+      createRemoteCase(profile, remotePath, tab.name, tab.meta, tab.records)
+    } else {
+      createCase(tab.drafts, tab.name, tab.records, tab.suggestedRecords, tab.meta, 'right', tab.suggestedRecordOptions)
+    }
+    setMode('explorer')
+  }
+
+  const openCaseTab = (tab: CaseWorkspaceTab, targetWork?: { side: DockSide; key: WorkTabKey }): void => {
     const terms = termsForCaseTab(tab)
     const docs = docsForCaseTab(tab)
+    const target = targetWork ? parseWorkKey(targetWork.key) : null
     const preferred =
+      terms.find((term) => target?.kind === 'terminal' && term.id === target.id) ||
       terms.find((term) => term.id === tab.activeTermId) ||
       terms.find((term) => term.id === activeTerm) ||
       terms[0]
     const preferredDoc =
+      docs.find((doc) => target?.kind === 'doc' && doc.id === target.id) ||
       docs.find((doc) => doc.id === tab.activeDocId) ||
       docs.find((doc) => doc.id === activeDoc) ||
       docs[0]
     const source = currentCaseFromCaseTab(tab)
-    const pastSessionSource = preferred ?? currentCaseSessionSource(source, sshProfiles)
+    const pastSessionSource = currentCaseSessionSource(source, sshProfiles)
     setCurrentCase(source)
     setActiveCaseTabId(tab.id)
     preloadPastSessions(pastSessionSource?.cwd, pastSessionSource)
     setCaseTabs((tabs) =>
       upsertCaseTab(tabs, {
         ...tab,
-        activeDocId: preferredDoc?.id ?? tab.activeDocId,
+        activeDocId: target?.kind === 'doc' ? target.id : preferredDoc?.id ?? tab.activeDocId,
         activeTermId: preferred?.id ?? tab.activeTermId,
         updatedAt: Date.now()
       })
     )
-    clearCaseDocumentUpdates(tab.id)
-    setTermAttention((ids) => {
-      if (!terms.some((term) => ids.has(term.id))) return ids
-      const next = new Set(ids)
-      for (const term of terms) next.delete(term.id)
-      return next
-    })
     setCaseTabsOpen(false)
     setMode('explorer')
     const validKeys = new Set([
@@ -6525,13 +6841,28 @@ export default function App(): JSX.Element {
           ? tab.activeWork.right
           : firstKeyForSide('right')
     }
+    if (targetWork) nextWork[targetWork.side] = targetWork.key
     setActiveWork(nextWork)
+    const viewedTerms = terms.filter((term) => nextWork[termSide(term)] === termKeyOf(term.id))
+    setTermAttention((ids) => {
+      const next = new Set(ids)
+      for (const term of viewedTerms) next.delete(term.id)
+      return next.size === ids.size ? ids : next
+    })
+    for (const term of viewedTerms) {
+      dismissToastForTerm(term.id)
+      window.lt.app.dismissNotify(term.id)
+    }
+    for (const doc of docs) {
+      if (nextWork[docSide(doc)] === docKey(doc.id)) clearCaseDocumentUpdates(tab.id, doc.path)
+    }
     updateCaseTabActivity(tab.id, {
-      activeDocId: preferredDoc?.id ?? tab.activeDocId,
+      activeDocId: target?.kind === 'doc' ? target.id : preferredDoc?.id ?? tab.activeDocId,
       activeTermId: preferred?.id ?? tab.activeTermId,
       activeWork: nextWork
     })
-    if (preferredDoc) setActiveDoc(preferredDoc.id)
+    if (target?.kind === 'doc') setActiveDoc(target.id)
+    else if (preferredDoc) setActiveDoc(preferredDoc.id)
     if (preferred) {
       setActiveTerm(preferred.id)
       if (isAgentTab(preferred)) {
@@ -6540,6 +6871,32 @@ export default function App(): JSX.Element {
       return
     }
     setActiveTerm('')
+  }
+
+  const openNextCaseAttention = (): void => {
+    const targets = caseTabRows.flatMap(({ tab, noticeTerms }) => [
+      ...noticeTerms.map((term) => ({ key: termKeyOf(term.id), tab, term, path: undefined as string | undefined })),
+      ...(caseDocumentUpdates[tab.id]?.paths ?? []).map((path) => ({
+        key: `${tab.id}:path:${path}`, tab, term: undefined as TermTab | undefined, path
+      }))
+    ])
+    if (!targets.length) return
+    // 읽은 완료가 목록에서 사라져도, 아직 남은 질문과 다른 사건을 차례로 방문한다.
+    const pending = new Map(targets.map((target) => [target.key, target]))
+    const order = [...new Set([...caseAttentionOrderRef.current, ...pending.keys()])]
+      .filter((key) => pending.has(key))
+    const target = pending.get(order[0])!
+    caseAttentionOrderRef.current = [...order.slice(1), order[0]]
+    if (target.term) {
+      selectTerm(target.term.id)
+      openCaseTab(target.tab, { side: termSide(target.term), key: termKeyOf(target.term.id) })
+      focusWorkTargetSoon(termSide(target.term), termKeyOf(target.term.id), true)
+    } else if (target.path) {
+      const id = openFile(target.path, pathLeaf(target.path) ?? target.path, 'left', target.tab.id)
+      const side = docSide(docTabs.find((doc) => doc.id === id))
+      openCaseTab(target.tab, { side, key: docKey(id) })
+      focusWorkTargetSoon(side, docKey(id), true)
+    }
   }
 
   const pickRecordsForCaseTab = (tabId: string): void => {
@@ -7890,6 +8247,23 @@ export default function App(): JSX.Element {
     if (side === 'left' && mode === 'cases') {
       return (
         <div className="work-pane work-left" key="cases" data-work-side="left">
+          <div className="case-management-nav" role="group" aria-label="사건 관리 보기">
+            <button type="button" aria-pressed={caseDashboardView === 'cases'} onClick={() => setCaseDashboardView('cases')}>개별 사건</button>
+            <button type="button" aria-pressed={caseDashboardView === 'projects'} onClick={() => setCaseDashboardView('projects')}>프로젝트</button>
+          </div>
+          {caseDashboardView === 'projects' ? (
+            <ProjectsDashboard
+              cases={projectCaseChoices}
+              onOpenCase={openProjectCase}
+              onPickFolder={pickProjectFolder}
+              onOpenFolder={openProjectFolder}
+              onOpenWork={openProjectWork}
+              workOpen={projectAgentVisible}
+              onAddCase={openNewCaseLauncher}
+              selectedId={selectedProjectId}
+              onSelect={setSelectedProjectId}
+            />
+          ) : (
           <CasesDashboard
             snapshot={todoSnapshot}
             caseUi={caseUi}
@@ -7911,6 +8285,7 @@ export default function App(): JSX.Element {
             }
             onChanged={() => setJsNonce((n) => n + 1)}
           />
+          )}
         </div>
       )
     }
@@ -8225,7 +8600,7 @@ export default function App(): JSX.Element {
                   caseContext={agentCaseContextForTerm(t)}
                 workspaceContext={agentWorkspaceContextForTerm(t, contextAppVersion)}
                 onTasksChanged={() => setTodoNonce((value) => value + 1)}
-                  visible={t.id === visibleTermId}
+                  visible={t.id === visibleTermId && (!projectManagementVisible || projectAgentVisible)}
                   focusNonce={termFocusNonce[t.id] ?? 0}
                   initialDraft={agentDrafts[t.id]}
                   clearDraftNonce={agentDraftClearNonce[t.id]}
@@ -8254,7 +8629,7 @@ export default function App(): JSX.Element {
                   autoAgent={t.autoAgent}
                   resumeSessionId={t.resumeSessionId}
                   ssh={t.ssh}
-                  visible={t.id === visibleTermId}
+                  visible={t.id === visibleTermId && (!projectManagementVisible || projectAgentVisible)}
                   focusNonce={termFocusNonce[t.id] ?? 0}
                   todoContext={todoContextForTerm(t)}
                   onDropPaths={(paths) => dropFilesToTerm(t.id, paths)}
@@ -8569,7 +8944,7 @@ export default function App(): JSX.Element {
   return (
     <div
       ref={shellRef}
-      className={`shell ${isViewer ? 'mode-viewer' : 'mode-default'} ${explorerVisible ? '' : 'explorer-hidden'}`}
+      className={`shell ${isViewer ? 'mode-viewer' : 'mode-default'} ${explorerVisible ? '' : 'explorer-hidden'} ${projectManagementVisible && !projectAgentVisible ? 'project-management' : ''}`}
       style={shellStyle}
       {...shellDragProps}
     >
@@ -8620,6 +8995,9 @@ export default function App(): JSX.Element {
                 : ''
             }`}
             title={caseTabActivityTitle}
+            aria-label={caseTabActivityTitle}
+            aria-expanded={caseTabsOpen}
+            aria-controls="case-tabs-flyout"
             onClick={() => setCaseTabsOpen((open) => !open)}
           >
             <IconCaseTabs />
@@ -8631,18 +9009,27 @@ export default function App(): JSX.Element {
           </button>
         </div>
         {caseTabsOpen && (
-          <div className="case-tabs-flyout" role="menu" onMouseDown={(e) => e.stopPropagation()}>
+          <div id="case-tabs-flyout" className="case-tabs-flyout" role="dialog" aria-label="사건탭" onMouseDown={(e) => e.stopPropagation()}>
             <div className="case-tabs-head">
               <span>사건탭</span>
               <button className="case-tabs-close" title="닫기" onClick={() => setCaseTabsOpen(false)}>
                 ×
               </button>
             </div>
+            <div className="case-tabs-filter">
+              <label>
+                <input type="checkbox" checked={caseAttentionOnly} onChange={(event) => setCaseAttentionOnly(event.target.checked)} />
+                확인 필요만
+              </label>
+              <button type="button" disabled={totalCaseNoticeCount === 0} onClick={openNextCaseAttention}>
+                다음 확인 작업 →
+              </button>
+            </div>
             <div className="case-tabs-list">
-              {caseTabRows.length === 0 ? (
-                <div className="case-tabs-empty">열린 사건탭 없음</div>
+              {visibleCaseTabRows.length === 0 ? (
+                <div className="case-tabs-empty" role="status">{caseTabs.length === 0 ? '열린 사건탭 없음' : '확인이 필요한 작업 없음'}</div>
               ) : (
-                caseTabRows.map(({
+                visibleCaseTabRows.map(({
                   tab,
                   active,
                   status,
@@ -8791,7 +9178,39 @@ export default function App(): JSX.Element {
 
       {explorerVisible && (
         <div className="side-col" key="side">
-          {docsPanel}
+          <div className="side-view-switch" role="group" aria-label="사이드바 보기">
+            <button type="button" aria-pressed={sidebarView === 'cases'} onClick={() => setSidebarView('cases')}>
+              <IconCases size={15} /> 사건
+            </button>
+            <button type="button" aria-pressed={sidebarView === 'files'} onClick={() => setSidebarView('files')}>
+              <IconExplorer size={15} /> 파일
+            </button>
+          </div>
+          <button className="project-open-button" type="button" aria-pressed={projectManagementVisible} onClick={showProjects}>
+            <IconWorkspace size={15} /> 프로젝트 관리
+          </button>
+          {sidebarView === 'cases' ? (
+            <CaseSidebar
+              cases={sidebarCases}
+              onOpenCase={(id) => {
+                const tab = sidebarCaseTabs.find((item) => item.id === id)
+                if (!tab) return
+                if (caseTabs.some((item) => item.id === id)) openCaseTab(tab)
+                else if (tab.profileId && !tab.ssh) void openRecent(tab)
+                else {
+                  openCaseContext(currentCaseFromCaseTab(tab))
+                  setMode('explorer')
+                }
+              }}
+              onOpenTask={openSidebarTask}
+              onNewTask={newSidebarTask}
+              onAddCase={openNewCaseLauncher}
+              loadSessions={(id, limit, refresh) => {
+                const source = sidebarSessionSource(id)
+                return source ? loadPastSessions(source.cwd, source, '', refresh, limit) : Promise.resolve([])
+              }}
+            />
+          ) : docsPanel}
         </div>
       )}
 
@@ -8849,7 +9268,7 @@ export default function App(): JSX.Element {
       {renderWorkPane('right')}
 
       <div className="statusbar" key="status">
-        <span className="status-left">legal-terminal · {modeLabel(mode)}</span>
+        <span className="status-left">legal-terminal · {projectManagementVisible ? '프로젝트' : modeLabel(mode)}</span>
         <span className="status-right">{statusInfo}</span>
       </div>
 
@@ -8916,6 +9335,42 @@ export default function App(): JSX.Element {
       )}
 
       {/* 원격 사건(작성서류) 폴더 선택 */}
+      {projectFolderPick && (projectFolderPick.profile ? (
+        <RemoteFolderPicker
+          profile={projectFolderPick.profile}
+          title="프로젝트 참고 폴더 선택"
+          confirmLabel="이 폴더 연결"
+          onSync={showSync}
+          onCancel={() => { projectFolderPick.resolve(null); setProjectFolderPick(null) }}
+          onPick={async (path) => {
+            const request = projectFolderPick
+            const profile = request.profile!
+            try {
+              if (!path.startsWith('/')) {
+                const result = await window.lt.ssh.listDir(profile, path)
+                if (!result.ok || !result.cwd?.startsWith('/')) throw new Error('원격 폴더의 전체 경로를 확인하지 못했습니다. 연결 상태와 경로를 확인해 주세요.')
+                path = result.cwd
+              }
+              request.resolve({ path: remoteUri(profile.id, path), name: pathLeaf(path) || profile.label })
+            } catch (error) { request.reject(error) }
+            finally { setProjectFolderPick((current) => current?.resolve === request.resolve ? null : current) }
+          }}
+        />
+      ) : (
+        <ConnMenu
+          title="참고 폴더 — 위치 선택"
+          localDescription="이 컴퓨터의 참고 폴더 연결"
+          profiles={sshProfiles}
+          onLocal={() => {
+            const request = projectFolderPick
+            setProjectFolderPick(null)
+            void window.lt.dialog.pickFolder({ title: '프로젝트 참고 폴더 선택' }).then(request.resolve, request.reject)
+          }}
+          onRemote={(profile) => setProjectFolderPick({ ...projectFolderPick, profile })}
+          onManage={() => { projectFolderPick.resolve(null); setProjectFolderPick(null); openSettings() }}
+          onClose={() => { projectFolderPick.resolve(null); setProjectFolderPick(null) }}
+        />
+      ))}
       {remotePick && (
         <RemoteFolderPicker
           profile={remotePick}
@@ -9616,7 +10071,6 @@ function SelectionAsk({ onAsk, onInline, inlineOpen = false, selectionDocument =
       }
       applyEditorDetail(detail)
     }
-
     const onOuterPointerDown = (event: PointerEvent): void => {
       if (!isSelectionActionControl(event.target)) onPointerCancel()
     }
@@ -10754,7 +11208,7 @@ function SessionList({
     const cached = cachedPastSessions(filterCwd, filterSource, query, pastLimit)
     if (cached) setPast(cached)
     else setPast(null)
-    loadPastSessions(filterCwd, filterSource, query, !!cached, pastLimit)
+    loadPastSessions(filterCwd, filterSource, query, false, pastLimit)
       .then((r) => {
         if (!alive) return
         setPast(r)
@@ -13117,12 +13571,16 @@ function WorkspacePicker({
 
 // 사건 열기 시 접속 선택 (로컬 / 저장된 SSH 프로필)
 function ConnMenu({
+  title = '사건 열기 — 접속 선택',
+  localDescription = '로컬 폴더에서 사건 선택',
   profiles,
   onLocal,
   onRemote,
   onManage,
   onClose
 }: {
+  title?: string
+  localDescription?: string
   profiles: SshProfile[]
   onLocal: () => void
   onRemote: (p: SshProfile) => void
@@ -13132,12 +13590,12 @@ function ConnMenu({
   return (
     <div className="modal-overlay" onMouseDown={onClose}>
       <div className="modal conn-menu" onMouseDown={(e) => e.stopPropagation()}>
-        <div className="modal-title">사건 열기 — 접속 선택</div>
+        <div className="modal-title">{title}</div>
         <button className="conn-row" onClick={onLocal}>
           <span className="conn-ic">💻</span>
           <span className="conn-main">
             <b>이 컴퓨터 (로컬)</b>
-            <span className="muted small">로컬 폴더에서 사건 선택</span>
+            <span className="muted small">{localDescription}</span>
           </span>
         </button>
         {profiles.map((p) => (

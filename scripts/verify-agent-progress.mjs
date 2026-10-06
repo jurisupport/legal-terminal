@@ -45,11 +45,13 @@ const serviceSource = readFileSync(new URL('../src/main/agent/agent-service.ts',
 const serviceModule = { exports: {} }
 let queryMessages = []
 let inputStates = []
+let contextSamples = []
+let contextReads = []
 let remoteProcess
 let queryFailure
 let onQueryMessage
 const queryPrompts = []
-runInNewContext(ts.transpileModule(`${serviceSource}\nexport const progressCheck = { sessions, handleSdkMessage, handleRemoteJsonLine, currentSessionStatus, startAgentTurn, runRemoteAgentMessage, handleCodexNotification, handleCodexJsonLine, runCodexAgentMessage, startCodexProcess, stopCodexProcess, ensureCodexInitialized, ensureCodexThread };`, {
+runInNewContext(ts.transpileModule(`${serviceSource}\nexport const progressCheck = { sessions, handleSdkMessage, handleRemoteJsonLine, currentSessionStatus, startAgentTurn, runRemoteAgentMessage, handleCodexNotification, handleCodexJsonLine, runCodexAgentMessage, rememberCodexTokenUsage, startCodexProcess, stopCodexProcess, ensureCodexInitialized, ensureCodexThread };`, {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 }
 }).outputText, {
   exports: serviceModule.exports, process, Buffer, AbortController, setTimeout, clearTimeout, setInterval, clearInterval,
@@ -65,7 +67,12 @@ runInNewContext(ts.transpileModule(`${serviceSource}\nexport const progressCheck
       const failure = queryFailure
       return {
         close: () => {},
-        getContextUsage: async () => ({}),
+        getContextUsage: async (options) => {
+          contextReads.push(options)
+          const sample = contextSamples.shift()
+          if (sample instanceof Error) throw sample
+          return sample ?? {}
+        },
         async *[Symbol.asyncIterator]() {
           queryPrompts.push((await input.next()).value.message.content)
           void input.next().then(() => { ended = true })
@@ -95,7 +102,7 @@ runInNewContext(ts.transpileModule(`${serviceSource}\nexport const progressCheck
     return require(name)
   }
 })
-const { sessions, handleSdkMessage, handleRemoteJsonLine, currentSessionStatus, startAgentTurn, runRemoteAgentMessage, handleCodexNotification, handleCodexJsonLine, runCodexAgentMessage } = serviceModule.exports.progressCheck
+const { sessions, handleSdkMessage, handleRemoteJsonLine, currentSessionStatus, startAgentTurn, runRemoteAgentMessage, handleCodexNotification, handleCodexJsonLine, runCodexAgentMessage, rememberCodexTokenUsage } = serviceModule.exports.progressCheck
 
 const panelSource = readFileSync(new URL('../src/renderer/src/agent/AgentPanel.tsx', import.meta.url), 'utf8')
 const panelAst = ts.createSourceFile('AgentPanel.tsx', panelSource, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX)
@@ -456,6 +463,120 @@ for (const kind of ['completed', 'interrupted']) {
   assert.equal(currentSessionStatus(codexSession), 'idle', `${kind} child activity must release the running flag`)
 }
 
+// Context is the latest request, while total usage remains the session aggregate.
+const tokenEvent = (last, modelContextWindow = 200000) => ({
+  turnId: 'turn-2', tokenUsage: { total: { totalTokens: 300000, outputTokens: 10000, reasoningOutputTokens: 8000 }, last: last === undefined ? undefined : { totalTokens: last }, modelContextWindow }
+})
+rememberCodexTokenUsage(codexSession, tokenEvent(35000))
+assert.equal(codexSession.tokenUsage.totalTokens, 300000)
+// Codex's FinalOutput displays output_tokens directly, with reasoning in parentheses:
+// https://github.com/openai/codex/blob/main/codex-rs/protocol/src/protocol.rs
+assert.equal(codexSession.tokenUsage.outputTokens, 10000, 'reasoning is part of output, not an additional output charge')
+assert.equal(codexSession.contextUsage.remainingTokens, 165000)
+assert.equal(codexSession.contextUsage.percentage, 17.5)
+rememberCodexTokenUsage(codexSession, tokenEvent(10000))
+assert.equal(codexSession.contextUsage.remainingTokens, 190000, 'compaction restores context capacity')
+rememberCodexTokenUsage(codexSession, tokenEvent(10000, null))
+assert.equal(codexSession.contextUsage, undefined, 'missing capacity must clear the old model limit')
+rememberCodexTokenUsage(codexSession, tokenEvent(undefined))
+assert.equal(codexSession.contextUsage, undefined, 'missing last usage must not fall back to cumulative totals')
+sessions.set(codexSession.id, codexSession)
+rememberCodexTokenUsage(codexSession, tokenEvent(35000))
+serviceModule.exports.setAgentModel(codexSession.id, 'different-model')
+assert.equal(codexSession.contextUsage, undefined, 'model changes invalidate the previous capacity')
+
+// A response shorter than the polling interval still gets a final summary sample.
+contextReads = []
+contextSamples = [{ totalTokens: 1000, maxTokens: 200000 }, { totalTokens: 30000, maxTokens: 200000 }]
+queryMessages = [{ type: 'result', subtype: 'success' }]
+startAgentTurn(endedSession, { text: 'Short response' })
+for (let i = 0; i < 20 && endedSession.running; i++) await new Promise((resolve) => setImmediate(resolve))
+clearTimeout(endedSession.workSummaryTimer)
+assert.equal(endedSession.contextUsage.remainingTokens, 170000)
+assert.equal(contextReads.length, 2, 'sample once before and once after a short response')
+assert.ok(contextReads.every((options) => options.detail === 'summary'))
+contextSamples = [{ totalTokens: 1000, maxTokens: 200000 }, new Error('context unavailable')]
+startAgentTurn(endedSession, { text: 'Unavailable final usage' })
+for (let i = 0; i < 20 && endedSession.running; i++) await new Promise((resolve) => setImmediate(resolve))
+clearTimeout(endedSession.workSummaryTimer)
+assert.equal(endedSession.contextUsage, undefined)
+assert.equal(endedSession.running, undefined, 'an unavailable context sample must not hold the turn open')
+
+// Execute the real renderer event branches to check parent-tab and snapshot updates.
+const eventBranch = (eventType, context) => {
+  let branch
+  const visit = (node) => {
+    if (ts.isIfStatement(node) && node.expression.getText(panelAst) === `event.type === '${eventType}'`) branch = node
+    ts.forEachChild(node, visit)
+  }
+  visit(panelAst)
+  assert.ok(branch)
+  return runInNewContext(ts.transpileModule(`(event) => { ${branch.getText(panelAst)} }`, {
+    compilerOptions: { target: ts.ScriptTarget.ES2022 }
+  }).outputText, { ...values, ...context })
+}
+let panelStatus
+let tabStatus
+const statusEvent = eventBranch('status', { setStatus: (value) => { panelStatus = value }, onStatus: (value) => { tabStatus = value } })
+statusEvent({ type: 'status', status: 'working' })
+statusEvent({ type: 'status', status: 'idle' })
+assert.equal(panelStatus, 'idle')
+assert.equal(tabStatus, 'idle', 'idle must also clear the parent tab spinner')
+let view = { tokens: {}, context: { remainingTokens: 50000 } }
+const usageEvent = eventBranch('usage:update', {
+  tokenUsageFromEvent: () => undefined, contextUsageFromEvent: (value) => value,
+  rateLimitUsageFromEvent: () => undefined, rateLimitUsagesFromEvent: () => undefined,
+  setUsage: (update) => { view = update(view) }
+})
+usageEvent({ type: 'usage:update', context: undefined })
+assert.equal(view.context, undefined, 'a full snapshot must be allowed to clear stale context')
+
+const appSource = readFileSync(new URL('../src/renderer/src/App.tsx', import.meta.url), 'utf8')
+const termStatusSource = appSource.match(/const onTermStatus = [\s\S]*?\n  }/)?.[0]
+assert.ok(termStatusSource)
+let termStatuses = new Map([['working', 'working'], ['done', 'done'], ['question', 'question']])
+let termAttention = new Set(['done', 'question'])
+const termStatusRef = { current: termStatuses }
+const statusUpdates = []
+const dismissed = []
+const onTermStatus = runInNewContext(ts.transpileModule(`${termStatusSource}\nonTermStatus`, {
+  compilerOptions: { target: ts.ScriptTarget.ES2022 }
+}).outputText, {
+  termStatusRef,
+  setTermStatus: (update) => statusUpdates.push(update),
+  setTermAttention: (update) => { termAttention = update(termAttention) },
+  dismissToastForTerm: (id) => dismissed.push(id),
+  window: { lt: { app: { dismissNotify: () => {} } } },
+  isTermVisibleInCurrentWorkspace: () => false,
+  document: { hasFocus: () => true }, notifyDone: true,
+  pushToast: () => {}, playNotificationSound: () => {}, notificationSound: '', notificationVolume: 0
+})
+const flushStatusUpdates = () => {
+  for (const update of statusUpdates.splice(0)) termStatuses = update(termStatuses)
+  termStatusRef.current = termStatuses
+}
+for (const id of termStatuses.keys()) onTermStatus(id, 'idle')
+flushStatusUpdates()
+assert.equal(termStatuses.get('working'), 'idle')
+assert.equal(termStatuses.get('done'), 'done', 'an idle snapshot must preserve a completion notice')
+assert.ok(termAttention.has('done'))
+assert.equal(termStatuses.get('question'), 'idle', 'idle resolves a pending question once the agent is no longer waiting')
+assert.ok(!termAttention.has('question'))
+assert.ok(dismissed.includes('question'))
+
+// React may batch multiple status events before it runs the state updaters.
+onTermStatus('batched', 'done')
+onTermStatus('batched', 'idle')
+assert.ok(termAttention.has('batched'), 'done then idle before rendering must preserve unread completion')
+assert.ok(!dismissed.includes('batched'), 'the unread completion toast must stay visible')
+flushStatusUpdates()
+assert.equal(termStatuses.get('batched'), 'done')
+onTermStatus('batched', 'question')
+onTermStatus('batched', 'idle')
+flushStatusUpdates()
+assert.equal(termStatuses.get('batched'), 'idle')
+assert.ok(!termAttention.has('batched'), 'a newer question then idle must clear a prior completion')
+
 // Each replacement transport must initialize anew; callbacks from the disposed
 // process cannot clear the new transport or its pending turn.
 const freshProcess = () => Object.assign(new EventEmitter(), {
@@ -554,7 +675,7 @@ await new Promise((resolve) => setImmediate(resolve))
 clearTimeout(racingSession.workSummaryTimer)
 console.log('Codex process ownership: late turn cleanup preserves new execution, model lookup replacement cannot bypass protection')
 
-console.log('agent progress: local/SSH lifecycle, snapshot/steer/failure completion, Codex turn isolation/interruption, and execution process ownership ok')
+console.log('agent progress: local/SSH lifecycle, snapshot/steer/failure completion, Codex turn isolation/interruption, context capacity, and renderer state ok')
 
 // Native child exit precedes close; wait for close before replacing its transport.
 const exitedBeforeClose = freshProcess()

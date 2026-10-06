@@ -10,6 +10,7 @@ import { RemoteAgentTransport, probeRemoteAgentRun } from '../src/main/agent/rem
 import * as execution from '../src/main/agent/agentExecutionLock.ts'
 import * as progress from '../src/main/agent/agentProgress.ts'
 import * as mcp from '../src/main/agent/agentMcp.ts'
+import * as projectMcp from '../src/main/agent/projectMcpConfig.ts'
 
 // Exercise the real service, broker, execution lock and native message protocols.
 // Only the provider executables, SSH host, auth probes and optional summaries are fake.
@@ -144,6 +145,8 @@ function freshApp(usageHydration) {
       if (name === './agentExecutionLock') return execution
       if (name === './agentProgress') return progress
       if (name === './agentMcp') return mcp
+      if (name === './projectMcpConfig') return projectMcp
+      if (name === '../projectAgent') return { releaseProjectMcp: () => {}, disposeProjectMcp: () => {} }
       if (name === '../sessions') return { rememberSessionMeta: async () => {}, readSessionTokenUsage: async () => usageHydration }
       if (name === '../sshOptions') return { buildSshArgs: () => [] }
       if (name === '../jurisupport') return { getAgentMcpConnection: async () => undefined, agentMcpAccountEpoch: () => 1, onAgentMcpAccountChange: () => {} }

@@ -1,0 +1,233 @@
+.case-sidebar {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  height: 100%;
+  color: var(--fg);
+  background: var(--bg-alt);
+  font-size: 12px;
+}
+
+.case-sidebar button,
+.case-sidebar select {
+  color: inherit;
+  font: inherit;
+}
+
+.case-sidebar button {
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+}
+
+.case-sidebar button:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--fg) 8%, transparent);
+}
+
+.case-sidebar button:focus-visible,
+.case-sidebar select:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.case-sidebar button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.case-sidebar-heading {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  padding: 14px 12px 10px;
+  color: var(--fg-muted);
+  font-size: 11px;
+}
+
+.case-sidebar-heading select {
+  max-width: 100%;
+  padding: 3px 2px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--bg-alt);
+}
+
+.case-sidebar-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 0 6px 10px;
+}
+
+.case-sidebar-group {
+  margin-bottom: 10px;
+}
+
+.case-sidebar-case-row {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  border-radius: 6px;
+}
+
+.case-sidebar-group.active > .case-sidebar-case-row {
+  background: color-mix(in srgb, var(--fg) 7%, transparent);
+}
+
+.case-sidebar-toggle {
+  flex: 0 0 20px;
+  align-self: stretch;
+  padding: 2px 4px;
+  color: var(--fg-muted) !important;
+  font-size: 16px !important;
+  text-align: center !important;
+}
+
+.case-sidebar-case {
+  display: flex;
+  align-items: center;
+  flex: 1;
+  gap: 7px;
+  min-width: 0;
+  padding: 8px 3px;
+}
+
+.case-sidebar-case svg {
+  flex-shrink: 0;
+  color: var(--fg-muted);
+}
+
+.case-sidebar-case-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.case-sidebar-case-title,
+.case-sidebar-case-participants,
+.case-sidebar-task-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.case-sidebar-case-title {
+  font-weight: 600;
+}
+
+.case-sidebar-case-participants {
+  color: var(--fg-muted);
+  font-size: 10px;
+}
+
+.case-sidebar-new-task {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 26px;
+  height: 28px;
+  padding: 4px;
+  color: var(--fg-muted) !important;
+}
+
+.case-sidebar-tasks {
+  margin: 2px 0 0 26px;
+}
+
+.case-sidebar-task {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  min-height: 32px;
+  padding: 7px 8px;
+  line-height: 1.45;
+}
+
+.case-sidebar-task.active {
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+}
+
+.case-sidebar-task-title {
+  flex: 1;
+  min-width: 0;
+}
+
+.case-sidebar-task-status {
+  flex-shrink: 0;
+  max-width: 65px;
+  overflow: hidden;
+  color: var(--fg-muted);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.case-sidebar-more-tasks,
+.case-sidebar-recent-only,
+.case-sidebar-more-cases,
+.case-sidebar-retry {
+  padding: 6px 8px;
+  color: var(--fg-muted) !important;
+  font-size: 11px !important;
+}
+
+.case-sidebar-more-cases {
+  width: calc(100% - 26px);
+  margin-left: 26px;
+}
+
+.case-sidebar-task-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.case-sidebar-refresh {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  margin-left: auto;
+  padding: 5px;
+  color: var(--fg-muted) !important;
+}
+
+.case-sidebar-message,
+.case-sidebar-empty {
+  margin: 4px 0;
+  padding: 5px 8px;
+  color: var(--fg-muted);
+  font-size: 11px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+.case-sidebar-empty {
+  padding: 14px 10px;
+}
+
+.case-sidebar-retry {
+  display: block;
+  margin-top: 3px;
+}
+
+.case-sidebar-add-case {
+  flex-shrink: 0;
+  margin: 4px 8px 8px;
+  padding: 10px;
+  border-top: 1px solid var(--border) !important;
+}
+
+.case-sidebar-add-case span {
+  margin-right: 6px;
+  color: var(--fg-muted);
+  font-size: 17px;
+}

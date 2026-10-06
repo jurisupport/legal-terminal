@@ -90,7 +90,7 @@ import type {
 export { DiffPreview } from './DiffPreview'
 export type { DiffView } from './diff'
 
-type AgentRunStatus = 'working' | 'done' | 'question'
+type AgentRunStatus = 'idle' | 'working' | 'done' | 'question'
 type AgentSendDelivery = 'normal' | 'queue' | 'steer'
 type AgentAuthStatus = 'checking' | 'authenticated' | 'unauthenticated' | 'unavailable' | 'error'
 type AgentPanelStatus = 'idle' | 'working' | 'waiting_permission' | 'waiting_user' | 'done' | 'error'
@@ -316,6 +316,12 @@ const globalSuggestions = [
 const folderSuggestions = [
   { label: '폴더 내용 정리', prompt: '현재 폴더의 자료를 살펴보고 확인된 내용과 아직 확인할 내용을 정리해줘.' },
   { label: '다음 작업', prompt: '현재 폴더에서 진행하던 작업과 다음 할 일을 정리해줘.' }
+]
+
+const projectSuggestions = [
+  { label: '프로젝트 현황', prompt: '프로젝트의 목표와 메모, 연결된 사건과 폴더를 검토해 현재 상황을 요약해줘. 확인한 근거는 출처별로 표시하고 접근하지 못한 자료도 알려줘.' },
+  { label: '자료 비교·모순 확인', prompt: '프로젝트에 연결된 사건과 폴더의 자료를 비교해 공통 사실, 서로 다른 주장과 모순을 정리해줘. 각 항목의 근거 출처를 구분하고 확인하지 못한 부분도 밝혀줘.' },
+  { label: '다음 행동 정리', prompt: '프로젝트의 목표와 진행 상황을 바탕으로 다음 행동과 우선순위를 정리해줘. 사건과 자료 사이의 관계, 먼저 확인해야 할 내용을 출처와 함께 알려줘.' }
 ]
 
 const isAgentPermissionMode = (value: unknown): value is AgentPermissionMode =>
@@ -820,6 +826,9 @@ function usageTitle(usage: AgentUsageView, provider: AgentProvider): string {
     lines.push(
       `컨텍스트: ${percentText(usage.context.percentage)} 사용, 잔여 ${exactTokenCount(usage.context.remainingTokens)} / ${exactTokenCount(usage.context.maxTokens)}`
     )
+    lines.push(`컨텍스트 갱신: ${new Date(usage.context.updatedAt).toLocaleString('ko-KR')}`)
+  } else {
+    lines.push('컨텍스트 잔여: 확인 불가')
   }
   const limits = usage.rateLimits?.length ? usage.rateLimits : usage.rateLimit ? [usage.rateLimit] : []
   if (limits.length > 0) {
@@ -2286,7 +2295,7 @@ export default function AgentPanel({
         const hasRateLimits = Object.prototype.hasOwnProperty.call(event, 'rateLimits')
         setUsage((current) => ({
           tokens: tokens ?? current.tokens,
-          context: context ?? current.context,
+          context: Object.prototype.hasOwnProperty.call(event, 'context') ? context : current.context,
           rateLimit: rateLimit ?? rateLimits?.[0] ?? current.rateLimit,
           rateLimits: hasRateLimits ? (rateLimits ?? []) : current.rateLimits
         }))
@@ -2345,6 +2354,7 @@ export default function AgentPanel({
           else onStatus?.('question')
         } else if (next === 'idle') {
           setStatus('idle')
+          onStatus?.('idle')
         }
       }
     })
@@ -3715,7 +3725,7 @@ export default function AgentPanel({
   )
   const contextLabel = usage.context
     ? `컨텍스트 ${percentText(usage.context.percentage)} · 잔여 ${tokenCount(usage.context.remainingTokens)}`
-    : '컨텍스트 대기'
+    : '컨텍스트 확인 불가'
   const tokensKnown = usage.tokens.updatedAt > 0
   const cacheTokens = cacheTokenTotal(usage.tokens)
   const limitLabels = visibleRateLimits.map((limit) => ({ label: rateLimitLabel(limit), tone: rateLimitTone(limit) }))
@@ -3838,10 +3848,12 @@ export default function AgentPanel({
               <div className="agent-empty-icon" aria-hidden="true">
                 <IconClaude size={30} />
               </div>
-              <div className="agent-empty-title">{agentLabel} Agent</div>
+              <div className="agent-empty-title">{workspaceContext?.kind === 'project' ? '프로젝트 AI 작업' : `${agentLabel} Agent`}</div>
               <div className="agent-empty-sub">
                 {pendingHandoff
                   ? `이전 대화 ${pendingHandoff.count}개 메시지를 이어받았습니다. 하던 이야기를 그대로 이어서 지시하세요.`
+                  : workspaceContext?.kind === 'project'
+                    ? '목표·메모·연결된 사건과 폴더를 함께 참고합니다. 근거는 출처별로 구분하고 접근할 수 없는 자료는 따로 알려드립니다.'
                   : workspaceContext?.kind === 'global'
                     ? '사건을 선택하지 않고 전체 할일과 기일을 함께 정리할 수 있습니다.'
                     : workspaceContext?.kind === 'folder'
@@ -3849,7 +3861,7 @@ export default function AgentPanel({
                       : '사건 폴더를 기반으로 검토·정리·초안 작업을 시킬 수 있습니다.'}
               </div>
               <div className="agent-empty-suggestions">
-                {(workspaceContext?.kind === 'global' ? globalSuggestions : workspaceContext?.kind === 'folder' ? folderSuggestions : emptyStateSuggestions).map((suggestion) => (
+                {(workspaceContext?.kind === 'project' ? projectSuggestions : workspaceContext?.kind === 'global' ? globalSuggestions : workspaceContext?.kind === 'folder' ? folderSuggestions : emptyStateSuggestions).map((suggestion) => (
                   <button
                     key={suggestion.label}
                     type="button"
