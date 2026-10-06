@@ -1,7 +1,7 @@
 import { spawn, execFile } from 'child_process'
 import type { WebContents } from 'electron'
 import type { SshProfile } from './settings'
-import { buildSshArgs } from './sshOptions'
+import { buildSshArgs } from './sshOptions.ts'
 
 // 클라우드 경유 모델: 맥미니에서(SSH로) rclone을 실행해 맥 사건폴더 ↔ OneDrive 클라우드 동기화.
 // Windows에는 rclone 불필요. 맥에 rclone + onedrive 리모트(rclone config)가 있어야 한다.
@@ -107,6 +107,13 @@ export function runRemoteSync(
   opts: RemoteSyncOpts,
   wc: WebContents
 ): Promise<{ ok: boolean; code: number | null; error?: string; changes?: RemoteSyncChange[] }> {
+  if (active) {
+    return Promise.resolve({
+      ok: false,
+      code: null,
+      error: '진행 중인 동기화가 있습니다. 완료하거나 중단한 뒤 다시 시도하세요.'
+    })
+  }
   const mode = opts.mode ?? 'full'
   const cloudDest = opts.dest
   const cloudArg = shq(cloudDest)
@@ -270,11 +277,11 @@ export function runRemoteSync(
     proc.stdout?.on('data', onData)
     proc.stderr?.on('data', onData)
     proc.on('error', (e) => {
-      active = null
+      if (active === proc) active = null
       resolve({ ok: false, code: null, error: String(e) })
     })
     proc.on('close', (code) => {
-      active = null
+      if (active === proc) active = null
       send(code === 0 ? (opts.dryRun ? '✓ 미리보기 완료' : '✓ 완료') : `✗ 종료 코드 ${code}`)
       resolve({
         ok: code === 0,
@@ -289,6 +296,5 @@ export function runRemoteSync(
 export function cancelSync(): void {
   if (active) {
     active.kill()
-    active = null
   }
 }

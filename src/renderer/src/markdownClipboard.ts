@@ -12,11 +12,45 @@ export function renderMarkdown(markdown: string): string {
 }
 
 export function markdownToPlainText(markdown: string): string {
+  return htmlToPlainText(renderMarkdown(markdown))
+}
+
+export function orderedListNumbers(root: Element): Map<Element, number> {
+  const numbers = new Map<Element, number>()
+  const lists = [...(root.matches('ol') ? [root] : []), ...root.querySelectorAll('ol')]
+  for (const list of lists) {
+    const items = Array.from(list.children).filter((child) => child.tagName === 'LI')
+    const step = list.hasAttribute('reversed') ? -1 : 1
+    let number = list.hasAttribute('start') ? (list as HTMLOListElement).start : step === -1 ? items.length : 1
+    for (const item of items) {
+      if (item.hasAttribute('value')) number = (item as HTMLLIElement).value
+      numbers.set(item, number)
+      number += step
+    }
+  }
+  return numbers
+}
+
+export function htmlToPlainText(html: string): string {
   const host = document.createElement('div')
   host.style.position = 'fixed'
   host.style.left = '-10000px'
   host.style.top = '0'
-  host.innerHTML = renderMarkdown(markdown)
+  host.innerHTML = DOMPurify.sanitize(html, { USE_PROFILES: { html: true } })
+  const numbers = orderedListNumbers(host)
+  // innerText omits browser-generated list markers; materialize them only in the copy.
+  for (const item of host.querySelectorAll('li')) {
+    if (!item.textContent?.trim()) continue
+    const first = Array.from(item.childNodes).find((node) => node.nodeType === Node.ELEMENT_NODE || node.textContent?.trim())
+    if (first instanceof Element && first.matches('ol, ul')) continue
+    let depth = 0
+    for (let parent = item.parentElement?.closest('li'); parent; parent = parent.parentElement?.closest('li')) depth += 1
+    const marker = document.createElement('span')
+    marker.style.whiteSpace = 'pre'
+    marker.textContent = `${'  '.repeat(depth)}${numbers.has(item) ? `${numbers.get(item)}.` : '•'} `
+    const target = first instanceof HTMLElement && first.tagName === 'P' ? first : item
+    target.prepend(marker)
+  }
   document.body.appendChild(host)
   const text = host.innerText.trim()
   host.remove()

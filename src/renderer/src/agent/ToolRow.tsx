@@ -55,6 +55,28 @@ const toolNameLabels: Record<string, string> = {
   ExitPlanMode: '계획 완료'
 }
 
+const MANAGED_MCP_PREFIX = 'mcp__legal_terminal_jurisupport__'
+const managedToolLabels: Record<string, string> = {
+  list_tasks: '할일 목록 확인',
+  get_task: '할일 상세 확인',
+  create_task: '할일 추가',
+  create_task_from_source: '원문에서 할일 추가',
+  update_task: '할일 수정',
+  update_task_from_source: '원문에서 할일 수정',
+  update_task_status: '할일 상태 변경',
+  delete_task: '할일 삭제',
+  get_task_evidence_suggestions: '완료 근거 확인',
+  list_cases: '사건 목록 확인',
+  get_case: '사건 상세 확인',
+  get_case_closure_preview: '사건 종결 전 할일 검토',
+  update_case_status: '사건 상태 변경',
+  update_case_engagement_status: '수임 상태 변경',
+  update_case_engagement: '수임 상태 변경',
+  get_today_hearings: '오늘 기일 확인',
+  get_upcoming_hearings: '다가오는 기일 확인',
+  list_case_progress: '사건 진행내역 확인'
+}
+
 function shortenPathLike(value: string): string {
   if (!/[\\/]/.test(value) || /\s/.test(value.trim())) return value
   const name = value.replace(/[\\/]+$/, '').split(/[\\/]/).filter(Boolean).pop()
@@ -76,7 +98,8 @@ function parsePreviewJson(preview: string | undefined): Record<string, unknown> 
 }
 
 export function toolDisplayName(rawName: string): string {
-  const mcp = rawName.match(/^mcp__([^_]+)__(.+)$/)
+  if (rawName.startsWith(MANAGED_MCP_PREFIX)) return managedToolLabels[rawName.slice(MANAGED_MCP_PREFIX.length)] ?? 'JuriSupport 작업'
+  const mcp = rawName.match(/^mcp__(.+?)__(.+)$/)
   return toolNameLabels[rawName] ?? (mcp ? `${mcp[1]} · ${mcp[2]}` : rawName)
 }
 
@@ -84,6 +107,12 @@ export function toolStepDisplay(step: ProcessStep): { name: string; arg?: string
   const rawName = step.toolName ?? step.title.replace(/^도구 · /, '')
   const name = toolDisplayName(rawName)
   const input = parsePreviewJson(step.input)
+  if (rawName.startsWith(MANAGED_MCP_PREFIX)) {
+    const title = input && (stringValue(input.title) || stringValue(input.search))
+    const status = input && stringValue(input.status)
+    const statusLabel = status && ({ pending: '예정', in_progress: '진행중', completed: '완료', closed: '종료' }[status])
+    return { name, ...(title || statusLabel ? { arg: clipArg(title || statusLabel!) } : {}), rawName }
+  }
   if (input) {
     for (const key of TOOL_ARG_KEYS) {
       const value = stringValue(input[key])

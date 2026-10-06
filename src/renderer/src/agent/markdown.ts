@@ -14,6 +14,9 @@ import sql from 'highlight.js/lib/languages/sql'
 import typescript from 'highlight.js/lib/languages/typescript'
 import xml from 'highlight.js/lib/languages/xml'
 import yaml from 'highlight.js/lib/languages/yaml'
+import { htmlToPlainText, markdownToPlainText, orderedListNumbers } from '../markdownClipboard'
+
+export { markdownToPlainText } from '../markdownClipboard'
 
 hljs.registerLanguage('bash', bash)
 hljs.registerLanguage('css', css)
@@ -107,18 +110,6 @@ export function renderMarkdownForDisplay(text: string): string {
   return host.innerHTML
 }
 
-export function markdownToPlainText(markdown: string): string {
-  const host = document.createElement('div')
-  host.style.position = 'fixed'
-  host.style.left = '-10000px'
-  host.style.top = '0'
-  host.innerHTML = renderMarkdown(markdown)
-  document.body.appendChild(host)
-  const text = host.innerText.trim()
-  host.remove()
-  return text
-}
-
 export function markdownPreviewText(markdown: string): string {
   const host = document.createElement('div')
   host.innerHTML = renderMarkdown(markdown)
@@ -132,7 +123,31 @@ export function richClipboardHtml(markdown: string): string {
 export function selectedHtml(selection: Selection): string {
   const wrap = document.createElement('div')
   for (let index = 0; index < selection.rangeCount; index += 1) {
-    wrap.appendChild(selection.getRangeAt(index).cloneContents())
+    const range = selection.getRangeAt(index)
+    let fragment: Node = range.cloneContents()
+    let source = range.commonAncestorContainer instanceof Element
+      ? range.commonAncestorContainer
+      : range.commonAncestorContainer.parentElement!
+    // A range inside a list drops its containing list and starting number when cloned.
+    for (let parent: Element | null = source; parent?.closest('ol, ul'); parent = parent.parentElement) {
+      const container = parent.cloneNode(false)
+      container.appendChild(fragment)
+      fragment = container
+      source = parent
+    }
+    const part = document.createElement('div')
+    part.appendChild(fragment)
+    const numbers = orderedListNumbers(source)
+    const originals = Array.from(source.querySelectorAll('li')).filter((item) => range.intersectsNode(item))
+    part.querySelectorAll('li').forEach((item, itemIndex) => {
+      const number = numbers.get(originals[itemIndex])
+      if (number === undefined) return
+      item.value = number
+      if (item.parentElement?.tagName === 'OL' && item === item.parentElement.firstElementChild) {
+        item.parentElement.setAttribute('start', String(number))
+      }
+    })
+    wrap.appendChild(part)
   }
   // 복사 버튼 툴바 등 UI 요소는 붙여넣기 결과에 섞이면 안 된다.
   wrap.querySelectorAll('.agent-msg-tools, .agent-code-toolbar, button').forEach((el) => el.remove())
@@ -159,7 +174,7 @@ export function writeSelectionToClipboard(clipboardData: DataTransfer, selection
   const text = selection.toString()
   if (!text.trim()) return false
   const html = selectedHtml(selection)
-  clipboardData.setData('text/plain', text)
+  clipboardData.setData('text/plain', /<(?:ol|ul)\b/i.test(html) ? htmlToPlainText(html) : text)
   if (html.trim()) clipboardData.setData('text/html', `<meta charset="utf-8">${html}`)
   return true
 }

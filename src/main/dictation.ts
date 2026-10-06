@@ -183,6 +183,22 @@ function extractSegments(value: unknown): DictationSegment[] | null {
   return segments
 }
 
+function apiErrorMessage(body: string, status: number): string {
+  try {
+    const error = JSON.parse(body)?.error
+    if (error && typeof error === 'object') {
+      if (error.code === 'credit_balance_exhausted') {
+        return 'OpenAI API 크레딧이 소진되었습니다. API 결제 설정에서 크레딧을 충전한 뒤 전사를 다시 시도해 주세요.'
+      }
+      if (error.type === 'insufficient_quota' || error.code === 'insufficient_quota') {
+        return 'OpenAI API 잔액 또는 사용 한도가 부족합니다. API 결제 설정에서 잔액과 한도를 확인한 뒤 전사를 다시 시도해 주세요.'
+      }
+      if (typeof error.message === 'string' && error.message.trim()) return error.message
+    }
+  } catch { /* JSON이 아닌 오류 응답도 그대로 표시한다. */ }
+  return body || `HTTP ${status}`
+}
+
 async function callResponses(
   key: string,
   body: Record<string, unknown>
@@ -200,7 +216,7 @@ async function callResponses(
       signal: ctrl.signal
     })
     const text = await response.text()
-    if (!response.ok) return { ok: false, error: text || `HTTP ${response.status}` }
+    if (!response.ok) return { ok: false, error: apiErrorMessage(text, response.status) }
     try {
       return { ok: true, json: JSON.parse(text) as unknown }
     } catch {
@@ -227,7 +243,7 @@ async function correctTranscript(
 ): Promise<{ ok: true; text: string } | { ok: false; error: string }> {
   const system = [
     '너는 법정 음성 전사문 교정기다.',
-    '맞춤법, 띄어쓰기, 문장부호, 제공된 고유명사만 고친다.',
+    '띄어쓰기와 문장부호만 고친다.',
     '단어 추가·삭제·요약·순서 변경을 하지 않는다.',
     '숫자, 날짜, 금액, 인명, 긍정/부정 표현을 추정하지 않는다.',
     '불명확한 부분은 원문을 그대로 둔다.',
@@ -298,7 +314,7 @@ async function transcribeAudio(
       signal: ctrl.signal
     })
     const text = await response.text()
-    if (!response.ok) return { ok: false, error: text || `HTTP ${response.status}` }
+    if (!response.ok) return { ok: false, error: apiErrorMessage(text, response.status) }
     let parsed: unknown
     try {
       parsed = JSON.parse(text) as unknown

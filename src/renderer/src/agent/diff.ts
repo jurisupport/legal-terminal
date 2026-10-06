@@ -215,9 +215,23 @@ export function diffViewFromParts(args: {
 
 export function diffViewFromRecord(record: Record<string, unknown> | null): DiffView | undefined {
   if (!record) return undefined
+  const patch: DiffPatchHunk[] = []
+  const gitDiff = asRecord(record.gitDiff)
+  const kind = stringValue(asRecord(gitDiff?.kind)?.type)
+  for (const line of splitDiffText(!kind || kind === 'update' ? stringValue(gitDiff?.diff) : undefined)) {
+    const header = line.match(/^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/)
+    if (header) {
+      patch.push({
+        oldStart: Number(header[1]), oldLines: Number(header[2] ?? 1),
+        newStart: Number(header[3]), newLines: Number(header[4] ?? 1), lines: []
+      })
+    } else if (patch.length && /^[ +\-\\]/.test(line)) {
+      patch[patch.length - 1].lines.push(line)
+    }
+  }
   return diffViewFromParts({
     filePath: stringValue(record.filePath),
-    structuredPatch: record.structuredPatch,
+    structuredPatch: normalizePatchHunks(record.structuredPatch).length ? record.structuredPatch : patch,
     oldString: stringValue(record.oldString),
     newString: stringValue(record.newString),
     edits: normalizeDiffEdits(record.edits)

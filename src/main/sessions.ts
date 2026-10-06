@@ -84,6 +84,7 @@ interface ParsedHead {
 }
 
 export interface SessionSearchContext {
+  projectId?: string
   query?: string
   displayTitle?: string
   caseNumber?: string
@@ -115,6 +116,7 @@ export interface SessionTranscriptMessage {
   id: string
   role: 'user' | 'assistant'
   text: string
+  timestamp?: number
 }
 
 export interface SessionTranscript {
@@ -377,6 +379,7 @@ function matchIndexedSession(
   cwdAliases = new Set([comparablePath(cwd)])
 ): boolean {
   if (pathMatchesAny(meta.cwd, cwdAliases)) return true
+  if (context?.projectId) return false
   const needles = [
     context?.query,
     context?.caseNumber,
@@ -982,10 +985,14 @@ function parseTranscriptMessages(
     const text = extractTranscriptText(message.content).trim()
     const visibleText = role === 'user' ? cleanUserInstruction(text, true) : text
     if (!visibleText) continue
+    const timestamp = typeof entry.timestamp === 'number'
+      ? entry.timestamp
+      : typeof entry.timestamp === 'string' ? Date.parse(entry.timestamp) : NaN
     messages.push({
       id: `${sessionId}-history-${lineIndex}`,
       role,
-      text: clipTranscriptText(visibleText)
+      text: clipTranscriptText(visibleText),
+      ...(Number.isFinite(timestamp) ? { timestamp } : {})
     })
   }
   return { messages: messages.slice(-MAX_SESSION_HISTORY_MESSAGES), model }

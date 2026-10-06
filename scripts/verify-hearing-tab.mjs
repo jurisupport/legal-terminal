@@ -176,7 +176,11 @@ try {
       path: `${payload.dir}/${payload.name}`
     }))
     globalThis.__hearingWrites = []
-    replace('fs:writeText', (_event, payload) => {
+    replace('fs:writeText', async (_event, payload) => {
+      if (globalThis.__holdNextHearingWrite) {
+        globalThis.__holdNextHearingWrite = false
+        await new Promise((resolve) => { globalThis.__releaseHearingWrite = resolve })
+      }
       globalThis.__hearingWrites.push(payload)
       return { ok: true }
     })
@@ -203,6 +207,8 @@ try {
   )
   await page.locator('.activity-item[title="설정"]').click()
   await page.locator('.setting-label', { hasText: 'OpenAI API 키' }).waitFor()
+  assert.match(await page.locator('.setting-row', { has: page.locator('.setting-label', { hasText: 'OpenAI API 키' }) }).textContent(),
+    /키 저장됨.*API 연결·잔액 미확인/, '키 복호화 성공을 API 연결 성공으로 표시하면 안 된다')
   await page
     .locator('[data-work-side="left"] button[title="문서를 오른쪽으로 이동"]')
     .click()
@@ -390,6 +396,27 @@ try {
   assert.ok(await dictationButton.isEnabled())
   console.log('hearing dictation handles rejected transcription requests without blocking input')
 
+  const beforePendingDelete = await messages.locator('textarea').evaluateAll(
+    (inputs) => inputs.map((input) => input.value)
+  )
+  await composer.fill('삭제할 녹음 초안')
+  await dictationButton.click()
+  await shellPanel.locator('.hearing-dictation-btn.recording').waitFor()
+  await dictationButton.click()
+  await messages.last().locator('.hearing-dictation-status[role="status"]').waitFor()
+  await composer.fill('삭제와 관계없는 새 초안')
+  await messages.last().getByRole('button', { name: '진행 메모 삭제', exact: true }).click()
+  assert.equal(await messages.count(), beforePendingDelete.length)
+  await resolveDictation(5, { ok: true, text: '늦게 도착한 삭제된 발언', corrected: false })
+  await page.waitForTimeout(1_100)
+  assert.deepEqual(await messages.locator('textarea').evaluateAll(
+    (inputs) => inputs.map((input) => input.value)
+  ), beforePendingDelete, '전사 완료 후에도 삭제한 대화가 되살아나면 안 된다')
+  assert.equal(await composer.inputValue(), '삭제와 관계없는 새 초안')
+  const afterPendingDelete = await app.evaluate(() => JSON.parse(globalThis.__hearingWrites.at(-1).content))
+  assert.deepEqual(afterPendingDelete.entries.map((entry) => entry.text), beforePendingDelete)
+  console.log('deleted pending dictation stays deleted when transcription completes')
+
   for (let index = 1; index <= 16; index += 1) {
     await composer.fill(`연속 발언 ${index}`)
     await submit.click()
@@ -433,6 +460,77 @@ try {
     `기일기록 탭에 돌아오면 마지막 발언이 보여야 한다: ${JSON.stringify(restoredScrollMetrics)}`
   )
   console.log('hearing record returns to the latest statement after tab changes')
+
+  await page.waitForTimeout(1_100)
+  const beforeDelete = await app.evaluate(() => JSON.parse(globalThis.__hearingWrites.at(-1).content))
+  await messages.nth(1).getByRole('button', { name: '진행 메모 삭제', exact: true }).click()
+  await page.waitForTimeout(1_100)
+  const afterDelete = await app.evaluate(() => JSON.parse(globalThis.__hearingWrites.at(-1).content))
+  assert.deepEqual(afterDelete.entries, beforeDelete.entries.filter((_, index) => index !== 1),
+    '선택한 대화만 삭제하고 다른 대화의 내용·화자·순서를 보존해 저장해야 한다')
+  assert.deepEqual(afterDelete.requests, beforeDelete.requests)
+  assert.deepEqual(afterDelete.result, beforeDelete.result)
+  console.log('deleting one hearing entry preserves and saves all other entries')
+
+  while (await messages.count()) {
+    await messages.last().getByRole('button', { name: '진행 메모 삭제', exact: true }).click()
+  }
+  await shellPanel.locator('.hearing-log .hearing-empty-line').waitFor()
+  await page.waitForTimeout(1_100)
+  const emptyRecord = await app.evaluate(() => JSON.parse(globalThis.__hearingWrites.at(-1).content))
+  assert.deepEqual(emptyRecord.entries, [], '마지막 대화 삭제도 자동 저장되어야 한다')
+  await shellPanel.getByRole('button', { name: '읽기', exact: true }).click()
+  await shellPanel.locator('.hearing-reader-item').first().click()
+  assert.equal(await messages.count(), 0, '저장 기록을 다시 열어도 삭제한 대화가 되살아나면 안 된다')
+  await shellPanel.locator('.hearing-log .hearing-empty-line').waitFor()
+  console.log('deleting the final hearing entry persists after reopening the saved record')
+
+  await shellPanel.getByRole('button', { name: '새 기록', exact: true }).click()
+  const writesBeforeEmptyRecord = await app.evaluate(() => globalThis.__hearingWrites.length)
+  await page.waitForTimeout(1_100)
+  assert.equal(await app.evaluate(() => globalThis.__hearingWrites.length), writesBeforeEmptyRecord,
+    '입력하지 않은 새 기록은 자동 저장하지 않아야 한다')
+  await app.evaluate(() => { globalThis.__holdNextHearingWrite = true })
+  await composer.fill('최초 저장 중 삭제할 대화')
+  await submit.click()
+  await app.evaluate(async () => {
+    const deadline = Date.now() + 5_000
+    while (!globalThis.__releaseHearingWrite && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 20))
+    }
+    if (!globalThis.__releaseHearingWrite) throw new Error('첫 저장 요청이 도착하지 않았습니다.')
+  })
+  await messages.last().getByRole('button', { name: '진행 메모 삭제', exact: true }).click()
+  await page.waitForTimeout(1_100)
+  await app.evaluate(() => { globalThis.__releaseHearingWrite() })
+  await page.waitForTimeout(1_100)
+  const deletedDuringSave = await app.evaluate(() => JSON.parse(globalThis.__hearingWrites.at(-1).content))
+  assert.deepEqual(deletedDuringSave.entries, [], '지연된 최초 저장이 삭제 결과를 덮어쓰면 안 된다')
+  console.log('deleting during the first save leaves the final saved record empty')
+
+  for (const destination of ['새 기록', '저장 기록']) {
+    await composer.fill(`전환 전에 삭제할 대화: ${destination}`)
+    await submit.click()
+    await page.waitForTimeout(1_100)
+    const originalPath = await app.evaluate(() => globalThis.__hearingWrites.at(-1).path)
+    // 저장 목록은 삭제 전 내용이어도 전환 시 최신 파일을 읽어야 한다.
+    if (destination === '저장 기록') {
+      await shellPanel.getByRole('button', { name: '읽기', exact: true }).click()
+      await shellPanel.locator('.hearing-reader-item').first().waitFor()
+    }
+    await messages.last().getByRole('button', { name: '진행 메모 삭제', exact: true }).click()
+    if (destination === '새 기록') {
+      await shellPanel.getByRole('button', { name: destination, exact: true }).click()
+    } else {
+      await shellPanel.locator('.hearing-reader-item').first().click()
+    }
+    await page.waitForTimeout(1_100)
+    const switchedRecord = await app.evaluate((_electron, originalPath) =>
+      JSON.parse(globalThis.__hearingWrites.findLast((write) => write.path === originalPath).content), originalPath)
+    assert.deepEqual(switchedRecord.entries, [], `${destination}으로 즉시 전환해도 삭제를 먼저 저장해야 한다`)
+    assert.equal(await messages.count(), 0, '전환 시 삭제 전 메모를 다시 표시하지 않아야 한다')
+  }
+  console.log('immediate new/saved record switches flush deletions and read current saved content')
 
   const diarizationEntryOffset = await messages.count()
   let nextDiarizationIndex = await app.evaluate(() => globalThis.__hearingTranscriptions.length)
@@ -535,6 +633,45 @@ try {
   await page.waitForFunction((expected) => document.querySelectorAll('.hearing-message').length === expected, diarizationEntryOffset + 16)
   await diarizeToggle.uncheck()
   console.log('speaker groups remain distinct across recordings; failed recordings are retried without interrupting new recordings')
+
+  const ordinaryRetryIndex = await app.evaluate(() => globalThis.__hearingTranscriptions.length)
+  await speakerPicker.selectOption('court')
+  await composer.fill('재시도할 초안')
+  await dictationButton.click()
+  await shellPanel.locator('.hearing-dictation-btn.recording').waitFor()
+  await dictationButton.click()
+  const ordinaryRetryRow = messages.last()
+  await ordinaryRetryRow.getByRole('status').waitFor()
+  const ordinaryRetryCount = await messages.count()
+  await resolveDictation(ordinaryRetryIndex, { ok: false, error: 'OpenAI API 크레딧이 소진되었습니다. 충전 후 다시 시도해 주세요.' })
+  await ordinaryRetryRow.getByRole('button', { name: '전사 재시도', exact: true }).click()
+  await ordinaryRetryRow.getByRole('status').waitFor()
+  await speakerPicker.selectOption('prosecutor')
+  await composer.fill('재시도 중 새 초안')
+  await resolveDictation(ordinaryRetryIndex + 1, { rejection: '재시도 중 연결 끊김' })
+  await ordinaryRetryRow.getByRole('button', { name: '전사 재시도', exact: true }).waitFor()
+  assert.match(await ordinaryRetryRow.getByRole('status').textContent(), /재시도 중 연결 끊김/)
+  assert.equal(await ordinaryRetryRow.locator('textarea').inputValue(), '재시도할 초안')
+  assert.equal(await messages.count(), ordinaryRetryCount, '재시도 실패가 대화 항목을 추가하면 안 된다')
+  await ordinaryRetryRow.getByRole('button', { name: '전사 재시도', exact: true }).evaluate((button) => {
+    button.click()
+    button.click()
+  })
+  const retryContext = await resolveDictation(ordinaryRetryIndex + 2, { ok: true, text: '복구된 발언', corrected: false })
+  await page.waitForFunction(() => document.querySelector('.hearing-message:last-child textarea')?.value === '재시도할 초안 복구된 발언')
+  assert.equal(retryContext.speaker, '재판부')
+  assert.equal(await ordinaryRetryRow.getByRole('combobox').inputValue(), 'court')
+  assert.equal(await composer.inputValue(), '재시도 중 새 초안')
+  assert.equal(await messages.count(), ordinaryRetryCount)
+  assert.equal(await app.evaluate(() => globalThis.__hearingTranscriptions.length), ordinaryRetryIndex + 3,
+    '재시도 버튼을 연속 클릭해도 같은 녹음을 중복 전송하면 안 된다')
+  assert.equal(await ordinaryRetryRow.getByRole('button', { name: '전사 재시도', exact: true }).count(), 0)
+  assert.ok(await app.evaluate((_electron, index) => {
+    const original = globalThis.__hearingTranscriptions[index].payload
+    return original.diarize === false && globalThis.__hearingTranscriptions.slice(index + 1).every(({ payload }) =>
+      payload.diarize === false && Buffer.from(original.audio).equals(Buffer.from(payload.audio)))
+  }, ordinaryRetryIndex), '일반 받아쓰기도 재녹음 없이 원래 음성으로 재시도해야 한다')
+  console.log('ordinary dictation survives quota and repeated connection failures, deduplicates retries, and preserves audio, speaker, and drafts')
 
   await page.locator('.activity-item[title*="새 사건 추가"]').click()
   await page.locator('.new-case-recent-row', { hasText: recent.name }).click()

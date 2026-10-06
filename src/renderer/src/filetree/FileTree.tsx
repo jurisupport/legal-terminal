@@ -31,7 +31,7 @@ function uniqueStrings(values: string[]): string[] {
   return out
 }
 
-export function readLtPaths(dataTransfer: Pick<DataTransfer, 'getData'>): string[] {
+export function readLtPaths(dataTransfer: Pick<DataTransfer, 'getData'> & Partial<Pick<DataTransfer, 'files'>>): string[] {
   const packed = dataTransfer.getData(LT_PATHS)
   if (packed) {
     try {
@@ -45,7 +45,10 @@ export function readLtPaths(dataTransfer: Pick<DataTransfer, 'getData'>): string
     }
   }
   const single = dataTransfer.getData(LT_PATH)
-  return single ? [single] : []
+  if (single) return [single]
+  return dataTransfer.files?.length
+    ? window.lt.fs.dragPathsForFiles(Array.from(dataTransfer.files))
+    : []
 }
 
 function writeLtPaths(dataTransfer: DataTransfer, paths: string[]): void {
@@ -192,6 +195,8 @@ export default function FileTree({
   const [editingPath, setEditingPath] = useState<string | null>(null)
   const [selectedPaths, setSelectedPaths] = useState<Set<string>>(() => new Set())
   const [selectRect, setSelectRect] = useState<SelectRect | null>(null)
+  const [dragStatus, setDragStatus] = useState('')
+  const preparedDrag = useRef<{ key: string; id?: string; readyAt?: number; wanted?: boolean; error?: string } | null>(null)
   const treeRef = useRef<HTMLUListElement>(null)
   const lastRoot = useRef<string | null>(null)
   const lastRefreshNonce = useRef(refreshNonce)
@@ -210,6 +215,12 @@ export default function FileTree({
     entries?: Entry[]
   } | null>(null)
   selectedPathsRef.current = selectedPaths
+
+  useEffect(() => window.lt.fs.onDragError(setDragStatus), [])
+  useEffect(() => {
+    preparedDrag.current = null
+    setDragStatus('')
+  }, [root, refreshNonce])
 
   const visibleEntries = (): VisibleEntry[] =>
     Array.from(treeRef.current?.querySelectorAll<HTMLElement>('.tree-row[data-entry-path]') ?? [])
@@ -293,6 +304,59 @@ export default function FileTree({
       .map((item) => item.path)
       .filter((path) => selectedPathsRef.current.has(path))
     return paths.length ? paths : [entry.path]
+  }
+
+  const prepareDrag = (entry: Entry): void => {
+    const paths = selectedDragPaths(entry)
+    // Folder movement keeps its existing HTML drag; export applies to files.
+    const rows = visibleEntries()
+    if (entry.isDir || rows.some((row) => row.isDir && paths.includes(row.path))) {
+      preparedDrag.current = null
+      return
+    }
+    const key = JSON.stringify(paths)
+    const previous = preparedDrag.current
+    if (previous?.key === key && !previous.error &&
+      (!previous.id || Date.now() - (previous.readyAt ?? 0) < 30_000)) return
+    const request: NonNullable<typeof preparedDrag.current> = { key }
+    preparedDrag.current = request
+    setDragStatus('')
+    void window.lt.fs.prepareDrag(paths).then((result) => {
+      if (preparedDrag.current !== request) return
+      if (result.ok && result.id) {
+        request.id = result.id
+        request.readyAt = Date.now()
+        if (request.wanted) setDragStatus('파일 준비 완료 · 바깥으로 다시 드래그해 주세요.')
+      } else {
+        request.error = result.error ?? '파일을 준비하지 못했습니다.'
+        if (request.wanted) setDragStatus(request.error)
+      }
+    }).catch((error) => {
+      if (preparedDrag.current !== request) return
+      request.error = String(error)
+      if (request.wanted) setDragStatus(request.error)
+    })
+  }
+
+  const startDrag = (event: React.DragEvent, entry: Entry): void => {
+    if (cancelIfTerminalPointerDrag(event)) return
+    event.stopPropagation()
+    const paths = selectedDragPaths(entry)
+    const prepared = preparedDrag.current
+    if (prepared?.key === JSON.stringify(paths)) {
+      if (prepared.id) {
+        event.preventDefault()
+        setDragStatus('')
+        window.lt.fs.startDrag(prepared.id)
+        preparedDrag.current = null
+        return
+      }
+      prepared.wanted = true
+      setDragStatus(prepared.error ?? '외부로 보낼 파일 준비 중… 완료 후 다시 드래그해 주세요.')
+    }
+    // Downloads never start a late native drag after the mouse has been released.
+    writeLtPaths(event.dataTransfer, paths)
+    event.dataTransfer.effectAllowed = 'copyMove'
   }
 
   const clearRootDropState = (): void => {
@@ -541,6 +605,7 @@ export default function FileTree({
   // 트리 빈 영역/루트로 드롭 → root 폴더로 이동(내부) 또는 복사(외부)
   const rootDrop = (e: React.DragEvent): void => {
     e.preventDefault()
+    e.stopPropagation()
     clearRootDropState()
     const paths = readLtPaths(e.dataTransfer)
     if (paths.length) {
@@ -560,6 +625,12 @@ export default function FileTree({
       data-drop-label={rootDropLabel}
       onContextMenu={onRootContext}
       onPointerDown={startMarqueeSelection}
+      onMouseDownCapture={(event) => {
+        if (event.button !== 0) return
+        const row = (event.target as Element).closest<HTMLElement>('.tree-row[data-entry-path]')
+        const entry = row && entryFromRow(row)
+        if (entry) prepareDrag(entry)
+      }}
       onKeyDown={handleTreeKeyDown}
       onDragOver={(e) => {
         // 내부 경로 또는 외부 파일일 때만 드롭 허용
@@ -573,7 +644,7 @@ export default function FileTree({
         const internal =
           e.dataTransfer.types.includes(LT_PATH) || e.dataTransfer.types.includes(LT_PATHS)
         e.dataTransfer.dropEffect = internal ? 'move' : 'copy'
-        setRootDropLabel(internal ? '작성서류 루트로 이동' : '작성서류 루트에 복사')
+        setRootDropLabel(internal ? '작성서류 루트로 이동' : '작성서류 루트에 놓기')
         setRootOver(true)
       }}
       onDragLeave={(e) => {
@@ -642,12 +713,7 @@ export default function FileTree({
                         onOpenFile(e.path, e.name)
                       }
                     }}
-                    onDragStart={(ev) => {
-                      if (cancelIfTerminalPointerDrag(ev)) return
-                      ev.stopPropagation()
-                      writeLtPaths(ev.dataTransfer, selectedDragPaths(e))
-                      ev.dataTransfer.effectAllowed = 'copyMove'
-                    }}
+                    onDragStart={(ev) => startDrag(ev, e)}
                   >
                     <span className="tree-icon">{fileIcon(e.name)}</span>
                     <span className="tree-name">{e.name}</span>
@@ -688,7 +754,7 @@ export default function FileTree({
                 selected={selectedPaths.has(e.path)}
                 isSelected={(path) => selectedPaths.has(path)}
                 onSelectForClick={selectForClick}
-                selectedDragPaths={selectedDragPaths}
+                onStartDrag={startDrag}
                 editingPath={editingPath}
                 onStartRename={setEditingPath}
                 onCancelRename={() => setEditingPath(null)}
@@ -812,6 +878,7 @@ export default function FileTree({
           )}
         </ul>
       )}
+      {dragStatus && <li className="tree-node muted pad" role="status">{dragStatus}</li>}
     </ul>
   )
 }
@@ -828,7 +895,7 @@ function TreeNode({
   selected,
   isSelected,
   onSelectForClick,
-  selectedDragPaths,
+  onStartDrag,
   editingPath,
   onStartRename,
   onCancelRename,
@@ -848,7 +915,7 @@ function TreeNode({
   selected: boolean
   isSelected: (path: string) => boolean
   onSelectForClick: (event: React.MouseEvent, entry: Entry) => boolean
-  selectedDragPaths: (entry: Entry) => string[]
+  onStartDrag: (event: React.DragEvent, entry: Entry) => void
   editingPath?: string | null
   onStartRename?: (path: string) => void
   onCancelRename?: () => void
@@ -946,12 +1013,8 @@ function TreeNode({
           }
         }}
         onDragStart={(e) => {
-          if (cancelIfTerminalPointerDrag(e)) return
           if (renaming) return
-          e.stopPropagation()
-          writeLtPaths(e.dataTransfer, selectedDragPaths(entry))
-          // 폴더로 '이동'과 터미널로 '복사'를 모두 허용 (copy만/move만이면 다른 드롭존에서 '금지' 표시됨)
-          e.dataTransfer.effectAllowed = 'copyMove'
+          onStartDrag(e, entry)
         }}
         onDragOver={
           droppable
@@ -968,7 +1031,7 @@ function TreeNode({
                 const internal =
                   e.dataTransfer.types.includes(LT_PATH) || e.dataTransfer.types.includes(LT_PATHS)
                 e.dataTransfer.dropEffect = internal ? 'move' : 'copy'
-                setDropLabel(internal ? `${entry.name} 폴더로 이동` : `${entry.name} 폴더에 복사`)
+                setDropLabel(internal ? `${entry.name} 폴더로 이동` : `${entry.name} 폴더에 놓기`)
                 setOver(true)
                 // 닫힌 폴더 위에 머물면 ~0.6초 후 자동으로 펼침
                 if (!open && !springTimer.current) {
@@ -1053,7 +1116,7 @@ function TreeNode({
                   selected={isSelected(c.path)}
                   isSelected={isSelected}
                   onSelectForClick={onSelectForClick}
-                  selectedDragPaths={selectedDragPaths}
+                  onStartDrag={onStartDrag}
                   editingPath={editingPath}
                   onStartRename={onStartRename}
                   onCancelRename={onCancelRename}
