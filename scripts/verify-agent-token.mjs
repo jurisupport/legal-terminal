@@ -121,7 +121,7 @@ for (const [name, path] of [['./jurisupportNormalize', '../src/main/jurisupportN
   const exported = {}; new Function('require', 'exports', compile(path))(require, exported); modules[name] = exported
 }
 const adapterCode = compile('../src/main/jurisupport.ts')
-function adapter({ stored = 'plain:synthetic-old', agent = 'synthetic-new' } = {}) {
+function adapter({ stored = 'plain:synthetic-old', agent = 'synthetic-new', paths = require('node:path') } = {}) {
   const state = { settings: { jurisupportTokenEnc: stored }, agent, rejected: new Set(), posts: [], writes: [], events: 0, networkStatus: 200, beforeInitialize: null, beforePersist: null }
   let clock = Date.parse('2026-10-06T00:00:00Z')
   class Clock extends Date { static now() { return clock += 1000 } }
@@ -129,10 +129,10 @@ function adapter({ stored = 'plain:synthetic-old', agent = 'synthetic-new' } = {
     electron: { app: { getPath: () => '/nonexistent-token-test' }, safeStorage: { isEncryptionAvailable: () => false, decryptString: () => { throw new Error('synthetic locked key') } } },
     './settings': { getSettings: async () => state.settings, setSettings: async (patch) => { await state.beforePersist?.(); state.settings = { ...state.settings, ...patch } } },
     'fs/promises': { rm: async () => {}, readFile: async (path) => {
-      if (path.endsWith('/.claude.json') && state.agent) return JSON.stringify({ mcpServers: { jurisupport: server(state.agent) } })
+      if (path.replaceAll('\\', '/').endsWith('/.claude.json') && state.agent) return JSON.stringify({ mcpServers: { jurisupport: server(state.agent) } })
       throw new Error('synthetic file missing')
     } },
-    os: { homedir: () => '/nonexistent-token-test-home' }, './imageSize': {}
+    path: paths, os: { homedir: () => '/nonexistent-token-test-home' }, './imageSize': {}
   }[name] ?? require(name))
   const fetch = async (_url, options) => {
     const input = JSON.parse(options.body), token = options.headers.Authorization.slice('Bearer '.length)
@@ -217,3 +217,9 @@ function adapter({ stored = 'plain:synthetic-old', agent = 'synthetic-new' } = {
   assert.equal(await api.tokenStatus(), 'ok', 'a usable registered agent key can serve while the app key remains locked')
 }
 console.log('agent token integration: initial reuse, external changes, rejected/expired key rotation, no cross-account replay, manual-change and persistence-failure guards passed')
+
+for (const paths of [require('node:path').posix, require('node:path').win32]) {
+  const { api, state } = adapter({ paths }); state.settings = {};
+  assert.equal(await api.hasToken(), true, 'registered-token reuse supports both POSIX and Windows config paths');
+}
+console.log('agent token path portability: POSIX and Windows config lookups passed')
