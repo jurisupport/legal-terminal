@@ -685,6 +685,7 @@ export async function listAutomaticWorkspaces(ssh?: SshProfileLike, includeClose
     for (const content of contents) {
       try {
         const snapshot: unknown = JSON.parse(content)
+        // Android and older desktop snapshots lack workspaceOpen but still belong in history.
         if (!isSnapshot(snapshot) || (!includeClosed && snapshot.workspaceOpen !== true)) continue
         const source = asRecord(snapshot.currentCase)
         if (!asString(source?.drafts)?.startsWith('/') || !asString(source?.name)) continue
