@@ -30,10 +30,14 @@ function runApp({ root, temp, screenshot }) {
   }))
   const meta = { court: '서울중앙지방법원', caseNumber: '2026가단12345', caseName: '손해배상(기)', client: '김민수', opponent: '주식회사 대한건설', partyNames: '김민수 / 주식회사 대한건설' }
   snapshots[0].currentCase.meta = meta
-  Object.assign(snapshots[0].terminals[0], meta)
+  Object.assign(snapshots[0].terminals[0], meta, { originDevice: 'android' })
   const remoteSnapshot = { version: 1, savedAt: new Date(now - 8 * day).toISOString(), workspaceOpen: false,
     currentCase: { drafts: '/cases/kim', name: '박지훈 · 원격 사건', meta: { caseNumber: '2026나123', caseName: '대여금', client: '박지훈', opponent: '김철수', partyNames: '박지훈 / 김철수' } },
     docs: [], terminals: [] }
+  const phoneSnapshot = { version: 1, savedAt: new Date(now - 10 * day).toISOString(), workspaceDevice: 'Android',
+    currentCase: { drafts: '/cases/phone-only', name: '폰에서 시작한 사건' }, docs: [], activeTerm: 'mobile-only',
+    terminals: [{ id: 'mobile-only', title: '폰에서 작성한 초안', kind: 'agent', agentProvider: 'claude',
+      cwd: '/cases/phone-only', resumeSessionId: 'phone-session', side: 'right', originDevice: 'android' }] }
   const sessions = Array.from({ length: 46 }, (_, i) => ({
     sessionId: `past-session-${i}`, title: `이전 작업 ${i}`, transcriptTitle: i === 0 ? '증거목록 검토' : `이전 작업 ${i}`,
     cwd: '/cases/kim', mtime: now - (i === 0 ? 2 : 9 + i) * day
@@ -66,6 +70,7 @@ function runApp({ root, temp, screenshot }) {
       const { cwd, ssh, limit } = args[0]
       if (delaySessionList) await new Promise((resolve) => setTimeout(resolve, 300))
       if (cwd === '/cases/lee' && failLee) throw Error('검증용 연결 오류')
+      if (cwd === '/cases/phone-only' && ssh) return [{ sessionId: 'phone-session', title: '폰에서 작성한 초안', cwd, mtime: now, originDevice: 'android' }]
       if (cwd !== '/cases/kim') return []
       if (ssh) return [{ sessionId: 'remote-session', title: '원격 기록 검토', cwd, mtime: now }]
       return [{ sessionId: 'open-session-0', title: '중복되면 안 되는 작업', mtime: now }, ...sessions].slice(0, limit ?? 40)
@@ -78,9 +83,11 @@ function runApp({ root, temp, screenshot }) {
         return { ok: true, snapshots: [{ ...remoteSnapshot, workspaceOpen: true, savedAt: new Date().toISOString(), currentCase: { drafts: '/cases/obsolete', name: '이전 서버에서 늦게 도착한 사건' } }] }
       }
       if (args[0].host !== profile.host) return { ok: true, snapshots: [{ ...remoteSnapshot, workspaceOpen: true, savedAt: new Date().toISOString(), currentCase: { drafts: '/cases/new-server', name: '변경된 서버의 사건' } }] }
-      return { ok: true, snapshots: [remoteSnapshot] }
+      return { ok: true, snapshots: args[1] ? [remoteSnapshot, phoneSnapshot] : [] }
     }
-    if (channel === 'workspace:autoLoad') return { ok: true, remote: { ok: true, snapshot: args[0].ssh ? remoteSnapshot : snapshots.find((s) => s.currentCase.drafts === args[0].cwd) } }
+    if (channel === 'workspace:autoLoad') return { ok: true, remote: { ok: true, snapshot: args[0].ssh
+      ? args[0].cwd === '/cases/phone-only' ? phoneSnapshot : remoteSnapshot
+      : snapshots.find((s) => s.currentCase.drafts === args[0].cwd) } }
     if (channel === 'workspace:autoSave') return { ok: true }
     if (channel === 'workspace:list') return { ok: true, entries: [{ id: 'legacy', label: history[1].name, cwd: history[1].drafts, caseNumber: '2025가단54321', caseName: '임대차보증금', client: '이서연', savedAt: new Date().toISOString() }] }
     if (channel === 'workspace:autoObserve') return
@@ -140,6 +147,10 @@ function runApp({ root, temp, screenshot }) {
       assert.equal(await evaluate(`${group('김민수')}.textContent.includes('이전 작업 1')`), false, 'old work is hidden initially')
       assert.equal(await evaluate(`${group('김민수')}.textContent.includes('중복되면')`), false, 'open and saved conversation are deduplicated')
       assert.equal(await evaluate(`${group('김민수')}.textContent.includes('준비서면 쟁점 정리')`), true, 'an older open task stays reachable')
+      assert.equal(await evaluate(`${group('김민수')}.querySelector('.case-sidebar-task-origin')?.textContent`), '폰',
+        'restored open tasks show their phone creator')
+      assert.equal(await evaluate(`${group('김민수')}.querySelectorAll('.case-sidebar-task-origin').length`), 1,
+        'unknown history entries do not receive a phone label')
       await evaluate(`document.querySelector('select[aria-label="최근 작업 기간"]').value = '14'; document.querySelector('select[aria-label="최근 작업 기간"]').dispatchEvent(new Event('change', { bubbles: true }))`)
       await wait(() => evaluate(`${group('김민수')}.textContent.includes('이전 작업 1')`))
       await evaluate(`document.querySelector('select[aria-label="최근 작업 기간"]').value = '7'; document.querySelector('select[aria-label="최근 작업 기간"]').dispatchEvent(new Event('change', { bubbles: true }))`)
@@ -158,7 +169,8 @@ function runApp({ root, temp, screenshot }) {
       await clickText('이서연', '다시')
       await wait(() => evaluate(`!${group('이서연')}.textContent.includes('다시')`))
       await evaluate(`document.querySelector('.case-sidebar-more-cases').click()`)
-      await wait(() => evaluate(`document.querySelectorAll('.case-sidebar-group').length === 9`))
+      await wait(() => evaluate(`document.querySelectorAll('.case-sidebar-group').length === 10`))
+      assert.equal(agents.has('mobile-only'), false, 'discovering a phone case does not activate its conversation')
       assert.equal(calls.some((call) => call.channel === 'sessions:list' && call.args[0]?.cwd.includes('ssh://')), false, 'SSH URI never scanned as a local folder')
       const remoteReads = calls.filter((call) => call.channel === 'sessions:list' && call.args[0].ssh).length
       assert.equal(remoteReads, 0, 'more cases does not open remote histories')
@@ -171,6 +183,17 @@ function runApp({ root, temp, screenshot }) {
       assert.equal(remote.cwd, '/cases/kim')
       assert.equal(remote.ssh.host, profile.host, 'resume retains selected SSH host despite same local cwd')
       assert.equal(await evaluate(`${group('박지훈')}.querySelector('.case-sidebar-case-participants').textContent`), '박지훈 / 김철수', 'direct history resume preserves both parties from a closed case')
+      await evaluate(`${group('폰에서 시작한 사건')}.querySelector('.case-sidebar-toggle').click()`)
+      await wait(() => evaluate(`${group('폰에서 시작한 사건')}?.textContent.includes('폰에서 작성한 초안')`))
+      assert.equal(await evaluate(`${group('폰에서 시작한 사건')}.querySelector('.case-sidebar-task-origin')?.textContent`), '폰',
+        'phone origin appears on history tasks before opening')
+      await clickText('폰에서 시작한 사건', '폰에서 작성한 초안')
+      await wait(() => [...agents.values()].some((agent) => agent.resumeSessionId === 'phone-session'))
+      const phone = [...agents.values()].find((agent) => agent.resumeSessionId === 'phone-session')
+      assert.equal(phone.cwd, '/cases/phone-only', 'phone-only history resumes in its original folder')
+      assert.equal(phone.ssh.host, profile.host, 'phone-only history resumes on its original host')
+      await wait(() => calls.some((call) => call.channel === 'workspace:autoSave' &&
+        call.args[0].snapshot.terminals.some((tab) => tab.resumeSessionId === 'phone-session' && tab.originDevice === 'android')))
       await clickText('김민수', '증거목록 검토')
       await wait(() => [...agents.values()].some((agent) => agent.resumeSessionId === 'past-session-0'))
       const resumed = [...agents.values()].find((agent) => agent.resumeSessionId === 'past-session-0')

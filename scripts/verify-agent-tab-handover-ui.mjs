@@ -20,7 +20,7 @@ function runApp({ root, temp }) {
     currentCase: { drafts: cwd, name: recent.name }, activeTerm: 'mobile-agent',
     docs: [{ id: 'excluded-document', kind: 'markdown', title: '열리면 안 되는 문서', path: '/private.md' }],
     terminals: [
-      { id: 'mobile-agent', title: '폰에서 열린 대화', kind: 'agent', agentProvider: 'claude', cwd, resumeSessionId: 'phone-session' },
+      { id: 'mobile-agent', title: '폰에서 열린 대화', kind: 'agent', agentProvider: 'claude', cwd, resumeSessionId: 'phone-session', originDevice: 'android' },
       { id: 'blank-agent', title: '빈 에이전트 탭', kind: 'agent', agentProvider: 'claude', cwd },
       { id: 'excluded-shell', title: '열리면 안 되는 터미널', kind: 'terminal', cwd }
     ]
@@ -116,6 +116,10 @@ function runApp({ root, temp }) {
       const saved = calls.find((call) => call.channel === 'workspace:autoSave').args[0].snapshot
       assert.deepEqual(saved.terminals.map((tab) => tab.id).sort(), ['blank-agent', 'mobile-agent'])
       assert.equal(saved.docs.length, 0)
+      assert.equal(saved.terminals.find((tab) => tab.id === 'mobile-agent').originDevice, 'android',
+        'restoring and resaving on PC keeps the original phone creator')
+      assert.equal(saved.terminals.find((tab) => tab.id === 'blank-agent').originDevice, undefined,
+        'legacy unknown tabs do not inherit Android from the workspace writer')
       const beforeStart = calls.filter((call) => call.channel === 'workspace:autoSave').length
       sessions.set('blank-agent', { id: 'blank-agent', resumeSessionId: 'new-conversation' })
       win.webContents.send('agent:event', { type: 'session:init', sessionId: 'blank-agent' })

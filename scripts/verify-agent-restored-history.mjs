@@ -43,7 +43,7 @@ const effect = (marker) => component.body.statements.find((node) =>
   node.getText(panel).includes(marker)
 ).getText(panel)
 
-for (const restoreBeforeHistory of [false, true]) {
+for (const loadOrder of ['history-first', 'restore-first', 'late-session-id']) {
   const permission = { id: 'permission-1', kind: 'permission', status: 'pending' }
   const process = { id: 'process-1', kind: 'process', processSteps: [{ id: 'step-1', status: 'running' }] }
   let items = [permission, process]
@@ -55,8 +55,9 @@ for (const restoreBeforeHistory of [false, true]) {
     useEffect: (callback) => callback(), window: { lt: { agent: { onEvent: (callback) => { emit = callback } } } },
     eventSessionId: (event) => event.sessionId, id: 'panel-id', agentLabel: 'Claude', provider: 'claude',
     cwd: '/tmp', profileId: undefined, ssh: undefined, onStatus: undefined, workspaceContext: undefined,
-    resumeSessionId: 'test-session', loadedHistoryKeyRef: { current: null },
-    restoredTurnStartedAtRef: { current: undefined },
+    resumeSessionId: loadOrder === 'late-session-id' ? undefined : 'test-session',
+    loadedHistoryKeyRef: { current: null },
+    restoredTurnStartedAtRef: { current: undefined }, hasLiveMessagesRef: { current: false },
     transcriptSourceKey: () => 'remote', loadSessionTranscript: () => history,
     invalidateSessionTranscript: () => {}, rememberPrompts: () => {}, setResumedModel: () => {},
     setItems: (update) => { items = update(items) }
@@ -69,17 +70,60 @@ for (const restoreBeforeHistory of [false, true]) {
     emit(user)
     emit(user)
   }
-  if (restoreBeforeHistory) restore()
+  if (loadOrder !== 'history-first') restore()
+  if (loadOrder === 'late-session-id') {
+    context.resumeSessionId = 'test-session'
+    compile(effect('const historyKey ='), context)
+  }
   resolveHistory(transcript)
   await history
   await Promise.resolve()
-  if (!restoreBeforeHistory) restore()
+  if (loadOrder === 'history-first') restore()
   assert.deepEqual(items.filter((item) => item.id.startsWith('history-')).map((item) => item.text), [
     '이전 요청', '이전 답변', '시간 없는 이전 기록'
-  ], `native history must omit the replayed turn when restore arrives ${restoreBeforeHistory ? 'before' : 'after'} history`)
+  ], `native history must omit the replayed turn: ${loadOrder}`)
   assert.equal(items.filter((item) => item.id === 'remote-user-1').length, 1)
   assert.equal(items.find((item) => item.id === permission.id), permission)
   assert.equal(items.find((item) => item.id === process.id), process)
 }
 
-console.log('restored remote history: timestamps, both load orders, stable user IDs, and live work preserved')
+// Persisting a fresh conversation's ID must not reload the turn already on screen.
+for (const ssh of [undefined, { host: 'example.invalid', user: 'test' }]) {
+  let items = []
+  let emit
+  let historyLoads = 0
+  const firstTurn = { sessionId: 'new-session', messages: [
+    { id: 'native-user', role: 'user', text: '첫 질문' },
+    { id: 'native-assistant', role: 'assistant', text: '첫 답변' }
+  ] }
+  const context = {
+    ...values, ...helpers,
+    useEffect: (callback) => callback(), window: { lt: { agent: { onEvent: (callback) => { emit = callback } } } },
+    eventSessionId: (event) => event.sessionId, id: 'new-panel', agentLabel: 'Claude', provider: 'claude',
+    cwd: '/tmp', profileId: undefined, ssh, onStatus: undefined, workspaceContext: undefined,
+    resumeSessionId: undefined, loadedHistoryKeyRef: { current: null },
+    restoredTurnStartedAtRef: { current: undefined }, hasLiveMessagesRef: { current: false },
+    transcriptSourceKey: () => ssh ? 'remote' : 'local',
+    loadSessionTranscript: async () => { historyLoads++; return firstTurn },
+    invalidateSessionTranscript: () => {}, rememberPrompts: () => {}, setResumedModel: () => {},
+    setItems: (update) => { items = update(items) }
+  }
+  compile(effect('window.lt.agent.onEvent'), context)
+  compile(effect('const historyKey ='), context)
+  emit({ type: 'message:user', sessionId: 'new-panel', messageId: 'live-user', text: '첫 질문' })
+  // App stores the ID from session:init/status:done back into the panel props.
+  context.resumeSessionId = firstTurn.sessionId
+  compile(effect('const historyKey ='), context)
+  await Promise.resolve()
+  await Promise.resolve()
+  assert.equal(items.filter((item) => item.kind === 'user').length, 1,
+    `persisting a fresh ${ssh ? 'remote' : 'local'} session must not duplicate its first question`)
+  assert.equal(historyLoads, 0, 'live conversations must not fetch their own transcript')
+  assert.equal(items.some((item) => item.id.startsWith('history-')), false)
+  emit({ type: 'message:user', sessionId: 'new-panel', messageId: 'live-user-2', text: '첫 질문' })
+  assert.equal(items.filter((item) => item.kind === 'user').length, 2,
+    'a deliberately repeated question is a separate turn')
+}
+
+console.log('restored remote history: timestamps, all load orders, late session IDs, stable user IDs, and live work preserved')
+console.log('fresh local/remote sessions: one first question, no self-history reload, repeated questions preserved')

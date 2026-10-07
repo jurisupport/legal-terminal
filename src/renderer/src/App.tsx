@@ -396,6 +396,7 @@ interface TermTab {
   opponent?: string
   partyNames?: string
   memo?: string
+  originDevice?: 'android' | 'desktop'
   sessionTitle?: string // claude 세션 제목(ai-title) — transcript에서 자동 반영
   renamed?: boolean // 사용자가 직접 이름 변경 → 자동 반영 중단
   createdAt?: number // 세션 시작 시각 — 이 이후의 transcript만 현재 세션으로 매칭
@@ -1025,6 +1026,7 @@ const sessionRememberInput = (
 ): SessionRememberInput => ({
   ...(sessionContextForTerm(source) ?? {}),
   sessionId,
+  originDevice: source.originDevice,
   cwd: source.cwd,
   title: koreanSessionTitle(source) || title,
   transcriptTitle: title,
@@ -1093,6 +1095,7 @@ const loadPastSessions = (
           void window.lt.sessions
             .remember({
               sessionId: entry.sessionId,
+              originDevice: entry.originDevice,
               cwd: entry.cwd || source.cwd,
               transcriptTitle: entry.transcriptTitle || entry.title,
               mtime: entry.mtime,
@@ -2803,7 +2806,7 @@ export default function App(): JSX.Element {
   }, [])
 
   const rememberSessionForTerm = (term: TermTab, sessionId: string, title?: string, mtime?: number): void => {
-    const key = `${term.ssh ? `${term.ssh.user}@${term.ssh.host}:${term.ssh.port ?? 22}` : 'local'}:${sessionId}:${title ?? ''}:${term.caseNumber ?? ''}:${term.cwd}`
+    const key = `${term.ssh ? `${term.ssh.user}@${term.ssh.host}:${term.ssh.port ?? 22}` : 'local'}:${sessionId}:${title ?? ''}:${term.caseNumber ?? ''}:${term.cwd}:${term.originDevice ?? ''}`
     if (rememberedSessionsRef.current.has(key)) return
     rememberedSessionsRef.current.add(key)
     void window.lt.sessions.remember(sessionRememberInput(term, sessionId, title, mtime)).catch(() => {})
@@ -2913,6 +2916,7 @@ export default function App(): JSX.Element {
       autoClaude: kind === 'terminal',
       agentProvider: kind === 'agent' ? resolveAgentProvider(agentProviderOverride ?? agentDefaultProvider) : undefined,
       createdAt: Date.now(),
+      originDevice: 'desktop',
       side,
       ...caseMeta
     }
@@ -3012,6 +3016,7 @@ export default function App(): JSX.Element {
       autoClaude: kind === 'terminal',
       agentProvider: kind === 'agent' ? resolveAgentProvider(agentProviderOverride ?? agentDefaultProvider, ssh) : undefined,
       createdAt: Date.now(),
+      originDevice: 'desktop',
       ssh,
       sshLabel: profile.label,
       profileId: profile.id,
@@ -3345,7 +3350,8 @@ export default function App(): JSX.Element {
     source?: TermTab,
     side: DockSide = termSide(source),
     fallbackCase?: OpenedCase, // 대시보드에서 방금 연 사건 — currentCase state가 아직 갱신 전일 수 있다
-    forceNew = false
+    forceNew = false,
+    originDevice?: TermTab['originDevice']
   ): void => {
     const matchesCwd = (c?: CurrentCase | null): boolean =>
       !!c && (c.drafts === cwd || c.remotePath === cwd)
@@ -3372,6 +3378,9 @@ export default function App(): JSX.Element {
         )
       : undefined
     if (existing) {
+      if (!existing.originDevice && originDevice) {
+        setTermTabs((tabs) => tabs.map((tab) => tab.id === existing.id ? { ...tab, originDevice } : tab))
+      }
       selectTerm(existing.id)
       return
     }
@@ -3386,6 +3395,7 @@ export default function App(): JSX.Element {
       agentProvider: 'claude',
       createdAt: Date.now(),
       resumeSessionId: sessionId,
+      originDevice,
       renamed: !!title, // 과거 세션 제목을 그대로 쓰면 자동 갱신 안 함
       todoManagement: source?.todoManagement,
       contextKind: source?.contextKind ?? base?.meta?.contextKind,
@@ -3517,6 +3527,7 @@ export default function App(): JSX.Element {
       autoClaude: terminalAutoClaude,
       autoAgent: terminalAutoAgent,
       createdAt: Date.now(),
+      originDevice: 'desktop',
       todoManagement: cur.todoManagement,
       contextKind: cur.contextKind,
       projectId: cur.projectId,
@@ -3565,6 +3576,7 @@ export default function App(): JSX.Element {
       autoClaude: false,
       agentProvider: resolveAgentProvider(agentProviderOverride ?? cur?.agentProvider ?? agentDefaultProvider, ssh),
       createdAt: Date.now(),
+      originDevice: 'desktop',
       todoManagement: cur?.todoManagement,
       contextKind: cur?.contextKind ?? currentCase?.meta?.contextKind,
       projectId: cur?.projectId ?? currentCase?.meta?.projectId,
@@ -3663,6 +3675,7 @@ export default function App(): JSX.Element {
       autoClaude: false,
       agentProvider: resolveAgentProvider(opts.provider ?? source.agentProvider, opts.ssh),
       createdAt: Date.now(),
+      originDevice: 'desktop',
       resumeSessionId: undefined,
       forkFromSessionId: opts.forkFromSessionId,
       handoffContext: opts.handoffContext,
@@ -4747,6 +4760,7 @@ export default function App(): JSX.Element {
       opponent: typeof t.opponent === 'string' ? t.opponent : undefined,
       partyNames: typeof t.partyNames === 'string' ? t.partyNames : undefined,
       memo: typeof t.memo === 'string' ? t.memo : undefined,
+      originDevice: t.originDevice === 'android' || t.originDevice === 'desktop' ? t.originDevice : undefined,
       sessionTitle: typeof t.sessionTitle === 'string' ? t.sessionTitle : undefined,
       renamed: !!t.renamed,
       createdAt: Date.now(),
@@ -5223,6 +5237,7 @@ export default function App(): JSX.Element {
       tab.agentProvider,
       tab.resumeSessionId,
       tab.sessionTitle,
+      tab.originDevice,
       tab.side
     ])
   })
@@ -6436,6 +6451,7 @@ export default function App(): JSX.Element {
         id: term.id,
         title: term.sessionTitle || term.title,
         mtime: term.createdAt ?? 0,
+        originDevice: term.originDevice,
         sessionId: term.agentProvider === 'codex' ? undefined : term.resumeSessionId,
         active: tab.id === activeCaseTabId && isTermVisibleInCurrentWorkspace(term.id),
         status: termStatus.get(term.id) === 'working' ? '작업 중'
@@ -6593,12 +6609,15 @@ export default function App(): JSX.Element {
     if (!tab) return
     const term = termsForCaseTab(tab).find((item) => item.id === task.id)
     if (term) {
+      if (!term.originDevice && task.originDevice) {
+        setTermTabs((tabs) => tabs.map((item) => item.id === term.id ? { ...item, originDevice: task.originDevice } : item))
+      }
       openCaseTab(tab, { side: termSide(term), key: termKeyOf(term.id) })
       return
     }
     const source = sidebarSessionSource(caseId)
     if (source && task.sessionId) {
-      openPastSession(task.sessionId, source.cwd, task.title, source)
+      openPastSession(task.sessionId, source.cwd, task.title, source, undefined, undefined, false, task.originDevice)
       setMode('explorer')
     }
   }
@@ -7280,7 +7299,7 @@ export default function App(): JSX.Element {
       }
       const opened = await openCaseRemote(c, profile, s.cwd)
       if (!opened) return
-      openPastSession(s.sessionId, s.cwd, s.title, undefined, undefined, opened.source, forceNew)
+      openPastSession(s.sessionId, s.cwd, s.title, undefined, undefined, opened.source, forceNew, s.originDevice)
       return
     }
     const opened = await openCaseWorkspace(c)
@@ -7292,7 +7311,8 @@ export default function App(): JSX.Element {
       opened.term,
       undefined,
       opened,
-      forceNew
+      forceNew,
+      s.originDevice
     )
   }
 
@@ -7301,11 +7321,12 @@ export default function App(): JSX.Element {
     cwd: string,
     title?: string,
     profileId?: string,
-    forceNew = false
+    forceNew = false,
+    originDevice?: TermTab['originDevice']
   ): Promise<void> => {
     setMode('explorer')
     if (!profileId) {
-      openPastSession(sessionId, cwd, title, undefined, undefined, undefined, forceNew)
+      openPastSession(sessionId, cwd, title, undefined, undefined, undefined, forceNew, originDevice)
       return
     }
     const profile = await findSshProfile(profileId)
@@ -7315,7 +7336,7 @@ export default function App(): JSX.Element {
     }
     const opened = openRemoteCaseContext(profile, cwd, title)
     resolveRemoteRecordsLater(opened.id, profile, cwd, opened.title)
-    openPastSession(sessionId, cwd, title, undefined, undefined, opened.source, forceNew)
+    openPastSession(sessionId, cwd, title, undefined, undefined, opened.source, forceNew, originDevice)
   }
 
   const openHearingRecordForCase = async (c: JsCase): Promise<void> => {
@@ -7863,8 +7884,8 @@ export default function App(): JSX.Element {
             selectTerm(id)
             setSessionListOpen(false)
           }}
-          onResume={(sid, cwd, title, source) => {
-            openPastSession(sid, cwd, title, source)
+          onResume={(sid, cwd, title, source, originDevice) => {
+            openPastSession(sid, cwd, title, source, undefined, undefined, false, originDevice)
             setSessionListOpen(false)
           }}
           onClose={() => setSessionListOpen(false)}
@@ -8003,8 +8024,8 @@ export default function App(): JSX.Element {
             onBrief={briefCaseToClaude}
             onHearingRecord={(c) => void openHearingRecordForCase(c)}
             onResumeSession={(c, s, newTab) => void resumeCaseSession(c, s, newTab)}
-            onResumePath={(sessionId, cwd, title, profileId, newTab) =>
-              void resumePathSession(sessionId, cwd, title, profileId, newTab)
+            onResumePath={(sessionId, cwd, title, profileId, newTab, originDevice) =>
+              void resumePathSession(sessionId, cwd, title, profileId, newTab, originDevice)
             }
             onChanged={() => setJsNonce((n) => n + 1)}
           />
@@ -8242,8 +8263,8 @@ export default function App(): JSX.Element {
               selectTerm(id)
               setSessionListOpen(false)
             }}
-            onResume={(sid, cwd, title, source) => {
-              openPastSession(sid, cwd, title, source, side)
+            onResume={(sid, cwd, title, source, originDevice) => {
+              openPastSession(sid, cwd, title, source, side, undefined, false, originDevice)
               setSessionListOpen(false)
             }}
             onClose={() => setSessionListOpen(false)}
@@ -9640,6 +9661,7 @@ function SelectionAsk({ onAsk, selectionDocument = document }: SelectionActionPr
 
   useEffect(() => {
     const sourceFrame = selectionDocument.defaultView?.frameElement
+    const selectionWindow = selectionDocument.defaultView ?? window
     let frame = 0
     let pointerSelecting = false
     let pendingEditorDetail: TextSelectionOverlayDetail | null = null
@@ -9748,7 +9770,7 @@ function SelectionAsk({ onAsk, selectionDocument = document }: SelectionActionPr
     } else {
       window.addEventListener(TEXT_SELECTION_OVERLAY_EVENT, onEditorSelection)
     }
-    window.addEventListener('blur', onPointerCancel)
+    selectionWindow.addEventListener('blur', onPointerCancel)
     return () => {
       if (frame) cancelAnimationFrame(frame)
       selectionDocument.removeEventListener('pointerup', onPointerUp)
@@ -9761,7 +9783,7 @@ function SelectionAsk({ onAsk, selectionDocument = document }: SelectionActionPr
       document.removeEventListener('scroll', onPointerCancel, true)
       document.removeEventListener('pointerdown', onOuterPointerDown)
       window.removeEventListener('resize', onPointerCancel)
-      window.removeEventListener('blur', onPointerCancel)
+      selectionWindow.removeEventListener('blur', onPointerCancel)
       window.removeEventListener(TEXT_SELECTION_OVERLAY_EVENT, onEditorSelection)
     }
   }, [selectionDocument])
@@ -10772,7 +10794,7 @@ function SessionList({
   caseCwd?: string
   caseSource?: TermTab
   onSelect: (id: string) => void
-  onResume: (sessionId: string, cwd: string, title?: string, source?: TermTab) => void
+  onResume: (sessionId: string, cwd: string, title?: string, source?: TermTab, originDevice?: TermTab['originDevice']) => void
   onClose: () => void
 }): JSX.Element {
   const [past, setPast] = useState<SessionListEntry[] | null>(null)
@@ -10995,7 +11017,7 @@ function SessionList({
                 {group !== prevGroup && <li className="sl-daysep">{group}</li>}
                 <li
                   className="sl-row past"
-                  onClick={() => onResume(p.sessionId, p.cwd ?? filterCwd, p.title, filterSource)}
+                  onClick={() => onResume(p.sessionId, p.cwd ?? filterCwd, p.title, filterSource, p.originDevice)}
                   title={`${p.sessionId}\n${p.cwd ?? filterCwd}\nclaude --resume 로 이어서 열기`}
                 >
                   <span className="sl-name">{name}</span>

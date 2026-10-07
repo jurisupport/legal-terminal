@@ -159,6 +159,7 @@
   min-width: 0;
 }
 
+.case-sidebar-task-origin,
 .case-sidebar-task-status {
   flex-shrink: 0;
   max-width: 65px;

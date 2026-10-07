@@ -1996,6 +1996,7 @@ export default function AgentPanel({
   const copyFeedbackTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const loadedHistoryKeyRef = useRef<string | null>(null)
   const restoredTurnStartedAtRef = useRef<number>()
+  const hasLiveMessagesRef = useRef(false)
   const handledAttachmentRequestIdsRef = useRef<Set<string>>(new Set())
   const promptHistoryRef = useRef<string[]>([])
   const promptHistoryIndexRef = useRef<number | null>(null)
@@ -2039,6 +2040,7 @@ export default function AgentPanel({
     createdRef.current = false
     loadedHistoryKeyRef.current = null
     restoredTurnStartedAtRef.current = undefined
+    hasLiveMessagesRef.current = false
     handledAttachmentRequestIdsRef.current.clear()
     setItems([])
     setRuntimeSlashCommands([])
@@ -2247,6 +2249,7 @@ export default function AgentPanel({
       if (event.type === 'session:restored') {
         restoredTurnStartedAtRef.current = numberValue(event.startedAt)
       }
+      if (event.type === 'message:user') hasLiveMessagesRef.current = true
       if (event.type === 'process:event' && isAgentTaskMutation(stringValue(event.toolName) ?? '') &&
         ['done', 'completed', 'error', 'failed', 'denied'].includes(stringValue(event.status) ?? '')) {
         const key = stringValue(event.processId)
@@ -2387,6 +2390,8 @@ export default function AgentPanel({
   useEffect(() => {
     if (provider !== 'claude') return
     if (!resumeSessionId) return
+    // A fresh session gets its saved ID after sending; its live turn is already displayed.
+    if (hasLiveMessagesRef.current && restoredTurnStartedAtRef.current === undefined) return
     const historyKey = `${transcriptSourceKey(ssh)}:${resumeSessionId}`
     if (loadedHistoryKeyRef.current === historyKey) return
     loadedHistoryKeyRef.current = historyKey

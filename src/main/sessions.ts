@@ -64,6 +64,7 @@ interface TranscriptHead {
 }
 
 export interface SessionListEntry {
+  originDevice?: 'android' | 'desktop'
   sessionId: string
   title?: string
   transcriptTitle?: string
@@ -98,6 +99,7 @@ export interface SessionSearchContext {
 }
 
 export interface SessionMetaInput extends SessionSearchContext {
+  originDevice?: 'android' | 'desktop'
   sessionId: string
   cwd: string
   title?: string
@@ -324,6 +326,7 @@ function buildSessionMeta(input: SessionMetaInput): SessionMeta {
   const key = sessionKey(input.sessionId, input.ssh)
   return {
     ...input,
+    originDevice: input.originDevice === 'android' || input.originDevice === 'desktop' ? input.originDevice : undefined,
     key,
     sourceKey: sourceKey(input.ssh),
     folderName,
@@ -350,6 +353,8 @@ export async function rememberSessionMeta(raw: SessionMetaInput): Promise<{ ok: 
         ? buildSessionMeta({
             ...previous,
             ...input,
+            originDevice: previous.originDevice === 'android' || previous.originDevice === 'desktop'
+              ? previous.originDevice : input.originDevice,
             displayTitle: input.displayTitle || previous.displayTitle,
             title: input.title || previous.title,
             transcriptTitle: input.transcriptTitle || previous.transcriptTitle,
@@ -411,6 +416,7 @@ function decorateSession(
   const title = displayTitle || meta?.title || transcriptTitle
   return {
     sessionId: session.sessionId,
+    originDevice: meta?.originDevice === 'android' || meta?.originDevice === 'desktop' ? meta.originDevice : undefined,
     title,
     transcriptTitle,
     mtime: session.mtime || meta?.mtime || 0,
@@ -496,6 +502,11 @@ for e in incoming:
         cur = merged.get(k)
         if (cur is None or cur == "") and v is not None:
             merged[k] = v
+    origin = next((v for v in (older.get("originDevice"), newer.get("originDevice")) if v in ("android", "desktop")), None)
+    if origin:
+        merged["originDevice"] = origin
+    else:
+        merged.pop("originDevice", None)
     by[e["key"]] = merged
 entries = sorted(by.values(), key=lambda x: x["updatedAt"], reverse=True)[:${MAX_SESSION_INDEX_ENTRIES}]
 tmp = path + "." + str(os.getpid()) + ".tmp"

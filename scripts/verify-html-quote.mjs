@@ -96,6 +96,7 @@ async function electronCheck({ root, temp, output, channels }) {
     for (let step = 1; step <= 8; step++) {
       w.webContents.sendInputEvent({ type: 'mouseMove', button: 'left', x: Math.round(drag.x + (drag.endX - drag.x) * step / 8), y: drag.y })
       await pause()
+      assert.equal(await run("return visible('.sel-actions').length"), 0, 'HTML selection action stays hidden throughout native drag')
     }
     w.webContents.sendInputEvent({ type: 'mouseUp', button: 'left', clickCount: 1, x: drag.endX, y: drag.y })
     await wait("visible('.sel-actions button').length === 1", 'Real pointer drag creates HTML selection action')
@@ -133,6 +134,9 @@ async function electronCheck({ root, temp, output, channels }) {
     await run("visible('.ctx-item').find(el => el.textContent.includes('Claude')).click()")
     await wait("visible('.agent-attachment-chip').some(el => el.title.includes('지연이자는 연 5퍼센트로 한다.'))", 'Context menu quote attachment')
     await run("check(true, 'Right-click question attaches the selected HTML text')")
+    await select()
+    await run("const view = document.querySelector('.html-frame').contentWindow; view.dispatchEvent(new view.Event('blur'))")
+    await wait("!visible('.sel-actions').length", 'Iframe focus loss dismisses action')
     await select()
     await run("document.querySelector('.html-frame').contentDocument.dispatchEvent(new Event('scroll'))")
     await wait("!visible('.sel-actions').length", 'Iframe scroll dismisses action')
