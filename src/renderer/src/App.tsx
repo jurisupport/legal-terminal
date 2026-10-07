@@ -9998,6 +9998,7 @@ function SelectionAsk({ onAsk, onInline, inlineOpen = false, selectionDocument =
 
   useEffect(() => {
     const sourceFrame = selectionDocument.defaultView?.frameElement
+    const selectionWindow = selectionDocument.defaultView ?? window
     let frame = 0
     let pointerSelecting = false
     let pendingEditorDetail: TextSelectionOverlayDetail | null = null
@@ -10111,7 +10112,7 @@ function SelectionAsk({ onAsk, onInline, inlineOpen = false, selectionDocument =
     } else {
       window.addEventListener(TEXT_SELECTION_OVERLAY_EVENT, onEditorSelection)
     }
-    window.addEventListener('blur', onPointerCancel)
+    selectionWindow.addEventListener('blur', onPointerCancel)
     return () => {
       if (frame) cancelAnimationFrame(frame)
       selectionDocument.removeEventListener('pointerup', onPointerUp)
@@ -10124,7 +10125,7 @@ function SelectionAsk({ onAsk, onInline, inlineOpen = false, selectionDocument =
       document.removeEventListener('scroll', onPointerCancel, true)
       document.removeEventListener('pointerdown', onOuterPointerDown)
       window.removeEventListener('resize', onPointerCancel)
-      window.removeEventListener('blur', onPointerCancel)
+      selectionWindow.removeEventListener('blur', onPointerCancel)
       window.removeEventListener(TEXT_SELECTION_OVERLAY_EVENT, onEditorSelection)
     }
   }, [selectionDocument])
