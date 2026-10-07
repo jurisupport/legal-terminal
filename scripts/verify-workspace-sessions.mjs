@@ -129,3 +129,21 @@ console.log('agent-only handover and concurrent-device merge: OK')
   assert.equal(mergeSharedAgentTabs(reopened, { ...stale, closedAgentTabs: closed.closedAgentTabs }, undefined).terminals.length, 1,
     'stale client close records cannot undo an intentional reopen')
 }
+
+{
+  const phone = snapshot([{ ...term('phone', 's-phone'), originDevice: 'android' }])
+  const legacy = snapshot([term('pc-view', 's-phone')])
+  const saved = mergeSharedAgentTabs(phone, legacy, phone)
+  assert.equal(saved.terminals[0].originDevice, 'android', 'desktop resave retains the phone creator')
+  assert.equal(mergeSharedAgentTabs(phone, snapshot([{ ...term('pc-view', 's-phone'), originDevice: 'desktop' }]), phone)
+    .terminals[0].originDevice, 'android', 'another writer cannot replace the established creator')
+  const restored = mergeWorkspaceSessions(legacy, phone)
+  assert.equal(restored.terminals[0].originDevice, 'android', 'legacy local tabs learn the known shared creator')
+  assert.equal(mergeWorkspaceSessions(phone, legacy).terminals[0].originDevice, 'android')
+  const blank = snapshot([term('phone', undefined)])
+  assert.equal(mergeWorkspaceSessions(blank, phone).terminals[0].originDevice, 'android',
+    'learning a session ID and creator together preserves both')
+  assert.equal(mergeSharedAgentTabs(legacy, legacy, legacy).terminals[0].originDevice, undefined,
+    'old unknown tasks are not guessed from the last-saving device')
+}
+console.log('task creator round-trip: OK')

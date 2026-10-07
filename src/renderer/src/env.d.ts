@@ -131,6 +131,7 @@ export interface TerminalTabPayload {
   opponent?: string
   partyNames?: string
   memo?: string
+  originDevice?: 'android' | 'desktop'
   sessionTitle?: string
   renamed?: boolean
   createdAt?: number
@@ -363,6 +364,7 @@ export interface SessionSearchContext {
 }
 
 export interface SessionListEntry {
+  originDevice?: 'android' | 'desktop'
   sessionId: string
   title?: string
   transcriptTitle?: string
@@ -376,6 +378,7 @@ export interface SessionListEntry {
 }
 
 export interface SessionRememberInput extends SessionSearchContext {
+  originDevice?: 'android' | 'desktop'
   sessionId: string
   cwd: string
   title?: string
@@ -393,6 +396,7 @@ export interface CaseActivityQuery {
 }
 
 export interface CaseSessionSummary {
+  originDevice?: 'android' | 'desktop'
   sessionId: string
   title?: string
   mtime: number
@@ -410,6 +414,7 @@ export interface CaseActivity {
 }
 
 export interface WorkLogItem {
+  originDevice?: 'android' | 'desktop'
   sessionId: string
   cwd?: string
   profileId?: string

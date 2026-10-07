@@ -70,10 +70,11 @@ try {
   const backup = await api.loadWorkspaceSnapshot(saved.entry.id)
   assert.equal(backup.snapshot.docs.length, 1, 'local manual backup still retains documents')
 
-  const phone = term('mobile')
+  const phone = { ...term('mobile'), originDevice: 'android' }
   await writeFile(file, JSON.stringify({ ...published, terminals: [...published.terminals, phone] }))
   await api.saveAutomaticWorkspace(snapshot([term('pc')]), location)
   assert.deepEqual(JSON.parse(await readFile(file, 'utf8')).terminals.map((tab) => tab.id), ['pc', 'mobile'])
+  assert.equal(JSON.parse(await readFile(file, 'utf8')).terminals.find((tab) => tab.id === 'mobile').originDevice, 'android')
   await api.loadAutomaticWorkspace(location)
   await api.saveAutomaticWorkspace(snapshot([phone]), location)
   assert.deepEqual(JSON.parse(await readFile(file, 'utf8')).terminals.map((tab) => tab.id), ['mobile'], 'closing an imported tab is persisted')
@@ -118,13 +119,21 @@ try {
   const emptyLocation = { ...location, cwd: '/cases/empty' }
   await api.saveAutomaticWorkspace({ ...snapshot([]), workspaceLabel: '빈 사건',
     currentCase: { records: 'ssh://desktop-profile/records/empty' } }, emptyLocation)
-  await writeFile(join(folder, '111111111111111111111111.json'), JSON.stringify(snapshot([term('legacy')])))
+  await writeFile(join(folder, '111111111111111111111111.json'), JSON.stringify({
+    ...snapshot([{ ...term('legacy'), originDevice: 'android' }]), workspaceDevice: 'Android',
+    currentCase: { drafts: '/cases/phone-only', name: '폰에서 시작한 사건' }
+  }))
   await writeFile(join(folder, '222222222222222222222222.json'), '{broken')
   const discovered = await api.listAutomaticWorkspaces(location.ssh)
   assert.equal(discovered.ok, true)
   assert.deepEqual(Array.from(discovered.snapshots, (s) => s.currentCase.drafts).sort(), ['/cases/empty', cwd].sort())
   assert.equal(discovered.snapshots.find((s) => s.currentCase.drafts === emptyLocation.cwd).currentCase.records, '/records/empty')
   assert.equal((await api.listAutomaticWorkspaces()).snapshots.length, 2)
+  const all = await api.listAutomaticWorkspaces(location.ssh, true)
+  assert.ok(all.snapshots.some((entry) => entry.currentCase.drafts === '/cases/phone-only'),
+    'old Android workspaces without workspaceOpen are discoverable in history')
+  assert.equal(all.snapshots.find((entry) => entry.currentCase.drafts === '/cases/phone-only')
+    .terminals[0].originDevice, 'android')
   // Merely listing a phone's new tab must not turn it into a known local deletion.
   await api.loadAutomaticWorkspace(location, 1, false)
   await api.saveAutomaticWorkspace(snapshot([term('A')]), location, 1)

@@ -95,7 +95,9 @@ curl -fsSL https://github.com/jurisupport/legal-terminal/releases/latest/downloa
 
 ## 이번 업데이트
 
-최신 릴리스: [v0.1.253](https://github.com/jurisupport/legal-terminal/releases/tag/v0.1.253)
+최신 릴리스: [v0.1.254](https://github.com/jurisupport/legal-terminal/releases/tag/v0.1.254)
+
+- **폰 작업 이어가기**: 폰에서 저장한 작업을 열어본 사건 목록에 표시합니다. 생성 기기가 기록된 폰 작업에는 `폰` 표시가 유지되며, 출처를 확인할 수 없는 과거 작업에는 표시를 붙이지 않습니다.
 
 - **프로젝트와 AI 작업**: 여러 사건과 로컬·SSH 참고 폴더를 한 프로젝트에 연결하고, 공통 목표·메모를 참고하는 Claude·Codex 대화를 시작하거나 이어갑니다.
 - **사건별 작업 탐색**: 사이드바에서 열어본 사건과 최근 대화를 찾아 이어가고, 확인 대기·완료 상태를 확인합니다.

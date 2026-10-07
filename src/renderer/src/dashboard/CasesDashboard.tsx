@@ -106,7 +106,8 @@ function CasesDashboardContent({
     cwd: string,
     title?: string,
     profileId?: string,
-    newTab?: boolean
+    newTab?: boolean,
+    originDevice?: CaseSessionSummary['originDevice']
   ) => void
   onChanged?: () => void
 }): JSX.Element {
@@ -275,6 +276,7 @@ function CasesDashboardContent({
         target,
         {
           sessionId: e.sessionId,
+          originDevice: e.originDevice,
           title: e.title,
           mtime: e.lastTs,
           cwd: e.cwd,
@@ -285,7 +287,7 @@ function CasesDashboardContent({
         options?.newTab
       )
     } else if (onResumePath && e.cwd)
-      onResumePath(e.sessionId, e.cwd, e.title, e.profileId, options?.newTab)
+      onResumePath(e.sessionId, e.cwd, e.title, e.profileId, options?.newTab, e.originDevice)
   }
 
   // ── 토큰 미설정: 연결 + 가입 유도 ──
@@ -534,7 +536,7 @@ function CasesDashboardContent({
                     className={`ca-line${onResumePath && !f.profileId ? ' clickable' : ''}`}
                     title={onResumePath && !f.profileId ? '클릭 → 이 세션 이어서 열기' : s.title}
                     onClick={() => {
-                      if (onResumePath && !f.profileId) onResumePath(s.sessionId, s.cwd ?? f.cwd, s.title)
+                      if (onResumePath && !f.profileId) onResumePath(s.sessionId, s.cwd ?? f.cwd, s.title, undefined, undefined, s.originDevice)
                     }}
                   >
                     <span className="ca-time">{agoLabel(s.mtime)}</span> ·{' '}

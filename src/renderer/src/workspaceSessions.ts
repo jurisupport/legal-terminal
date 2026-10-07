@@ -47,8 +47,11 @@ export function mergeWorkspaceSessions(
         ? stableIndex : undefined)
     if (index !== undefined) {
       const existing = terminals[index]
+      if (!existing.originDevice && term.originDevice) {
+        terminals[index] = { ...existing, originDevice: term.originDevice }
+      }
       if (!existing.resumeSessionId && term.resumeSessionId) {
-        terminals[index] = { ...existing, resumeSessionId: term.resumeSessionId,
+        terminals[index] = { ...terminals[index], resumeSessionId: term.resumeSessionId,
           sessionTitle: term.sessionTitle ?? existing.sessionTitle }
         terminalKeys.set(terminalKey(terminals[index]), index)
       }

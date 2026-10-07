@@ -13,6 +13,7 @@ export interface SidebarTask {
   title: string
   mtime: number
   sessionId?: string
+  originDevice?: 'android' | 'desktop'
   status?: string
   active?: boolean
 }
@@ -138,6 +139,7 @@ function CaseGroup({
     .map((session) => ({
       id: `session:${session.sessionId}`,
       sessionId: session.sessionId,
+      originDevice: session.originDevice,
       title: session.transcriptTitle || session.title || '이름 없는 작업',
       mtime: session.mtime
     }))
@@ -145,7 +147,10 @@ function CaseGroup({
     .filter((task) => showOlder || task.mtime >= now - days * DAY_MS)
     .sort((a, b) => b.mtime - a.mtime)
   const visibleTasks = [
-    ...item.tasks,
+    ...item.tasks.map((task) => ({
+      ...task,
+      originDevice: task.originDevice ?? sessions.find((session) => session.sessionId === task.sessionId)?.originDevice
+    })),
     ...filteredHistory.slice(0, Math.max(0, visibleCount - item.tasks.length))
   ].sort((a, b) => b.mtime - a.mtime)
   const canLoadMore = sessions.length >= limit && limit < SESSION_SEARCH_MAX_LIMIT
@@ -209,6 +214,7 @@ function CaseGroup({
               onClick={() => onOpenTask(item.id, task)}
             >
               <span className="case-sidebar-task-title">{task.title}</span>
+              {task.originDevice === 'android' && <span className="case-sidebar-task-origin" title="폰에서 시작한 작업">폰</span>}
               {task.status && <span className="case-sidebar-task-status">{task.status}</span>}
             </button>
           ))}

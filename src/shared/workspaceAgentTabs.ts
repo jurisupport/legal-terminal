@@ -30,6 +30,7 @@ export interface SharedAgentTabIdentity {
   cwd: string
   agentProvider?: string
   resumeSessionId?: string
+  originDevice?: 'android' | 'desktop'
 }
 
 const sameAgent = (a: SharedAgentTabIdentity, b: SharedAgentTabIdentity): boolean =>
@@ -82,6 +83,9 @@ export function mergeSharedAgentTabs<T extends { version: number; savedAt: strin
     if (isClosed(remote)) continue
     const index = next.findIndex((tab) => sameAgent(tab, remote))
     if (index !== -1) {
+      if (remote.originDevice === 'android' || remote.originDevice === 'desktop') {
+        next[index] = { ...next[index], originDevice: remote.originDevice }
+      }
       if (!next[index].resumeSessionId && remote.resumeSessionId) {
         next[index] = { ...next[index], resumeSessionId: remote.resumeSessionId }
       }

@@ -56,3 +56,95 @@ assert.equal(reads, 5, 'local cache refreshes after one minute')
 resolveRead(rows)
 await localRefresh
 console.log('session list cache: TTL, refresh dedupe, cached empty results, source isolation and failure retention OK')
+
+const resumeHandlers = []
+let clickHandler
+function findResumeHandlers(node) {
+  if (ts.isJsxAttribute(node) && node.initializer && ts.isJsxExpression(node.initializer)) {
+    if (node.name.text === 'onResume') resumeHandlers.push(node.initializer.expression.getText(parsed))
+    if (node.name.text === 'onClick' && node.initializer.expression?.getText(parsed).includes('onResume(p.sessionId')) {
+      clickHandler = node.initializer.expression.getText(parsed)
+    }
+  }
+  ts.forEachChild(node, findResumeHandlers)
+}
+findResumeHandlers(parsed)
+assert.equal(resumeHandlers.length, 2, 'both desktop history layouts are covered')
+for (const handler of resumeHandlers) {
+  let resumed
+  const context = vm.createContext({
+    p: { sessionId: 'phone', cwd: '/cases/one', title: '폰 작업', originDevice: 'android' },
+    filterSource: remote, side: 'right', setSessionListOpen: () => {},
+    openPastSession: (...args) => { resumed = args }
+  })
+  vm.runInContext(`const onResume = ${handler}; (${clickHandler})()`, context)
+  assert.equal(resumed[0], 'phone')
+  assert.equal(resumed[7], 'android', 'history row forwards creator through the layout wrapper')
+}
+console.log('session history creator propagation: both layouts OK')
+
+// Run each real dashboard resume branch so creator metadata reaches the reopened tab.
+let dashboardResume
+const resumeApi = vm.runInNewContext(ts.transpileModule(
+  ['resumeCaseSession', 'resumePathSession'].map((name) => `const ${name} = ${declarations.get(name)};`).join('\n') +
+    '\n({resumeCaseSession, resumePathSession})', { compilerOptions: { target: ts.ScriptTarget.ES2022 } }
+).outputText, {
+  setMode: () => {}, findSshProfile: async () => ({ id: 'office' }),
+  openCaseRemote: async () => ({ source: {} }), openCaseWorkspace: async () => ({ drafts: '/cases/one' }),
+  openRemoteCaseContext: () => ({ id: 'case', title: '작업', source: {} }), resolveRemoteRecordsLater: () => {},
+  openPastSession: (...args) => { dashboardResume = args }
+})
+for (const profileId of [undefined, 'office']) {
+  for (const originDevice of ['android', 'desktop', undefined]) {
+    const summary = { sessionId: 'phone', cwd: '/cases/one', title: '작업', profileId, originDevice }
+    await resumeApi.resumeCaseSession({ id: 'case' }, summary, true)
+    assert.equal(dashboardResume[7], originDevice, 'local/remote case history keeps creator')
+    assert.equal(dashboardResume[6], true, 'opening a new tab keeps existing resume semantics')
+    await resumeApi.resumePathSession(summary.sessionId, summary.cwd, summary.title, profileId, true, originDevice)
+    assert.equal(dashboardResume[7], originDevice, 'local/remote work log path keeps creator')
+  }
+}
+const dashboardSource = readFileSync(new URL('../src/renderer/src/dashboard/CasesDashboard.tsx', import.meta.url), 'utf8')
+const dashboardParsed = ts.createSourceFile('CasesDashboard.tsx', dashboardSource, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX)
+const dashboardDeclarations = new Map()
+let folderClick
+function visitDashboard(node) {
+  if (ts.isVariableDeclaration(node) && node.initializer) dashboardDeclarations.set(node.name.getText(dashboardParsed), node.initializer.getText(dashboardParsed))
+  if (ts.isJsxAttribute(node) && node.name.text === 'onClick' && ts.isJsxExpression(node.initializer) &&
+    node.initializer.expression?.getText(dashboardParsed).includes('onResumePath(s.sessionId')) folderClick = node.initializer.expression.getText(dashboardParsed)
+  ts.forEachChild(node, visitDashboard)
+}
+visitDashboard(dashboardParsed)
+let summaryArgs, pathArgs
+const dashboardContext = vm.createContext({
+  cases: [{ id: 'case', caseNumber: '2026가단1' }],
+  onResumeSession: (...args) => { summaryArgs = args }, onResumePath: (...args) => { pathArgs = args },
+  s: { sessionId: 'phone', cwd: '/cases/one', originDevice: 'android' }, f: { cwd: '/cases/one' }
+})
+const resumeWorkLog = vm.runInContext(ts.transpileModule(
+  ['norm', 'resumeFromWorkLog'].map((name) => `const ${name} = ${dashboardDeclarations.get(name)};`).join('\n') +
+    '\nresumeFromWorkLog', { compilerOptions: { target: ts.ScriptTarget.ES2022 } }
+).outputText, dashboardContext)
+resumeWorkLog({ sessionId: 'phone', cwd: '/cases/one', caseNumber: '2026가단1', originDevice: 'android' })
+assert.equal(summaryArgs[1].originDevice, 'android', 'case-matched work log retains creator in its summary')
+resumeWorkLog({ sessionId: 'phone', cwd: '/cases/one', originDevice: 'android' })
+assert.equal(pathArgs[5], 'android', 'unmatched work log retains creator in its path callback')
+vm.runInContext(`(${folderClick})()`, dashboardContext)
+assert.equal(pathArgs[5], 'android', 'folder card retains creator in its path callback')
+function verifyDashboardWrappers(node) {
+  if (ts.isJsxAttribute(node) && ['onResumeSession', 'onResumePath'].includes(node.name.text)) {
+    const context = vm.createContext({ resumeCaseSession: (...args) => { summaryArgs = args },
+      resumePathSession: (...args) => { pathArgs = args } })
+    const handler = vm.runInContext(`(${node.initializer.expression.getText(parsed)})`, context)
+    if (node.name.text === 'onResumePath') {
+      handler('phone', '/cases/one', '작업', 'office', true, 'android')
+      assert.equal(pathArgs[5], 'android', 'App forwards the dashboard path creator')
+    } else {
+      handler({ id: 'case' }, { originDevice: 'android' }, true)
+      assert.equal(summaryArgs[1].originDevice, 'android', 'App forwards the dashboard session creator')
+    }
+  }
+  ts.forEachChild(node, verifyDashboardWrappers)
+}
+verifyDashboardWrappers(parsed)
+console.log('dashboard creator resume: local/remote case, folder, both work log routes and App wrappers OK')
