@@ -109,6 +109,22 @@ function pathKey(path: string): string {
   return trimmed || path
 }
 
+const expandedFoldersByRoot = new Map<string, Set<string>>()
+
+function expandedFolders(root: string): Set<string> {
+  const key = pathKey(root)
+  let paths = expandedFoldersByRoot.get(key)
+  if (!paths) {
+    let saved: unknown
+    try {
+      saved = JSON.parse(localStorage.getItem(`lt:expanded-folders:${key}`) ?? '[]')
+    } catch { /* Keep expansion in memory if storage is unavailable. */ }
+    paths = new Set(Array.isArray(saved) ? saved.filter((path): path is string => typeof path === 'string') : [])
+    expandedFoldersByRoot.set(key, paths)
+  }
+  return paths
+}
+
 function isComposingKeyEvent(event: ReactKeyboardEvent<HTMLInputElement>): boolean {
   return event.nativeEvent.isComposing || event.key === 'Process' || event.keyCode === 229
 }
@@ -742,7 +758,8 @@ export default function FileTree({
             entries &&
             sortEntries(entries, sortMode).map((e) => (
               <TreeNode
-                key={e.path}
+                key={`${root}:${e.path}`}
+                root={root}
                 entry={e}
                 depth={0}
                 refreshNonce={refreshNonce}
@@ -884,6 +901,7 @@ export default function FileTree({
 }
 
 function TreeNode({
+  root,
   entry,
   depth,
   refreshNonce,
@@ -904,6 +922,7 @@ function TreeNode({
   onCreate,
   onCancelCreate
 }: {
+  root: string
   entry: Entry
   depth: number
   refreshNonce: number
@@ -924,18 +943,22 @@ function TreeNode({
   onCreate?: (name: string, type: 'file' | 'folder', dir?: string) => void
   onCancelCreate?: () => void
 }): JSX.Element {
-  const [open, setOpen] = useState(false)
+  const [open, setOpenState] = useState(() => expandedFolders(root).has(entry.path))
   const [children, setChildren] = useState<Entry[] | null>(null)
+  const [childError, setChildError] = useState('')
   const [over, setOver] = useState(false)
   const [dropLabel, setDropLabel] = useState('')
   // spring-load: 드래그한 채 폴더 위에 머물면 자동으로 펼침
   const springTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
 
-  const loadChildren = (opts?: { refresh?: boolean }): void => {
-    window.lt.fs
-      .list(entry.path, opts)
-      .then(setChildren)
-      .catch(() => setChildren([]))
+  const setOpen = (next: boolean): void => {
+    const paths = expandedFolders(root)
+    if (next) paths.add(entry.path)
+    else paths.delete(entry.path)
+    setOpenState(next)
+    try {
+      localStorage.setItem(`lt:expanded-folders:${pathKey(root)}`, JSON.stringify([...paths]))
+    } catch { /* The in-memory state still survives sidebar remounts. */ }
   }
 
   const clearSpring = (): void => {
@@ -947,11 +970,19 @@ function TreeNode({
   // 언마운트 시 타이머 정리
   useEffect(() => clearSpring, [])
 
-  // 이동/복사 등으로 nonce가 바뀌면 펼쳐진 폴더 내용 갱신
+  // Ignore obsolete reads and keep the last successful listing on transient failures.
   useEffect(() => {
-    if (entry.isDir && open) loadChildren({ refresh: true })
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [refreshNonce])
+    if (!entry.isDir || !open) return
+    let alive = true
+    window.lt.fs.list(entry.path, { refresh: true }).then((next) => {
+      if (!alive) return
+      setChildren(next)
+      setChildError('')
+    }).catch((error) => {
+      if (alive) setChildError(String(error))
+    })
+    return () => { alive = false }
+  }, [entry.path, entry.isDir, open, refreshNonce])
 
   const isCreateTarget =
     !!pendingCreate && entry.isDir && pathKey(createTargetDir(pendingCreate, '')) === pathKey(entry.path)
@@ -959,7 +990,6 @@ function TreeNode({
   useEffect(() => {
     if (!isCreateTarget) return
     if (!open) setOpen(true)
-    if (children === null) loadChildren()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isCreateTarget, entry.path])
 
@@ -970,7 +1000,6 @@ function TreeNode({
     }
     const next = !open
     setOpen(next)
-    if (next && children === null) loadChildren()
   }
 
   const droppable = entry.isDir && (!!onDropTo || !!onMove)
@@ -1038,7 +1067,6 @@ function TreeNode({
                   springTimer.current = setTimeout(() => {
                     springTimer.current = null
                     setOpen(true)
-                    if (children === null) loadChildren()
                   }, 600)
                 }
               }
@@ -1087,6 +1115,7 @@ function TreeNode({
       </div>
       {entry.isDir && open && (
         <ul className="tree">
+          {childError && <li className="tree-node muted pad small" role="status">불러오기 실패: {childError}</li>}
           {isCreateTarget && pendingCreate && (
             <CreateEntryRow
               type={pendingCreate.type}
@@ -1096,7 +1125,7 @@ function TreeNode({
             />
           )}
           {children === null ? (
-            <li className="tree-node muted pad small">불러오는 중…</li>
+            !childError && <li className="tree-node muted pad small">불러오는 중…</li>
           ) : (
             <>
               {children.length === 0 && !isCreateTarget && (
@@ -1105,6 +1134,7 @@ function TreeNode({
               {sortEntries(children, sortMode).map((c) => (
                 <TreeNode
                   key={c.path}
+                  root={root}
                   entry={c}
                   depth={depth + 1}
                   refreshNonce={refreshNonce}

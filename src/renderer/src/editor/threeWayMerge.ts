@@ -3,10 +3,13 @@ export type ThreeWayTextMergeResult =
   | { status: 'merged'; text: string; remoteHunkCount: number }
   | { status: 'conflict'; reason: string }
 
-interface TextHunk {
+interface TextChange {
   from: number
   to: number
   insert: string
+}
+
+interface TextHunk extends TextChange {
   conflictFrom: number
   conflictTo: number
 }
@@ -17,6 +20,37 @@ interface LineMap {
 }
 
 const MAX_LINE_DIFF_CELLS = 1_500_000
+
+// Keep unchanged paragraphs outside replacement ranges so editor positions can be mapped.
+export function findTextChanges(base: string, modified: string): TextChange[] {
+  if (base === modified) return []
+  const baseMap = buildLineMap(base)
+  const modifiedMap = buildLineMap(modified)
+  if (baseMap.lines.length * modifiedMap.lines.length > MAX_LINE_DIFF_CELLS) {
+    // Split large comparisons at an unchanged line instead of replacing the whole middle.
+    const uniqueLines = new Map<string, number>()
+    modifiedMap.lines.forEach((line, index) => {
+      uniqueLines.set(line, uniqueLines.has(line) ? -1 : index)
+    })
+    const middle = Math.floor(baseMap.lines.length / 2)
+    for (let distance = 0; distance < baseMap.lines.length; distance++) {
+      const index = distance % 2 === 0 ? middle + distance / 2 : middle - (distance + 1) / 2
+      const line = baseMap.lines[index]
+      const match = uniqueLines.get(line)
+      if (!line?.trim() || match === undefined || match < 0) continue
+      const before = findTextChanges(
+        base.slice(0, baseMap.offsets[index]), modified.slice(0, modifiedMap.offsets[match])
+      )
+      const offset = baseMap.offsets[index + 1]
+      const after = findTextChanges(base.slice(offset), modified.slice(modifiedMap.offsets[match + 1]))
+      return [...before, ...after.map((change) => ({ ...change, from: change.from + offset, to: change.to + offset }))]
+    }
+  }
+  return buildTextHunks(base, modified, baseMap).map((hunk) => {
+    const change = minimalTextChange(base.slice(hunk.from, hunk.to), hunk.insert)
+    return { from: hunk.from + change.from, to: hunk.from + change.to, insert: change.insert }
+  })
+}
 
 export function mergeTextAgainstBase(base: string, local: string, remote: string): ThreeWayTextMergeResult {
   if (remote === base) return { status: 'unchanged' }
@@ -58,6 +92,11 @@ function buildTextHunks(base: string, modified: string, lineMap: LineMap): TextH
 }
 
 function buildSingleHunk(base: string, modified: string, lineMap: LineMap): TextHunk {
+  const { from, to, insert } = minimalTextChange(base, modified)
+  return makeHunk(from, to, insert, lineMap)
+}
+
+function minimalTextChange(base: string, modified: string): TextChange {
   let prefix = 0
   const limit = Math.min(base.length, modified.length)
   while (prefix < limit && base.charCodeAt(prefix) === modified.charCodeAt(prefix)) prefix++
@@ -73,12 +112,7 @@ function buildSingleHunk(base: string, modified: string, lineMap: LineMap): Text
     modifiedSuffix--
   }
 
-  return makeHunk(
-    prefix,
-    baseSuffix,
-    modified.slice(prefix, modifiedSuffix),
-    lineMap
-  )
+  return { from: prefix, to: baseSuffix, insert: modified.slice(prefix, modifiedSuffix) }
 }
 
 function buildLineHunks(lineMap: LineMap, modifiedLines: string[]): TextHunk[] | null {

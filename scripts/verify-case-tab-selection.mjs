@@ -249,7 +249,7 @@ for (const scenario of ['active', 'active-middle', 'active-end', 'empty-neighbor
     activeCaseTabId: scenario === 'background' ? other.id : closing.id,
     activeDoc: 'draft', activeTerm: 'agent', activeWork: { left: 'doc:draft', right: 'terminal:agent' },
     currentCase: closing, folderRecord: {}, pdfRecord: {},
-    caseTabsOpen: true, newCaseOpen: false, mode: 'viewer',
+    newCaseOpen: false, mode: 'viewer',
     pdfStatus: {}, agentAttachmentRequests: {}, agentDrafts: {}, agentDraftClearNonce: {},
     termAttention: new Set(), termBracketedPasteMode: {}, caseTabContextMenu: {}, termFocusNonce: {}
   }
@@ -340,7 +340,6 @@ for (const scenario of ['active', 'active-middle', 'active-end', 'empty-neighbor
     assert.equal(state.activeWork.right, hasWork ? 'terminal:other-agent' : '')
     assert.equal(state.folderRecord, null)
     assert.equal(state.pdfRecord, null)
-    assert.equal(state.caseTabsOpen, false)
     assert.equal(state.mode, 'explorer')
     assert.equal(closingHandlers.visibleInActiveCase(other.id), hasNeighbor)
     assert.equal(closingHandlers.visibleInActiveCase(undefined), !hasNeighbor)
@@ -350,7 +349,6 @@ for (const scenario of ['active', 'active-middle', 'active-end', 'empty-neighbor
   }
   closingHandlers.openNewCaseLauncher()
   assert.equal(state.newCaseOpen, true, 'explicitly adding a new case must still open the launcher')
-  assert.equal(state.caseTabsOpen, false)
 }
 
 for (const detached of ['docOnly', 'termOnly']) {

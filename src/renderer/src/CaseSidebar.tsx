@@ -23,6 +23,9 @@ export interface SidebarCase {
   title: string
   participants?: string
   subtitle: string
+  open: boolean
+  status?: string
+  noticeCount: number
   active: boolean
   updatedAt: number
   historyKey?: string
@@ -36,6 +39,11 @@ interface CaseSidebarProps {
   onOpenTask: (caseId: string, task: SidebarTask) => void
   onNewTask: (caseId: string) => void
   onAddCase: () => void
+  attentionOnly: boolean
+  onAttentionOnlyChange: (value: boolean) => void
+  noticeCount: number
+  onNextAttention: () => void
+  onManageCase: (id: string, x: number, y: number) => void
   loadSessions: (caseId: string, limit: number, refresh: boolean) => Promise<SessionListEntry[]>
 }
 
@@ -57,8 +65,9 @@ function CaseGroup({
   onOpenCase,
   onOpenTask,
   onNewTask,
+  onManageCase,
   loadSessions
-}: Omit<CaseSidebarProps, 'cases' | 'onAddCase'> & {
+}: Pick<CaseSidebarProps, 'onOpenCase' | 'onOpenTask' | 'onNewTask' | 'onManageCase' | 'loadSessions'> & {
   item: SidebarCase
   days: number
 }): JSX.Element {
@@ -166,7 +175,7 @@ function CaseGroup({
   }
 
   return (
-    <section className={`case-sidebar-group${item.active ? ' active' : ''}`} data-case-id={item.id}>
+    <section className={`case-sidebar-group${item.active ? ' active' : ''}`} data-case-id={item.id} data-open={item.open}>
       <div className="case-sidebar-case-row">
         <button
           type="button"
@@ -181,16 +190,40 @@ function CaseGroup({
         <button
           type="button"
           className={`case-sidebar-case${item.active ? ' active' : ''}`}
-          title={[item.title, item.participants, item.subtitle].filter(Boolean).join('\n')}
+          title={[item.title, item.participants, item.status, item.subtitle].filter(Boolean).join('\n')}
           aria-current={item.active ? 'page' : undefined}
           onClick={() => { setExpanded(true); onOpenCase(item.id) }}
+          onContextMenu={item.open ? (event) => {
+            event.preventDefault()
+            onManageCase(item.id, event.clientX, event.clientY)
+          } : undefined}
         >
           <IconExplorer size={16} />
           <span className="case-sidebar-case-text">
             <span className="case-sidebar-case-title">{item.title}</span>
             {item.participants && <span className="case-sidebar-case-participants">{item.participants}</span>}
+            {item.open && (
+              <span className={`case-sidebar-case-status${item.noticeCount ? ' has-notice' : ''}`}>
+                열림{item.status ? ` · ${item.status}` : ''}
+              </span>
+            )}
           </span>
         </button>
+        {item.open && (
+          <button
+            type="button"
+            className="case-sidebar-manage"
+            title="사건 관리"
+            aria-label={`${item.title} 사건 관리`}
+            aria-haspopup="menu"
+            onClick={(event) => {
+              const rect = event.currentTarget.getBoundingClientRect()
+              onManageCase(item.id, rect.left, rect.bottom)
+            }}
+          >
+            ⋯
+          </button>
+        )}
         <button
           type="button"
           className="case-sidebar-new-task"
@@ -260,15 +293,18 @@ function CaseGroup({
   )
 }
 
-export default function CaseSidebar({ cases, onAddCase, ...callbacks }: CaseSidebarProps): JSX.Element {
+export default function CaseSidebar({ cases, onAddCase, attentionOnly, onAttentionOnlyChange, noticeCount, onNextAttention, ...callbacks }: CaseSidebarProps): JSX.Element {
   const [days, setDays] = useState(readPeriod)
   const [visibleCases, setVisibleCases] = useState(6)
-  const orderedCases = [...cases].sort((a, b) => b.updatedAt - a.updatedAt)
+  const orderedCases = cases
+    .filter((item) => !attentionOnly || item.noticeCount > 0)
+    .sort((a, b) => Number(b.open) - Number(a.open) || b.updatedAt - a.updatedAt)
+  const count = Math.max(visibleCases, orderedCases.filter((item) => item.open).length)
 
   return (
-    <nav className="case-sidebar" aria-label="사건별 작업">
+    <nav id="case-sidebar" className="case-sidebar" aria-label="사건별 작업">
       <div className="case-sidebar-heading">
-        <span>열어본 사건</span>
+        <span>사건별 작업</span>
         <select
           aria-label="최근 작업 기간"
           value={days}
@@ -281,11 +317,20 @@ export default function CaseSidebar({ cases, onAddCase, ...callbacks }: CaseSide
           {[7, 14, 30].map((value) => <option key={value} value={value}>최근 {value}일</option>)}
         </select>
       </div>
+      <div className="case-sidebar-filter">
+        <label>
+          <input type="checkbox" checked={attentionOnly} onChange={(event) => onAttentionOnlyChange(event.target.checked)} />
+          확인 필요만{noticeCount > 0 ? ` (${noticeCount})` : ''}
+        </label>
+        <button type="button" disabled={noticeCount === 0} onClick={onNextAttention}>
+          다음 확인 →
+        </button>
+      </div>
       <div className="case-sidebar-list">
-        {orderedCases.slice(0, visibleCases).map((item) => <CaseGroup key={`${item.id}:${item.historyKey ?? ''}`} item={item} days={days} {...callbacks} />)}
-        {cases.length === 0 && <p className="case-sidebar-empty">사건을 열면 최근 작업이 여기에 표시됩니다.</p>}
-        {cases.length > visibleCases && (
-          <button type="button" className="case-sidebar-more-cases" onClick={() => setVisibleCases((count) => count + 6)}>
+        {orderedCases.slice(0, count).map((item) => <CaseGroup key={`${item.id}:${item.historyKey ?? ''}`} item={item} days={days} {...callbacks} />)}
+        {orderedCases.length === 0 && <p className="case-sidebar-empty" role="status">{attentionOnly ? '확인이 필요한 작업 없음' : '사건을 열면 최근 작업이 여기에 표시됩니다.'}</p>}
+        {orderedCases.length > count && (
+          <button type="button" className="case-sidebar-more-cases" onClick={() => setVisibleCases(count + 6)}>
             사건 더 보기
           </button>
         )}

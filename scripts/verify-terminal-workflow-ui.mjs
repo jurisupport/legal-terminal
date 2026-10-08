@@ -59,7 +59,10 @@ async function electronCheck({ root, temp, output, channels, pdf }) {
     if (channel === 'js:listCases') return { ok: true, cases: [] }
     if (channel === 'js:listHearings') return { ok: true, hearings: [] }
     if (channel === 'js:hearingSummary') return { ok: true, summary: { todayCount: 0, weekCount: 0 } }
-    if (channel === 'agent:create') created.add(args[0].id)
+    if (channel === 'agent:create') {
+      created.add(args[0].id)
+      _event.sender.send('agent:event', { type: 'auth:status', sessionId: args[0].id, state: 'authenticated' })
+    }
     if (channel === 'agent:models') return { ok: true, models: [] }
     if (channel === 'agent:snapshot') return { ok: true, snapshot: { events: [] } }
     if (channel.startsWith('case:get')) return undefined
@@ -94,13 +97,15 @@ async function electronCheck({ root, temp, output, channels, pdf }) {
   }
   try {
     await w.loadFile(path.join(root, 'out/renderer/index.html'))
-    await wait("!!document.querySelector('.case-tabs-trigger')", 'App ready')
+    await wait("!!document.querySelector('.case-sidebar-trigger')", 'App ready')
     await run(`
       window.smokeChecks = [];
       window.check = (condition, label) => { if (!condition) throw Error(label); window.smokeChecks.push(label) };
       window.visible = (selector) => [...document.querySelectorAll(selector)].filter(el => el.getClientRects().length && getComputedStyle(el).visibility !== 'hidden');
       window.click = (selector) => { const el = visible(selector)[0]; if (!el || el.disabled) throw Error('Missing or disabled '+selector); el.click() };
-      window.openCases = () => { if (!document.querySelector('.case-tabs-flyout')) click('.case-tabs-trigger') };
+      window.openCases = () => { if (!document.querySelector('.case-sidebar')) click('.case-sidebar-trigger') };
+      window.pendingCases = () => [...document.querySelectorAll('.case-sidebar-case-status')].filter(el => el.textContent.includes('확인 대기'));
+      window.activeAgentId = () => visible('.agent-panel')[0]?.closest('[data-term-id]').dataset.termId;
     `)
     await add('fixture-a', '계약서 검토', '/synthetic/case-a')
     w.webContents.send('tabs:receive', { kind: 'document', tab: { id: 'fixture-pdf', kind: 'pdf', path: '/synthetic/case-a/계약서.pdf', title: '계약서.pdf', side: 'left' } })
@@ -154,73 +159,73 @@ async function electronCheck({ root, temp, output, channels, pdf }) {
     await status('fixture-a', 'waiting_user')
     await status('fixture-b', 'waiting_permission')
     await run('openCases()')
-    await wait("document.querySelectorAll('.case-tab-row').length === 3", 'Three synthetic cases')
+    await wait("document.querySelectorAll('.case-sidebar-group[data-open=true]').length === 3", 'Three synthetic cases')
     await run(`
-      check(document.querySelectorAll('.case-tab-row.has-question').length === 2, 'Two unresolved question cases');
-      click('.case-tabs-filter input');
+      check(pendingCases().length === 2, 'Two unresolved question cases');
+      click('.case-sidebar-filter input');
     `)
-    await wait("document.querySelectorAll('.case-tab-row').length === 2", 'Only attention cases remain')
+    await wait("document.querySelectorAll('.case-sidebar-group[data-open=true]').length === 2", 'Only attention cases remain')
     await run(`
-      check(!document.querySelector('.case-tabs-list').textContent.includes('확인 완료 사건'), 'Attention filter excludes quiet case');
-      click('.case-tabs-filter button');
+      check(!document.querySelector('.case-sidebar-list').textContent.includes('확인 완료 사건'), 'Attention filter excludes quiet case');
+      click('.case-sidebar-filter button');
     `)
-    await wait("!document.querySelector('.case-tabs-flyout')", 'Next attention navigates')
+    await wait("activeAgentId() !== 'fixture-c'", 'Next attention navigates')
     await run(`
       check(visible('.agent-panel').length === 1, 'Next attention shows one target agent');
       window.firstTarget = visible('.agent-panel')[0].closest('[data-term-id]').dataset.termId;
       openCases();
     `)
-    await wait("document.querySelectorAll('.case-tab-row.has-question').length === 2", 'First viewed question stays pending')
+    await wait("pendingCases().length === 2", 'First viewed question stays pending')
     await run(`
-      check(document.querySelectorAll('.case-tab-row').length === 2, 'Attention filter survives opening a case');
-      check(document.querySelectorAll('.case-tab-row.has-question').length === 2, 'Viewing question leaves both questions unresolved');
-      click('.case-tabs-filter button');
+      check(document.querySelectorAll('.case-sidebar-group[data-open=true]').length === 2, 'Attention filter survives opening a case');
+      check(pendingCases().length === 2, 'Viewing question leaves both questions unresolved');
+      click('.case-sidebar-filter button');
     `)
-    await wait("!document.querySelector('.case-tabs-flyout')", 'Next attention cycles')
+    await wait("activeAgentId() !== window.firstTarget", 'Next attention cycles')
     await run(`
       const target = visible('.agent-panel')[0].closest('[data-term-id]').dataset.termId;
       check(target !== window.firstTarget, 'Next attention moves to the other pending task');
       openCases();
     `)
-    await wait("document.querySelectorAll('.case-tab-row.has-question').length === 2", 'Second viewed question stays pending')
+    await wait("pendingCases().length === 2", 'Second viewed question stays pending')
     await screenshot('case-attention-desktop')
     w.setSize(800, 800)
     await pause(250)
     await run(`
-      const panel = document.querySelector('.case-tabs-flyout').getBoundingClientRect();
-      const label = document.querySelector('.case-tabs-filter label').getBoundingClientRect();
-      const next = document.querySelector('.case-tabs-filter button').getBoundingClientRect();
+      const panel = document.querySelector('.case-sidebar').getBoundingClientRect();
+      const label = document.querySelector('.case-sidebar-filter label').getBoundingClientRect();
+      const next = document.querySelector('.case-sidebar-filter button').getBoundingClientRect();
       check(panel.left >= 0 && panel.right <= innerWidth, 'Narrow attention panel fits viewport');
       check(label.right <= next.left || label.bottom <= next.top || next.bottom <= label.top, 'Narrow filter and next button do not overlap');
     `)
     await screenshot('case-attention-narrow')
     await status('fixture-a', 'working')
-    await wait("document.querySelectorAll('.case-tab-row.has-question').length === 1", 'Resumed task leaves pending filter')
+    await wait("pendingCases().length === 1", 'Resumed task leaves pending filter')
     await status('fixture-b', 'idle')
-    await wait("!!document.querySelector('.case-tabs-empty')", 'Resolved tasks leave empty attention view')
-    await run(`check(document.querySelector('.case-tabs-empty').textContent.includes('확인이 필요한 작업 없음') && document.querySelector('.case-tabs-filter button').disabled, 'Empty attention view disables next action')`)
+    await wait("!!document.querySelector('.case-sidebar-empty')", 'Resolved tasks leave empty attention view')
+    await run(`check(document.querySelector('.case-sidebar-empty').textContent.includes('확인이 필요한 작업 없음') && document.querySelector('.case-sidebar-filter button').disabled, 'Empty attention view disables next action')`)
     await status('fixture-a', 'idle')
     await run(`
-      click('.case-tabs-filter input');
+      click('.case-sidebar-filter input');
       window.agentBeforeClose = visible('.agent-panel')[0].closest('[data-term-id]').dataset.termId;
     `)
-    await wait("document.querySelectorAll('.case-tab-row').length === 3", 'All cases before closing')
+    await wait("document.querySelectorAll('.case-sidebar-group[data-open=true]').length === 3", 'All cases before closing')
     await run(`
-      document.querySelector('.case-tab-row[title*="/synthetic/case-c"]').dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, clientX: 100, clientY: 100 }));
+      document.querySelector('.case-sidebar-case[title*="/synthetic/case-c"]').dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, clientX: 100, clientY: 100 }));
     `)
-    await wait("!!document.querySelector('.tab-context-menu-item[title^=" + '"이 사건탭"' + "]')", 'Background close menu')
-    await run(`click('.tab-context-menu-item[title^="이 사건탭"]')`)
-    await wait("document.querySelectorAll('.case-tab-row').length === 2", 'Background case closed')
+    await wait("!!document.querySelector('.tab-context-menu-item[title^=" + '"이 사건과"' + "]')", 'Background close menu')
+    await run(`click('.tab-context-menu-item[title^="이 사건과"]')`)
+    await wait("document.querySelectorAll('.case-sidebar-group[data-open=true]').length === 2", 'Background case closed')
     await run(`
       check(visible('.agent-panel')[0].closest('[data-term-id]').dataset.termId === window.agentBeforeClose, 'Closing a background case preserves the active work');
-      click('.case-tab-row[title*="/synthetic/case-b"]');
+      click('.case-sidebar-case[title*="/synthetic/case-b"]');
     `)
-    await wait("!document.querySelector('.case-tabs-flyout')", 'Select case B')
+    await wait("activeAgentId() === 'fixture-b'", 'Select case B')
     await run('openCases()')
-    await wait("!!document.querySelector('.case-tab-row.active')", 'Active case close menu ready')
-    await run(`document.querySelector('.case-tab-row.active').dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, clientX: 100, clientY: 100 }))`)
+    await wait("!!document.querySelector('.case-sidebar-case.active')", 'Active case close menu ready')
+    await run(`document.querySelector('.case-sidebar-case.active').dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, clientX: 100, clientY: 100 }))`)
     await wait("!!document.querySelector('.tab-context-menu-item')", 'Active close menu')
-    await run(`click('.tab-context-menu-item[title^="이 사건탭"]')`)
+    await run(`click('.tab-context-menu-item[title^="이 사건과"]')`)
     await wait("visible('.agent-panel').length === 1 && visible('.agent-panel')[0].closest('[data-term-id]').dataset.termId === 'fixture-a'", 'Neighbor agent restored after menu close')
     await wait("visible('[data-doc-id=" + '"fixture-pdf"' + "]').length === 1", 'Neighbor document restored')
     await run(`check(visible('.welcome').length === 0, 'Closing an active case restores the remaining case instead of startup')`)

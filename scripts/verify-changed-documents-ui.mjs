@@ -82,7 +82,7 @@ async function electronCheck({ root, temp, output, channels }) {
   const confirmations = () => calls.filter(c => c.channel === 'dialog:message' && c.args[0] === 'confirm')
   try {
     await w.loadFile(path.join(root, 'out/renderer/index.html'))
-    await wait("!!document.querySelector('.case-tabs-trigger')", 'App ready')
+    await wait("!!document.querySelector('.case-sidebar-trigger')", 'App ready')
     await run(`
       window.checks = [];
       window.check = (condition, label) => { if (!condition) throw Error(label); window.checks.push(label) };

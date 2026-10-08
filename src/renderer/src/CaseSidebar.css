@@ -56,6 +56,33 @@
   background: var(--bg-alt);
 }
 
+.case-sidebar-filter {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  padding: 0 12px 12px;
+  color: var(--fg-muted);
+  font-size: 11px;
+}
+
+.case-sidebar-filter label {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  cursor: pointer;
+}
+
+.case-sidebar-filter input {
+  margin: 0;
+  accent-color: var(--accent);
+}
+
+.case-sidebar-filter button {
+  padding: 4px;
+}
+
 .case-sidebar-list {
   flex: 1;
   min-height: 0;
@@ -111,6 +138,7 @@
 
 .case-sidebar-case-title,
 .case-sidebar-case-participants,
+.case-sidebar-case-status,
 .case-sidebar-task-title {
   overflow: hidden;
   text-overflow: ellipsis;
@@ -121,12 +149,18 @@
   font-weight: 600;
 }
 
-.case-sidebar-case-participants {
+.case-sidebar-case-participants,
+.case-sidebar-case-status {
   color: var(--fg-muted);
   font-size: 10px;
 }
 
-.case-sidebar-new-task {
+.case-sidebar-case-status.has-notice {
+  color: var(--accent);
+}
+
+.case-sidebar-new-task,
+.case-sidebar-manage {
   display: flex;
   align-items: center;
   justify-content: center;

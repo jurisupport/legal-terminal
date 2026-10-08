@@ -74,7 +74,12 @@ async function electronCheck({ root, temp, output, channels }) {
   }
   try {
     await w.loadFile(path.join(root, 'out/renderer/index.html'))
-    await wait("!!document.querySelector('.case-tabs-trigger')", 'App ready')
+    // Electron native input requires a focused window; a hidden window is unreliable on Windows.
+    w.show()
+    w.focus()
+    w.webContents.focus()
+    await wait('document.hasFocus()', 'Native input window focused')
+    await wait("!!document.querySelector('.case-sidebar-trigger')", 'App ready')
     await run(`
       window.checks = [];
       window.check = (value, label) => { if (!value) throw Error(label); checks.push(label) };
@@ -85,10 +90,12 @@ async function electronCheck({ root, temp, output, channels }) {
       window.highlight = () => frame().contentWindow.CSS.highlights.get('inline-command-source');
     `)
     w.webContents.send('tabs:receive', { kind: 'terminal', tab: { id: 'html-agent', kind: 'agent', agentProvider: 'claude', title: 'HTML 계약 검토', cwd: '/synthetic', side: 'right', createdAt: Date.now() } })
-    await wait("visible('.agent-composer textarea').length === 1", 'Agent ready')
+    await wait("visible('.agent-composer textarea').some(el => el === document.activeElement) && visible('.agent-auth-btn').some(el => el.textContent.trim() === '계정 변경')", 'Agent initialized and initially focused')
+    await run('await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))')
     w.webContents.send('tabs:receive', { kind: 'document', tab: { id: 'html-doc', kind: 'file', path: '/synthetic/계약서.html', title: '계약서.html', side: 'left' } })
     await wait("!!document.querySelector('.html-frame')", 'HTML frame')
     await wait("!!document.querySelector('.html-frame').contentDocument?.getElementById('quote')", 'HTML document accessible for selection')
+    await run('await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))')
     await run(`
       const frame = document.querySelector('.html-frame'), d = frame.contentDocument;
       check(!frame.sandbox.contains('allow-scripts'), 'HTML preview does not permit scripts');

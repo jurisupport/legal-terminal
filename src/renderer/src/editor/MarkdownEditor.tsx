@@ -15,7 +15,7 @@ import { GFM } from '@lezer/markdown'
 import { syntaxHighlighting, defaultHighlightStyle } from '@codemirror/language'
 import { livePreview } from './livePreview'
 import { mdToPrintHtml, type PrintLayoutProfile } from './mdExport'
-import { mergeTextAgainstBase } from './threeWayMerge'
+import { findTextChanges, mergeTextAgainstBase } from './threeWayMerge'
 import FindBar from '../search/FindBar'
 import {
   IconAlignCenter,
@@ -64,12 +64,6 @@ export interface TextSelectionOverlayDetail {
   editorDraftId?: string
   range?: MarkdownSelectionRange
   count: number
-}
-
-interface TextReplacement {
-  from: number
-  to: number
-  insert: string
 }
 
 interface FileSignature {
@@ -229,26 +223,6 @@ function draftHistoryPreview(content: string): string {
     .map((part) => part.trim())
     .find(Boolean)
   return line || '(빈 문서)'
-}
-
-function findMinimalReplacement(current: string, next: string): TextReplacement | null {
-  if (current === next) return null
-  const limit = Math.min(current.length, next.length)
-  let prefix = 0
-  while (prefix < limit && current.charCodeAt(prefix) === next.charCodeAt(prefix)) prefix++
-
-  let currentSuffix = current.length
-  let nextSuffix = next.length
-  while (
-    currentSuffix > prefix &&
-    nextSuffix > prefix &&
-    current.charCodeAt(currentSuffix - 1) === next.charCodeAt(nextSuffix - 1)
-  ) {
-    currentSuffix--
-    nextSuffix--
-  }
-
-  return { from: prefix, to: currentSuffix, insert: next.slice(prefix, nextSuffix) }
 }
 
 function fileSignatureOf(value: { size: number; mtimeMs?: number }): FileSignature {
@@ -1038,8 +1012,8 @@ export default function MarkdownEditor({
     const v = viewRef.current
     if (!v) return
     const current = v.state.doc.toString()
-    const replacement = findMinimalReplacement(current, entry.content)
-    if (replacement) {
+    const replacement = findTextChanges(current, entry.content)
+    if (replacement.length) {
       const viewport = captureViewport(v)
       const selectionBookmark = bookmarkSelection(v.state)
       const previewTransaction = v.state.update({ changes: replacement })
@@ -1275,8 +1249,8 @@ export default function MarkdownEditor({
                 setSavedState(mergedText === next && !!pathRef.current)
                 setDirtyState(mergedText !== next)
 
-                const replacement = findMinimalReplacement(current, mergedText)
-                if (replacement) {
+                const replacement = findTextChanges(current, mergedText)
+                if (replacement.length) {
                   const viewport = captureViewport(v)
                   const selectionBookmark = bookmarkSelection(v.state)
                   const previewTransaction = v.state.update({ changes: replacement })
@@ -1296,8 +1270,8 @@ export default function MarkdownEditor({
                 pulseRemoteApplied(merged.remoteHunkCount > 0 ? '외부 수정 병합됨' : '외부 수정 반영됨')
                 return
               }
-              const replacement = findMinimalReplacement(current, next)
-              if (!replacement) return
+              const replacement = findTextChanges(current, next)
+              if (!replacement.length) return
               const viewport = captureViewport(v)
               const selectionBookmark = bookmarkSelection(v.state)
               const previewTransaction = v.state.update({ changes: replacement })

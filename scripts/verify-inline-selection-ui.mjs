@@ -127,7 +127,7 @@ async function electronCheck({ root, temp, output, channels, pdf }) {
   const tab = (name, close = false) => run(`const tab = visible('.work-pane[data-work-side="right"] .tab').find(el => el.querySelector('.tab-title')?.textContent.includes(${JSON.stringify(name)})); click(${close ? "tab?.querySelector('.tab-close')" : 'tab'})`)
   try {
     await w.loadFile(path.join(root, 'out/renderer/index.html'))
-    await wait("!!document.querySelector('.case-tabs-trigger')", 'App ready')
+    await wait("!!document.querySelector('.case-sidebar-trigger')", 'App ready')
     await run(`
       window.checks = [];
       window.check = (value, message) => { if (!value) throw Error(message); checks.push(message) };
@@ -285,8 +285,8 @@ async function electronCheck({ root, temp, output, channels, pdf }) {
     const beforeCase=sends().length; await enter()
     await wait("popup()?.querySelector('[role=alert]')?.textContent.includes('사건으로 돌아와')", 'Wrong active case error')
     assertFixture(sends().length===beforeCase,'Changing active case prevents sending')
-    await run(`check(popup().querySelector('textarea').value==='사건 변경 중 보존할 입력','Wrong-case error retains inline text'); click(document.querySelector('.case-tabs-trigger'))`)
-    await run(`click([...document.querySelectorAll('.case-tab-row')].find(el=>el.textContent.includes('인용 사건')))`)
+    await run(`check(popup().querySelector('textarea').value==='사건 변경 중 보존할 입력','Wrong-case error retains inline text'); click(document.querySelector('.case-sidebar-trigger'))`)
+    await run(`click([...document.querySelectorAll('.case-sidebar-case')].find(el=>el.textContent.includes('인용 사건')))`)
     await close(); await tab('검토 Agent 하나'); await open()
     await fill('닫힌 대상 입력'); await tab('검토 Agent 하나',true)
     await wait("popup()?.querySelector('select').selectedOptions[0].textContent.includes('닫혔습니다')", 'Closed target visible')

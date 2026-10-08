@@ -1652,10 +1652,10 @@ export default function App(): JSX.Element {
   const activeCaseTabIdRef = useRef(activeCaseTabId)
   activeCaseTabIdRef.current = activeCaseTabId
   const caseTabCycleOrderRef = useRef<string[]>([])
-  const [caseTabsOpen, setCaseTabsOpen] = useState(false)
   const [sidebarView, setSidebarView] = useState<'cases' | 'files'>('cases')
   const [caseAttentionOnly, setCaseAttentionOnly] = useState(false)
   const caseAttentionOrderRef = useRef<string[]>([])
+  const caseTabContextMenuRef = useRef<HTMLDivElement>(null)
   const [caseTabContextMenu, setCaseTabContextMenu] = useState<{
     x: number
     y: number
@@ -1887,27 +1887,22 @@ export default function App(): JSX.Element {
   useEffect(() => window.lt.app.onCloseActiveCaseTab(() => closeActiveCaseTabRef.current()), [])
   useEffect(() => window.lt.app.onCloseWindowRequest(() => requestWindowCloseRef.current()), [])
   useEffect(() => {
-    if (!caseTabsOpen) return
-    const closeFromPointer = (event: MouseEvent): void => {
-      const target = event.target instanceof Element ? event.target : null
-      if (target?.closest('.case-tabs-trigger, .case-tabs-flyout')) return
-      setCaseTabsOpen(false)
-    }
-    const closeFromKey = (event: KeyboardEvent): void => {
-      if (event.key === 'Escape') setCaseTabsOpen(false)
-    }
-    document.addEventListener('mousedown', closeFromPointer)
-    window.addEventListener('keydown', closeFromKey)
-    return () => {
-      document.removeEventListener('mousedown', closeFromPointer)
-      window.removeEventListener('keydown', closeFromKey)
-    }
-  }, [caseTabsOpen])
-  useEffect(() => {
     if (!caseTabContextMenu) return
+    const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null
+    const buttons = Array.from(caseTabContextMenuRef.current?.querySelectorAll<HTMLButtonElement>('button') ?? [])
+    buttons[0]?.focus()
     const close = (): void => setCaseTabContextMenu(null)
     const closeFromKey = (event: KeyboardEvent): void => {
-      if (event.key === 'Escape') close()
+      if (event.key === 'Escape') {
+        event.preventDefault()
+        close()
+        opener?.focus()
+      } else if ((event.key === 'ArrowDown' || event.key === 'ArrowUp') &&
+        caseTabContextMenuRef.current?.contains(document.activeElement)) {
+        event.preventDefault()
+        const index = buttons.indexOf(document.activeElement as HTMLButtonElement)
+        buttons[(index + (event.key === 'ArrowDown' ? 1 : -1) + buttons.length) % buttons.length]?.focus()
+      }
     }
     document.addEventListener('mousedown', close)
     document.addEventListener('scroll', close, true)
@@ -2310,8 +2305,12 @@ export default function App(): JSX.Element {
     return true
   }
 
+  const openCaseSidebar = (): void => {
+    setSidebarView('cases')
+    setExplorerVisible(true)
+  }
+
   const openNewCaseLauncher = (): void => {
-    setCaseTabsOpen(false)
     setNewCaseOpen(true)
   }
 
@@ -2425,7 +2424,7 @@ export default function App(): JSX.Element {
       } else if (isZero) {
         e.preventDefault()
         e.stopPropagation()
-        setCaseTabsOpen((open) => !open)
+        openCaseSidebar()
       } else if (isKey('w', 'KeyW') && !e.shiftKey) {
         e.preventDefault()
         e.stopPropagation()
@@ -2437,7 +2436,7 @@ export default function App(): JSX.Element {
       } else if (isKey('o', 'KeyO') && e.shiftKey) {
         e.preventDefault()
         e.stopPropagation()
-        setCaseTabsOpen((open) => !open)
+        openCaseSidebar()
       } else if (isKey('n', 'KeyN') && !e.shiftKey) {
         e.preventDefault()
         e.stopPropagation()
@@ -6542,9 +6541,6 @@ export default function App(): JSX.Element {
               : '작업 탭 없음'
       }
   })
-  const visibleCaseTabRows = caseAttentionOnly
-    ? caseTabRows.filter((row) => row.questionTaskCount + row.doneTaskCount + row.documentUpdateCount > 0)
-    : caseTabRows
   const totalCaseDocumentUpdateCount = caseTabRows.reduce((sum, row) => sum + row.documentUpdateCount, 0)
   const totalCaseDoneTaskCount = caseTabRows.reduce((sum, row) => sum + row.doneTaskCount, 0)
   const totalCaseQuestionTaskCount = caseTabRows.reduce((sum, row) => sum + row.questionTaskCount, 0)
@@ -6554,14 +6550,14 @@ export default function App(): JSX.Element {
   const closeCaseTabShortcut = platform === 'darwin' ? '⌘⇧W' : 'Ctrl+Shift+W / Ctrl+Alt+W'
   const caseTabActivityTitle =
     totalCaseNoticeCount > 0
-      ? `사건탭 · ${[
+      ? `사건별 작업 · ${[
           totalCaseDocumentUpdateCount > 0 ? `업데이트 ${totalCaseDocumentUpdateCount}개` : undefined,
           totalCaseQuestionTaskCount > 0 ? `확인 대기 ${totalCaseQuestionTaskCount}개` : undefined,
           totalCaseDoneTaskCount > 0 ? `완료 작업 ${totalCaseDoneTaskCount}개` : undefined
         ]
           .filter(Boolean)
           .join(' · ')} (${caseTabsShortcut})`
-      : `사건탭 (${caseTabsShortcut})`
+      : `사건별 작업 (${caseTabsShortcut})`
   const caseTabActivityBadgeClass =
     totalCaseDocumentUpdateCount > 0
       ? 'update'
@@ -6570,7 +6566,6 @@ export default function App(): JSX.Element {
         : totalCaseDoneTaskCount > 0
           ? 'done'
           : ''
-  const caseTabActivityBadgeCount = totalCaseNoticeCount > 0 ? totalCaseNoticeCount : caseTabs.length
   const caseTabTitle = (tab: CaseWorkspaceTab): string =>
     [
       tab.meta?.court ? abbrevCourt(tab.meta.court) : undefined,
@@ -6616,6 +6611,7 @@ export default function App(): JSX.Element {
     sidebarCaseTabs.push({ ...caseTabFromCurrentCase(source), id: caseTabId(source, sidebarCaseTabs), updatedAt: entry.ts })
   }
   const sidebarCases: SidebarCase[] = sidebarCaseTabs.map((tab) => {
+    const row = caseTabRows.find((item) => item.tab.id === tab.id)
     const saved = savedCaseLabels.find((entry) => entry.label === tab.name &&
       entry.profileId === tab.profileId &&
       normalizedCasePathKey(entry.cwd) === normalizedCasePathKey(tab.remotePath ?? tab.drafts) &&
@@ -6625,6 +6621,13 @@ export default function App(): JSX.Element {
       title: [tab.meta?.caseNumber ?? saved?.caseNumber, tab.meta?.caseName ?? saved?.caseName].filter(Boolean).join(' ') || tab.name || '사건',
       participants: tab.meta?.partyNames || [tab.meta?.client ?? saved?.client, tab.meta?.opponent].filter(Boolean).join(' / ') || undefined,
       subtitle: caseTabSubtitle(tab),
+      open: !!row,
+      status: row ? joinStatus([
+        row.documentUpdateCount ? `업데이트 ${row.documentUpdateCount}개` : undefined,
+        row.questionTaskCount ? `확인 대기 ${row.questionTaskCount}개` : undefined,
+        row.doneTaskCount ? `완료 ${row.doneTaskCount}개` : undefined
+      ]) || row.status : undefined,
+      noticeCount: row ? row.documentUpdateCount + row.questionTaskCount + row.doneTaskCount : 0,
       active: tab.id === activeCaseTabId,
       updatedAt: tab.updatedAt ?? 0,
       historyKey: sessionListKey(tab.remotePath ?? tab.drafts, tab.ssh, sessionContextForTerm(currentCaseSessionSource(tab, sshProfiles))),
@@ -6860,7 +6863,6 @@ export default function App(): JSX.Element {
         updatedAt: Date.now()
       })
     )
-    setCaseTabsOpen(false)
     setMode('explorer')
     const validKeys = new Set([
       ...docs.map((doc) => docKey(doc.id)),
@@ -6981,14 +6983,14 @@ export default function App(): JSX.Element {
       const more = dirty.length > names.length ? `\n- 외 ${dirty.length - names.length}개` : ''
       if (
         !(await window.lt.dialog.confirm(
-          `이 사건탭에 저장하지 않은 문서가 있습니다.\n\n${names.join('\n')}${more}\n\n사건탭을 닫을까요?`
+          `이 사건에 저장하지 않은 문서가 있습니다.\n\n${names.join('\n')}${more}\n\n사건을 닫을까요?`
         ))
       )
         return
     }
     if (!caseTabsRef.current.some((item) => item.id === tabId)) return
     const working = terms.filter((term) => termStatus.get(term.id) === 'working')
-    if (working.length > 0 && !(await window.lt.dialog.confirm('이 사건탭에 아직 작업 중인 Claude/Agent가 있습니다. 닫을까요?'))) {
+    if (working.length > 0 && !(await window.lt.dialog.confirm('이 사건에 아직 작업 중인 Claude/Agent가 있습니다. 닫을까요?'))) {
       return
     }
 
@@ -7090,7 +7092,6 @@ export default function App(): JSX.Element {
     setFolderRecord(null)
     setPdfRecord(null)
     setMode('explorer')
-    setCaseTabsOpen(false)
     if (nextCaseTab) openCaseTab(nextCaseTab)
   }
   closeActiveCaseTabRef.current = (): void => {
@@ -8806,11 +8807,11 @@ export default function App(): JSX.Element {
           },
           {
             id: 'case-tabs',
-            label: '열린 사건탭 목록',
-            detail: '현재 열려 있는 사건 작업공간 보기',
+            label: '사건별 작업',
+            detail: '사건 전환과 최근 대화를 사이드바에서 보기',
             keywords: '사건 탭 전환',
             shortcut: `${primaryShortcut}0`,
-            run: () => setCaseTabsOpen(true)
+            run: openCaseSidebar
           },
           {
             id: 'cases',
@@ -9026,7 +9027,7 @@ export default function App(): JSX.Element {
             </button>
           ))}
           <button
-            className={`activity-item case-tabs-trigger ${caseTabsOpen ? 'active' : ''} ${
+            className={`activity-item case-sidebar-trigger ${explorerVisible && sidebarView === 'cases' ? 'active' : ''} ${
               totalCaseDocumentUpdateCount > 0 ? 'has-updates' : ''
             } ${
               totalCaseDocumentUpdateCount === 0 && totalCaseQuestionTaskCount > 0
@@ -9041,151 +9042,19 @@ export default function App(): JSX.Element {
             }`}
             title={caseTabActivityTitle}
             aria-label={caseTabActivityTitle}
-            aria-expanded={caseTabsOpen}
-            aria-controls="case-tabs-flyout"
-            onClick={() => setCaseTabsOpen((open) => !open)}
+            aria-expanded={explorerVisible && sidebarView === 'cases'}
+            aria-controls="case-sidebar"
+            onClick={openCaseSidebar}
           >
             <IconCaseTabs />
-            {caseTabActivityBadgeCount > 0 && (
+            {totalCaseNoticeCount > 0 && (
               <span className={`activity-badge ${caseTabActivityBadgeClass}`}>
-                {caseTabActivityBadgeCount}
+                {totalCaseNoticeCount}
               </span>
             )}
           </button>
         </div>
-        {caseTabsOpen && (
-          <div id="case-tabs-flyout" className="case-tabs-flyout" role="dialog" aria-label="사건탭" onMouseDown={(e) => e.stopPropagation()}>
-            <div className="case-tabs-head">
-              <span>사건탭</span>
-              <button className="case-tabs-close" title="닫기" onClick={() => setCaseTabsOpen(false)}>
-                ×
-              </button>
-            </div>
-            <div className="case-tabs-filter">
-              <label>
-                <input type="checkbox" checked={caseAttentionOnly} onChange={(event) => setCaseAttentionOnly(event.target.checked)} />
-                확인 필요만
-              </label>
-              <button type="button" disabled={totalCaseNoticeCount === 0} onClick={openNextCaseAttention}>
-                다음 확인 작업 →
-              </button>
-            </div>
-            <div className="case-tabs-list">
-              {visibleCaseTabRows.length === 0 ? (
-                <div className="case-tabs-empty" role="status">{caseTabs.length === 0 ? '열린 사건탭 없음' : '확인이 필요한 작업 없음'}</div>
-              ) : (
-                visibleCaseTabRows.map(({
-                  tab,
-                  active,
-                  status,
-                  questionTaskCount,
-                  doneTaskCount,
-                  documentUpdateCount,
-                  documentUpdateLatestAt
-                }) => (
-                  <button
-                    key={tab.id}
-                    className={`case-tab-row ${active ? 'active' : ''} ${documentUpdateCount > 0 ? 'has-updates' : ''} ${
-                      documentUpdateCount === 0 && questionTaskCount > 0 ? 'has-question' : ''
-                    } ${
-                      documentUpdateCount === 0 && questionTaskCount === 0 && doneTaskCount > 0 ? 'has-done' : ''
-                    }`}
-                    title={`${caseTabTitle(tab)}${documentUpdateCount > 0 ? ` · 업데이트 ${documentUpdateCount}개` : ''}${
-                      questionTaskCount > 0 ? ` · 확인 대기 ${questionTaskCount}개` : ''
-                    }${
-                      doneTaskCount > 0 ? ` · 완료 작업 ${doneTaskCount}개` : ''
-                    }\n${caseTabSubtitle(tab)}${
-                      documentUpdateLatestAt
-                        ? `\n최근 업데이트 ${new Date(documentUpdateLatestAt).toLocaleTimeString('ko-KR')}`
-                        : ''
-                    }`}
-                    onClick={() => openCaseTab(tab)}
-                    onContextMenu={(e) => {
-                      e.preventDefault()
-                      e.stopPropagation()
-                      setCaseTabContextMenu({
-                        x: Math.max(8, Math.min(e.clientX, window.innerWidth - 220 - 8)),
-                        y: Math.max(8, Math.min(e.clientY, window.innerHeight - 48 - 8)),
-                        tabId: tab.id
-                      })
-                    }}
-                  >
-                    <span className="case-tab-row-main">
-                      <span className="case-tab-row-titleline">
-                        <span className="case-tab-row-title">{caseTabTitle(tab)}</span>
-                        {documentUpdateCount > 0 && (
-                          <span
-                            className="case-tab-row-update-badge"
-                            title={`업데이트 ${documentUpdateCount}개`}
-                            aria-label={`업데이트 ${documentUpdateCount}개`}
-                          >
-                            {documentUpdateCount}
-                          </span>
-                        )}
-                        {questionTaskCount > 0 && (
-                          <span
-                            className="case-tab-row-question-badge"
-                            title={`확인 대기 ${questionTaskCount}개`}
-                            aria-label={`확인 대기 ${questionTaskCount}개`}
-                          >
-                            {questionTaskCount}
-                          </span>
-                        )}
-                        {doneTaskCount > 0 && (
-                          <span
-                            className="case-tab-row-done-badge"
-                            title={`완료된 작업 ${doneTaskCount}개`}
-                            aria-label={`완료된 작업 ${doneTaskCount}개`}
-                          >
-                            {doneTaskCount}
-                          </span>
-                        )}
-                      </span>
-                      <span className="case-tab-row-sub">{caseTabSubtitle(tab)}</span>
-                    </span>
-                    <span className="case-tab-row-status">{status}</span>
-                  </button>
-                ))
-              )}
-            </div>
-            <div className="case-tabs-actions">
-              <button className="case-tabs-add" type="button" onClick={openNewCaseLauncher}>
-                + 새 사건
-              </button>
-            </div>
-            {caseTabContextMenu && (
-              <div
-                className="tab-context-menu"
-                role="menu"
-                style={{ left: caseTabContextMenu.x, top: caseTabContextMenu.y }}
-                onMouseDown={(e) => e.stopPropagation()}
-              >
-                <button
-                  className="tab-context-menu-item"
-                  role="menuitem"
-                  title="이 사건의 전자소송기록 폴더를 직접 지정합니다"
-                  onClick={(e) => {
-                    e.stopPropagation()
-                    pickRecordsForCaseTab(caseTabContextMenu.tabId)
-                  }}
-                >
-                  <span>소송기록 폴더 지정</span>
-                </button>
-                <button
-                  className="tab-context-menu-item"
-                  role="menuitem"
-                  title={`이 사건탭과 여기에 속한 문서/터미널 탭을 닫습니다 (${closeCaseTabShortcut})`}
-                  onClick={(e) => {
-                    e.stopPropagation()
-                    closeCaseTab(caseTabContextMenu.tabId)
-                  }}
-                >
-                  <span>사건탭 닫기</span>
-                </button>
-              </div>
-            )}
-          </div>
-        )}
+
         <div className="activitybar-bottom">
           <button
             className="activity-item"
@@ -9221,6 +9090,39 @@ export default function App(): JSX.Element {
         </div>
       </div>
 
+      {caseTabContextMenu && (
+        <div
+          ref={caseTabContextMenuRef}
+          className="tab-context-menu"
+          role="menu"
+          style={{ left: caseTabContextMenu.x, top: caseTabContextMenu.y }}
+          onMouseDown={(e) => e.stopPropagation()}
+        >
+          <button
+            className="tab-context-menu-item"
+            role="menuitem"
+            title="이 사건의 전자소송기록 폴더를 직접 지정합니다"
+            onClick={(e) => {
+              e.stopPropagation()
+              pickRecordsForCaseTab(caseTabContextMenu.tabId)
+            }}
+          >
+            <span>소송기록 폴더 지정</span>
+          </button>
+          <button
+            className="tab-context-menu-item"
+            role="menuitem"
+            title={`이 사건과 여기에 속한 문서/터미널 탭을 닫습니다 (${closeCaseTabShortcut})`}
+            onClick={(e) => {
+              e.stopPropagation()
+              closeCaseTab(caseTabContextMenu.tabId)
+            }}
+          >
+            <span>사건 닫기</span>
+          </button>
+        </div>
+      )}
+
       {explorerVisible && (
         <div className="side-col" key="side">
           <div className="side-view-switch" role="group" aria-label="사이드바 보기">
@@ -9237,6 +9139,15 @@ export default function App(): JSX.Element {
           {sidebarView === 'cases' ? (
             <CaseSidebar
               cases={sidebarCases}
+              attentionOnly={caseAttentionOnly}
+              onAttentionOnlyChange={setCaseAttentionOnly}
+              noticeCount={totalCaseNoticeCount}
+              onNextAttention={openNextCaseAttention}
+              onManageCase={(id, x, y) => setCaseTabContextMenu({
+                tabId: id,
+                x: Math.max(8, Math.min(x, window.innerWidth - 228)),
+                y: Math.max(8, Math.min(y, window.innerHeight - 100))
+              })}
               onOpenCase={(id) => {
                 const tab = sidebarCaseTabs.find((item) => item.id === id)
                 if (!tab) return

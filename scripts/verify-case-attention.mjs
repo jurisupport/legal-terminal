@@ -11,6 +11,21 @@ function visit(node) {
   ts.forEachChild(node, visit)
 }
 visit(parsed)
+const sidebarSource = readFileSync(new URL('../src/renderer/src/CaseSidebar.tsx', import.meta.url), 'utf8')
+const sidebarParsed = ts.createSourceFile('CaseSidebar.tsx', sidebarSource, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX)
+const sidebarDeclarations = new Map()
+let moreCasesOnClick
+function visitSidebar(node) {
+  if (ts.isVariableDeclaration(node) && node.initializer) sidebarDeclarations.set(node.name.getText(sidebarParsed), node.initializer.getText(sidebarParsed))
+  if (ts.isJsxOpeningElement(node) && node.attributes.properties.some((attribute) =>
+    ts.isJsxAttribute(attribute) && attribute.name.getText(sidebarParsed) === 'className' && attribute.initializer?.text === 'case-sidebar-more-cases')) {
+    moreCasesOnClick = node.attributes.properties.find((attribute) => ts.isJsxAttribute(attribute) && attribute.name.getText(sidebarParsed) === 'onClick')?.initializer?.expression?.getText(sidebarParsed)
+  }
+  ts.forEachChild(node, visitSidebar)
+}
+visitSidebar(sidebarParsed)
+assert.ok(sidebarDeclarations.has('orderedCases'), 'find actual sidebar attention filter')
+assert.ok(sidebarDeclarations.has('count') && moreCasesOnClick, 'find actual sidebar pagination')
 
 const noop = () => {}
 const state = {
@@ -22,11 +37,13 @@ const state = {
   termStatus: new Map([['a1', 'question'], ['a2', 'question'], ['a3', 'done'], ['b1', 'done']]),
   termAttention: new Set(['a1', 'a2', 'a3', 'b1']),
   caseDocumentUpdates: { a: { paths: ['/a/a-visible.md', '/a/a-hidden.md'], latestAt: 1 }, b: { paths: ['/b/new.md'], latestAt: 2 } },
-  caseAttentionOnly: true, caseTabsOpen: true, termFocusNonce: {}, mode: 'explorer'
+  caseAttentionOnly: true, termFocusNonce: {}, mode: 'explorer'
 }
 const focus = []
 const context = {
   ...state,
+  savedCaseLabels: [], caseTabSubtitle: (tab) => tab.drafts, sessionListKey: (path) => path, sessionContextForTerm: noop,
+  joinStatus: (parts) => parts.filter(Boolean).join(' · '),
   caseAttentionOrderRef: { current: [] }, termStatusRef: { current: state.termStatus }, sshProfiles: [], liveCaseTabIds: new Set(['a', 'b', 'empty']),
   caseIdForTerm: (term) => term.caseTabId, caseIdForDoc: (doc) => doc.caseTabId,
   isSharedDocTab: () => false, currentCaseFromCaseTab: (tab) => tab,
@@ -55,12 +72,13 @@ for (const key of Object.keys(state)) {
 }
 const names = [
   'docSide', 'termSide', 'docKey', 'termKeyOf', 'parseWorkKey', 'isAgentTab',
-  'termsForCaseTab', 'docsForCaseTab', 'caseTabRows', 'visibleCaseTabRows',
+  'termsForCaseTab', 'docsForCaseTab', 'caseTabRows', 'sidebarCases',
   'clearCaseDocumentUpdates', 'updateCaseTabActivity', 'activateDocTab', 'activateTermTab',
   'openFile', 'selectTerm', 'onTermStatus', 'openCaseTab', 'openNextCaseAttention', 'onDocumentChanged'
 ]
 function render() {
   context.termStatusRef.current = state.termStatus
+  context.sidebarCaseTabs = [...state.caseTabs, { id: 'history', drafts: '/history', updatedAt: Date.now() }]
   const code = names.map((name) => {
     assert.ok(declarations.has(name), `find actual ${name} implementation`)
     return `const ${name} = ${declarations.get(name)};`
@@ -68,10 +86,20 @@ function render() {
   return vm.runInNewContext(ts.transpileModule(`(() => { ${code} })()`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText, context)
 }
 const row = (id) => render().caseTabRows.find((item) => item.tab.id === id)
+function sidebarList(cases = render().sidebarCases, attentionOnly = state.caseAttentionOnly, visibleCases = 6, setVisibleCases = noop) {
+  return vm.runInNewContext(ts.transpileModule(`(() => {
+    const orderedCases = ${sidebarDeclarations.get('orderedCases')};
+    const count = ${sidebarDeclarations.get('count')};
+    return { orderedCases, count, onMore: ${moreCasesOnClick} };
+  })()`, {
+    compilerOptions: { target: ts.ScriptTarget.ES2022 }
+  }).outputText, { cases, attentionOnly, visibleCases, setVisibleCases })
+}
+const visibleCases = () => sidebarList().orderedCases
 
 assert.equal(row('a').questionTaskCount, 2, 'active-case questions stay visible')
 assert.equal(row('a').doneTaskCount, 1, 'hidden completed work in the active case stays unread')
-assert.deepEqual(Array.from(render().visibleCaseTabRows, (item) => item.tab.id), ['a', 'b'])
+assert.deepEqual(Array.from(visibleCases(), (item) => item.id), ['a', 'b'])
 render().openCaseTab(state.caseTabs[0])
 assert.equal(row('a').questionTaskCount, 2, 'opening a case does not answer either pending question')
 assert.ok(state.termAttention.has('a2'), 'opening the visible agent does not acknowledge the hidden agent')
@@ -110,12 +138,26 @@ const change = (paths) => render().onDocumentChanged({ detail: { caseTabId: 'b',
 change(['/b/new.md', '/b/hidden.md'])
 assert.deepEqual(Array.from(state.caseDocumentUpdates.b.paths), ['/b/other.md', '/b/hidden.md'], 'active-case hidden document updates are tracked, visible updates are quiet')
 context.setCaseDocumentUpdates({})
-assert.equal(render().visibleCaseTabRows.length, 0, 'attention filter handles an empty queue')
+assert.equal(visibleCases().length, 0, 'attention filter handles an empty queue')
 const focusedBefore = focus.length
 render().openNextCaseAttention()
 assert.equal(focus.length, focusedBefore, 'empty queue does not navigate')
 context.setCaseAttentionOnly(false)
-assert.equal(render().visibleCaseTabRows.length, 3, 'turning off the filter restores all cases')
-assert.match(source, /disabled=\{totalCaseNoticeCount === 0\}/)
-assert.match(source, /type="checkbox" checked=\{caseAttentionOnly\}/)
+assert.deepEqual(Array.from(visibleCases(), (item) => item.id).slice(0, 3).sort(), ['a', 'b', 'empty'], 'turning off the filter restores all open cases')
+assert.equal(visibleCases().at(-1).id, 'history', 'open cases precede more recent history')
+const manyCases = [
+  ...Array.from({ length: 12 }, (_, index) => ({ id: `open-${index}`, open: true, updatedAt: index, noticeCount: 0 })),
+  ...Array.from({ length: 9 }, (_, index) => ({ id: `history-${index}`, open: false, updatedAt: 100 + index, noticeCount: 0 }))
+]
+let visibleLimit = 6
+const initialList = sidebarList(manyCases, false, visibleLimit, (count) => { visibleLimit = count })
+assert.equal(initialList.count, 12, 'all opened cases are visible even above the initial list limit')
+assert.equal(initialList.orderedCases.slice(0, initialList.count).every((item) => item.open), true, 'newer history cannot displace open cases')
+initialList.onMore()
+const expandedList = sidebarList(manyCases, false, visibleLimit)
+assert.equal(expandedList.count, 18, 'one More click extends the effective open-case count')
+assert.equal(expandedList.orderedCases.slice(0, expandedList.count).filter((item) => !item.open).length, 6, 'one More click reveals six history cases')
+assert.match(sidebarSource, /disabled=\{noticeCount === 0\}/)
+assert.match(sidebarSource, /type="checkbox" checked=\{attentionOnly\}/)
+assert.doesNotMatch(source, /case-tabs-flyout|visibleCaseTabRows/, 'attention navigation belongs to one sidebar')
 console.log('case attention ok')

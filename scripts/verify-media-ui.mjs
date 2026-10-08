@@ -47,7 +47,7 @@ async function electronCheck({ root, temp, output }) {
   }
   const checks = []
   try {
-    await wait("!!document.querySelector('.case-tabs-trigger')", 'App ready')
+    await wait("!!document.querySelector('.case-sidebar-trigger')", 'App ready')
     await run(`window.testButton = label => [...document.querySelectorAll('.media-viewer button')].find(item=>item.textContent.trim()===label && item.checkVisibility({checkVisibilityCSS:true})); window.testMedia = () => [...document.querySelectorAll('.media-viewer video,.media-viewer audio')].find(item=>item.checkVisibility({checkVisibilityCSS:true}));`)
     win.webContents.send('tabs:receive', { kind: 'terminal', tab: { id: 'media-fixture-agent', kind: 'agent', agentProvider: 'claude', title: '미디어 검토', cwd: path.dirname(sample), side: 'right', createdAt: Date.now() } })
     for (let i = 0; i < 200 && !agentCreated; i++) await pause(50)
