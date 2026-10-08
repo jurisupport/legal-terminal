@@ -5,6 +5,7 @@ import { execFile, spawn, type ChildProcessWithoutNullStreams } from 'child_proc
 import { existsSync } from 'fs'
 import { mkdir, realpath } from 'fs/promises'
 import { tmpdir } from 'os'
+import { createRequire } from 'module'
 import { basename, dirname, join, relative } from 'path'
 import { readSessionTokenUsage, rememberSessionMeta } from '../sessions'
 import {
@@ -493,6 +494,18 @@ function packagedClaudeAgentSdkExecutable(): string | undefined {
   return existsSync(candidate) ? candidate : undefined
 }
 
+function localClaudeAuthExecutable(): string {
+  const packaged = packagedClaudeAgentSdkExecutable()
+  if (packaged) return packaged
+  const binaryName = CLAUDE_AGENT_SDK_BINARY_BY_PLATFORM[process.platform] ?? 'claude'
+  try {
+    const sdkRequire = createRequire(require.resolve('@anthropic-ai/claude-agent-sdk'))
+    return join(dirname(sdkRequire.resolve(`@anthropic-ai/claude-agent-sdk-${process.platform}-${process.arch}/package.json`)), binaryName)
+  } catch {
+    return binaryName
+  }
+}
+
 function remoteClaudeCommand(session: AgentSession): string {
   const mode = cliPermissionMode(session.permissionMode)
   const flags = [
@@ -826,7 +839,7 @@ function emitAuthStatus(session: AgentSession, state: AgentAuthStatus, message?:
 }
 
 function isAuthFailureOutput(value: string): boolean {
-  return /not\s+(logged|signed)\s+in|login\s+required|not authenticated|unauthorized|refresh[_\s-]*token|sign in again|log out and sign in again|invalid authentication credentials|api error:\s*401|인증.*필요/i.test(
+  return /failed to authenticate|authentication_failed|oauth session expired|not\s+(logged|signed)\s+in|login\s+required|not authenticated|unauthorized|refresh[_\s-]*token|sign in again|log out and sign in again|invalid authentication credentials|api error:\s*401|인증.*필요/i.test(
     value
   )
 }
@@ -907,14 +920,20 @@ function refreshAgentAuthStatus(session: AgentSession): void {
     return
   }
   if (session.provider !== 'claude') return
-  if (session.source !== 'ssh' || !session.ssh || session.authProcess || session.running) return
+  if (session.authProcess || session.running) return
   emitAuthStatus(session, 'checking')
   let proc: ChildProcessWithoutNullStreams
   try {
-    proc = spawn(sshBin, [...sshArgs(session.ssh), remoteClaudeAuthStatusCommand()], {
-      windowsHide: true,
-      env: cleanEnv()
-    })
+    proc = session.source === 'ssh' && session.ssh
+      ? spawn(sshBin, [...sshArgs(session.ssh), remoteClaudeAuthStatusCommand()], {
+          windowsHide: true,
+          env: cleanEnv()
+        })
+      : spawn(localClaudeAuthExecutable(), ['auth', 'status'], {
+          cwd: session.cwd,
+          windowsHide: true,
+          env: cleanEnv()
+        })
   } catch (error) {
     emitAuthStatus(session, 'error', error instanceof Error ? sshErrorMessage(error) : String(error))
     return
@@ -943,7 +962,7 @@ function refreshAgentAuthStatus(session: AgentSession): void {
       return
     }
     if (code === 127 || /claude command not found/i.test(output)) {
-      emitAuthStatus(session, 'unavailable', '원격에서 Claude Code CLI를 찾을 수 없습니다.')
+      emitAuthStatus(session, 'unavailable', `${session.source === 'ssh' ? '원격에서' : '이 PC에서'} Claude Code CLI를 찾을 수 없습니다.`)
       return
     }
     if (loggedIn === false || code !== 0) {
@@ -2447,7 +2466,7 @@ function handleSystemMessage(session: AgentSession, message: Record<string, unkn
 
 function handleResultMessage(session: AgentSession, message: Record<string, unknown>): void {
   const subtype = stringValue(message.subtype)
-  const isError = subtype !== 'success'
+  const isError = message.is_error === true || subtype !== 'success'
   rememberClaudeUsageSummary(session, stringValue(message.result))
   accumulateResultUsage(session, message)
   if (Array.isArray(message.permission_denials)) {
@@ -2475,7 +2494,9 @@ function handleResultMessage(session: AgentSession, message: Record<string, unkn
     emit(session, {
       type: 'error',
       sessionId: session.id,
-      message: `Claude 종료 상태: ${subtype ?? 'unknown'}`,
+      message: stringValue(message.result)
+        || (Array.isArray(message.errors) ? message.errors.filter(line => typeof line === 'string').join('\n') : '')
+        || `Claude 종료 상태: ${subtype ?? 'unknown'}`,
       recoverable: true
     })
   }
@@ -2693,6 +2714,13 @@ function handleSdkMessage(session: AgentSession, sdkMessage: unknown): void {
   emit(session, { type: 'raw', sessionId: session.id, message: sdkMessage })
   const message = asRecord(sdkMessage)
   if (!message) return
+
+  const authError = message.type === 'assistant' || message.type === 'auth_status'
+    ? stringValue(message.error)
+    : message.type === 'result' && (message.is_error === true || message.subtype !== 'success')
+      ? [stringValue(message.result), ...(Array.isArray(message.errors) ? message.errors.filter(line => typeof line === 'string') : [])].filter(Boolean).join('\n')
+      : undefined
+  if (authError && isAuthFailureOutput(authError)) emitAuthStatus(session, 'unauthenticated', authError)
 
   const parentToolId = stringValue(message.parent_tool_use_id)
   if (parentToolId && message.type === 'stream_event') return
@@ -4184,10 +4212,6 @@ export function startAgentAuthLogin(sessionId: string): AgentCommandResult {
   if (session.running) return { ok: false, error: 'Agent 작업 실행 중에는 로그인할 수 없습니다.' }
   const label = session.provider === 'codex' ? 'Codex' : 'Claude'
   if (session.authProcess) return { ok: false, error: `이미 ${label} 로그인 절차가 실행 중입니다.` }
-  if (session.provider !== 'codex' && (session.source !== 'ssh' || !session.ssh)) {
-    return { ok: false, error: '현재 구현은 원격 Agent 세션의 Claude 로그인만 지원합니다.' }
-  }
-
   let proc: ChildProcessWithoutNullStreams
   try {
     if (session.provider === 'codex') {
@@ -4212,11 +4236,11 @@ export function startAgentAuthLogin(sessionId: string): AgentCommandResult {
                 windowsHide: true,
                 env: cleanEnv()
               })
-    } else {
+    } else if (session.source === 'ssh' && session.ssh) {
       proc = spawn(
         sshBin,
         [
-          ...sshArgs(session.ssh!, { batchMode: false, tty: true, controlMaster: true }),
+          ...sshArgs(session.ssh, { batchMode: false, tty: true, controlMaster: true }),
           remoteClaudeAuthCommand()
         ],
         {
@@ -4224,6 +4248,12 @@ export function startAgentAuthLogin(sessionId: string): AgentCommandResult {
           env: cleanEnv()
         }
       )
+    } else {
+      proc = spawn(localClaudeAuthExecutable(), ['auth', 'login', '--claudeai'], {
+        cwd: session.cwd,
+        windowsHide: true,
+        env: cleanEnv()
+      })
     }
   } catch (error) {
     return { ok: false, error: error instanceof Error ? sshErrorMessage(error) : String(error) }
@@ -4607,7 +4637,7 @@ export function createAgentSession(opts: AgentCreateOptions, webContents: WebCon
     ssh: opts.ssh,
     context: opts.context?.trim() || undefined,
     workspaceContext: opts.workspaceContext,
-    authStatus: provider === 'codex' || (source === 'ssh' && provider === 'claude') ? 'checking' : undefined,
+    authStatus: 'checking',
     viewers: new Map(),
     pendingPermissions: new Map(),
     pendingDialogs: new Map(),
@@ -5188,6 +5218,7 @@ export function removeQueuedAgentMessage(sessionId: string, queueId: string): Ag
 
 function startNextQueuedMessage(session: AgentSession): void {
   if (session.running || session.authProcess || session.remoteRestoring || session.detached) return
+  if (session.authStatus === 'checking' || session.authStatus === 'unauthenticated' || session.authStatus === 'unavailable') return
   const next = session.queue.shift()
   if (!next) return
   emit(session, { type: 'queue:started', sessionId: session.id, queueId: next.queueId })
@@ -5400,7 +5431,7 @@ function startAgentTurn(session: AgentSession, input: AgentSendInput, codexComma
     } catch (error) {
       if (!abortController.signal.aborted) {
         const message = localExecutionError ?? (error instanceof Error ? error.message : String(error))
-        if (session.provider === 'codex' && isAuthFailureOutput(message)) {
+        if (isAuthFailureOutput(message)) {
           emitAuthStatus(session, 'unauthenticated', message)
         }
         emit(session, {
@@ -5457,12 +5488,14 @@ export function sendAgentMessage(sessionId: string, input: AgentSendInput): Agen
       return { ok: false, error: 'Codex 로그인이 필요합니다. 로그인 버튼으로 인증을 먼저 진행하세요.' }
     }
   }
-  if (session.source === 'ssh') {
+  if (session.provider === 'claude') {
     if (session.authStatus === 'unavailable') {
-      return { ok: false, error: '원격에서 Claude Code CLI를 찾을 수 없습니다. 원격 터미널에서 Claude Code를 설치한 뒤 다시 시도하세요.' }
+      return { ok: false, error: session.source === 'ssh'
+        ? '원격에서 Claude Code CLI를 찾을 수 없습니다. 원격 터미널에서 Claude Code를 설치한 뒤 다시 시도하세요.'
+        : '이 PC에서 Claude Code를 실행할 수 없습니다. 앱을 다시 설치한 뒤 시도하세요.' }
     }
     if (session.authStatus === 'unauthenticated') {
-      return { ok: false, error: '원격 Claude 로그인이 필요합니다. 로그인 버튼으로 인증을 먼저 진행하세요.' }
+      return { ok: false, error: `${session.source === 'ssh' ? '원격' : '이 PC의'} Claude 로그인이 필요합니다. 로그인 버튼으로 인증을 먼저 진행하세요.` }
     }
   }
   if (session.running) {

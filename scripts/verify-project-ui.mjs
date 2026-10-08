@@ -9,13 +9,15 @@ import { fileURLToPath } from 'node:url'
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const temp = await fs.mkdtemp(path.join(os.tmpdir(), 'project-ui-'))
 const screenshotDir = path.join(os.tmpdir(), 'legal-terminal-project-preview')
-const agentSmoke = process.argv.includes('--agent')
+const claudeAuthSmoke = process.argv.includes('--claude-auth')
+const agentSmoke = process.argv.includes('--agent') || claudeAuthSmoke
 await fs.mkdir(screenshotDir, { recursive: true })
 
-function runApp({ root, temp, screenshotDir, agentSmoke }) {
+function runApp({ root, temp, screenshotDir, agentSmoke, claudeAuthSmoke }) {
   const { app, BrowserWindow, ipcMain, session } = require('electron')
   const fs = require('node:fs'), path = require('node:path'), assert = require('node:assert/strict')
   const calls = [], errors = []
+  const agentProvider = claudeAuthSmoke ? 'claude' : 'codex'
   const agents = new Map(), workspaces = new Map()
   const caseDir = path.join(temp, 'case-a')
   const contextDir = path.join(temp, '공통 계약·증거')
@@ -41,7 +43,7 @@ function runApp({ root, temp, screenshotDir, agentSmoke }) {
     if (channel === 'projects:save' && failSave) throw Error('검증용 저장 실패')
     if (channel.startsWith('projects:') || ['app:info', 'app:setWindowTitle', 'tabs:ready', 'caseManagement:get', 'caseManagement:update'].includes(channel)) return handler(event, ...args)
     if (channel === 'setup:status') return { items: [], ready: true }
-    if (channel === 'settings:get') return { sshProfiles: profiles, notifyDone: false, agentDefaultProvider: agentSmoke ? 'codex' : 'claude' }
+    if (channel === 'settings:get') return { sshProfiles: profiles, notifyDone: false, agentDefaultProvider: agentSmoke ? agentProvider : 'claude' }
     if (channel === 'dialog:pickFolder') return cancelFolder ? null : pickedFolder
     if (channel === 'ssh:listDir') return { ok: true, cwd: args[0].path === '~/research' ? '/home/lawyer/research' : '/home/lawyer', entries: [] }
     if (channel === 'case:history' || channel === 'case:addHistory') return history
@@ -81,6 +83,16 @@ function runApp({ root, temp, screenshotDir, agentSmoke }) {
       return { ok: true, sessionId: options.id }
     }
     if (channel === 'agent:snapshot') return { ok: true, session: agents.get(args[0]) }
+    if (channel === 'agent:authLogin') {
+      const sessionId = args[0]
+      event.sender.send('agent:event', { type: 'auth:started', sessionId, source: 'local' })
+      setTimeout(() => {
+        event.sender.send('agent:event', { type: 'auth:done', sessionId, ok: true, exitCode: 0 })
+        event.sender.send('agent:event', { type: 'auth:status', sessionId, state: 'authenticated' })
+        event.sender.send('agent:event', { type: 'status', sessionId, status: 'idle' })
+      }, 30)
+      return { ok: true }
+    }
     if (channel === 'agent:close' || channel === 'agent:setModel' || channel === 'agent:slashCommand') return { ok: true }
     if (channel === 'sessions:transcript') return { sessionId: args[0], messages: [{ role: 'user', text: '프로젝트 자료를 비교해 줘.' }] }
     if (channel === 'agent:send') {
@@ -157,7 +169,7 @@ function runApp({ root, temp, screenshotDir, agentSmoke }) {
         const first = [...agents.values()][0]
         assert.equal(first.workspaceContext.kind, 'project')
         assert.equal(first.workspaceContext.projectId, id)
-        assert.equal(first.provider, 'codex')
+        assert.equal(first.provider, agentProvider)
         assert.equal(first.ssh, undefined)
         assert.equal(first.cwd.startsWith(fs.realpathSync.native(path.join(temp, 'profile')) + path.sep), true, 'project workspace stays under the canonical app profile, including Windows short-path aliases')
         assert.notEqual(first.cwd, caseDir)
@@ -166,6 +178,19 @@ function runApp({ root, temp, screenshotDir, agentSmoke }) {
         await wait(() => evaluate(`document.querySelector('.work-right .agent-empty')?.textContent.includes('프로젝트') || document.querySelector('.work-right').textContent.includes('프로젝트의 현황')`), 'project-specific agent guidance')
         await evaluate(`(() => { const el = document.querySelector('.work-right .agent-composer textarea'); Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set.call(el, '연결 자료를 비교하고 근거를 구분해 줘.'); el.dispatchEvent(new Event('input', {bubbles:true})) })()`)
         await wait(() => evaluate(`!document.querySelector('.work-right .agent-send-btn').disabled`), 'project composer ready')
+        if (claudeAuthSmoke) {
+          const expired = 'Failed to authenticate: OAuth session expired and could not be refreshed'
+          win.webContents.send('agent:event', { type: 'auth:status', sessionId: first.id, state: 'unauthenticated', message: expired })
+          win.webContents.send('agent:event', { type: 'error', sessionId: first.id, message: expired, recoverable: true })
+          await wait(() => evaluate(`document.querySelector('.work-right .agent-auth-banner')?.textContent.includes('이 PC의 Claude 로그인이 필요합니다.')`), 'local Claude re-login guidance')
+          assert.equal(await evaluate(`document.querySelector('.work-right .agent-send-btn').disabled`), true)
+          assert.equal(await evaluate(`document.querySelector('.work-right .agent-composer textarea').value`), '연결 자료를 비교하고 근거를 구분해 줘.')
+          await capture('project-claude-auth-expired')
+          await evaluate(`document.querySelector('.work-right .agent-auth-banner button').click()`)
+          await wait(() => calls.some(call => call.channel === 'agent:authLogin' && call.args[0] === first.id), 'local login action')
+          await wait(() => evaluate(`!document.querySelector('.work-right .agent-auth-banner') && !document.querySelector('.work-right .agent-send-btn').disabled`), 'composer recovers after login')
+          assert.equal(calls.some(call => call.channel === 'agent:send'), false, 'login does not resubmit a failed request automatically')
+        }
         await evaluate(`document.querySelector('.work-right .agent-send-btn').click()`)
         await wait(() => calls.some(call => call.channel === 'agent:send'), 'project input sent')
         const sent = calls.find(call => call.channel === 'agent:send').args[0]
@@ -198,7 +223,7 @@ function runApp({ root, temp, screenshotDir, agentSmoke }) {
         await evaluate(`document.querySelector('[aria-label="프로젝트 AI 작업"]').click()`)
         await wait(() => agents.has(first.id), 'same project conversation restored after restart')
         assert.equal(agents.get(first.id).resumeSessionId, `native-${first.id}`)
-        assert.equal(agents.get(first.id).provider, 'codex')
+        assert.equal(agents.get(first.id).provider, agentProvider)
         assert.equal(agents.get(first.id).workspaceContext.projectId, id)
         assert.equal(agents.size, 1, 'other project stays unloaded')
         await evaluate(`document.querySelector('[aria-label="프로젝트 새 대화"]').click()`)
@@ -206,7 +231,7 @@ function runApp({ root, temp, screenshotDir, agentSmoke }) {
         assert.ok([...agents.values()].every(agent => agent.workspaceContext.projectId === id && agent.cwd === first.cwd))
         assert.equal(calls.some(call => call.channel === 'case:addHistory' && call.args[0].drafts === first.cwd), false, 'project workspace is not reclassified as a case')
         assert.deepEqual(errors, [])
-        console.log('project agent UI: scoped Codex workspaces, no automatic prompts, duplicate-click protection, durable resume, project isolation and new conversation OK')
+        console.log(`project agent UI: scoped ${agentProvider} workspaces, ${claudeAuthSmoke ? 'local auth expiry/re-login/draft preservation, ' : ''}no automatic prompts, duplicate-click protection, durable resume, project isolation and new conversation OK`)
         app.exit(0)
         return
       }
@@ -323,7 +348,7 @@ function runApp({ root, temp, screenshotDir, agentSmoke }) {
   })()
 }
 
-await fs.writeFile(path.join(temp, 'main.cjs'), `(${runApp.toString()})(${JSON.stringify({ root, temp, screenshotDir, agentSmoke })})`)
+await fs.writeFile(path.join(temp, 'main.cjs'), `(${runApp.toString()})(${JSON.stringify({ root, temp, screenshotDir, agentSmoke, claudeAuthSmoke })})`)
 const env = { ...process.env }
 delete env.ELECTRON_RUN_AS_NODE
 try {

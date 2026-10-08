@@ -852,7 +852,7 @@ const dialogQuestions = (value: unknown): AgentDialogQuestion[] =>
   })).filter((question) => question.question)
 
 const isAuthFailureText = (text: string | undefined): boolean =>
-  /failed to authenticate|invalid authentication credentials|api error:\s*401|401 unauthorized|refresh[_\s-]*token|sign in again|log out and sign in again/i.test(text ?? '')
+  /failed to authenticate|authentication_failed|oauth session expired|invalid authentication credentials|api error:\s*401|401 unauthorized|refresh[_\s-]*token|sign in again|log out and sign in again/i.test(text ?? '')
 
 const attachmentOrigin = (value: unknown): AgentAttachment['origin'] | undefined =>
   value === 'local' || value === 'remote' ? value : undefined
@@ -1936,7 +1936,7 @@ export default function AgentPanel({
   onInlineActions
 }: AgentPanelProps): JSX.Element {
   const usesClaudeRemoteAuth = Boolean(ssh) && provider === 'claude'
-  const usesAgentAuth = usesClaudeRemoteAuth || provider === 'codex'
+  const usesAgentAuth = provider === 'claude' || provider === 'codex'
   const [items, setItems] = useState<TimelineItem[]>([])
   const taskChangesRef = useRef(onTasksChanged)
   taskChangesRef.current = onTasksChanged
@@ -4399,7 +4399,9 @@ export default function AgentPanel({
           <span>
             {usesClaudeRemoteAuth
               ? '원격 서버에서 Claude Code CLI를 찾을 수 없습니다. 원격 터미널에서 설치한 뒤 Agent를 다시 여세요.'
-              : 'Codex CLI를 찾을 수 없습니다. Codex CLI를 설치한 뒤 Agent를 다시 여세요.'}
+              : provider === 'claude'
+                ? '이 PC에서 Claude Code를 실행할 수 없습니다. 앱을 다시 설치한 뒤 Agent를 여세요.'
+                : 'Codex CLI를 찾을 수 없습니다. Codex CLI를 설치한 뒤 Agent를 다시 여세요.'}
           </span>
           {onOpenTerminal && (
             <button onClick={onOpenTerminal}>
@@ -4411,7 +4413,7 @@ export default function AgentPanel({
       {!authCliUnavailable && (needsAuth || needsLogin || authChecking) && authStatus !== 'authenticated' && (
         <div className="agent-auth-banner">
           <span>
-            {authChecking ? `${agentLabel} 상태를 확인하고 있습니다.` : `${agentLabel} 로그인이 필요합니다.`}
+            {authChecking ? `${agentLabel} 상태를 확인하고 있습니다.` : `${ssh ? '원격' : '이 PC의'} ${agentLabel} 로그인이 필요합니다.`}
           </span>
           <button disabled={authButtonDisabled} onClick={() => void startAuthLogin()}>
             {authButtonLabel === '로그인' ? '로그인 시작' : authButtonLabel}
