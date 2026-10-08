@@ -3,6 +3,8 @@ import { randomUUID } from 'node:crypto'
 import { EventEmitter } from 'node:events'
 import type { AgentExecutionIdentity } from './agentExecutionLock'
 
+const CLIENT_HEARTBEAT_INTERVAL_MS = 5_000
+
 export interface RemoteAgentRunInfo {
   runId: string
   provider: 'claude' | 'codex'
@@ -30,7 +32,9 @@ export interface RemoteAgentOptions {
 // SSH only tails the private journal and forwards acknowledged operations. The
 // detached broker owns all three CLI pipes; disconnecting never sends CLI EOF.
 export const REMOTE_AGENT_BROKER = String.raw`
-import base64, fcntl, hashlib, json, os, re, shutil, signal, socket, subprocess, sys, tempfile, threading, time
+import base64, fcntl, hashlib, json, os, re, shutil, signal, socket, subprocess, sys, tempfile, threading, time, queue
+CLIENT_HEARTBEAT_TIMEOUT = 30
+CLIENT_STOP_GRACE = 6
 os.umask(0o077)
 root = sys.argv[2] if len(sys.argv) > 2 and sys.argv[1] == 'broker' else os.path.join(os.path.expanduser('~'), '.legal-terminal', 'agent-runs')
 def save(path, value):
@@ -101,6 +105,8 @@ def broker(request):
     secrets = set()
     input_buffer = b''
     child = None
+    client_required = state['metadata'].get('clientRequired') is True
+    last_client_at = time.monotonic()
     def record(value):
         with lock: journal.write((json.dumps(value, separators=(',', ':')) + '\n').encode())
     def persist(): save(os.path.join(directory, 'state.json'), state)
@@ -110,15 +116,15 @@ def broker(request):
         save(reference(identity, 'session', session), request['runId'])
         persist()
     def stop():
-        if child is None or child.poll() is not None: return
+        if child is None or (not client_required and child.poll() is not None): return
         try: os.killpg(child.pid, signal.SIGTERM)
         except ProcessLookupError: return
         def force():
-            if child.poll() is None:
+            if client_required or child.poll() is None:
                 try: os.killpg(child.pid, signal.SIGKILL)
                 except ProcessLookupError: pass
-        timer = threading.Timer(6, force)
-        timer.daemon = True
+        timer = threading.Timer(CLIENT_STOP_GRACE, force)
+        timer.daemon = not client_required
         timer.start()
     def redact(data):
         for secret in secrets: data = data.replace(secret.encode(), b'[redacted]')
@@ -168,6 +174,17 @@ def broker(request):
         persist()
         return b''.join(accepted), has_turn, resolved_ids
     def operate(operation):
+        nonlocal last_client_at
+        if operation.get('type') == 'heartbeat':
+            if client_required:
+                with lock: last_client_at = time.monotonic()
+            return
+        if operation.get('type') == 'stop':
+            with lock:
+                if operation['id'] in seen: return
+                seen.add(operation['id'])
+            stop()
+            return
         with input_lock:
             oid = operation['id']
             if oid in seen: return
@@ -190,23 +207,34 @@ def broker(request):
                 if not child.stdin.closed:
                     if input_buffer: child.stdin.write(input_buffer)
                     child.stdin.close()
-            elif kind == 'stop': stop()
             else: raise ValueError('Unknown remote operation')
             seen.add(oid)
+    def serve_connection(connection):
+        try:
+            connection.settimeout(30)
+            with connection.makefile('rb') as stream:
+                operation = json.loads(stream.readline())
+            operate(operation)
+            connection.sendall(b'{"ok":true}\n')
+        except Exception as error:
+            try: connection.sendall((json.dumps({'error': str(error)}) + '\n').encode())
+            except OSError: pass
+        finally: connection.close()
     def serve():
         while state['running']:
             try: connection, _ = listener.accept()
             except OSError: return
-            try:
-                connection.settimeout(30)
-                with connection.makefile('rb') as stream:
-                    operation = json.loads(stream.readline())
-                operate(operation)
-                connection.sendall(b'{"ok":true}\n')
-            except Exception as error:
-                try: connection.sendall((json.dumps({'error': str(error)}) + '\n').encode())
-                except OSError: pass
-            finally: connection.close()
+            # Heartbeats must not wait for a provider that has stopped reading stdin.
+            threading.Thread(target=serve_connection, args=(connection,), daemon=True).start()
+    def watch_client():
+        while state['running']:
+            time.sleep(min(1, CLIENT_HEARTBEAT_TIMEOUT / 3))
+            with lock:
+                if time.monotonic() - last_client_at < CLIENT_HEARTBEAT_TIMEOUT: continue
+                state['interrupted'] = True
+                persist()
+            stop()
+            return
     def pump(stream, kind):
         while True:
             line = stream.readline()
@@ -245,6 +273,7 @@ def broker(request):
         if identity.get('resumeSessionId'): save(reference(identity, 'session', identity['resumeSessionId']), request['runId'])
         persist()
         threading.Thread(target=serve, daemon=True).start()
+        if client_required: threading.Thread(target=watch_client, daemon=True).start()
         pumps = [threading.Thread(target=pump, args=(child.stdout, 'stdout')),
                  threading.Thread(target=pump, args=(child.stderr, 'stderr'))]
         for thread in pumps: thread.start()
@@ -323,26 +352,38 @@ def client(request):
     state = run_state(directory)
     output({'type': 'ready', 'info': dict(state, attached=attached), 'replayEnd': replay_end})
     disconnected = threading.Event()
+    operations = queue.Queue()
+    def forward_operation(operation):
+        channel = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            channel.connect(state['socket'])
+            channel.sendall((json.dumps(operation) + '\n').encode())
+            with channel.makefile('rb') as response: result = json.loads(response.readline())
+            if result.get('error'): output({'type': 'operation-error', 'id': operation['id'], 'message': result['error']})
+            else: output({'type': 'ack', 'id': operation['id']})
+        except OSError:
+            # The final exit record owns shutdown; do not mistake it for an SSH failure.
+            current = run_state(directory)
+            if current and not current['running']: return
+            raise
+        finally: channel.close()
+    def forward_operations():
+        try:
+            while True:
+                operation = operations.get()
+                if operation is None: return
+                forward_operation(operation)
+        except Exception: pass
+        finally: disconnected.set()
     def forward():
         try:
             for line in sys.stdin.buffer:
                 operation = json.loads(line)
-                channel = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-                try:
-                    channel.connect(state['socket'])
-                    channel.sendall((json.dumps(operation) + '\n').encode())
-                    with channel.makefile('rb') as response: result = json.loads(response.readline())
-                    if result.get('error'): output({'type': 'operation-error', 'id': operation['id'], 'message': result['error']})
-                    else: output({'type': 'ack', 'id': operation['id']})
-                except OSError:
-                    # The final exit record owns shutdown; do not mistake it for an SSH failure.
-                    current = run_state(directory)
-                    if current and not current['running']: return
-                    raise
-                finally: channel.close()
-        except Exception:
-            disconnected.set()
-        else: disconnected.set()
+                if operation.get('type') in ('heartbeat', 'stop'): forward_operation(operation)
+                else: operations.put(operation)
+        except Exception: disconnected.set()
+        finally: operations.put(None)
+    threading.Thread(target=forward_operations, daemon=True).start()
     threading.Thread(target=forward, daemon=True).start()
     replayed = False
     with open(event_path, 'rb') as journal:
@@ -452,6 +493,7 @@ export class RemoteAgentTransport extends EventEmitter {
   private options: RemoteAgentOptions
   private connection?: ChildProcessWithoutNullStreams
   private retry?: ReturnType<typeof setTimeout>
+  private heartbeat?: ReturnType<typeof setInterval>
   private closed = false
   connected = false
   private cursor = 0
@@ -480,6 +522,13 @@ export class RemoteAgentTransport extends EventEmitter {
     if (this.connected) this.connection?.stdin.write(JSON.stringify(operation) + '\n')
   }
 
+  private sendHeartbeat(): void {
+    const input = this.connection?.stdin
+    if (!this.heartbeat || !this.connected || !input?.writable || input.destroyed || input.writableLength) return
+    // A lease renewal is expendable: never queue, replay or retain it as an AI operation.
+    input.write(JSON.stringify({ type: 'heartbeat', id: 'heartbeat' }) + '\n')
+  }
+
   private open(): void {
     if (this.closed) return
     const child = connect(this.options)
@@ -499,6 +548,11 @@ export class RemoteAgentTransport extends EventEmitter {
           this.connected = true
           this.backoff = 500
           this.runId = event.info.runId
+          if (event.info.metadata?.clientRequired === true && !this.heartbeat) {
+            this.heartbeat = setInterval(() => this.sendHeartbeat(), CLIENT_HEARTBEAT_INTERVAL_MS)
+            this.heartbeat.unref()
+          }
+          this.sendHeartbeat()
           if (!this.readyResolved) {
             this.readyResolved = true
             this.resolveReady(event.info)
@@ -573,6 +627,8 @@ export class RemoteAgentTransport extends EventEmitter {
     this.connected = false
     this.stdin.destroyed = true
     if (this.retry) clearTimeout(this.retry)
+    if (this.heartbeat) clearInterval(this.heartbeat)
+    this.heartbeat = undefined
     this.connection?.kill()
     this.connection = undefined
     this.pending.clear()

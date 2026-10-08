@@ -29,6 +29,7 @@ try {
   assert.equal(created.cases[0].name, '본안')
   assert.equal(created.cases[2].remotePath, '/cases/집행')
   assert.deepEqual(created.folders, [], 'omitted folder input defaults to an empty list')
+  assert.equal(created.executionProfileId, undefined, 'legacy and omitted execution location stays local')
   assert.ok(created.id)
   assert.deepEqual(await new ProjectStore(file).list(), [created], 'projects survive reopening the store')
   const { folders: _folders, ...legacyProject } = created
@@ -37,7 +38,9 @@ try {
   assert.deepEqual(await store.list(), [created], 'older stored projects gain an empty folder list on read')
   assert.equal(await readFile(file, 'utf8'), legacyText, 'reading a legacy project does not rewrite its file')
 
-  const updated = await store.save({ ...created, expectedUpdatedAt: created.updatedAt, status: 'completed', cases: [] })
+  const updated = await store.save({ ...created, expectedUpdatedAt: created.updatedAt, status: 'completed', cases: [], executionProfileId: '  office  ' })
+  assert.equal(updated.executionProfileId, 'office', 'saved execution profile is trimmed')
+  assert.equal((await new ProjectStore(file).list())[0].executionProfileId, 'office', 'execution location survives reopening')
   assert.equal(updated.createdAt, created.createdAt)
   assert.notEqual(updated.updatedAt, created.updatedAt)
   assert.equal(updated.status, 'completed')
@@ -63,6 +66,7 @@ try {
 
   for (const invalid of [
     { ...input, name: '  ' },
+    ...[null, 123, '', '  ', 'office/host', 'office\\host', 'office\0host', 'office\nhost', '\noffice', 'office\x7f', 'x'.repeat(4097)].map((executionProfileId) => ({ ...input, executionProfileId })),
     { ...input, status: 'unknown' },
     { ...input, cases: null },
     { ...input, cases: [{ key: 'case', name: '사건', jsId: 123 }] },
@@ -89,6 +93,11 @@ try {
     }))
   ]) await assert.rejects(store.save(invalid))
   assert.deepEqual(await store.list(), [], 'invalid input never modifies storage')
+  const remote = await store.save({ ...input, executionProfileId: 'office' })
+  const local = await store.save({ ...remote, expectedUpdatedAt: remote.updatedAt, executionProfileId: undefined })
+  assert.equal(local.executionProfileId, undefined, 'selecting local clears a previous remote location')
+  assert.equal((await new ProjectStore(file).list())[0].executionProfileId, undefined)
+  await store.remove(local.id, local.updatedAt)
 
   const boundary = await store.save({
     ...input,

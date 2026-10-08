@@ -4,14 +4,18 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { request as httpRequest } from 'node:http'
 import { ProjectStore } from '../src/main/projectStore.ts'
-import { configureProjectAgent, getProjectWorkspace, getProjectAgentContext, acquireProjectMcp, releaseProjectMcp, disposeProjectMcp } from '../src/main/projectAgent.ts'
+import { configureProjectAgent, getProjectWorkspace, getProjectAgentContext, forwardProjectMcp, acquireProjectMcp, releaseProjectMcp, disposeProjectMcp } from '../src/main/projectAgent.ts'
 
 const root = await mkdtemp(join(tmpdir(), 'lt-project-agent-'))
 const storeFile = join(root, 'app', 'projects.json')
 const store = new ProjectStore(storeFile)
 const data = join(root, 'documents'), separate = join(root, 'other'), outside = join(root, 'private.txt')
 let changed = 0, remoteReads = 0, canWrite = true, approved = 0
-const remoteFiles = new Map([['ssh://office/evidence/remote.txt', Buffer.from('원격 계약 자료\n채권 회수 근거')]])
+let executionProfiles = { office: { host: 'saved-office', user: 'saved-user', port: 2222 } }
+const remoteFiles = new Map([
+  ['ssh://office/evidence/remote.txt', Buffer.from('원격 계약 자료\n채권 회수 근거')],
+  ['ssh://office/.legal-terminal/project-workspaces/project/ai.txt', Buffer.from('프로젝트 결과물')]
+])
 let pairings = { 'case-1': { drafts: data, records: separate }, 'remote:office:case-1': { drafts: '/remote-drafts', records: '/remote-records' } }
 let details = { id: 'case-1', name: '현재 사건 정보' }
 const base = { name: '채권 회수', goal: '회수 검토', nextAction: '자료 비교', notes: '', status: 'active', cases: [], folders: [] }
@@ -44,10 +48,23 @@ try {
   await writeFile(join(data, 'scan.pdf'), pdf(''))
   configureProjectAgent({
     store, workspaceRoot: join(root, 'app', 'project-workspaces'), changed: () => changed++,
+    remoteWorkspace: async (profileId, projectId) => {
+      const ssh = executionProfiles[profileId]
+      if (!ssh) throw new Error('SSH 프로필을 찾을 수 없습니다.')
+      return { cwd: `/home/office/.legal-terminal/project-workspaces/${projectId}`, ssh, profileId }
+    },
+    forwardLocal: async (profileId, localUrl, onDisconnect, expectedSsh) => {
+      assert.equal(profileId, 'office'); assert.equal(localUrl, 'http://127.0.0.1:1234/mcp/remote')
+      assert.equal(expectedSsh.host, 'saved-office')
+      return { url: 'http://127.0.0.1:5678/mcp/remote', close: onDisconnect }
+    },
     pairings: async () => pairings,
     caseDetails: async (id) => { assert.equal(id, 'case-1'); return details },
     list: async (path) => path.startsWith('ssh://')
-      ? [...remoteFiles.keys()].filter((file) => file.startsWith(path + '/')).map((file) => ({ name: file.split('/').at(-1), path: file, isDir: false }))
+      ? [...remoteFiles.keys()].filter((file) => file.startsWith(path + '/')).map((file) => {
+        const [name, ...rest] = file.slice(path.length + 1).split('/')
+        return { name, path: `${path}/${name}`, isDir: rest.length > 0 }
+      })
       : (await readdir(path, { withFileTypes: true })).filter((entry) => !entry.isSymbolicLink()).map((entry) => ({ name: entry.name, path: join(path, entry.name), isDir: entry.isDirectory() })),
     stat: async (path) => {
       if (path.startsWith('ssh://')) { if (!remoteFiles.has(path)) throw new Error('원격 파일 없음'); return { size: remoteFiles.get(path).length, isDir: false } }
@@ -66,6 +83,25 @@ try {
   const workspace = await getProjectWorkspace(project.id)
   assert.equal(workspace.cwd, await realpath(join(root, 'app', 'project-workspaces', project.id)))
   assert.equal(workspace.project.id, project.id)
+  assert.equal(workspace.ssh, undefined, 'local project behavior remains unchanged')
+  const remoteProject = await store.save({ ...base, name: '원격 실행', executionProfileId: 'office' })
+  const remoteWorkspace = await getProjectWorkspace(remoteProject.id)
+  assert.equal(remoteWorkspace.profileId, 'office')
+  assert.equal(remoteWorkspace.ssh.host, 'saved-office')
+  assert.equal(remoteWorkspace.cwd, `/home/office/.legal-terminal/project-workspaces/${remoteProject.id}`)
+  const remoteContext = await getProjectAgentContext(remoteProject.id)
+  assert.ok(remoteContext.includes(remoteWorkspace.cwd), 'context names the actual remote output directory')
+  assert.equal(remoteContext.includes('로컬 outputDirectory'), false)
+  const explicitContext = await getProjectAgentContext(remoteProject.id, '/canonical/remote-output')
+  assert.ok(explicitContext.includes('/canonical/remote-output'), 'execution passes the canonical directory into context')
+  executionProfiles = {}
+  await assert.rejects(getProjectWorkspace(remoteProject.id), /SSH 프로필을 찾을 수 없습니다/, 'missing remote profile never falls back to local')
+  await assert.rejects(stat(join(root, 'app', 'project-workspaces', remoteProject.id)), { code: 'ENOENT' })
+  executionProfiles = { office: { host: 'saved-office', user: 'saved-user', port: 2222 } }
+  let tunnelClosed = false
+  const tunnel = await forwardProjectMcp('office', 'http://127.0.0.1:1234/mcp/remote', () => { tunnelClosed = true }, remoteWorkspace.ssh)
+  assert.equal(tunnel.url, 'http://127.0.0.1:5678/mcp/remote')
+  tunnel.close(); assert.equal(tunnelClosed, true)
   const connection = await acquireProjectMcp('session-1', project.id, { canWrite: () => canWrite, approveWrite: async () => { approved++; return true } })
   const otherConnection = await acquireProjectMcp('session-2', other.id)
   const request = async (target, method, params = {}) => {
@@ -200,6 +236,11 @@ try {
   const broadFiles = await call('project_list_files', { sourceId: broadSource.id, depth: 5 }, broadConnection)
   assert.equal(broadFiles.entries.some((entry) => entry.path.includes('project-workspaces')), false, 'broad source folders exclude private output workspaces from listing')
   assert.equal((await call('project_read_file', { sourceId: broadSource.id, path: `app/project-workspaces/${broad.id}/ai-output.txt` }, broadConnection)).failed, true)
+  const broadRemote = await store.save({ ...base, folders: [{ name: '원격 앱 자료', path: 'ssh://office/.legal-terminal' }] })
+  const broadRemoteConnection = await acquireProjectMcp('broad-remote', broadRemote.id)
+  const broadRemoteSource = (await call('project_context', {}, broadRemoteConnection)).sources[0]
+  assert.equal((await call('project_list_files', { sourceId: broadRemoteSource.id, depth: 5 }, broadRemoteConnection)).entries.length, 0, 'broad remote sources exclude private output workspaces')
+  assert.equal((await call('project_read_file', { sourceId: broadRemoteSource.id, path: 'project-workspaces/project/ai.txt' }, broadRemoteConnection)).failed, true)
   console.log('project agent ok: authenticated MCP, live membership, local/SSH reads, case details, PDF/office extraction, source attribution, isolated workspace, CAS and revocation')
 } finally {
   await disposeProjectMcp()

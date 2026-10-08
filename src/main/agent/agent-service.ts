@@ -50,7 +50,7 @@ import { currentAgentContext, prependAgentContext } from './agentPrompt'
 import type { AgentWorkspaceContext } from '../../shared/agentWorkspaceContext'
 import { listTodos, getAgentMcpConnection, agentMcpAccountEpoch, onAgentMcpAccountChange } from '../jurisupport'
 import { MANAGED_MCP, MANAGED_MCP_ENV, managedToolName, managedToolDecision, managedMcpApproval, managedDisallowedTools, claudeManagedServers, codexManagedConfig, redactManagedSecrets, type ManagedMcpConnection } from './agentMcp'
-import { acquireProjectMcp, releaseProjectMcp, disposeProjectMcp, getProjectAgentContext, getProjectWorkspace } from '../projectAgent'
+import { acquireProjectMcp, releaseProjectMcp, disposeProjectMcp, getProjectAgentContext, getProjectWorkspace, forwardProjectMcp } from '../projectAgent'
 import { PROJECT_MCP, PROJECT_MCP_ENV, projectToolName, projectToolDecision, projectMcpToken, projectDisallowedTools, claudeProjectServers, codexProjectConfig, type ProjectMcpConnection } from './projectMcpConfig'
 import { codexTurnRunStatus, codexWorkStepStatus } from './agentProgress'
 import { AGENT_BUSY_MESSAGE, agentExecutionArgs, agentExecutionCommand } from './agentExecutionLock'
@@ -127,6 +127,8 @@ interface AgentSession {
   managedMcp?: ManagedMcpConnection
   projectMcp?: ProjectMcpConnection
   projectMcpReady?: boolean
+  projectTunnel?: { url: string; close: () => void }
+  projectConnectionLost?: boolean
   managedAccountInvalid?: boolean
   managedMcpReady?: boolean
   managedSecrets?: Set<string>
@@ -219,11 +221,18 @@ function assertManagedAccount(session: AgentSession): void {
 function projectSessionError(session: Pick<AgentSession, 'workspaceContext' | 'source'>, next?: AgentWorkspaceContext): string | undefined {
   const current = session.workspaceContext
   if (current?.kind !== 'project' && next?.kind !== 'project') return
-  if (session.source !== 'local') return '프로젝트 Agent는 이 컴퓨터에서 실행해야 합니다.'
   if (!current?.projectId || current.kind !== 'project' || current.todoManagement !== undefined ||
       (next && (next.kind !== 'project' || next.projectId !== current.projectId || next.todoManagement !== undefined))) {
     return '프로젝트 작업 범위가 변경되었습니다. 해당 프로젝트에서 새 대화를 열어 주세요.'
   }
+}
+
+function releaseSessionProjectMcp(session: AgentSession): void {
+  session.projectTunnel?.close()
+  session.projectTunnel = undefined
+  releaseProjectMcp(session.id)
+  session.projectMcp = undefined
+  session.projectMcpReady = false
 }
 
 async function prepareProjectContext(session: AgentSession): Promise<string> {
@@ -232,8 +241,17 @@ async function prepareProjectContext(session: AgentSession): Promise<string> {
   const projectId = session.workspaceContext!.projectId!
   try {
     const workspace = await getProjectWorkspace(projectId)
-    if (await realpath(session.cwd) !== await realpath(workspace.cwd)) throw new Error('프로젝트 전용 작업 폴더가 일치하지 않습니다. 프로젝트에서 대화를 다시 열어 주세요.')
-    const context = await getProjectAgentContext(projectId)
+    if (workspace.ssh) {
+      const expected = workspace.ssh
+      const actual = session.ssh
+      if (session.source !== 'ssh' || !actual || !workspace.profileId || actual.host !== expected.host ||
+          actual.user !== expected.user || (actual.port ?? 22) !== (expected.port ?? 22) ||
+          (actual.identityFile ?? '') !== (expected.identityFile ?? '') || Boolean(actual.remoteControl) !== Boolean(expected.remoteControl) ||
+          session.cwd !== workspace.cwd) throw new Error('프로젝트 원격 실행 위치가 변경되었습니다. 프로젝트에서 새 대화를 열어 주세요.')
+    } else if (session.source !== 'local' || await realpath(session.cwd) !== await realpath(workspace.cwd)) {
+      throw new Error('프로젝트 전용 작업 폴더가 일치하지 않습니다. 프로젝트에서 대화를 다시 열어 주세요.')
+    }
+    const context = await getProjectAgentContext(projectId, workspace.cwd)
     if (sessions.get(session.id) !== session || session.running?.signal.aborted) throw new Error('프로젝트 대화가 닫혔습니다.')
     if (!session.projectMcp) {
       session.projectMcp = await acquireProjectMcp(session.id, projectId, {
@@ -252,14 +270,31 @@ async function prepareProjectContext(session: AgentSession): Promise<string> {
       if (sessions.get(session.id) !== session || session.running?.signal.aborted) throw new Error('프로젝트 대화가 닫혔습니다.')
       session.managedSecrets ??= new Set()
       session.managedSecrets.add(projectMcpToken(session.projectMcp))
+      if (workspace.profileId && workspace.ssh) {
+        const tunnel = await forwardProjectMcp(workspace.profileId, session.projectMcp.url, () => {
+          if (sessions.get(session.id) !== session) return
+          session.projectConnectionLost = true
+          releaseSessionProjectMcp(session)
+          session.running?.abort()
+          session.remoteProcess?.kill()
+          session.codexProcess?.kill()
+          emit(session, { type: 'error', sessionId: session.id, message: '프로젝트 자료 연결이 끊겨 원격 요청을 중지했습니다. 연결을 확인한 뒤 다시 보내 주세요.', recoverable: true })
+          emit(session, { type: 'status', sessionId: session.id, status: 'error' })
+        }, workspace.ssh)
+        if (sessions.get(session.id) !== session || session.running?.signal.aborted || !session.projectMcp) {
+          tunnel.close()
+          throw new Error('프로젝트 대화가 닫혔습니다.')
+        }
+        session.projectTunnel = tunnel
+        session.projectMcp = { ...session.projectMcp, url: tunnel.url }
+      }
       if (session.codexProcess) await stopCodexProcess(session)
       session.codexMcpMode = undefined
     }
+    session.projectConnectionLost = false
     return context
   } catch (error) {
-    releaseProjectMcp(session.id)
-    session.projectMcp = undefined
-    session.projectMcpReady = false
+    releaseSessionProjectMcp(session)
     throw error
   }
 }
@@ -349,6 +384,19 @@ function restoreRemoteSession(session: AgentSession, retryDelay = 3000): void {
       }
       const meta = info.metadata
       if (meta.cwd !== session.cwd) throw new Error('저장된 원격 작업의 폴더가 현재 작업과 다릅니다.')
+      if (session.workspaceContext?.kind === 'project') {
+        if (meta.projectId !== session.workspaceContext.projectId || meta.clientRequired !== true) {
+          throw new Error('저장된 원격 작업이 현재 프로젝트와 다릅니다. 프로젝트에서 새 대화를 열어 주세요.')
+        }
+        // Project tools belong to the open app. Never reattach a process with an expired tunnel/token.
+        if (info.running) throw new Error('이 프로젝트의 이전 원격 요청이 실행 중입니다. 종료를 확인한 뒤 대화를 준비합니다.')
+        session.resumeSessionId = info.sessionId ?? session.resumeSessionId
+        if (session.provider === 'codex') session.codexThreadId = session.resumeSessionId
+        session.remoteRestoring = false
+        refreshAgentAuthStatus(session)
+        prefetchClaudeSlashCommands(session)
+        return
+      }
       if (meta.managedFingerprint) {
         const connection = await getAgentMcpConnection()
         if (!connection || managedFingerprint(connection) !== meta.managedFingerprint) {
@@ -520,7 +568,7 @@ function remoteClaudeCommand(session: AgentSession): string {
     shellArgFlag('--effort', claudeEffort(session.reasoningEffort)).trim(),
     shellListFlag('--tools', session.tools).trim(),
     shellListFlag('--allowedTools', session.allowedTools).trim(),
-    shellListFlag('--disallowedTools', [...(session.disallowedTools ?? []), ...(session.managedMcp ? managedDisallowedTools(session.managedMcp, session.permissionMode) : [])]).trim()
+    shellListFlag('--disallowedTools', [...(session.disallowedTools ?? []), ...(session.managedMcp ? managedDisallowedTools(session.managedMcp, session.permissionMode) : []), ...(session.projectMcp ? projectDisallowedTools(session.permissionMode) : [])]).trim()
   ]
     .filter(Boolean)
     .join(' ')
@@ -569,8 +617,9 @@ function remoteClaudeUsageCommand(): string {
 
 function remoteCodexCommand(session: AgentSession, protectExecution = false): string {
   const executable = protectExecution ? `${agentExecutionCommand(session)} "$codex_bin"` : '"$codex_bin"'
-  const launch = session.managedMcp
-    ? `set +x; IFS= read -r ${MANAGED_MCP_ENV} || exit 1; export ${MANAGED_MCP_ENV}; exec ${executable} app-server`
+  const tokenEnv = session.projectMcp ? PROJECT_MCP_ENV : session.managedMcp ? MANAGED_MCP_ENV : undefined
+  const launch = tokenEnv
+    ? `set +x; IFS= read -r ${tokenEnv} || exit 1; export ${tokenEnv}; exec ${executable} app-server`
     : session.ssh?.remoteControl && !protectExecution
     ? 'if "$codex_bin" app-server daemon bootstrap --remote-control >/dev/null 2>&1; then exec "$codex_bin" app-server proxy; fi; exec "$codex_bin" app-server'
     : `exec ${executable} app-server`
@@ -2863,9 +2912,9 @@ function startCodexProcess(session: AgentSession, protectExecution = false, rest
   proc.once('detached', () => {
     if (session.detached) rejectCodexPending(session, new Error('원격 실행 연결을 분리했습니다.'))
   })
-  if (session.managedMcp && session.source === 'ssh' && !restoring) {
-    proc.stdin.write(`${session.managedMcp.token}\n`)
-    if (session.ssh?.remoteControl) emitProcessEvent(session, 'managed-mcp-transport', '할일 전용 연결', '앱 계정 보호를 위해 이 할일 Agent는 전용 원격 연결을 사용합니다.', 'completed')
+  if ((session.managedMcp || session.projectMcp) && session.source === 'ssh' && !restoring) {
+    proc.stdin.write(`${session.projectMcp ? projectMcpToken(session.projectMcp) : session.managedMcp!.token}\n`)
+    if (session.managedMcp && session.ssh?.remoteControl) emitProcessEvent(session, 'managed-mcp-transport', '할일 전용 연결', '앱 계정 보호를 위해 이 할일 Agent는 전용 원격 연결을 사용합니다.', 'completed')
   }
   session.codexPending = new Map()
   if (restoring) {
@@ -4025,9 +4074,10 @@ function runRemoteAgentMessage(
     let mcpRequestId: string | undefined
     let mcpStage: 'initialize' | 'mcp_set_servers' | 'mcp_status' = 'initialize'
     let mcpTimer: NodeJS.Timeout | undefined
+    const mcpLabel = session.projectMcp ? '프로젝트' : 'JuriSupport'
     const mcpRequest = (): void => {
       mcpRequestId = randomUUID()
-      proc.stdin.write(JSON.stringify({ type: 'control_request', request_id: mcpRequestId, request: { subtype: mcpStage, ...(mcpStage === 'mcp_set_servers' ? { servers: claudeManagedServers(session.managedMcp!, session.permissionMode) } : {}) } }) + '\n')
+      proc.stdin.write(JSON.stringify({ type: 'control_request', request_id: mcpRequestId, request: { subtype: mcpStage, ...(mcpStage === 'mcp_set_servers' ? { servers: session.projectMcp ? claudeProjectServers(session.projectMcp, session.permissionMode) : claudeManagedServers(session.managedMcp!, session.permissionMode) } : {}) } }) + '\n')
     }
     const handleMcpBootstrap = (message: Record<string, unknown> | null): void => {
       if (!mcpRequestId || message?.type !== 'control_response') return
@@ -4035,17 +4085,18 @@ function runRemoteAgentMessage(
       if (response?.request_id !== mcpRequestId) return
       try {
         assertManagedAccount(session)
-        if (response.subtype !== 'success') throw new Error('JuriSupport 연결 제어 요청이 거절되었습니다.')
+        if (response.subtype !== 'success') throw new Error(`${mcpLabel} 연결 제어 요청이 거절되었습니다.`)
         const body = asRecord(response.response)
         if (mcpStage === 'initialize') { mcpStage = 'mcp_set_servers'; mcpRequest(); return }
         if (mcpStage === 'mcp_set_servers') {
-          if (Object.keys(asRecord(body?.errors) ?? {}).length) throw new Error('JuriSupport 도구 연결에 실패했습니다.')
+          if (Object.keys(asRecord(body?.errors) ?? {}).length) throw new Error(`${mcpLabel} 도구 연결에 실패했습니다.`)
           mcpStage = 'mcp_status'; mcpRequest(); return
         }
-        const status = mcpStatusesFromUnknown(body?.mcpServers).find((server) => server.name === MANAGED_MCP)
-        if (status?.status !== 'connected') throw new Error('원격 JuriSupport 도구 연결을 확인할 수 없습니다.')
+        const status = mcpStatusesFromUnknown(body?.mcpServers).find((server) => server.name === (session.projectMcp ? PROJECT_MCP : MANAGED_MCP))
+        if (status?.status !== 'connected') throw new Error(`원격 ${mcpLabel} 도구 연결을 확인할 수 없습니다.`)
         mcpRequestId = undefined
-        session.managedMcpReady = true
+        if (session.projectMcp) session.projectMcpReady = true
+        else session.managedMcpReady = true
         if (mcpTimer) clearTimeout(mcpTimer)
         proc.stdin.write(`${remotePromptLine(prompt)}\n`)
       } catch (error) {
@@ -4199,8 +4250,8 @@ function runRemoteAgentMessage(
     })
 
     if (restoring) return
-    if (session.managedMcp) {
-      mcpTimer = setTimeout(() => { emit(session, { type: 'error', sessionId: session.id, message: '원격 JuriSupport 도구 연결 시간이 초과되었습니다.', recoverable: true }); proc.kill() }, MCP_STATUS_TIMEOUT_MS)
+    if (session.managedMcp || session.projectMcp) {
+      mcpTimer = setTimeout(() => { emit(session, { type: 'error', sessionId: session.id, message: `원격 ${mcpLabel} 도구 연결 시간이 초과되었습니다.`, recoverable: true }); proc.kill() }, MCP_STATUS_TIMEOUT_MS)
       mcpRequest()
     } else proc.stdin.write(`${remotePromptLine(prompt)}\n`)
   })
@@ -5218,6 +5269,7 @@ export function removeQueuedAgentMessage(sessionId: string, queueId: string): Ag
 
 function startNextQueuedMessage(session: AgentSession): void {
   if (session.running || session.authProcess || session.remoteRestoring || session.detached) return
+  if (session.projectConnectionLost) return
   if (session.authStatus === 'checking' || session.authStatus === 'unauthenticated' || session.authStatus === 'unavailable') return
   const next = session.queue.shift()
   if (!next) return
@@ -5304,6 +5356,7 @@ function startAgentTurn(session: AgentSession, input: AgentSendInput, codexComma
           cwd: session.cwd, permissionMode: session.permissionMode, model: session.model,
           reasoningEffort: session.reasoningEffort, messageId, assistantMessageId,
           userText: userDisplayText, tokenUsage: session.tokenUsage,
+          ...(workspaceContext?.kind === 'project' ? { projectId: workspaceContext.projectId, clientRequired: true } : {}),
           ...(session.managedMcp ? { managedFingerprint: managedFingerprint(session.managedMcp) } : {})
         }
       }
@@ -5745,9 +5798,13 @@ export function closeAgentSession(sessionId: string, webContents?: WebContents):
     session.viewers.delete(webContents.id)
     if (session.viewers.size > 0) return { ok: true }
   }
-  releaseProjectMcp(sessionId)
-  session.projectMcp = undefined
-  session.projectMcpReady = false
+  const remoteProject = session.source === 'ssh' && session.workspaceContext?.kind === 'project'
+  if (remoteProject) {
+    session.running?.abort()
+    session.remoteProcess?.kill()
+    session.codexProcess?.kill()
+  }
+  releaseSessionProjectMcp(session)
   // 탭을 닫으면 디바운스를 기다리지 않고 "한 일/다음" 요약을 즉시 남긴다 (best effort).
   if (session.workSummaryTimer) {
     clearTimeout(session.workSummaryTimer)
@@ -5756,7 +5813,7 @@ export function closeAgentSession(sessionId: string, webContents?: WebContents):
   flushWorkSummary(session)
   clearTimeout(session.remoteRestoreTimer)
   session.commandProbe?.abort()
-  if (session.source === 'ssh') {
+  if (session.source === 'ssh' && !remoteProject) {
     // Closing the app/tab detaches; only the Stop action cancels remote work.
     session.detached = true
     session.viewers.clear()

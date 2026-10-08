@@ -1,4 +1,5 @@
-import { Client, type ClientChannel, type SFTPWrapper, type Stats, utils } from 'ssh2'
+import { Client, type ClientChannel, type SFTPWrapper, type Stats, type TcpConnectionDetails, utils } from 'ssh2'
+import { connect as connectSocket, type Socket } from 'net'
 import { createHash, randomUUID } from 'crypto'
 import { open, readFile, rm } from 'fs/promises'
 import { existsSync } from 'fs'
@@ -19,6 +20,7 @@ import {
 } from './remoteFileCache'
 import { SshConnectionPool, type SshConnection } from './sshConnectionPool'
 import { verifySshHostKey } from './sshHostKeys'
+import type { AgentSshConn } from './agent/agent-types'
 
 // ── ssh:// URI 스킴 ──
 // 형식: ssh://<profileId>/<원격절대경로>  (profileId는 UUID라 슬래시 없음)
@@ -43,6 +45,7 @@ export function makeRemote(profileId: string, path: string): string {
 // ── 연결 풀 (profileId → SFTP) ──
 const MAX_TOTAL_CONNECTIONS = 4
 const connectionPool = new SshConnectionPool(connect, MAX_TOTAL_CONNECTIONS)
+const connectionProfiles = new WeakMap<Client, AgentSshConn>()
 
 const winAgent = '\\\\.\\pipe\\openssh-ssh-agent'
 const DEFAULT_KEYS = ['id_ed25519', 'id_ecdsa', 'id_rsa']
@@ -332,6 +335,26 @@ async function getProfile(profileId: string): Promise<SshProfile> {
   return profile
 }
 
+function projectSsh(profile: AgentSshConn): AgentSshConn {
+  const { host, user, port, identityFile, remoteControl } = profile
+  return { host, user, port, identityFile, remoteControl }
+}
+
+function sameProjectSsh(left: AgentSshConn, right: AgentSshConn): boolean {
+  return left.host === right.host && left.user === right.user && (left.port || 22) === (right.port || 22)
+    && (left.identityFile ?? '') === (right.identityFile ?? '') && !!left.remoteControl === !!right.remoteControl
+}
+
+async function verifyProjectConnection(profileId: string, expected: AgentSshConn, connection: SshConnection): Promise<void> {
+  const current = await getProfile(profileId)
+  const connected = connectionProfiles.get(connection.client)
+  if (!connected || !sameProjectSsh(current, connected)) {
+    connectionPool.discard(profileId, connection)
+    throw new Error('SSH 프로필이 변경되어 기존 연결을 종료했습니다. 프로젝트 대화를 다시 열어 주세요.')
+  }
+  if (!sameProjectSsh(current, expected)) throw new Error('SSH 프로필이 변경되었습니다. 프로젝트 대화를 다시 열어 주세요.')
+}
+
 // 프로필 + 기본 키/agent로 ssh2 접속 설정을 만든다.
 // 비밀번호 인증은 지원하지 않음(파일 패널은 키/agent 필요) — 실패 시 명확한 에러를 던진다.
 async function buildConfig(p: SshProfile): Promise<Record<string, unknown>> {
@@ -377,6 +400,7 @@ function connect(profileId: string): Promise<SshConnection> {
 
     return await new Promise<SshConnection>((resolve, reject) => {
       const client = new Client()
+      connectionProfiles.set(client, projectSsh(profile))
       const hostVerification = new AbortController()
       let hostVerificationError: Error | undefined
       let settled = false
@@ -435,6 +459,128 @@ async function getSftp(profileId: string): Promise<SFTPWrapper> {
 
 function getConnection(profileId: string): Promise<SshConnection> {
   return connectionPool.get(profileId)
+}
+
+export async function rfsProjectWorkspace(profileId: string, projectId: string): Promise<{ cwd: string; ssh: AgentSshConn; profileId: string }> {
+  if (!/^[a-zA-Z0-9_-]{1,128}$/.test(projectId)) throw new Error('프로젝트 ID가 작업 폴더 이름으로 안전하지 않습니다.')
+  const profile = projectSsh(await getProfile(profileId))
+  const connection = await getConnection(profileId)
+  await verifyProjectConnection(profileId, profile, connection)
+  const { sftp } = connection
+  let cwd = await sftpRequest<string>(sftp, (done) => sftp.realpath('.', done))
+  if (!posix.isAbsolute(cwd) || posix.normalize(cwd) !== cwd || cwd.includes('\0')) throw new Error('원격 홈 폴더 경로를 확인할 수 없습니다.')
+  for (const name of ['.legal-terminal', 'project-workspaces', projectId]) {
+    cwd = posix.join(cwd, name)
+    const inspect = (): Promise<Stats> => sftpRequest(sftp, (done) => sftp.lstat(cwd, done))
+    let info = await inspect().catch((error: Error & { code?: number }) => {
+      if (error.code === 2) return undefined
+      throw error
+    })
+    if (!info) {
+      // A concurrent creator is safe only after the same canonical-directory check below.
+      await sftpRequest<void>(sftp, (done) => sftp.mkdir(cwd, { mode: 0o700 }, done)).catch(async (error) => {
+        await inspect().catch(() => { throw error })
+      })
+      info = await inspect()
+    }
+    if (info.isSymbolicLink() || !info.isDirectory() || await sftpRequest<string>(sftp, (done) => sftp.realpath(cwd, done)) !== cwd) {
+      throw new Error('원격 프로젝트 작업 폴더가 지정된 저장 위치를 벗어나거나 안전한 폴더가 아닙니다.')
+    }
+  }
+  await verifyProjectConnection(profileId, profile, connection)
+  return { cwd, profileId, ssh: profile }
+}
+
+type ForwardHandler = (accept: () => ClientChannel, reject: () => void) => void
+const localForwards = new WeakMap<Client, { ports: Map<number, ForwardHandler>; pending: number; dispatch: (details: TcpConnectionDetails, accept: () => ClientChannel, reject: () => void) => void }>()
+
+export async function rfsForwardLocal(profileId: string, localUrl: string, onDisconnect: () => void, expectedSsh?: AgentSshConn): Promise<{ url: string; close: () => void }> {
+  const target = new URL(localUrl)
+  if (target.protocol !== 'http:' || target.hostname !== '127.0.0.1' || target.username || target.password || target.port === '0' || /[?#]/.test(localUrl) || !/^http:\/\/127\.0\.0\.1(?::\d+)?\//.test(localUrl)) {
+    throw new Error('프로젝트 도구는 로컬 127.0.0.1 HTTP 주소만 연결할 수 있습니다.')
+  }
+  const profile = projectSsh(await getProfile(profileId))
+  if (expectedSsh && !sameProjectSsh(profile, expectedSsh)) throw new Error('SSH 프로필이 변경되었습니다. 프로젝트 대화를 다시 열어 주세요.')
+  const connection = await getConnection(profileId)
+  await verifyProjectConnection(profileId, expectedSsh ?? profile, connection)
+  const { client } = connection
+  let dispatcher = localForwards.get(client)
+  if (!dispatcher) {
+    const ports = new Map<number, ForwardHandler>()
+    dispatcher = { ports, pending: 0, dispatch: (details, accept, reject) => {
+      const handle = details.destIP === '127.0.0.1' ? ports.get(details.destPort) : undefined
+      if (handle) handle(accept, reject)
+      else reject()
+    } }
+    localForwards.set(client, dispatcher)
+    client.on('tcp connection', dispatcher.dispatch)
+  }
+  const shared = dispatcher
+  shared.pending++
+  return await new Promise((resolve, reject) => {
+    let port: number | undefined
+    let closed = false, settled = false, pending = true
+    const sockets = new Set<Socket | ClientChannel>()
+    const releasePending = (): void => { if (pending) { pending = false; shared.pending-- } }
+    const cleanup = (): void => {
+      clearTimeout(timer)
+      client.removeListener('error', disconnected)
+      client.removeListener('end', disconnected)
+      client.removeListener('close', disconnected)
+      releasePending()
+      if (port !== undefined) {
+        shared.ports.delete(port)
+        try { client.unforwardIn('127.0.0.1', port, () => {}) } catch { /* disconnected */ }
+      }
+      for (const socket of sockets) socket.destroy()
+      sockets.clear()
+      if (!shared.pending && !shared.ports.size) {
+        client.removeListener('tcp connection', shared.dispatch)
+        localForwards.delete(client)
+      }
+    }
+    const close = (): void => { if (!closed) { closed = true; cleanup() } }
+    const disconnected = (): void => {
+      if (closed) return
+      close()
+      if (settled) onDisconnect()
+      else { settled = true; reject(new Error('프로젝트 원격 도구 연결이 종료되었습니다.')) }
+    }
+    const timer = setTimeout(disconnected, 15_000)
+    client.once('error', disconnected)
+    client.once('end', disconnected)
+    client.once('close', disconnected)
+    try {
+      client.forwardIn('127.0.0.1', 0, (error, assignedPort) => {
+        if (closed) {
+          if (!error) try { client.unforwardIn('127.0.0.1', assignedPort, () => {}) } catch { /* disconnected */ }
+          return
+        }
+        if (error || !Number.isInteger(assignedPort) || assignedPort <= 0 || assignedPort > 65535 || shared.ports.has(assignedPort)) {
+          close(); settled = true
+          reject(error ?? new Error('프로젝트 원격 도구의 전용 포트를 만들 수 없습니다.'))
+          return
+        }
+        port = assignedPort
+        releasePending()
+        clearTimeout(timer)
+        shared.ports.set(port, (accept, rejectChannel) => {
+          if (closed) { rejectChannel(); return }
+          const channel = accept()
+          const socket = connectSocket({ host: '127.0.0.1', port: Number(target.port || 80) })
+          sockets.add(channel); sockets.add(socket)
+          const remove = (): void => { sockets.delete(channel); sockets.delete(socket); channel.destroy(); socket.destroy() }
+          channel.once('error', remove)
+          channel.once('close', remove)
+          socket.once('error', disconnected)
+          socket.once('close', remove)
+          channel.pipe(socket).pipe(channel)
+        })
+        settled = true
+        resolve({ url: `http://127.0.0.1:${port}${target.pathname}`, close })
+      })
+    } catch (error) { close(); settled = true; reject(error) }
+  })
 }
 
 async function execRemoteCommand(

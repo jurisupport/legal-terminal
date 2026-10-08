@@ -56,6 +56,8 @@ import {
   rfsRename,
   rfsStat,
   rfsRealpath,
+  rfsProjectWorkspace,
+  rfsForwardLocal,
   rfsDelete,
   clearRemoteDirCache as clearRemoteFsDirCache,
   disposeRemote,
@@ -1060,6 +1062,8 @@ function notifyProjectsChanged(): void {
 configureProjectAgent({
   store: projectStore,
   workspaceRoot: join(app.getPath('userData'), 'project-workspaces'),
+  remoteWorkspace: rfsProjectWorkspace,
+  forwardLocal: rfsForwardLocal,
   changed: notifyProjectsChanged,
   pairings: allJsPairings,
   caseDetails: js.getCase,

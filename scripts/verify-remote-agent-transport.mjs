@@ -2,9 +2,20 @@ import assert from 'node:assert/strict'
 import { appendFile, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
-import { RemoteAgentTransport, probeRemoteAgentRun } from '../src/main/agent/remoteAgentTransport.ts'
+import { pathToFileURL } from 'node:url'
 
 const root = await mkdtemp(join(tmpdir(), 'remote-agent-check-'))
+// Shorten internal lease constants in this fixture, without adding a production setting.
+const source = await readFile(new URL('../src/main/agent/remoteAgentTransport.ts', import.meta.url), 'utf8')
+const testTransport = join(root, 'remoteAgentTransport.ts')
+assert.ok(source.includes('const CLIENT_HEARTBEAT_INTERVAL_MS = 5_000'))
+assert.ok(source.includes('CLIENT_HEARTBEAT_TIMEOUT = 30'))
+assert.ok(source.includes('CLIENT_STOP_GRACE = 6'))
+await writeFile(testTransport, source
+  .replace('const CLIENT_HEARTBEAT_INTERVAL_MS = 5_000', 'const CLIENT_HEARTBEAT_INTERVAL_MS = 100')
+  .replaceAll('CLIENT_HEARTBEAT_TIMEOUT = 30', 'CLIENT_HEARTBEAT_TIMEOUT = 0.6')
+  .replaceAll('CLIENT_STOP_GRACE = 6', 'CLIENT_STOP_GRACE = 0.15'))
+const { RemoteAgentTransport, probeRemoteAgentRun } = await import(pathToFileURL(testTransport).href)
 const fakeSsh = join(root, 'ssh.py')
 await writeFile(fakeSsh, String.raw`
 import os, shlex, sys
@@ -89,7 +100,9 @@ try {
   await until(() => first.stdout.includes('claude-persistent'), 'Claude init must arrive')
   write(first, { type: 'user', message: 'work' })
   await until(() => first.stdout.includes('permission-1'), 'permission must arrive')
+  assert.equal(first.process.heartbeat, undefined, 'ordinary remote runs do not send client heartbeats')
   first.process.detach()
+  await new Promise(resolve => setTimeout(resolve, 900))
   const waiting = await probeRemoteAgentRun(options())
   assert.equal(waiting.hasTurnInput, true)
   assert.equal(waiting.running, true, 'detaching must preserve waiting worker')
@@ -184,6 +197,67 @@ try {
   assert.ok(large.stdout.includes('large-done'))
   assert.equal(large.code, 0)
 
+  const clientWorker = String.raw`
+import json, os, signal, subprocess, sys, time
+child = subprocess.Popen([sys.executable, '-u', '-c', 'import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); print("grandchild-ready", flush=True); time.sleep(60)'])
+print(json.dumps({'workerPid': os.getpid(), 'grandchildPid': child.pid}), flush=True)
+# Also observe the provider input directly when it is not deliberately blocked.
+if sys.argv[1] == 'crash':
+    for line in sys.stdin: print(json.dumps({'providerInput': line}), flush=True)
+else: time.sleep(60)
+`
+  const pidAlive = pid => { try { process.kill(pid, 0); return true } catch { return false } }
+  const waitStopped = async (base, runId) => {
+    let state
+    for (let i = 0; i < 30; i++) {
+      state = await probeRemoteAgentRun({ ...base, runId })
+      if (!state.running) break
+      await new Promise(resolve => setTimeout(resolve, 100))
+    }
+    assert.equal(state.running, false, 'client lease expiry must finish the broker without reattachment')
+    assert.equal(state.interrupted, true)
+  }
+  for (const ending of ['detach', 'crash', 'stop']) {
+    const base = options('claude', 'client-required-' + ending)
+    const leased = start({ ...base, command: `python3 -u -c ${quote(clientWorker)} ${ending}`, metadata: { projectId: 'project-1', clientRequired: true } })
+    const leaseInfo = await leased.process.ready
+    runs.push({ base, runId: leaseInfo.runId })
+    await until(() => leased.stdout.includes('grandchild-ready') && leased.stdout.includes('workerPid'), 'client-required worker and grandchild must initialize')
+    const pids = JSON.parse(leased.stdout.split('\n').find(line => line.startsWith('{')))
+    orphanPids.push(pids.workerPid, pids.grandchildPid)
+    const journalPath = join(root, '.legal-terminal', 'agent-runs', leaseInfo.runId, 'events')
+    const journalBefore = await readFile(journalPath, 'utf8')
+    if (ending !== 'crash') leased.process.stdin.write(JSON.stringify({ type: 'user', text: 'x'.repeat(2 * 1024 * 1024) }) + '\n')
+    await new Promise(resolve => setTimeout(resolve, 1500))
+    assert.equal((await probeRemoteAgentRun({ ...base, runId: leaseInfo.runId })).running, true, 'heartbeats must keep a connected worker alive beyond its lease, including blocked provider stdin')
+    assert.ok(leased.process.heartbeat)
+    assert.ok(leased.process.pending.size <= 1, 'heartbeats must not accumulate pending operations')
+    assert.equal(await readFile(journalPath, 'utf8'), journalBefore, 'heartbeats must not enter provider input or the private output journal')
+    let survivingClient
+    if (ending === 'detach') {
+      survivingClient = await attach(base, leaseInfo.runId)
+      leased.process.detach()
+      assert.equal(leased.process.heartbeat, undefined, 'detach must clear the heartbeat timer')
+      await new Promise(resolve => setTimeout(resolve, 900))
+      assert.equal((await probeRemoteAgentRun({ ...base, runId: leaseInfo.runId })).running, true, 'another connected client must keep the shared project worker alive')
+    }
+    const expiredAt = Date.now()
+    if (ending === 'detach') survivingClient.process.detach()
+    else if (ending === 'stop') {
+      leased.process.kill()
+      await until(() => leased.closed, 'explicit stop must bypass a blocked provider input')
+      assert.equal(leased.process.heartbeat, undefined, 'finish must clear the heartbeat timer')
+    } else {
+      // Simulate a dead app's pipe without invoking graceful transport cleanup.
+      leased.process.closed = true
+      leased.process.connection.kill('SIGKILL')
+    }
+    if (ending !== 'stop') await waitStopped(base, leaseInfo.runId)
+    assert.ok(Date.now() - expiredAt < 4000, 'missing heartbeats must stop a project run within a bounded grace')
+    await until(() => !pidAlive(pids.workerPid) && !pidAlive(pids.grandchildPid), 'lease expiry must terminate the entire child group, including a SIGTERM-resistant grandchild')
+    if (ending === 'crash') { leased.process.closed = false; leased.process.detach() }
+  }
+
   const crashBase = options('claude', 'broker-crash')
   const crash = start({ ...crashBase, command: `python3 -u -c ${quote("import os, time\nprint(os.getpid(), flush=True)\ntime.sleep(60)\n")}` })
   const crashInfo = await crash.process.ready
@@ -224,7 +298,7 @@ try {
       assert.ok(!decoded.includes('managed-token-must-stay-private'), 'known bearer tokens must be redacted')
     }
   }
-  console.log('Remote agent transport: detach/reconnect, permission recovery, exact cursor replay, duplicate input, run aliases, private config logs, explicit EOF/stop, completed-run discovery, broker crash, partial journal writes and large bidirectional I/O passed')
+  console.log('Remote agent transport: detach/reconnect, permission recovery, exact cursor replay, duplicate input, run aliases, private config logs, explicit EOF/stop, completed-run discovery, broker crash, partial journal writes, large bidirectional I/O, client heartbeat privacy/liveness, blocked stdin, detach/crash lease expiry, surviving attachments, blocked-input stop and descendant termination passed')
 } finally {
   for (const client of clients) client.process.detach()
   for (const { base, runId } of runs) {

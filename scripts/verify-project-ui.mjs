@@ -10,10 +10,11 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const temp = await fs.mkdtemp(path.join(os.tmpdir(), 'project-ui-'))
 const screenshotDir = path.join(os.tmpdir(), 'legal-terminal-project-preview')
 const claudeAuthSmoke = process.argv.includes('--claude-auth')
-const agentSmoke = process.argv.includes('--agent') || claudeAuthSmoke
+const remoteAgentSmoke = process.argv.includes('--remote-agent')
+const agentSmoke = process.argv.includes('--agent') || claudeAuthSmoke || remoteAgentSmoke
 await fs.mkdir(screenshotDir, { recursive: true })
 
-function runApp({ root, temp, screenshotDir, agentSmoke, claudeAuthSmoke }) {
+function runApp({ root, temp, screenshotDir, agentSmoke, claudeAuthSmoke, remoteAgentSmoke }) {
   const { app, BrowserWindow, ipcMain, session } = require('electron')
   const fs = require('node:fs'), path = require('node:path'), assert = require('node:assert/strict')
   const calls = [], errors = []
@@ -31,7 +32,8 @@ function runApp({ root, temp, screenshotDir, agentSmoke, claudeAuthSmoke }) {
   ]
   const jsCase = { id: 'js-1', caseNumber: '2026타채12345', caseName: 'A사 채권압류 및 추심', court: '서울중앙지방법원', division: null, caseType: 'civil', status: 'active', parties: [], hearings: [] }
   let connected = false, failSave = false, cancelFolder = false
-  let profiles = []
+  let profiles = [], caseOpenTarget = 'local', staleLocalWorkspace = null
+  const workspaceKey = location => JSON.stringify([location.cwd, location.profileId ?? null, location.ssh?.host ?? null, location.ssh?.user ?? null])
   let pickedFolder = { path: contextDir, name: '공통 계약·증거' }
   app.setPath('userData', path.join(temp, 'profile'))
   BrowserWindow.prototype.show = function () {}
@@ -41,9 +43,13 @@ function runApp({ root, temp, screenshotDir, agentSmoke, claudeAuthSmoke }) {
   ipcMain.handle = (channel, handler) => handle(channel, async (event, ...args) => {
     calls.push({ channel, args })
     if (channel === 'projects:save' && failSave) throw Error('검증용 저장 실패')
+    if (channel === 'projects:workspace' && remoteAgentSmoke) {
+      const project = JSON.parse(fs.readFileSync(path.join(temp, 'profile', 'projects.json'), 'utf8')).projects.find(project => project.id === args[0])
+      if (project?.executionProfileId) return { project, cwd: `/home/lawyer/.legal-terminal/project-workspaces/${project.id}` }
+    }
     if (channel.startsWith('projects:') || ['app:info', 'app:setWindowTitle', 'tabs:ready', 'caseManagement:get', 'caseManagement:update'].includes(channel)) return handler(event, ...args)
     if (channel === 'setup:status') return { items: [], ready: true }
-    if (channel === 'settings:get') return { sshProfiles: profiles, notifyDone: false, agentDefaultProvider: agentSmoke ? agentProvider : 'claude' }
+    if (channel === 'settings:get') return { sshProfiles: profiles, caseOpenTarget, notifyDone: false, agentDefaultProvider: agentSmoke ? agentProvider : 'claude' }
     if (channel === 'dialog:pickFolder') return cancelFolder ? null : pickedFolder
     if (channel === 'ssh:listDir') return { ok: true, cwd: args[0].path === '~/research' ? '/home/lawyer/research' : '/home/lawyer', entries: [] }
     if (channel === 'case:history' || channel === 'case:addHistory') return history
@@ -63,10 +69,10 @@ function runApp({ root, temp, screenshotDir, agentSmoke, claudeAuthSmoke }) {
     if (channel === 'workspace:autoList') return { ok: true, snapshots: [] }
     if (channel === 'workspace:autoLoad') {
       if (agentSmoke) await new Promise(resolve => setTimeout(resolve, 60))
-      return { ok: true, remote: { ok: true, snapshot: workspaces.get(args[0].cwd) ?? null } }
+      return { ok: true, ...(staleLocalWorkspace ? { local: { ok: true, snapshot: staleLocalWorkspace } } : {}), remote: { ok: true, snapshot: workspaces.get(workspaceKey(args[0])) ?? null } }
     }
     if (channel === 'workspace:autoSave') {
-      if (agentSmoke) workspaces.set(args[0].location.cwd, args[0].snapshot)
+      if (agentSmoke) workspaces.set(workspaceKey(args[0].location), args[0].snapshot)
       return { ok: true }
     }
     if (channel === 'workspace:autoObserve') return
@@ -205,7 +211,7 @@ function runApp({ root, temp, screenshotDir, agentSmoke, claudeAuthSmoke }) {
         await capture('project-ai-narrow')
         assert.equal(await evaluate(`document.querySelector('.project-dashboard').scrollWidth <= document.querySelector('.project-dashboard').clientWidth`), true, 'project detail fits beside agent in narrow window')
         win.setSize(1440, 940)
-        await wait(() => workspaces.get(first.cwd)?.terminals.some(term => term.resumeSessionId === `native-${first.id}`), 'project native session persisted')
+        await wait(() => workspaces.get(workspaceKey(first))?.terminals.some(term => term.resumeSessionId === `native-${first.id}`), 'project native session persisted')
         const second = await evaluate(`window.lt.projects.save({name:'B사 자문',goal:'별도 프로젝트',nextAction:'',notes:'',cases:[],folders:[],status:'active'})`)
         await click('← 프로젝트 목록')
         await wait(() => evaluate(`[...document.querySelectorAll('.project-card')].some(el => el.textContent.includes('B사 자문'))`), 'second project shown')
@@ -230,8 +236,95 @@ function runApp({ root, temp, screenshotDir, agentSmoke, claudeAuthSmoke }) {
         await wait(() => agents.size === 2, 'explicit new project conversation')
         assert.ok([...agents.values()].every(agent => agent.workspaceContext.projectId === id && agent.cwd === first.cwd))
         assert.equal(calls.some(call => call.channel === 'case:addHistory' && call.args[0].drafts === first.cwd), false, 'project workspace is not reclassified as a case')
+        if (remoteAgentSmoke) {
+          profiles = [
+            { id: 'office', label: '사무실 서버', host: 'office.invalid', user: 'lawyer', port: 2222, identityFile: '/keys/office' },
+            { id: 'other', label: '다른 서버', host: 'other.invalid', user: 'lawyer' }
+          ]
+          caseOpenTarget = 'remote:office'
+          await evaluate(`window.lt.settings.get().then(settings => window.dispatchEvent(new CustomEvent('lt:settings-updated', {detail: settings})))`)
+          await click('프로젝트 수정')
+          assert.equal(await evaluate(`document.querySelector('[name="executionProfileId"]').value`), '', 'existing projects stay local when app default becomes remote')
+          await fill('executionProfileId', 'office')
+          await capture('project-remote-editor')
+          await click('변경사항 저장')
+          await wait(() => evaluate(`document.querySelector('.project-execution-location')?.textContent.includes('사무실 서버')`), 'remote selection shown')
+          assert.equal((await evaluate('window.lt.projects.list()')).find(project => project.id === id).executionProfileId, 'office', 'remote selection persists')
+          const sendCount = calls.filter(call => call.channel === 'agent:send').length
+          const openProject = () => evaluate(`document.querySelector('[aria-label="프로젝트 대화 이어가기"], [aria-label="프로젝트 AI 작업"]').click()`)
+          await openProject()
+          await wait(() => [...agents.values()].some(agent => agent.ssh?.host === 'office.invalid'), 'project agent on saved SSH host')
+          const remote = [...agents.values()].find(agent => agent.ssh?.host === 'office.invalid')
+          assert.equal(remote.provider, agentProvider, 'remote uses normal selected provider')
+          assert.equal(remote.source, 'ssh')
+          assert.deepEqual(remote.ssh, { host: 'office.invalid', user: 'lawyer', port: 2222, identityFile: '/keys/office', remoteControl: undefined })
+          assert.equal(remote.workspaceContext.projectId, id)
+          assert.equal(remote.cwd, `/home/lawyer/.legal-terminal/project-workspaces/${id}`)
+          assert.notEqual(remote.id, first.id, 'local transcript is not reused for remote execution')
+          const countBeforeContinue = agents.size
+          await openProject()
+          await wait(() => evaluate(`!document.querySelector('[aria-label="프로젝트 대화 이어가기"]').disabled`), 'remote continue settles')
+          assert.equal(agents.size, countBeforeContinue, 'same remote location reuses its conversation')
+          await wait(() => workspaces.get(workspaceKey({ ...remote, profileId: 'office' }))?.currentCase?.profileId === 'office', 'remote workspace persistence')
+          const storedRemote = workspaces.get(workspaceKey({ ...remote, profileId: 'office' }))
+          assert.equal(storedRemote.currentCase.drafts, `ssh://office${remote.cwd}`)
+          assert.equal(storedRemote.currentCase.remotePath, remote.cwd)
+          assert.equal(storedRemote.currentCase.ssh.host, 'office.invalid')
+          await capture('project-remote-agent')
+
+          profiles = profiles.map(profile => profile.id === 'office' ? { ...profile, host: 'replacement.invalid' } : profile)
+          staleLocalWorkspace = structuredClone(storedRemote)
+          staleLocalWorkspace.terminals.forEach(term => { term.resumeSessionId = 'old-host-session' })
+          agents.clear()
+          await new Promise(resolve => { win.webContents.once('did-finish-load', resolve); win.webContents.reload() })
+          await evaluate(`document.querySelector('.project-open-button').click()`)
+          await wait(() => evaluate(`[...document.querySelectorAll('.project-card')].some(el => el.textContent.includes('A사 거래대금 회수'))`), 'remote project persisted after restart')
+          await evaluate(`[...document.querySelectorAll('.project-card')].find(el => el.textContent.includes('A사 거래대금 회수')).click()`)
+          const remoteCreatesBefore = calls.filter(call => call.channel === 'agent:create').length
+          await openProject()
+          await wait(() => calls.filter(call => call.channel === 'agent:create').length > remoteCreatesBefore, 'edited SSH host creates a separate conversation')
+          const replacement = calls.filter(call => call.channel === 'agent:create').at(-1).args[0]
+          assert.equal(replacement.ssh.host, 'replacement.invalid')
+          assert.notEqual(replacement.id, remote.id, 'cached conversation from previous host is rejected')
+          assert.equal(replacement.resumeSessionId, undefined)
+          staleLocalWorkspace = null
+
+          await click('프로젝트 수정')
+          await fill('executionProfileId', 'other')
+          await click('변경사항 저장')
+          await wait(() => evaluate(`!!document.querySelector('.project-detail')`), 'other profile saved')
+          await openProject()
+          await wait(() => [...agents.values()].some(agent => agent.ssh?.host === 'other.invalid'), 'different profile creates a separate conversation')
+          const other = [...agents.values()].find(agent => agent.ssh?.host === 'other.invalid')
+          assert.notEqual(other.id, remote.id)
+          assert.equal(other.source, 'ssh')
+          assert.equal(other.cwd, remote.cwd, 'different hosts may use the same remote directory')
+          assert.equal(calls.filter(call => call.channel === 'agent:send').length, sendCount, 'switching execution never submits a prompt')
+
+          profiles = profiles.filter(profile => profile.id !== 'other')
+          await evaluate(`window.lt.settings.get().then(settings => window.dispatchEvent(new CustomEvent('lt:settings-updated', {detail: settings})))`)
+          const createsBeforeMissing = calls.filter(call => call.channel === 'agent:create').length
+          await openProject()
+          await wait(() => evaluate(`document.querySelector('.project-inline-error')?.textContent.includes('원격 연결 설정을 찾을 수 없습니다')`), 'missing profile failure')
+          assert.equal(calls.filter(call => call.channel === 'agent:create').length, createsBeforeMissing, 'missing profile never falls back to local')
+          await click('프로젝트 수정')
+          assert.equal(await evaluate(`document.querySelector('[name="executionProfileId"] option:checked').textContent.includes('연결 설정 없음')`), true, 'removed profile is clearly shown in editor')
+          await fill('executionProfileId', '')
+          await click('변경사항 저장')
+          await wait(() => evaluate(`document.querySelector('.project-execution-location')?.textContent.includes('이 PC')`), 'local selection restored')
+          assert.equal((await evaluate('window.lt.projects.list()')).find(project => project.id === id).executionProfileId, undefined)
+          await openProject()
+          await wait(() => evaluate(`!document.querySelector('[aria-label="프로젝트 대화 이어가기"]').disabled`), 'local conversation reopened')
+          await wait(() => [...agents.values()].some(agent => agent.source === 'local'), 'local transcript restored after changing location')
+          assert.equal([...agents.values()].filter(agent => agent.source === 'local').every(agent => agent.cwd === first.cwd), true, 'switching back restores only local conversations')
+          assert.equal(calls.some(call => call.channel === 'case:addHistory' && call.args[0].drafts === `ssh://office${remote.cwd}`), false, 'remote project never becomes an individual case')
+          await click('← 프로젝트 목록')
+          await click('+ 새 프로젝트')
+          assert.equal(await evaluate(`document.querySelector('[name="executionProfileId"]').value`), 'office', 'new projects use known app execution default')
+          await click('취소')
+        }
         assert.deepEqual(errors, [])
-        console.log(`project agent UI: scoped ${agentProvider} workspaces, ${claudeAuthSmoke ? 'local auth expiry/re-login/draft preservation, ' : ''}no automatic prompts, duplicate-click protection, durable resume, project isolation and new conversation OK`)
+        console.log(`project agent UI: scoped ${agentProvider} workspaces, ${remoteAgentSmoke ? 'SSH selection/persistence/host isolation/missing profile, ' : ''} ${claudeAuthSmoke ? 'local auth expiry/re-login/draft preservation, ' : ''}no automatic prompts, duplicate-click protection, durable resume, project isolation and new conversation OK`)
         app.exit(0)
         return
       }
@@ -348,7 +441,7 @@ function runApp({ root, temp, screenshotDir, agentSmoke, claudeAuthSmoke }) {
   })()
 }
 
-await fs.writeFile(path.join(temp, 'main.cjs'), `(${runApp.toString()})(${JSON.stringify({ root, temp, screenshotDir, agentSmoke, claudeAuthSmoke })})`)
+await fs.writeFile(path.join(temp, 'main.cjs'), `(${runApp.toString()})(${JSON.stringify({ root, temp, screenshotDir, agentSmoke, claudeAuthSmoke, remoteAgentSmoke })})`)
 const env = { ...process.env }
 delete env.ELECTRON_RUN_AS_NODE
 try {

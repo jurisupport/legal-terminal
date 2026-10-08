@@ -1289,7 +1289,10 @@ const caseProfileKey = (source: CurrentCase): string =>
 
 const caseIdentityKey = (source: CurrentCase): string => {
   const profileKey = caseProfileKey(source)
-  if (source.meta?.contextKind === 'project') return `project:${source.meta.projectId ?? normalizedCasePathKey(source.drafts)}`
+  if (source.meta?.contextKind === 'project') {
+    const id = `project:${source.meta.projectId ?? normalizedCasePathKey(source.drafts)}`
+    return source.ssh ? `${id}:${profileKey}:${JSON.stringify([source.ssh.host, source.ssh.user, source.ssh.port ?? 22, source.ssh.identityFile ?? '', Boolean(source.ssh.remoteControl)])}:${normalizedCasePathKey(source.remotePath ?? source.drafts)}` : id
+  }
   if (source.meta?.contextKind === 'global') return `global:${profileKey}:${normalizedCasePathKey(source.remotePath ?? source.drafts)}`
   if (source.meta?.jsId) return `js:${profileKey}:${source.meta.jsId}`
   return `drafts:${profileKey}:${normalizedCasePathKey(source.remotePath ?? source.drafts)}`
@@ -1310,7 +1313,9 @@ const findCaseTab = (
 ): CaseWorkspaceTab | undefined => {
   const identity = caseIdentityKey(source)
   const path = normalizedCasePathKey(source.remotePath ?? source.drafts)
-  return tabs.find((tab) => caseIdentityKey(tab) === identity) ?? tabs.find((tab) =>
+  const exact = tabs.find((tab) => caseIdentityKey(tab) === identity)
+  if (exact || source.meta?.contextKind === 'project') return exact
+  return tabs.find((tab) =>
     !!path &&
     (tab.meta?.contextKind === 'global') === (source.meta?.contextKind === 'global') &&
     (tab.meta?.contextKind === 'project') === (source.meta?.contextKind === 'project') &&
@@ -3065,7 +3070,7 @@ export default function App(): JSX.Element {
     setCurrentCase(source)
     registerCaseTab(source, tab.id)
     preloadPastSessions(tab.cwd, tab)
-    window.lt.case.addHistory({ drafts: draftsUri, records, name: title }).then(setRecent)
+    if (meta?.contextKind !== 'project') window.lt.case.addHistory({ drafts: draftsUri, records, name: title }).then(setRecent)
     markWorkspaceReopened(source, tab)
     // 소송기록이 정해졌으면 페어링 기억(다음에 자동 적용) — 로컬과 동일
     if (records) window.lt.case.setPairing(draftsUri, records)
@@ -5065,6 +5070,7 @@ export default function App(): JSX.Element {
   })
 
   const workspaceLocationKey = (source: CurrentCase): string => {
+    if (source.meta?.contextKind === 'project') return caseIdentityKey(source)
     const location = workspaceLocation(source)
     return `${location.profileId ?? 'local'}\0${normalizedCasePathKey(location.cwd)}\0${location.caseId ?? ''}`
   }
@@ -5186,7 +5192,10 @@ export default function App(): JSX.Element {
         if (account !== todoAccountGeneration.current) return true
         // A background response must not undo a tab closed while the read was in flight.
         if (refresh && termsBeforeLoad !== termTabsRef.current) return true
-        const local = !refresh && result.local?.snapshot
+        const cachedSource = result.local?.snapshot?.currentCase as CurrentCase | undefined
+        const localProjectMatches = source.meta?.contextKind !== 'project' ||
+          (cachedSource?.meta?.contextKind === 'project' && caseIdentityKey(cachedSource) === caseIdentityKey(source))
+        const local = !refresh && result.local?.snapshot && localProjectMatches
           ? rebaseRemoteWorkspace(agentTabsOnly(result.local.snapshot), source)
           : undefined
         const remote = result.remote?.snapshot
@@ -6655,22 +6664,34 @@ export default function App(): JSX.Element {
     if (pending) return pending
     const operation = (async (): Promise<void> => {
       const { cwd, project: latest } = await window.lt.projects.workspace(project.id)
+      const settings = await window.lt.settings.get()
+      const profile = settings.sshProfiles?.find((item) => item.id === latest.executionProfileId)
+      if (latest.executionProfileId && !profile) throw new Error('프로젝트의 원격 연결 설정을 찾을 수 없습니다. 프로젝트 수정에서 AI 실행 위치를 다시 선택해 주세요.')
       const source: CurrentCase = {
-        drafts: cwd, name: `프로젝트 · ${latest.name}`,
-        meta: { contextKind: 'project', projectId: latest.id }
+        drafts: profile ? remoteUri(profile.id, cwd) : cwd, name: `프로젝트 · ${latest.name}`,
+        meta: { contextKind: 'project', projectId: latest.id },
+        ...(profile ? { ssh: sshConnFromProfile(profile), sshLabel: profile.label, profileId: profile.id, remotePath: cwd } : {})
       }
       markWorkspaceReopened(source)
       const workspace = registerCaseTab(source)
       setCurrentCase(source)
       activeCaseTabIdRef.current = workspace.id
       if (!(await restoreAutomaticWorkspace(source))) throw new Error('프로젝트 대화를 복원하지 못했습니다. 다시 시도해 주세요.')
+      const atLocation = (term: TermTab): boolean =>
+        normalizedCasePathKey(term.cwd) === normalizedCasePathKey(cwd) && (profile
+          ? term.profileId === profile.id && term.ssh?.host === profile.host && term.ssh?.user === profile.user &&
+            (term.ssh?.port ?? 22) === (profile.port ?? 22) && term.ssh?.identityFile === profile.identityFile &&
+            Boolean(term.ssh?.remoteControl) === Boolean(profile.remoteControl)
+          : !term.ssh)
       const conversations = termTabsRef.current.filter((term) => isAgentTab(term) &&
-        term.contextKind === 'project' && term.projectId === latest.id && term.cwd === cwd && !term.ssh)
+        term.contextKind === 'project' && term.projectId === latest.id && atLocation(term))
       let tab = !newConversation
         ? conversations.find((term) => term.id === activeTerm) ?? conversations.find((term) => term.id === workspace.activeTermId) ?? conversations[0]
         : undefined
       if (!tab) {
-        tab = createCase(cwd, source.name, undefined, undefined, source.meta, 'right')
+        tab = profile
+          ? createRemoteCase(profile, cwd, source.name, source.meta, undefined, 'right')
+          : createCase(cwd, source.name, undefined, undefined, source.meta, 'right')
         // Keep rapid navigation and workspace persistence aware of a newly queued React tab.
         termTabsRef.current = [...termTabsRef.current, tab]
       }
@@ -8276,6 +8297,8 @@ export default function App(): JSX.Element {
           {caseDashboardView === 'projects' ? (
             <ProjectsDashboard
               cases={projectCaseChoices}
+              sshProfiles={sshProfiles}
+              defaultExecutionProfileId={defaultCaseOpenProfileId}
               onOpenCase={openProjectCase}
               onPickFolder={pickProjectFolder}
               onOpenFolder={openProjectFolder}

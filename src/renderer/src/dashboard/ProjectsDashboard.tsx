@@ -1,10 +1,13 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
 import type { Project, ProjectCaseLink, ProjectFolderLink, ProjectInput } from '../../../shared/project'
+import type { SshProfile } from '../env'
 import { listCasesCached } from './caseListCache'
 import './ProjectsDashboard.css'
 
 interface ProjectsDashboardProps {
   cases: ProjectCaseLink[]
+  sshProfiles: SshProfile[]
+  defaultExecutionProfileId?: string
   onOpenCase: (item: ProjectCaseLink) => Promise<void>
   onAddCase: () => void
   onPickFolder: () => Promise<ProjectFolderLink | null>
@@ -44,9 +47,11 @@ function uniqueCases(items: ProjectCaseLink[]): ProjectCaseLink[] {
   })
 }
 
-function ProjectEditor({ project, cases, saving, error, onPickFolder, onSave, onCancel }: {
+function ProjectEditor({ project, cases, sshProfiles, defaultExecutionProfileId, saving, error, onPickFolder, onSave, onCancel }: {
   project: Project | null
   cases: ProjectCaseLink[]
+  sshProfiles: SshProfile[]
+  defaultExecutionProfileId?: string
   saving: boolean
   error: string
   onPickFolder: () => Promise<ProjectFolderLink | null>
@@ -60,6 +65,7 @@ function ProjectEditor({ project, cases, saving, error, onPickFolder, onSave, on
   const [notes, setNotes] = useState(initial?.notes ?? '')
   const [status, setStatus] = useState<Project['status']>(initial?.status ?? 'active')
   const [members, setMembers] = useState<ProjectCaseLink[]>(initial?.cases ?? [])
+  const [executionProfileId, setExecutionProfileId] = useState(initial ? initial.executionProfileId ?? '' : defaultExecutionProfileId ?? '')
   const [folders, setFolders] = useState<ProjectFolderLink[]>(initial?.folders ?? [])
   const [pickingFolder, setPickingFolder] = useState(false)
   const [folderError, setFolderError] = useState('')
@@ -75,8 +81,8 @@ function ProjectEditor({ project, cases, saving, error, onPickFolder, onSave, on
   const [retry, setRetry] = useState(0)
 
   useEffect(() => {
-    sessionDraft = { project, input: { name, goal, nextAction, notes, status, cases: members, folders } }
-  }, [project, name, goal, nextAction, notes, status, members, folders])
+    sessionDraft = { project, input: { name, goal, nextAction, notes, status, cases: members, folders, ...(executionProfileId ? { executionProfileId } : {}) } }
+  }, [project, name, goal, nextAction, notes, status, members, folders, executionProfileId])
 
   useEffect(() => {
     let active = true
@@ -160,7 +166,7 @@ function ProjectEditor({ project, cases, saving, error, onPickFolder, onSave, on
     void onSave({
       ...(project ? { id: project.id, expectedUpdatedAt: project.updatedAt } : {}),
       name: name.trim(), goal: goal.trim(), nextAction: nextAction.trim(), notes: notes.trim(),
-      status, cases: members, folders
+      status, cases: members, folders, ...(executionProfileId ? { executionProfileId } : {})
     })
   }
 
@@ -182,6 +188,14 @@ function ProjectEditor({ project, cases, saving, error, onPickFolder, onSave, on
             </select>
           </label>
         </div>
+        <label className="project-field">AI 실행 위치
+          <select name="executionProfileId" value={executionProfileId} onChange={(event) => setExecutionProfileId(event.target.value)}>
+            <option value="">이 PC (로컬)</option>
+            {sshProfiles.map((profile) => <option key={profile.id} value={profile.id}>{profile.label} (원격)</option>)}
+            {executionProfileId && !sshProfiles.some((profile) => profile.id === executionProfileId) && <option value={executionProfileId}>연결 설정 없음 · {executionProfileId}</option>}
+          </select>
+          <span className="project-muted">{executionProfileId ? '선택한 원격 컴퓨터에서 AI를 실행합니다. 프로젝트 도구를 사용하려면 이 앱을 열어 두세요. 앱을 닫으면 실행 중인 요청은 종료되며, 저장된 대화는 다시 이어갈 수 있습니다.' : '이 PC에서 AI를 실행합니다. 설정에 저장한 원격 연결도 선택할 수 있습니다.'}</span>
+        </label>
         <label className="project-field">공통 목표
           <textarea name="goal" rows={3} maxLength={4000} value={goal} onChange={(event) => setGoal(event.target.value)} placeholder="이 프로젝트를 통해 무엇을 달성하려고 하나요?" />
         </label>
@@ -226,7 +240,7 @@ function ProjectEditor({ project, cases, saving, error, onPickFolder, onSave, on
   )
 }
 
-export default function ProjectsDashboard({ cases, onOpenCase, onAddCase, onPickFolder, onOpenFolder, onOpenWork, workOpen = false, selectedId, onSelect }: ProjectsDashboardProps): JSX.Element {
+export default function ProjectsDashboard({ cases, sshProfiles, defaultExecutionProfileId, onOpenCase, onAddCase, onPickFolder, onOpenFolder, onOpenWork, workOpen = false, selectedId, onSelect }: ProjectsDashboardProps): JSX.Element {
   const [projects, setProjects] = useState<Project[]>([])
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState('')
@@ -344,7 +358,7 @@ export default function ProjectsDashboard({ cases, onOpenCase, onAddCase, onPick
           <span className="project-local-badge">이 기기에 저장</span>
         </header>
         {loadError && <div className="project-inline-error" role="alert"><span>{loadError}</span><button className="dash-btn" onClick={() => void load()}>다시 시도</button></div>}
-        {editor ? <ProjectEditor key={editor.project?.id ?? 'new'} project={editor.project} cases={cases} saving={saving} error={actionError} onPickFolder={onPickFolder} onSave={save} onCancel={() => { sessionDraft = null; setEditor(null); setActionError('') }} />
+        {editor ? <ProjectEditor key={editor.project?.id ?? 'new'} project={editor.project} cases={cases} sshProfiles={sshProfiles} defaultExecutionProfileId={defaultExecutionProfileId} saving={saving} error={actionError} onPickFolder={onPickFolder} onSave={save} onCancel={() => { sessionDraft = null; setEditor(null); setActionError('') }} />
           : selected ? <section className="project-detail" aria-label={selected.name}>
             <button className="project-back" onClick={() => onSelect(null)}>← 프로젝트 목록</button>
             <div className="project-detail-title">
@@ -353,9 +367,11 @@ export default function ProjectsDashboard({ cases, onOpenCase, onAddCase, onPick
             </div>
             <section className="project-work" aria-labelledby="project-work-heading" aria-busy={openingWork !== null}>
               <div className="project-work-description">
+                <p className="project-execution-location">AI 실행 위치 · {selected.executionProfileId ? `${sshProfiles.find((profile) => profile.id === selected.executionProfileId)?.label ?? '연결 설정 없음'} (원격)` : '이 PC (로컬)'}</p>
                 <h3 id="project-work-heading">프로젝트 맥락으로 함께 검토하세요</h3>
                 <p>목표·메모·연결된 사건과 폴더를 함께 참고합니다. 근거는 출처별로 구분하고, 접근할 수 없는 자료는 따로 알려드립니다.</p>
               </div>
+              {selected.executionProfileId && <p>원격 프로젝트 도구를 사용하려면 이 앱을 열어 두세요. 앱을 닫으면 실행 중인 요청은 종료되며, 저장된 대화는 다시 이어갈 수 있습니다.</p>}
               <div className="project-work-actions">
                 <button className="dash-btn project-primary" disabled={openingWork !== null || deleting} aria-label={workOpen ? '프로젝트 대화 이어가기' : '프로젝트 AI 작업'} onClick={() => void openWork()}>{openingWork === 'continue' ? '대화 여는 중…' : workOpen ? '대화 이어가기' : '프로젝트 AI 작업'}</button>
                 <button className="dash-btn" disabled={openingWork !== null || deleting} aria-label="프로젝트 새 대화" onClick={() => void openWork(true)}>{openingWork === 'new' ? '대화 여는 중…' : '새 대화'}</button>

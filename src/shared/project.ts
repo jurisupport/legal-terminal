@@ -22,6 +22,7 @@ export interface Project {
   nextAction: string
   notes: string
   status: 'active' | 'completed'
+  executionProfileId?: string
   cases: ProjectCaseLink[]
   folders: ProjectFolderLink[]
   createdAt: string
@@ -30,6 +31,7 @@ export interface Project {
 
 export type ProjectInput = Pick<Project, 'name' | 'goal' | 'nextAction' | 'notes' | 'status' | 'cases'> & {
   folders?: ProjectFolderLink[]
+  executionProfileId?: string
   id?: string
   expectedUpdatedAt?: string
 }
