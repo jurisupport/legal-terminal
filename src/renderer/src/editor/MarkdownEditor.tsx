@@ -480,15 +480,22 @@ function captureViewport(view: EditorView): ViewportBookmark {
 }
 
 function restoreViewport(view: EditorView, bookmark: ViewportBookmark, changes: ChangeDesc): void {
+  if (view.state.doc.length === 0) {
+    // Empty documents have no old anchor; reset in CodeMirror's layout cycle.
+    view.requestMeasure({
+      key: restoreViewport,
+      read: (current) => current.state.doc.length === 0,
+      write: (empty, current) => {
+        if (!empty) return
+        current.scrollDOM.scrollTop = 0
+        current.scrollDOM.scrollLeft = 0
+      }
+    })
+    return
+  }
   const mappedPos = Math.max(0, Math.min(changes.mapPos(bookmark.pos, 1), view.state.doc.length))
   window.requestAnimationFrame(() => {
     const scroller = view.scrollDOM
-    if (view.state.doc.length === 0) {
-      // An empty document has no viewport anchor; padding can still leave a scroll range.
-      scroller.scrollTop = 0
-      scroller.scrollLeft = 0
-      return
-    }
     scroller.scrollLeft = bookmark.scrollLeft
     if (bookmark.topOffset == null) {
       scroller.scrollTop = bookmark.scrollTop
@@ -1023,7 +1030,7 @@ export default function MarkdownEditor({
       const viewport = captureViewport(v)
       const selectionBookmark = bookmarkSelection(v.state)
       const previewTransaction = v.state.update({ changes: replacement })
-      const scrollEffect = v.scrollSnapshot().map(previewTransaction.changes)
+      const scrollEffect = previewTransaction.state.doc.length ? v.scrollSnapshot().map(previewTransaction.changes) : undefined
       const selection = changeCoversSelection(previewTransaction.changes, v.state.selection)
         ? restoreSelection(previewTransaction.state, selectionBookmark)
         : undefined
@@ -1260,7 +1267,7 @@ export default function MarkdownEditor({
                   const viewport = captureViewport(v)
                   const selectionBookmark = bookmarkSelection(v.state)
                   const previewTransaction = v.state.update({ changes: replacement })
-                  const scrollEffect = v.scrollSnapshot().map(previewTransaction.changes)
+                  const scrollEffect = previewTransaction.state.doc.length ? v.scrollSnapshot().map(previewTransaction.changes) : undefined
                   const selection = changeCoversSelection(previewTransaction.changes, v.state.selection)
                     ? restoreSelection(previewTransaction.state, selectionBookmark)
                     : undefined
@@ -1281,7 +1288,7 @@ export default function MarkdownEditor({
               const viewport = captureViewport(v)
               const selectionBookmark = bookmarkSelection(v.state)
               const previewTransaction = v.state.update({ changes: replacement })
-              const scrollEffect = v.scrollSnapshot().map(previewTransaction.changes)
+              const scrollEffect = previewTransaction.state.doc.length ? v.scrollSnapshot().map(previewTransaction.changes) : undefined
               const selection = changeCoversSelection(previewTransaction.changes, v.state.selection)
                 ? restoreSelection(previewTransaction.state, selectionBookmark)
                 : undefined

@@ -93,6 +93,22 @@ function editorGeometry(view) {
     firstLine: view.coordsAtPos(0), scrollerTop: scroller.getBoundingClientRect().top
   })
 }
+async function emptyDocument(view, apply, label) {
+  // Retain overflow after deletion, as non-overlay scrollbars/padding can do on Windows.
+  view.contentDOM.style.minHeight = 'calc(100% + 24px)'
+  // Exercise a later CodeMirror measurement after the app's own animation-frame work.
+  const requestMeasure = view.requestMeasure.bind(view)
+  view.requestMeasure = request => { setTimeout(() => requestMeasure(request), 75) }
+  await apply()
+  await wait(() => view.state.doc.length === 0)
+  await pause(180)
+  view.requestMeasure = requestMeasure
+  check(view.scrollDOM.scrollHeight > view.scrollDOM.clientHeight, label + ' retains layout overflow', editorGeometry(view))
+  check(view.scrollDOM.scrollTop === 0 && view.state.selection.main.to === 0, label + ' clamps viewport and selection', editorGeometry(view))
+  view.contentDOM.style.removeProperty('min-height')
+  await pause(180)
+  check(view.scrollDOM.scrollTop === 0 && view.state.selection.main.to === 0, label + ' stays at top after layout settles', editorGeometry(view))
+}
 window.uiCheck = async () => {
   const pairs = [
     ['', '새 문서'], ['원래 문서', ''], ['변경 없음', '변경 없음'],
@@ -142,20 +158,18 @@ window.uiCheck = async () => {
     await pause(180)
     unchanged(view, before, mode + ' history restore')
     check(dirty, mode + ' history restore remains unsaved')
+    historyText = ''
+    document.querySelector('[title="문서 히스토리에서 가져오기"]').click()
+    await wait(() => document.querySelector('.draft-history-row'))
+    await emptyDocument(view, () => document.querySelector('.draft-history-row').click(), mode + ' empty history')
+    check(dirty, mode + ' empty history stays unsaved')
   }
   const longText = original + Array.from({ length: 1200 }, (_, i) => '긴 문서 추가 문단 ' + i + '\n\n').join('')
   const longView = await mount(false, longText)
   const longBefore = await position(longView)
   await refresh(longView, '새 머리말\n\n' + longText.replace('추가 문단 1190', '추가 문단 1190 수정'))
   unchanged(longView, longBefore, 'Large document external refresh')
-  // Retain overflow after deletion, as non-overlay scrollbars/padding can do on Windows.
-  longView.contentDOM.style.minHeight = 'calc(100% + 24px)'
-  await refresh(longView, '')
-  check(longView.scrollDOM.scrollHeight > longView.scrollDOM.clientHeight, 'Empty fixture retains layout overflow', editorGeometry(longView))
-  check(longView.scrollDOM.scrollTop === 0 && longView.state.selection.main.to === 0, 'Empty document clamps viewport and selection', editorGeometry(longView))
-  longView.contentDOM.style.removeProperty('min-height')
-  await pause(180)
-  check(longView.scrollDOM.scrollTop === 0 && longView.state.selection.main.to === 0, 'Empty document stays at top after layout settles', editorGeometry(longView))
+  await emptyDocument(longView, () => { disk = ''; version++ }, 'Empty document')
   return { checks: checks.length, scenarios: checks }
 }
 `
