@@ -480,11 +480,12 @@ function captureViewport(view: EditorView): ViewportBookmark {
 }
 
 function restoreViewport(view: EditorView, bookmark: ViewportBookmark, changes: ChangeDesc): void {
-  if (view.state.doc.length === 0) {
+  const targetDocument = view.state.doc
+  if (targetDocument.length === 0) {
     // Empty documents have no old anchor; reset in CodeMirror's layout cycle.
     view.requestMeasure({
       key: restoreViewport,
-      read: (current) => current.state.doc.length === 0,
+      read: (current) => current.dom.isConnected && current.state.doc === targetDocument,
       write: (empty, current) => {
         if (!empty) return
         current.scrollDOM.scrollTop = 0
@@ -493,8 +494,9 @@ function restoreViewport(view: EditorView, bookmark: ViewportBookmark, changes: 
     })
     return
   }
-  const mappedPos = Math.max(0, Math.min(changes.mapPos(bookmark.pos, 1), view.state.doc.length))
   window.requestAnimationFrame(() => {
+    if (!view.dom.isConnected || view.state.doc !== targetDocument) return
+    const mappedPos = Math.max(0, Math.min(changes.mapPos(bookmark.pos, 1), view.state.doc.length))
     const scroller = view.scrollDOM
     scroller.scrollLeft = bookmark.scrollLeft
     if (bookmark.topOffset == null) {

@@ -134,6 +134,10 @@ jobs:
       - name: Install dependencies
         run: npm ci --include=optional
 
+      - name: Verify editor refresh before Windows preflight
+        if: ${{ inputs.windows_preflight }}
+        run: npm run verify:editor-refresh
+
       - name: Verify desktop and case-management runtime
         run: npm run verify:desktop
 

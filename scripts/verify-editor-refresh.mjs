@@ -39,11 +39,22 @@ const wait = async (fn) => {
   throw Error('Timed out: ' + fn)
 }
 const checks = []
+const browserErrors = []
 const check = (condition, label, detail = '') => { if (!condition) throw Error(label + ': ' + detail); checks.push(label) }
 const original = Array.from({ length: 240 }, (_, i) =>
   '문단 ' + String(i).padStart(3, '0') + ': **확인할 문장**과 변하지 않는 본문입니다.\n\n'
 ).join('')
 let generation = 0
+function reportBrowserError(error, message) {
+  const dom = document.querySelector('.cm-editor')
+  const view = dom && EditorView.findFromDOM(dom)
+  const details = { message, stack: error?.stack ?? String(error), generation, lastCheck: checks.at(-1),
+    connected: !!view?.dom.isConnected, docLength: view?.state.doc.length, selection: view?.state.selection.toJSON() }
+  browserErrors.push(details)
+  console.error('EDITOR_BROWSER_ERROR ' + JSON.stringify(details))
+}
+window.addEventListener('error', event => reportBrowserError(event.error, event.message))
+window.addEventListener('unhandledrejection', event => reportBrowserError(event.reason, 'Unhandled promise rejection'))
 async function mount(plainText = false, text = original) {
   disk = text; version++
   root.render(<MarkdownEditor key={++generation} path='/fixture/검토.claude-draft.md'
@@ -98,11 +109,22 @@ async function emptyDocument(view, apply, label) {
   view.contentDOM.style.minHeight = 'calc(100% + 24px)'
   // Exercise a later CodeMirror measurement after the app's own animation-frame work.
   const requestMeasure = view.requestMeasure.bind(view)
-  view.requestMeasure = request => { setTimeout(() => requestMeasure(request), 75) }
-  await apply()
-  await wait(() => view.state.doc.length === 0)
-  await pause(180)
-  view.requestMeasure = requestMeasure
+  const pendingMeasures = new Set()
+  view.requestMeasure = request => {
+    const timer = setTimeout(() => {
+      pendingMeasures.delete(timer)
+      if (view.dom.isConnected) requestMeasure(request)
+    }, 75)
+    pendingMeasures.add(timer)
+  }
+  try {
+    await apply()
+    await wait(() => view.state.doc.length === 0)
+    await pause(180)
+  } finally {
+    view.requestMeasure = requestMeasure
+    for (const timer of pendingMeasures) clearTimeout(timer)
+  }
   check(view.scrollDOM.scrollHeight > view.scrollDOM.clientHeight, label + ' retains layout overflow', editorGeometry(view))
   check(view.scrollDOM.scrollTop === 0 && view.state.selection.main.to === 0, label + ' clamps viewport and selection', editorGeometry(view))
   view.contentDOM.style.removeProperty('min-height')
@@ -170,6 +192,19 @@ window.uiCheck = async () => {
   await refresh(longView, '새 머리말\n\n' + longText.replace('추가 문단 1190', '추가 문단 1190 수정'))
   unchanged(longView, longBefore, 'Large document external refresh')
   await emptyDocument(longView, () => { disk = ''; version++ }, 'Empty document')
+  for (const close of [false, true]) {
+    const view = await mount(false)
+    await position(view)
+    historyText = '새 머리말\n\n' + original
+    document.querySelector('[title="문서 히스토리에서 가져오기"]').click()
+    await wait(() => document.querySelector('.draft-history-row'))
+    document.querySelector('.draft-history-row').click()
+    if (close) root.unmount()
+    else view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: '' } })
+    await pause(180)
+    check(browserErrors.length === 0, close ? 'Deferred viewport restore ignores closed editor' : 'Deferred viewport restore ignores replaced document', JSON.stringify(browserErrors))
+  }
+  check(browserErrors.length === 0, 'No browser errors during editor refresh', JSON.stringify(browserErrors))
   return { checks: checks.length, scenarios: checks }
 }
 `
@@ -187,7 +222,7 @@ try {
     app.whenReady().then(async () => {
       const w = new BrowserWindow({ width: 1100, height: 800, show: false, webPreferences: { backgroundThrottling: false, contextIsolation: true, nodeIntegration: false } })
       const errors = []
-      w.webContents.on('console-message', (_event, level, message) => { if (level >= 3) errors.push(message) })
+      w.webContents.on('console-message', (event) => { if (event.level === 'error') errors.push(event.message) })
       try {
         await w.loadFile(${JSON.stringify(path.join(temp, 'index.html'))})
         const result = await w.webContents.executeJavaScript('window.uiCheck()')
