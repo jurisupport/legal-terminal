@@ -81,6 +81,18 @@ function unchanged(view, before, label) {
     label, JSON.stringify({ before, after }))
   check(view.state.sliceDoc(view.state.selection.main.from, view.state.selection.main.to) === '문단 120', label + ' keeps selection')
 }
+function editorGeometry(view) {
+  const scroller = view.scrollDOM
+  return JSON.stringify({
+    docLength: view.state.doc.length, selection: view.state.selection.toJSON(),
+    scrollTop: scroller.scrollTop, scrollLeft: scroller.scrollLeft,
+    scrollHeight: scroller.scrollHeight, clientHeight: scroller.clientHeight,
+    scrollWidth: scroller.scrollWidth, clientWidth: scroller.clientWidth,
+    contentHeight: view.contentDOM.getBoundingClientRect().height,
+    contentPadding: getComputedStyle(view.contentDOM).padding,
+    firstLine: view.coordsAtPos(0), scrollerTop: scroller.getBoundingClientRect().top
+  })
+}
 window.uiCheck = async () => {
   const pairs = [
     ['', '새 문서'], ['원래 문서', ''], ['변경 없음', '변경 없음'],
@@ -136,8 +148,14 @@ window.uiCheck = async () => {
   const longBefore = await position(longView)
   await refresh(longView, '새 머리말\n\n' + longText.replace('추가 문단 1190', '추가 문단 1190 수정'))
   unchanged(longView, longBefore, 'Large document external refresh')
+  // Retain overflow after deletion, as non-overlay scrollbars/padding can do on Windows.
+  longView.contentDOM.style.minHeight = 'calc(100% + 24px)'
   await refresh(longView, '')
-  check(longView.scrollDOM.scrollTop === 0 && longView.state.selection.main.to === 0, 'Empty document clamps viewport and selection')
+  check(longView.scrollDOM.scrollHeight > longView.scrollDOM.clientHeight, 'Empty fixture retains layout overflow', editorGeometry(longView))
+  check(longView.scrollDOM.scrollTop === 0 && longView.state.selection.main.to === 0, 'Empty document clamps viewport and selection', editorGeometry(longView))
+  longView.contentDOM.style.removeProperty('min-height')
+  await pause(180)
+  check(longView.scrollDOM.scrollTop === 0 && longView.state.selection.main.to === 0, 'Empty document stays at top after layout settles', editorGeometry(longView))
   return { checks: checks.length, scenarios: checks }
 }
 `

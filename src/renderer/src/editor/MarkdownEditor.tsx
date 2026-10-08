@@ -483,6 +483,12 @@ function restoreViewport(view: EditorView, bookmark: ViewportBookmark, changes: 
   const mappedPos = Math.max(0, Math.min(changes.mapPos(bookmark.pos, 1), view.state.doc.length))
   window.requestAnimationFrame(() => {
     const scroller = view.scrollDOM
+    if (view.state.doc.length === 0) {
+      // An empty document has no viewport anchor; padding can still leave a scroll range.
+      scroller.scrollTop = 0
+      scroller.scrollLeft = 0
+      return
+    }
     scroller.scrollLeft = bookmark.scrollLeft
     if (bookmark.topOffset == null) {
       scroller.scrollTop = bookmark.scrollTop
