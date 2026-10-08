@@ -3,6 +3,7 @@ import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { spawn } from 'node:child_process'
+import { createRequire } from 'node:module'
 import { fileURLToPath } from 'node:url'
 import { build } from 'esbuild'
 
@@ -232,9 +233,7 @@ try {
       } catch (error) { console.error(error, errors); app.exit(1) }
     })
   `)
-  const electron = process.platform === 'darwin'
-    ? path.join(root, 'node_modules/electron/dist/Electron.app/Contents/MacOS/Electron')
-    : path.join(root, 'node_modules/electron/dist/electron' + (process.platform === 'win32' ? '.exe' : ''))
+  const electron = createRequire(import.meta.url)('electron')
   const env = { ...process.env }
   delete env.ELECTRON_RUN_AS_NODE
   const result = await new Promise((resolve, reject) => {
