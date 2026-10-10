@@ -91,7 +91,40 @@ const sshBin = process.platform === 'win32' ? 'ssh.exe' : 'ssh'
 let sharedWriteSeq = 0
 let workspaceIndexChain: Promise<unknown> = Promise.resolve()
 const knownSharedWorkspaces = new Map<string, WorkspaceSnapshot>()
+const movedAgentTabOwners = new Map<string, number>()
 let sharedSaveChain: Promise<unknown> = Promise.resolve()
+
+function workspaceForWindow(snapshot: WorkspaceSnapshot, observerId: number): WorkspaceSnapshot {
+  if (!Array.isArray(snapshot.terminals)) return snapshot
+  return { ...snapshot, terminals: snapshot.terminals.filter((tab) => {
+    const owner = tab?.kind === 'agent' ? movedAgentTabOwners.get(tab.id) : undefined
+    return owner === undefined || owner === observerId
+  }) }
+}
+
+export function moveWorkspaceAgentTab(tabId: string, observerId: number): void {
+  movedAgentTabOwners.set(tabId, observerId)
+  // A transfer must not become a deletion in the source window's next save.
+  for (const [key, snapshot] of [...knownSharedWorkspaces]) {
+    const moved = Array.isArray(snapshot.terminals) && snapshot.terminals.find((tab) => tab?.kind === 'agent' && tab.id === tabId)
+    if (moved) {
+      const targetKey = `${observerId}${key.slice(key.indexOf('\0'))}`
+      const previous = knownSharedWorkspaces.get(targetKey)
+      const terminals = Array.isArray(previous?.terminals) ? previous.terminals : []
+      // The target may close the tab before its first automatic save.
+      knownSharedWorkspaces.set(targetKey, { ...(previous ?? snapshot),
+        terminals: [...terminals.filter((tab) => tab?.id !== tabId), moved] })
+    }
+    knownSharedWorkspaces.set(key, workspaceForWindow(knownSharedWorkspaces.get(key) ?? snapshot, Number(key.split('\0')[0])))
+  }
+}
+
+export function releaseWorkspaceAgentTabs(observerId: number): void {
+  for (const [id, owner] of movedAgentTabOwners) {
+    if (owner === observerId) movedAgentTabOwners.delete(id)
+  }
+  // Keep the observer baseline for a final save already dispatched by the closing window.
+}
 
 function sharedLocationKey(location: AutomaticWorkspaceLocation, observerId: number): string {
   const ssh = location.ssh
@@ -586,7 +619,7 @@ export async function saveAutomaticWorkspace(
     return { ok: false, error: '작업환경의 사건 정보가 일치하지 않아 저장하지 않았습니다.' }
   }
   const savedSnapshot: WorkspaceSnapshot = {
-    ...snapshot,
+    ...workspaceForWindow(snapshot, observerId),
     workspaceId: workspaceIdForLocation(location.cwd, location.profileId, location.caseId),
     workspaceLabel: snapshot.workspaceLabel || displayNameFromPath(location.cwd) || '사건 작업환경',
     workspaceDevice: hostname(),
@@ -631,7 +664,8 @@ export async function saveAutomaticWorkspace(
       const replay = !!intentId && applied.includes(intentId)
       const reopened = agentTabsOnly({ version: 1, savedAt: shared.savedAt, terminals: replay ? [] : snapshot.reopenAgentTabs }).terminals as
         { id: string; cwd: string; agentProvider?: string; resumeSessionId?: string }[]
-      const merged = mergeSharedAgentTabs(current.snapshot ?? undefined, shared,
+      const owned = workspaceForWindow(shared, observerId)
+      const merged = mergeSharedAgentTabs(current.snapshot ?? undefined, owned,
         shared.workspaceOpen === false ? undefined : knownSharedWorkspaces.get(key), reopened)
       if (replay) merged.workspaceOpen = current.snapshot?.workspaceOpen
       else if (current.snapshot?.workspaceOpen === false && snapshot.workspaceReopen !== true) merged.workspaceOpen = false
@@ -639,7 +673,7 @@ export async function saveAutomaticWorkspace(
       if (location.ssh) await saveSharedRemote(location.ssh, location.cwd, merged, location.caseId)
       else await saveSharedLocal(merged, location.cwd, location.caseId)
       // Track only this device's tabs; preserved unseen tabs must survive its next save too.
-      knownSharedWorkspaces.set(key, shared)
+      knownSharedWorkspaces.set(key, workspaceForWindow(owned, observerId))
     }
     // ponytail: serialize workspace writes in this process; use per-host queues if saves become slow.
     const lockedSave = (): Promise<void> => withSharedWorkspaceLock(location, save)
@@ -711,10 +745,12 @@ export async function loadAutomaticWorkspace(
     (caseId) => loadWorkspaceSnapshot(workspaceIdForLocation(location.cwd, location.profileId, caseId)),
     location.caseId
   )
+  if (local.snapshot) local.snapshot = workspaceForWindow(local.snapshot, observerId)
   if (!location.ssh) {
     const shared = await loadCaseWorkspace(
       (caseId) => loadSnapshotFile(sharedWorkspacePath(location.cwd, caseId)), location.caseId
     )
+    if (shared.snapshot) shared.snapshot = workspaceForWindow(shared.snapshot, observerId)
     if (observe && shared.ok && shared.snapshot) knownSharedWorkspaces.set(sharedLocationKey(location, observerId), shared.snapshot)
     return {
       ok: local.ok && shared.ok,
@@ -726,6 +762,7 @@ export async function loadAutomaticWorkspace(
   const remote = await loadCaseWorkspace(
     (caseId) => loadSharedRemote(location.ssh!, location.cwd, caseId), location.caseId
   )
+  if (remote.snapshot) remote.snapshot = workspaceForWindow(remote.snapshot, observerId)
   if (observe && remote.ok && remote.snapshot) knownSharedWorkspaces.set(sharedLocationKey(location, observerId), remote.snapshot)
   return {
     ok: local.ok && remote.ok,
@@ -744,5 +781,5 @@ export function observeAutomaticWorkspace(
   if (location.caseId && !snapshotMatchesCase(snapshot, location.caseId)) {
     throw new Error('작업환경의 사건 정보가 일치하지 않아 적용하지 않았습니다.')
   }
-  knownSharedWorkspaces.set(sharedLocationKey(location, observerId), agentTabsOnly(snapshot))
+  knownSharedWorkspaces.set(sharedLocationKey(location, observerId), agentTabsOnly(workspaceForWindow(snapshot, observerId)))
 }

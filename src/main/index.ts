@@ -93,6 +93,8 @@ import {
   loadAutomaticWorkspace,
   listAutomaticWorkspaces,
   observeAutomaticWorkspace,
+  moveWorkspaceAgentTab,
+  releaseWorkspaceAgentTabs,
   listWorkspaceSnapshots,
   loadWorkspaceSnapshot,
   saveAutomaticWorkspace,
@@ -248,6 +250,8 @@ function createWindow(setMain = true, opts?: { docOnly?: boolean; termOnly?: boo
   })
 
   if (setMain) mainWindow = win
+  const observerId = win.webContents.id
+  win.webContents.once('destroyed', () => releaseWorkspaceAgentTabs(observerId))
 
   let closeGuardReady = false
   let lastRendererRecoveryAt = 0
@@ -443,6 +447,13 @@ let pendingTabDrag: {
 // 새 창은 렌더러가 준비되기 전이라 페이로드를 큐잉했다가 'tabs:ready' 때 전달.
 const pendingReceive = new Map<number, TabPayload[]>()
 
+const recordTabTransfer = (payload: TabPayload, target: BrowserWindow): void => {
+  const tab = payload.tab as { kind?: unknown; id?: unknown } | undefined
+  if (payload.kind === 'terminal' && tab?.kind === 'agent' && typeof tab.id === 'string') {
+    moveWorkspaceAgentTab(tab.id, target.webContents.id)
+  }
+}
+
 // 새 창 (새 작업환경)
 ipcMain.handle('window:new', (_e, opts?: NewWindowOptions) => {
   const win = createWindow(false)
@@ -577,6 +588,7 @@ ipcMain.handle('tabs:dropOnTabBar', (e, target: TabDropTarget): TabMoveResult =>
     drag.completed = { action: 'moved', removeSource: false }
     return drag.completed
   }
+  recordTabTransfer(payload, targetWindow)
   targetWindow.webContents.send('tabs:receive', payload)
   targetWindow.focus()
   drag.completed = { action: 'moved', removeSource: true }
@@ -671,6 +683,7 @@ ipcMain.handle('tabs:endDrag', async (): Promise<TabMoveResult> => {
         return { action: 'moved', removeSource: false }
       }
       // 다른 창 탭바 = 그 창으로 이동(merge)
+      recordTabTransfer(payload, w)
       w.webContents.send('tabs:receive', payload)
       w.focus()
       return { action: 'moved', removeSource: true }
@@ -678,6 +691,7 @@ ipcMain.handle('tabs:endDrag', async (): Promise<TabMoveResult> => {
   }
   // 2) 탭바 밖(본문/창 밖 등)에서 놓임 → 새 전용 창으로 찢기
   const win = createWindow(false, kind === 'terminal' ? { termOnly: true } : { docOnly: true })
+  recordTabTransfer(drag.payload, win)
   pendingReceive.set(win.webContents.id, [drag.payload])
   return { action: 'moved', removeSource: true }
 })

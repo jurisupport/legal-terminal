@@ -70,6 +70,9 @@ jobs:
       - name: Verify desktop and case-management runtime
         run: npm run verify:desktop
 
+      - name: Verify detached conversation windows
+        run: npm run verify:detached-window
+
       - name: Verify projects and unreleased desktop additions
         run: npm run verify:release-additions
 
@@ -140,6 +143,9 @@ jobs:
 
       - name: Verify desktop and case-management runtime
         run: npm run verify:desktop
+
+      - name: Verify detached conversation windows
+        run: npm run verify:detached-window
 
       - name: Verify projects and unreleased desktop additions
         run: npm run verify:release-additions

@@ -114,6 +114,58 @@ try {
   assert.deepEqual(JSON.parse(await readFile(file, 'utf8')).terminals.map((tab) => tab.id), ['A', 'phone-B'],
     'one window loading phone tabs must not make another window treat those tabs as locally closed')
 
+  const movedDevice = loadDevice(join(root, 'moved-device'))
+  await movedDevice.loadAutomaticWorkspace(location, 1)
+  movedDevice.moveWorkspaceAgentTab('A', 3)
+  await movedDevice.saveAutomaticWorkspace(snapshot([term('phone-B')]), location, 1)
+  let movedSnapshot = JSON.parse(await readFile(file, 'utf8'))
+  assert.deepEqual(movedSnapshot.terminals.map((tab) => tab.id).sort(), ['A', 'phone-B'],
+    'moving an agent to another window is not a shared tab closure')
+  assert.deepEqual(movedSnapshot.closedAgentTabs, [])
+  const movedLoad = await movedDevice.loadAutomaticWorkspace(location, 1)
+  for (const result of [movedLoad.local, movedLoad.remote]) {
+    assert.equal(result.snapshot.terminals.some((tab) => tab.id === 'A'), false,
+      'neither local backup nor remote refresh reopens a tab owned by another window')
+  }
+  movedDevice.observeAutomaticWorkspace(location, snapshot([term('A'), term('phone-B')]), 1)
+  await movedDevice.saveAutomaticWorkspace(snapshot([term('phone-B')]), location, 1)
+  await movedDevice.saveAutomaticWorkspace(snapshot([term('A')]), location, 3)
+  movedSnapshot = JSON.parse(await readFile(file, 'utf8'))
+  assert.deepEqual(movedSnapshot.terminals.map((tab) => tab.id).sort(), ['A', 'phone-B'],
+    'each window saves only its owned tabs without deleting the other window’s tabs')
+  movedDevice.moveWorkspaceAgentTab('A', 1)
+  movedDevice.releaseWorkspaceAgentTabs(3)
+  assert.equal((await movedDevice.loadAutomaticWorkspace(location, 3)).remote.snapshot.terminals.some((tab) => tab.id === 'A'), false,
+    'closing the former owner must not release a tab that has moved back')
+  movedDevice.releaseWorkspaceAgentTabs(1)
+  assert.equal((await movedDevice.loadAutomaticWorkspace(location, 3)).remote.snapshot.terminals.some((tab) => tab.id === 'A'), true,
+    'closing the owning window makes its saved conversation restorable again')
+
+  await movedDevice.loadAutomaticWorkspace(location, 10)
+  movedDevice.moveWorkspaceAgentTab('A', 11)
+  await movedDevice.saveAutomaticWorkspace(snapshot([term('A')]), location, 11)
+  const finalCloseSave = movedDevice.saveAutomaticWorkspace(snapshot([]), location, 11)
+  movedDevice.releaseWorkspaceAgentTabs(11)
+  await finalCloseSave
+  const afterTabClose = (await movedDevice.loadAutomaticWorkspace(location, 10)).remote.snapshot
+  assert.deepEqual(Array.from(afterTabClose.terminals, (tab) => tab.id), ['phone-B'],
+    'closing the last detached tab persists its deletion even after its window is destroyed')
+  assert.equal(afterTabClose.closedAgentTabs.some((tab) => tab.id === 'A'), true)
+
+  for (const owner of [21, 22]) {
+    await writeFile(file, JSON.stringify(snapshot([term('A'), term('phone-B')])))
+    await movedDevice.loadAutomaticWorkspace(location, 20)
+    if (owner === 22) await movedDevice.saveAutomaticWorkspace(snapshot([]), location, owner)
+    movedDevice.moveWorkspaceAgentTab('A', owner)
+    const immediateCloseSave = movedDevice.saveAutomaticWorkspace(snapshot([]), location, owner)
+    movedDevice.releaseWorkspaceAgentTabs(owner)
+    await immediateCloseSave
+    const immediateClose = (await movedDevice.loadAutomaticWorkspace(location, 20)).remote.snapshot
+    assert.deepEqual(Array.from(immediateClose.terminals, (tab) => tab.id), ['phone-B'],
+      'closing immediately after a transfer works for both a new window and a previously empty window')
+    assert.equal(immediateClose.closedAgentTabs.some((tab) => tab.id === 'A'), true)
+  }
+
   // Discover only explicitly open cases, including an empty case, across local/SSH access.
   await writeFile(file, JSON.stringify({ ...snapshot([term('A'), term('phone-B')]), workspaceOpen: true }))
   const emptyLocation = { ...location, cwd: '/cases/empty' }
@@ -216,6 +268,7 @@ try {
   const alerts = []
   const observed = []
   const context = {
+    docOnly: false, termOnly: false,
     resolveCaseTabId: () => 'case', workspaceLocationKey: () => 'key', workspaceLocation: () => location,
     autoRestoreDoneRef: { current: new Set() }, autoRestoreInFlightRef: { current: new Map() },
     autoSaveEligibleRef: { current: new Set() }, todoAccountGeneration: { current: 0 }, caseTabsRef: { current: [{ id: 'case' }] },
@@ -232,6 +285,12 @@ try {
   const run = vm.runInNewContext(ts.transpileModule(`(${handler})`, {
     compilerOptions: { target: ts.ScriptTarget.ES2022 }
   }).outputText, context)
+  for (const mode of ['docOnly', 'termOnly']) {
+    context[mode] = true
+    await run({})
+    assert.equal(loaded, 0, `${mode}: receiving one tab must not restore its whole case`)
+    context[mode] = false
+  }
   response = { ok: false, error: 'offline' }
   await run({})
   assert.equal(context.autoRestoreDoneRef.current.size, 0, 'failure is retryable')

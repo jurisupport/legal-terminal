@@ -2199,8 +2199,13 @@ export default function App(): JSX.Element {
   }
 
   const forceCloseWindow = async (): Promise<void> => {
-    await autoWorkspaceSaveChainRef.current.catch(() => {})
-    await saveAllCaseWorkspacesRef.current().catch(() => {})
+    if (docOnly || termOnly) {
+      // Dispatch the final tab list before closing; the main process finishes syncing it.
+      await Promise.allSettled(caseTabsRef.current.map((tab) => saveCaseWorkspace(tab.id, false)))
+    } else {
+      await autoWorkspaceSaveChainRef.current.catch(() => {})
+      await saveAllCaseWorkspacesRef.current().catch(() => {})
+    }
     forceWindowCloseRef.current = true
     setCloseWindowPrompt(null)
     void window.lt.app.forceCloseWindow()
@@ -4723,7 +4728,7 @@ export default function App(): JSX.Element {
     return result
   }
 
-  const buildWorkspaceSnapshot = async (onlyCaseTabId?: string): Promise<WorkspaceSnapshot> => {
+  const buildWorkspaceSnapshot = async (onlyCaseTabId?: string, refreshSessions = true): Promise<WorkspaceSnapshot> => {
     const sourceDocs = onlyCaseTabId
       ? docTabsRef.current.filter((tab) => !isSharedDocTab(tab) && caseIdForDoc(tab) === onlyCaseTabId)
       : docTabs
@@ -4736,6 +4741,7 @@ export default function App(): JSX.Element {
     const terminals = await Promise.all(
       sourceTerms.map(async (t) => {
         const caseTabIdValue = caseIdForTerm(t)
+        if (!refreshSessions) return { ...t, caseTabId: caseTabIdValue, side: termSide(t) }
         if (isAgentTab(t)) {
           const agentSnapshot = await window.lt.agent.snapshot(t.id).catch(() => null)
           const resumeSessionId =
@@ -5142,17 +5148,17 @@ export default function App(): JSX.Element {
     }
   }
 
-  const saveCaseWorkspace = async (caseTabIdValue: string): Promise<void> => {
+  const saveCaseWorkspace = async (caseTabIdValue: string, waitForSync = true): Promise<void> => {
     const tab = caseTabsRef.current.find((item) => item.id === caseTabIdValue)
     if (!tab) return
     const source = currentCaseFromCaseTab(tab)
     const key = workspaceLocationKey(source)
-    if (autoRestoreInFlightRef.current.has(key)) return
-    if (!autoRestoreDoneRef.current.has(key) && !(await restoreAutomaticWorkspace(source))) {
+    if (waitForSync && autoRestoreInFlightRef.current.has(key)) return
+    if (waitForSync && !autoRestoreDoneRef.current.has(key) && !(await restoreAutomaticWorkspace(source))) {
       throw new Error('사건 작업환경을 복원하지 못해 자동 저장을 보류했습니다.')
     }
     const reopen = pendingWorkspaceReopensRef.current.get(key)
-    const snapshot = await buildWorkspaceSnapshot(caseTabIdValue)
+    const snapshot = await buildWorkspaceSnapshot(caseTabIdValue, waitForSync)
     snapshot.workspaceLabel = tab.name
     snapshot.workspaceReopen = !!reopen
     snapshot.workspaceIntentId = reopen?.id
@@ -5161,9 +5167,12 @@ export default function App(): JSX.Element {
       return live ? [live] : []
     })
     if (!caseTabsRef.current.some((item) => item.id === caseTabIdValue)) return
-    const result = await window.lt.workspace.autoSave(snapshot, workspaceLocation(source))
-    if (!result.ok || result.remoteError) throw new Error(result.remoteError || result.error || '사건탭 저장 실패')
-    if (pendingWorkspaceReopensRef.current.get(key) === reopen) pendingWorkspaceReopensRef.current.delete(key)
+    const saving = window.lt.workspace.autoSave(snapshot, workspaceLocation(source)).then((result) => {
+      if (!result.ok || result.remoteError) throw new Error(result.remoteError || result.error || '사건탭 저장 실패')
+      if (pendingWorkspaceReopensRef.current.get(key) === reopen) pendingWorkspaceReopensRef.current.delete(key)
+    })
+    if (waitForSync) await saving
+    else void saving.catch(() => {})
   }
 
   const saveAllCaseWorkspaces = async (): Promise<boolean> => {
@@ -5178,6 +5187,7 @@ export default function App(): JSX.Element {
   saveAllCaseWorkspacesRef.current = saveAllCaseWorkspaces
 
   const restoreAutomaticWorkspace = async (source: CurrentCase, refresh = false): Promise<boolean> => {
+    if (docOnly || termOnly) return true
     const id = resolveCaseTabId(source)
     const key = workspaceLocationKey(source)
     if (!refresh && autoRestoreDoneRef.current.has(key)) return true
