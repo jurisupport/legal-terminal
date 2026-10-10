@@ -347,6 +347,9 @@ interface DocTab {
   side?: DockSide
 }
 
+const documentAgentKey = (doc: Pick<DocTab, 'id' | 'path' | 'caseTabId'>): string =>
+  JSON.stringify([doc.caseTabId ?? '', doc.path ?? doc.id])
+
 interface DocScrollPosition {
   key: string
   top: number
@@ -1629,6 +1632,7 @@ export default function App(): JSX.Element {
   )
   const [agentDiffs, setAgentDiffs] = useState<Record<string, AgentDiffOpenRequest>>({})
   const [activeDoc, setActiveDoc] = useState<string>(() => (docOnly ? '' : 'doc-welcome'))
+  const [documentAgentTabs, setDocumentAgentTabs] = useState<Record<string, string>>({})
   // 실제 파일에 저장되지 않은 변경사항이 있는 문서 id 집합 — 닫기 전 확인용
   const [dirtyDocs, setDirtyDocs] = useState<Set<string>>(new Set())
   const [caseDocumentUpdates, setCaseDocumentUpdates] = useState<Record<string, CaseDocumentUpdates>>({})
@@ -3874,6 +3878,7 @@ export default function App(): JSX.Element {
         ? nextWorkKeyAfterClose(sideKeys, closingKey)
         : undefined
     setTermTabs((tabs) => closeTab(tabs, id, activeTerm, setActiveTerm, visibleTermTabs))
+    setDocumentAgentTabs((links) => Object.fromEntries(Object.entries(links).filter(([, agentId]) => agentId !== id)))
     setTermBracketedPasteMode((m) => {
       if (!(id in m)) return m
       const n = { ...m }
@@ -4348,6 +4353,37 @@ export default function App(): JSX.Element {
     mountedTermIds.has(term.id) || activeTermIds.has(term.id)
   const activeDocTab = visibleDocTabs.find((t) => t.id === activeDoc)
   const activeTermTab = visibleTermTabs.find((t) => t.id === activeTerm)
+  const rememberedAgentForDoc = (doc?: DocTab): (TermTab & { kind: 'agent' }) | undefined =>
+    doc && visibleTermTabs.find((term): term is TermTab & { kind: 'agent' } =>
+      term.id === documentAgentTabs[documentAgentKey(doc)] && isAgentTab(term))
+  const documentLinkForAgent = (term: TermTab) =>
+    activeDocTab && !['welcome', 'settings', 'diff'].includes(activeDocTab.kind)
+      ? {
+          title: activeDocTab.title,
+          checked: documentAgentTabs[documentAgentKey(activeDocTab)] === term.id,
+          onChange: (checked: boolean): void => {
+            setDocumentAgentTabs((links) => {
+              const next = { ...links }
+              const key = documentAgentKey(activeDocTab)
+              if (checked) next[key] = term.id
+              else delete next[key]
+              return next
+            })
+          }
+        }
+      : undefined
+
+  useEffect(() => {
+    if (docOnly || termOnly) return
+    const doc = docTabsRef.current.find((tab) => tab.id === activeDoc)
+    const term = rememberedAgentForDoc(doc)
+    if (!term) return
+    setActiveTerm(term.id)
+    // Keep the document visible when both tabs share one pane.
+    if (docSide(doc) !== termSide(term)) setWorkActive(termSide(term), termKeyOf(term.id))
+    // Restore only on document navigation; choosing another panel must remain possible.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeDoc, activeDocTab?.path, activeCaseTabId])
   // 활성 터미널이 있으면 그 사건, 없으면(터미널 다 닫힘) 마지막 사건 컨텍스트 유지
   // 원격 탭의 작성서류 폴더는 ssh:// URI로 변환(패널·탐색기용). 터미널은 plain cwd를 그대로 씀.
   const activeDraftsFolder =
@@ -4532,7 +4568,8 @@ export default function App(): JSX.Element {
       return 'forwarded'
     }
     const candidate = resolveClaudeAgentTargetTab(visibleTermTabs, activeTerm, activeWork) ?? activeTermTab
-    const target = isAgentTab(activeTermTab) ? activeTermTab : isAgentTab(candidate) ? candidate : createClaudeAgentForPrompt(selection.sourcePath)
+    const sourceDoc = docTabsRef.current.find((doc) => doc.path === selection.sourcePath || doc.mediaState?.sourcePath === selection.sourcePath)
+    const target = rememberedAgentForDoc(sourceDoc) ?? (isAgentTab(activeTermTab) ? activeTermTab : isAgentTab(candidate) ? candidate : createClaudeAgentForPrompt(selection.sourcePath))
     if (!target) throw new Error('미디어를 질문할 Agent 작업을 먼저 열어 주세요.')
     const remote = parseRemoteUri(selection.sourcePath)
     if ((remote && target.profileId !== remote.profileId) || (!remote && target.ssh)) {
@@ -4552,7 +4589,6 @@ export default function App(): JSX.Element {
     const sourceName = fileNameFromPath(selection.sourcePath)
     const rangeLabel = selection.start !== undefined && selection.end !== undefined
       ? `${formatMediaTime(selection.start)}–${formatMediaTime(selection.end)}` : formatMediaTime(selection.time)
-    const sourceDoc = docTabsRef.current.find((doc) => doc.path === selection.sourcePath || doc.mediaState?.sourcePath === selection.sourcePath)
     queueAgentAttachment(target, {
       kind: 'media-range', label: `${sourceName} · ${rangeLabel}`, media,
       path: remote?.path ?? selection.sourcePath, origin: remote ? 'remote' : 'local', access: 'workspace-path',
@@ -4677,7 +4713,9 @@ export default function App(): JSX.Element {
     const sourcePath = captured?.docPath ?? doc.path
     const sourceTitle = captured?.docTitle ?? (sourcePath && sourcePath !== doc.path ? fileNameFromPath(sourcePath) : doc.title)
     try {
-      const target = candidates.find((item) => item.id === activeTerm) ?? candidates[0] ?? createInlineAgent(caseTab.id, sourceSide)
+      const remembered = rememberedAgentForDoc({ ...doc, path: sourcePath })
+      const target = candidates.find((item) => item.id === remembered?.id) ??
+        candidates.find((item) => item.id === activeTerm) ?? candidates[0] ?? createInlineAgent(caseTab.id, sourceSide)
       setMountedTermIds((current) => current.has(target.id) ? current : new Set(current).add(target.id))
       setInlineSelection({
         key: newId(), caseId: caseTab.id, caseName: caseTabTitle(caseTab), sourceSide,
@@ -6173,10 +6211,12 @@ export default function App(): JSX.Element {
 
   // 활성 문서명+경로 + (있으면) 선택 텍스트로 claude 프롬프트 주입. 텍스트 없으면 문서 전체에 대해 묻기.
   const askClaude = (text: string, opts?: ClaudeAskOptions): void => {
-    const targetTab = resolveClaudeAgentTargetTab(visibleTermTabs, activeTerm, activeWork) ?? activeTermTab
+    const d = docTabsRef.current.find((x) => x.id === (opts?.selectionSource?.docId ?? activeDoc))
+    const rememberedTarget = opts?.docPath === null ? undefined : rememberedAgentForDoc(
+      d && { ...d, path: opts?.selectionSource?.docPath ?? d.path })
+    const targetTab = rememberedTarget ?? resolveClaudeAgentTargetTab(visibleTermTabs, activeTerm, activeWork) ?? activeTermTab
     const promptTarget = targetTab ?? sessionCaseSource
     void (async () => {
-      const d = docTabsRef.current.find((x) => x.id === (opts?.selectionSource?.docId ?? activeDoc))
       let docPath = opts?.docPath === null ? undefined : (opts?.docPath ?? opts?.selectionSource?.docPath ?? d?.path)
       let sourcePath = opts?.sourcePath
       let sourceTitle = opts?.sourceTitle
@@ -6215,7 +6255,7 @@ export default function App(): JSX.Element {
             }
           : undefined
       if (t && !docOnly) {
-        const selectionTarget = isClaudeAgentTab(targetTab) ? targetTab : createClaudeAgentForPrompt(docPath)
+        const selectionTarget = isAgentTab(targetTab) ? targetTab : createClaudeAgentForPrompt(docPath)
         if (selectionTarget) {
           const attachment = selectionAttachmentForAgent(
             t,
@@ -6261,7 +6301,8 @@ export default function App(): JSX.Element {
         payload = `인용 위치: PDF ${quotePage}쪽 (파일의 실제 쪽번호)\n${payload}`
       }
       if (targetTab && !termTabsRef.current.some((term) => term.id === targetTab.id)) return
-      sendClaude(payload, { displayText, contextPath: docPath, pasteOnly: true })
+      if (rememberedTarget && !docOnly) pasteDraftToAgent(rememberedTarget, payload)
+      else sendClaude(payload, { displayText, contextPath: docPath, pasteOnly: true })
     })()
   }
 
@@ -8236,6 +8277,7 @@ export default function App(): JSX.Element {
                 id={t.id}
                 cwd={t.cwd}
                 title={t.title}
+                documentLink={documentLinkForAgent(t)}
                 provider={resolveAgentProvider(t.agentProvider, t.ssh)}
                 resumeSessionId={t.resumeSessionId}
                 forkFromSessionId={t.forkFromSessionId}
@@ -8646,6 +8688,7 @@ export default function App(): JSX.Element {
                   id={t.id}
                   cwd={t.cwd}
                   title={t.title}
+                  documentLink={documentLinkForAgent(t)}
                   provider={resolveAgentProvider(t.agentProvider, t.ssh)}
                   resumeSessionId={t.resumeSessionId}
                   forkFromSessionId={t.forkFromSessionId}
@@ -9999,7 +10042,8 @@ function SelectionAsk({ onAsk, onInline, inlineOpen = false, selectionDocument =
         return
       }
       const activeEditor = document.activeElement instanceof Element ? document.activeElement.closest('.cm-editor') : null
-      const docElement = activeEditor?.closest('[data-doc-id]') ?? null
+      const docElement = activeEditor?.closest('[data-doc-id]') ??
+        Array.from(document.querySelectorAll<HTMLElement>('[data-doc-id]')).find((element) => element.dataset.docId === detail.editorDraftId) ?? null
       const selectionSource = selectionSourceForElement(docElement, detail.text, detail)
       setBox({
         ...detail,
@@ -10106,7 +10150,10 @@ function SelectionAsk({ onAsk, onInline, inlineOpen = false, selectionDocument =
           if (onInline && box.askOpts?.selectionSource?.docId) onInline(box)
           else if (!quoteAgentPanelSelection(box.askOpts)) onAsk(box.text, box.askOpts)
           setBox(null)
-          selectionDocument.getSelection()?.removeAllRanges()
+          // CodeMirror owns its DOM selection until the instruction input receives focus.
+          if (!box.editorDraftId && !selectionDocument.activeElement?.closest('.cm-editor')) {
+            selectionDocument.getSelection()?.removeAllRanges()
+          }
         }}
       >
         {onInline && box.askOpts?.selectionSource?.docId ? '이 부분에 지시 · ⌘/Ctrl+J' : '✳ Claude에 묻기'}

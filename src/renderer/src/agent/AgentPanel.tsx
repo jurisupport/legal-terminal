@@ -129,6 +129,7 @@ export type AgentInlineActions = {
 }
 
 interface AgentPanelProps {
+  documentLink?: { title: string; checked: boolean; onChange: (checked: boolean) => void }
   id: string
   cwd: string
   title: string
@@ -1906,6 +1907,7 @@ export default function AgentPanel({
   id,
   cwd,
   title,
+  documentLink,
   provider,
   resumeSessionId,
   forkFromSessionId,
@@ -2085,7 +2087,7 @@ export default function AgentPanel({
       const textarea = textareaRef.current
       if (!textarea || document.activeElement?.closest('.inline-selection-command')) return
       const caret = Math.max(0, Math.min(position ?? textarea.value.length, textarea.value.length))
-      textarea.focus()
+      textarea.focus({ preventScroll: true })
       textarea.setSelectionRange(caret, caret)
     })
   }, [])
@@ -3803,6 +3805,19 @@ export default function AgentPanel({
           )}
         </div>
       </header>
+
+      {documentLink && (
+        <label className="agent-document-link" title={`「${documentLink.title}」로 돌아오면 이 에이전트 패널을 엽니다`}>
+          <input
+            type="checkbox"
+            aria-label="에이전트 패널 기억하기"
+            checked={documentLink.checked}
+            onChange={(event) => documentLink.onChange(event.target.checked)}
+          />
+          <span>에이전트 패널 기억하기</span>
+          <span className="agent-document-link-title">{documentLink.title}</span>
+        </label>
+      )}
 
       <div className="agent-timeline-wrap">
         {changedDocuments.length > 0 && (

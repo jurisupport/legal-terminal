@@ -225,9 +225,11 @@ const quoteHandlers = [
   'selectionSourceForElement', 'selectionAttachmentLabel', 'selectionAttachmentForAgent',
   'markdownRangeFromAttachmentSource', 'openAgentAttachmentSource',
   'attachmentSource', 'attachmentOrigin', 'attachmentAccess', 'normalizeAgentAttachments',
-  'askClaude', 'agentSelectionInputText'
+  'askClaude', 'agentSelectionInputText', 'rememberedAgentForDoc', 'documentAgentKey'
 ]
-let queuedQuote
+let queuedQuote, queuedTarget
+const agents = []
+const documentAgentTabs = {}
 const pdf = runInNewContext(ts.transpileModule(
   quoteHandlers.map((name) => {
     assert.ok(declarations.has(name), `missing quote handler: ${name}`)
@@ -245,14 +247,15 @@ const pdf = runInNewContext(ts.transpileModule(
   fileNameFromPath: (path) => path.split('/').at(-1),
   setPdfJump: (request) => { pdfRequest = request },
   setMarkdownRevealRequests: (update) => { markdownRequest = update({}) },
-  visibleTermTabs: [], activeTerm: '', activeWork: {}, activeTermTab: undefined,
+  visibleTermTabs: agents, termTabsRef: { current: agents }, activeTerm: '', activeWork: {}, activeTermTab: undefined,
+  documentAgentTabs,
   activeDoc: 'some-other-doc', sessionCaseSource: {}, docOnly: false,
   resolveClaudeAgentTargetTab: () => undefined,
   dirtyMarkdownTabForPath: () => undefined,
   confirmCaseFileScope: async () => true,
-  isClaudeAgentTab: (tab) => tab?.kind === 'agent',
+  isAgentTab: (tab) => tab?.kind === 'agent',
   createClaudeAgentForPrompt: () => ({ id: 'new-agent', kind: 'agent' }),
-  queueAgentAttachment: (_tab, attachment) => { queuedQuote = attachment }
+  queueAgentAttachment: (tab, attachment) => { queuedTarget = tab; queuedQuote = attachment }
 })
 const captured = pdf.selectionSourceForElement(pdfElement, '인용한 계약 조항')
 assert.equal(captured.range.startPage, 12)
@@ -293,6 +296,28 @@ pdf.askClaude('인용한 계약 조항', { selectionSource: captured })
 await new Promise(setImmediate)
 assert.equal(queuedQuote.source.range.startPage, 12, 'a new Agent tab receives the same navigable citation')
 assert.equal(queuedQuote.source.path, captured.docPath, 'quote source must not drift when another document becomes active')
+
+agents.push({ id: 'remembered-codex', kind: 'agent', agentProvider: 'codex' })
+docs.current[0].path = captured.docPath
+documentAgentTabs[pdf.documentAgentKey(docs.current[0])] = 'remembered-codex'
+const linkedPath = docs.current[0].path
+docs.current[0].path = 'ssh://office/records/another.pdf'
+assert.equal(pdf.rememberedAgentForDoc(docs.current[0]), undefined, 'another file in the same record tab starts unlinked')
+docs.current[0].path = linkedPath
+assert.equal(pdf.rememberedAgentForDoc(docs.current[0]).id, 'remembered-codex', 'returning to the original file restores its link')
+assert.equal(pdf.rememberedAgentForDoc({ ...docs.current[0], caseTabId: 'another-case' }), undefined,
+  'the same file opened in another case has a separate panel link')
+pdf.askClaude('기억한 패널에 질문', { selectionSource: captured })
+await new Promise(setImmediate)
+assert.equal(queuedTarget.id, 'remembered-codex', 'selection uses the source document’s remembered panel, including Codex')
+assert.equal(queuedQuote.source.docId, 'record-tab')
+pdf.askClaude('에이전트 답변 인용', { docPath: null })
+await new Promise(setImmediate)
+assert.equal(queuedTarget.id, 'new-agent', 'agent response quotes do not inherit the current document link')
+agents.length = 0
+pdf.askClaude('닫힌 패널 대신 질문', { selectionSource: captured })
+await new Promise(setImmediate)
+assert.equal(queuedTarget.id, 'new-agent', 'a closed remembered panel falls back to an available agent')
 
 const media = { sourcePath: '/shorts/video.mp4', versionId: 'review-v1', time: 12.3, start: 12.3, end: 15.8 }
 const [mediaQuote] = pdf.normalizeAgentAttachments([{ kind: 'media-range', label: '12.3–15.8초', media }])

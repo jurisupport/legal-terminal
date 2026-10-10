@@ -30,10 +30,12 @@ const state = {
   sshProfiles: [{ id: 'office', host: 'synthetic' }]
 }
 const sent = [], work = [], created = [], alerts = []
-let allow = true, confirmHook
+let allow = true, confirmHook, rememberedTarget
+const rememberedByPath = new Map()
 const actions = new Map(['a1', 'a2'].map((id) => [id, { submit: async (request) => { sent.push({ id, request }); return { ok: true } } }]))
 const context = {
   ...state, inlineActionsRef: { current: actions },
+  rememberedAgentForDoc: (doc) => rememberedByPath.get(doc.path) ?? rememberedTarget,
   isAgentTab: (term) => term.kind === 'agent', caseIdForTerm: (term) => term.caseTabId, caseIdForDoc: (doc) => doc.caseTabId,
   termSide: (term) => term.side ?? 'right', docSide: (doc) => doc.side ?? 'left', otherSide: (side) => side === 'left' ? 'right' : 'left',
   currentCaseFromCaseTab: (tab) => tab, caseTabTitle: (tab) => tab.name,
@@ -58,11 +60,23 @@ assert.deepEqual(Array.from(api.inlineTargetsForCase('a', 'left'), (term) => ter
 const box = { text: '선택한 원문', x: 100, y: 200, bottom: 260, askOpts: { selectionSource: {
   docId: 'doc', docPath: 'ssh://office/case-a/source.pdf', range: { startPage: 12, endPage: 12 }
 } } }
+rememberedTarget = state.termTabsRef.current.find((term) => term.id === 'a2')
+api.openInlineSelection(box)
+assert.equal(state.inlineSelection.targetId, 'a2', 'document memory chooses its eligible panel before the active panel')
+rememberedTarget = state.termTabsRef.current.find((term) => term.id === 'a-left')
+api.openInlineSelection(box)
+assert.equal(state.inlineSelection.targetId, 'a1', 'a remembered panel cannot hide the document by using its source pane')
+rememberedTarget = undefined
 api.openInlineSelection(box)
 assert.equal(state.inlineSelection.targetId, 'a1', 'active Agent from another case cannot become the recipient')
 context.activeTerm = 'a2'
 state.docTabsRef.current[0].path = 'ssh://office/case-a/next.pdf'
 state.docTabsRef.current[0].title = 'next.pdf'
+rememberedByPath.set(box.askOpts.selectionSource.docPath, state.termTabsRef.current[0])
+rememberedByPath.set(state.docTabsRef.current[0].path, state.termTabsRef.current[1])
+api.openInlineSelection(box)
+assert.equal(state.inlineSelection.targetId, 'a1', 'a moving record tab uses the captured source file’s remembered panel')
+rememberedByPath.clear()
 assert.equal((await api.submitInlineSelection('반박해줘')).ok, true)
 assert.equal(sent[0].id, 'a1', 'changing the active Agent does not redirect the frozen recipient')
 assert.equal(sent[0].request.attachment.source.docPath, box.askOpts.selectionSource.docPath)

@@ -93,6 +93,9 @@ jobs:
       - name: Verify HTML selection and quoting
         run: npm run verify:html-quote
 
+      - name: Verify document-linked instructions and scroll position
+        run: npm run verify:agent-quote && npm run verify:document-agent-memory-ui
+
       - name: Verify native media review
         run: npm run verify:media && npm run verify:media-viewer && npm run verify:media-ui
         env:
@@ -106,6 +109,7 @@ jobs:
           path: |
             .omx/screenshots/**
             output/playwright/html-quote/**
+            output/playwright/document-agent-memory/**
           if-no-files-found: warn
 
       - name: Package macOS
@@ -156,6 +160,9 @@ jobs:
       - name: Verify HTML selection and quoting
         run: npm run verify:html-quote
 
+      - name: Verify document-linked instructions and scroll position
+        run: npm run verify:agent-quote && npm run verify:document-agent-memory-ui
+
       - name: Verify native media review
         run: npm run verify:media && npm run verify:media-viewer && npm run verify:media-ui
         env:
@@ -175,6 +182,7 @@ jobs:
           path: |
             .omx/screenshots/**
             output/playwright/html-quote/**
+            output/playwright/document-agent-memory/**
           if-no-files-found: warn
 
       - name: Upload Windows
