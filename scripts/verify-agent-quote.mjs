@@ -22,7 +22,7 @@ assert.equal(
   ].join('\n')
 )
 
-const panel = await readFile(new URL('../src/renderer/src/agent/AgentPanel.tsx', import.meta.url), 'utf8')
+const panel = (await readFile(new URL('../src/renderer/src/agent/AgentPanel.tsx', import.meta.url), 'utf8')).replace(/\r\n/g, '\n')
 assert.match(
   panel,
   /<button[^>]*className="agent-quote-preview"[^>]*onClick=\{onOpen\}/,
@@ -133,7 +133,7 @@ timeline.scrollTop = 1600
 controls.updateTimelineFollowState()
 assert.equal(follow.current, true, 'manual scrolling back to the bottom must still resume following')
 
-const app = await readFile(new URL('../src/renderer/src/App.tsx', import.meta.url), 'utf8')
+const app = (await readFile(new URL('../src/renderer/src/App.tsx', import.meta.url), 'utf8')).replace(/\r\n/g, '\n')
 assert.match(
   app,
   /agentQuoteMessageId:\s*element\?\.closest<HTMLElement>\('\.agent-msg\.assistant'\)\?\.id/,

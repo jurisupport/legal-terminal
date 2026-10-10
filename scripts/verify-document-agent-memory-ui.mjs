@@ -57,7 +57,7 @@ async function electronCheck({ root, temp, output, channels }) {
   })
   await app.whenReady()
   session.defaultSession.webRequest.onBeforeRequest((details, callback) => callback({ cancel: !/^(file|data|blob):/.test(details.url) }))
-  const w = new BrowserWindow({ width: 1440, height: 1000, show: false, webPreferences: { preload: path.join(root, 'out/preload/index.js'), contextIsolation: true, nodeIntegration: false, backgroundThrottling: false } })
+  const w = new BrowserWindow({ width: Number(process.env.LT_MEMORY_UI_WIDTH ?? 1440), height: Number(process.env.LT_MEMORY_UI_HEIGHT ?? 1000), show: false, webPreferences: { preload: path.join(root, 'out/preload/index.js'), contextIsolation: true, nodeIntegration: false, backgroundThrottling: false } })
   const consoleErrors = []
   w.webContents.on('console-message', event => { if (event.level === 'error') consoleErrors.push(event.message) })
   const pause = () => new Promise(resolve => setTimeout(resolve, 50))
@@ -128,7 +128,10 @@ async function electronCheck({ root, temp, output, channels }) {
         const r = el.getBoundingClientRect(); return el.textContent.includes('대금은') && r.top > bounds.top + 120 && r.bottom < bounds.bottom - 100;
       });
       if (!el) throw Error('No visible source paragraph');
-      const r = document.createRange(); r.selectNodeContents(el); const b = r.getBoundingClientRect();
+      const node = el.firstChild, r = document.createRange();
+      r.setStart(node, 0); r.setEnd(node, node.textContent.indexOf('대금은') + '대금은'.length);
+      if (r.getClientRects().length !== 1) throw Error('Markdown selection prefix must occupy one visual line');
+      const b = r.getBoundingClientRect();
       return { x: Math.ceil(b.left + 1), endX: Math.floor(b.right - 1), y: Math.round(b.top + b.height / 2) };
     `)
     await drag(rect)
@@ -144,7 +147,10 @@ async function electronCheck({ root, temp, output, channels }) {
     await run('await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))')
     const rect = await run(`
       const f = document.querySelector('.html-frame'), d = f.contentDocument, r = d.createRange();
-      r.selectNodeContents(d.getElementById('paragraph-80')); const b = r.getBoundingClientRect(), outer = f.getBoundingClientRect();
+      const node = d.getElementById('paragraph-80').firstChild;
+      r.setStart(node, 0); r.setEnd(node, node.textContent.indexOf('지연이자는') + '지연이자는'.length);
+      if (r.getClientRects().length !== 1) throw Error('HTML selection prefix must occupy one visual line');
+      const b = r.getBoundingClientRect(), outer = f.getBoundingClientRect();
       return { x: Math.ceil(outer.left + f.clientLeft + b.left + 1), endX: Math.floor(outer.left + f.clientLeft + b.right - 1), y: Math.round(outer.top + f.clientTop + b.top + b.height / 2) };
     `)
     await drag(rect)
@@ -279,7 +285,7 @@ async function electronCheck({ root, temp, output, channels }) {
     assert.equal(await run('return memory().checked'), true)
     checks.push('Previous/next images sharing one document tab keep independent panel associations by file')
     assert.deepEqual(consoleErrors, [], 'Unexpected renderer errors')
-    const result = { checks, markdownScroll: markdownScroll.top, htmlScroll: htmlBefore.top, consoleErrors, screenshots: ['markdown-quote-memory.png', 'html-quote-memory.png'].map(name => path.join(output, name)) }
+    const result = { checks, viewport: await run('return { width: innerWidth, height: innerHeight }'), markdownScroll: markdownScroll.top, htmlScroll: htmlBefore.top, consoleErrors, screenshots: ['markdown-quote-memory.png', 'html-quote-memory.png'].map(name => path.join(output, name)) }
     fs.writeFileSync(path.join(output, 'result.json'), JSON.stringify(result, null, 2))
     console.log('DOCUMENT_AGENT_MEMORY_RESULT ' + JSON.stringify(result))
     app.exit(0)
