@@ -280,6 +280,8 @@ interface DictationContext {
   opponent?: string
   partyNames?: string
   speaker?: string
+  participants?: { id: string; label: string }[]
+  recentDialogue?: { speakerId: string; text: string }[]
 }
 
 interface DictationTranscribeInput {
@@ -287,6 +289,7 @@ interface DictationTranscribeInput {
   mimeType: string
   context?: DictationContext
   diarize?: boolean
+  knownSpeakers?: { name: string; audio: Uint8Array; participantId?: string }[]
 }
 
 interface DictationSegment {
@@ -294,6 +297,8 @@ interface DictationSegment {
   text: string
   start: number
   end: number
+  participantId?: string
+  participantSource?: 'voice' | 'context'
 }
 
 interface DictationTranscribeResult {

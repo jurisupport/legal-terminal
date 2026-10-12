@@ -64,6 +64,34 @@ for (const forbidden of ['prompt', 'keywords[]', 'languages[]']) {
 }
 assert.equal((await transcribe({ text: '전체 전사문', segments })).text, '전체 전사문')
 
+const referenceAudio = Buffer.alloc(44 + 16_000 * 2 * 3)
+referenceAudio.write('RIFF')
+referenceAudio.writeUInt32LE(referenceAudio.length - 8, 4)
+referenceAudio.write('WAVEfmt ', 8)
+referenceAudio.writeUInt32LE(16, 16)
+referenceAudio.writeUInt16LE(1, 20)
+referenceAudio.writeUInt16LE(1, 22)
+referenceAudio.writeUInt32LE(16_000, 24)
+referenceAudio.writeUInt32LE(32_000, 28)
+referenceAudio.writeUInt16LE(2, 32)
+referenceAudio.writeUInt16LE(16, 34)
+referenceAudio.write('data', 36)
+referenceAudio.writeUInt32LE(referenceAudio.length - 44, 40)
+const knownSpeakers = [{ name: 'speaker_0', audio: referenceAudio }, { name: 'speaker_1', audio: referenceAudio }]
+result = await transcribe({ segments: [{ ...segments[0], speaker: 'speaker_1' }] }, { knownSpeakers })
+assert.equal(result.ok, true)
+assert.equal(result.segments[0].speaker, 'speaker_1')
+assert.deepEqual(requests[0].body.getAll('known_speaker_names[]'), ['speaker_0', 'speaker_1'])
+assert.deepEqual(requests[0].body.getAll('known_speaker_references[]'),
+  knownSpeakers.map(() => `data:audio/wav;base64,${referenceAudio.toString('base64')}`))
+for (const invalid of [null, {}, [null], Array(1), Array(5).fill(knownSpeakers[0]), [knownSpeakers[0], knownSpeakers[0]],
+  [{ name: 'A', audio: referenceAudio }], [{ name: 'speaker_0', audio: new Uint8Array(64_044) }],
+  [{ name: 'speaker_0', audio: referenceAudio.subarray(0, 100) }],
+  [{ name: 'speaker_0', audio: new Uint8Array(320_046) }]]) {
+  assert.equal((await transcribe({ segments }, { knownSpeakers: invalid })).ok, false)
+  assert.equal(requests.length, 0, 'Malformed voice references must not be sent to the API')
+}
+
 for (const invalid of [
   {}, { text: '화자 정보 없음' }, { segments: [] }, { segments: [null] },
   ...[
@@ -146,7 +174,7 @@ console.log('hearing diarization request, segments, validation, and ordinary dic
 // A disk read may finish after one pending row has expanded into several speakers.
 const panel = {}
 const panelSource = readFileSync(new URL('../src/renderer/src/hearing/HearingRecordPanel.tsx', import.meta.url), 'utf8')
-runInNewContext(ts.transpileModule(`${panelSource}\nexports.mergePendingRecord = mergePendingRecord`, {
+runInNewContext(ts.transpileModule(`${panelSource}\nObject.assign(exports, { mergePendingRecord, selectSpeakerReferences, applyDiarizedTranscript, assignRecordSpeaker, speakerAssignmentGroups, sanitizeRecord, buildReport })`, {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX }
 }).outputText, { exports: panel, require: () => ({}) })
 const base = { speakers: [], case: {}, requests: [], activeSpeakerId: '', result: {} }
@@ -163,3 +191,103 @@ const merged = panel.mergePendingRecord(
 assert.deepEqual(JSON.parse(JSON.stringify(merged.entries)), [...split, manual],
   'All speaker segments must replace the pending row together without moving past subsequent notes')
 console.log('hearing diarization preserves segment order when a delayed disk read completes')
+
+const plain = (value) => JSON.parse(JSON.stringify(value))
+const overSplit = [...segments, { speaker: 'C', text: '같은 사람의 다른 발언', start: 6, end: 9 }]
+const original = panel.applyDiarizedTranscript({ ...base, entries: [placeholder, manual] }, 'recording', 0, overSplit, [])
+const [speakerA, speakerB, speakerC] = original.speakers.map(({ id }) => id)
+const combined = panel.assignRecordSpeaker(original, speakerC, speakerA)
+assert.equal(combined.speakers.length, 2, 'Detected speakers can merge with one another')
+assert.equal(combined.entries[3].speakerId, speakerA)
+assert.deepEqual(plain(combined.entries.map(({ text, recording }) => ({ text, recording }))),
+  plain(original.entries.map(({ text, recording }) => ({ text, recording }))), 'Merging must preserve every word, time, and entry')
+assert.equal(panel.assignRecordSpeaker(combined, speakerA, 'missing'), combined)
+assert.equal(panel.assignRecordSpeaker(combined, speakerA, speakerA), combined)
+
+const cache = new Map([['recording-segment-3', referenceAudio], ['recording-segment-1', referenceAudio]])
+const references = panel.selectSpeakerReferences(original, cache)
+const next = { ...combined, entries: [...combined.entries, { id: 'next', dictation: { status: 'transcribing' } }] }
+const reused = panel.applyDiarizedTranscript(next, 'next', 1000, [
+  { ...segments[0], speaker: references[1].name },
+  { ...segments[1], speaker: references[0].name }
+], references)
+assert.equal(reused.speakers.length, 2, 'Known voices must not create new speakers')
+assert.equal(reused.entries.at(-2).speakerId, speakerB)
+assert.equal(reused.entries.at(-1).speakerId, speakerA, 'A merge during the API request must follow the sample entry')
+assert.deepEqual(plain(reused.entries.slice(-2).map(({ text }) => text)), segments.slice(0, 2).map(({ text }) => text))
+const unknown = panel.applyDiarizedTranscript(next, 'next', 1000, [segments[0]], references)
+assert.equal(unknown.speakers.length, 3, 'Unknown A/B labels cannot be matched to previous labels by order')
+const deletedSample = { ...next, entries: next.entries.filter(({ id }) => id !== references[0].entryId) }
+assert.equal(panel.selectSpeakerReferences(deletedSample, cache).length, 1)
+assert.equal(panel.applyDiarizedTranscript(deletedSample, 'next', 0,
+  [{ ...segments[0], speaker: references[0].name }], references).speakers.length, 3,
+  'Deleting the sample entry removes its identity evidence')
+assert.equal(panel.selectSpeakerReferences({ ...base, entries: [] }, cache).length, 0, 'References must not leak to another record')
+assert.equal(panel.applyDiarizedTranscript(combined, 'deleted-placeholder', 0, segments, references), combined)
+const reassigned = { ...next, entries: next.entries.map((entry) => entry.id === references[0].entryId
+  ? { ...entry, speakerId: speakerB } : entry) }
+assert.equal(panel.selectSpeakerReferences(reassigned, cache).length, 1, 'Corrected sample entries group under the corrected speaker')
+assert.equal(panel.applyDiarizedTranscript(reassigned, 'next', 0,
+  [{ ...segments[0], speaker: references[0].name }], references).entries.at(-1).speakerId, speakerB)
+
+const restored = panel.mergePendingRecord(original, combined, new Set([speakerC]))
+assert.equal(restored.speakers.length, 2, 'A delayed disk read must not resurrect a merged speaker')
+assert.equal(restored.entries[3].speakerId, speakerA, 'A delayed disk read must preserve reassigned speech')
+assert.equal(panel.mergePendingRecord(original, original, new Set([speakerA])).speakers.length, 3,
+  'Removing and then restoring a preset speaker must survive a delayed disk read')
+const many = {
+  ...base,
+  speakers: Array.from({ length: 6 }, (_, i) => ({ id: `s${i}`, label: `s${i}`, detected: i !== 5 })),
+  entries: Array.from({ length: 6 }, (_, i) => ({ id: `e${i}`, speakerId: `s${i}` }))
+}
+const selected = panel.selectSpeakerReferences(many, new Map(many.entries.map(({ id }) => [id, referenceAudio])))
+assert.equal(selected.length, 4)
+assert.equal(selected[0].entryId, 'e5', 'User-named speakers should be prioritized within the API limit')
+console.log('voice references, speaker reuse, manual merges, deletion, record scope, and pending corrections verified')
+
+const roster = [{ id: 'mediator', label: '조정위원', role: 'court' }, { id: 'client', label: '홍길동', role: 'plaintiff' }]
+const declared = { ...base, speakers: roster, activeSpeakerId: 'client', entries: [placeholder],
+  hearing: { type: 'hearing', dateTime: '2026-10-12T10:00:00+09:00' } }
+const matchedSegments = [
+  { ...segments[0], participantId: 'mediator', participantSource: 'context' },
+  segments[1],
+  { ...segments[2], speaker: 'C', participantId: 'mediator', participantSource: 'context' }
+]
+const matched = panel.applyDiarizedTranscript(declared, 'recording', 0, matchedSegments, [])
+assert.deepEqual(plain(matched.speakers.map(({ id }) => id)), ['mediator', 'client'], 'A declared roster must not grow from detected labels')
+assert.deepEqual(plain(matched.entries.map(({ speakerId }) => speakerId)), ['mediator', '', 'mediator'])
+assert.equal(matched.entries[0].participantSource, 'context', 'Context-based attribution must be visibly provisional')
+assert.equal(matched.entries[1].participantSource, undefined)
+assert.deepEqual(plain(matched.entries.map(({ text, recording }) => [text, recording.start, recording.end])),
+  matchedSegments.map(({ text, start, end }) => [text, start, end]), 'Participant assignment must not rewrite speech')
+const groups = panel.speakerAssignmentGroups(matched)
+assert.equal(groups.length, 3)
+assert.equal(groups[0].suggestedId, 'mediator')
+assert.equal(groups[1].suggestedId, '')
+const pendingCache = new Map([['recording', referenceAudio], ['recording-segment-1', referenceAudio]])
+assert.equal(panel.selectSpeakerReferences(matched, pendingCache).length, 0, 'Guesses and unresolved voices must not become trusted references')
+assert.equal(panel.selectSpeakerReferences(matched, pendingCache, true).length, 2, 'Keep samples for a later manual confirmation')
+const confirmed = panel.assignRecordSpeaker(matched, groups[0].id, 'client')
+assert.equal(confirmed.entries[0].speakerId, 'client')
+assert.equal(confirmed.entries[0].participantSource, undefined)
+assert.equal(panel.selectSpeakerReferences(confirmed, pendingCache)[0].participantId, 'client')
+const named = panel.assignRecordSpeaker(confirmed, groups[1].id, 'mediator')
+assert.equal(named.entries[1].speakerId, 'mediator')
+assert.equal(panel.selectSpeakerReferences(named, pendingCache).length, 2)
+const finalConfirmed = panel.assignRecordSpeaker(named, groups[2].id, 'mediator')
+assert.equal(panel.speakerAssignmentGroups(finalConfirmed).length, 0)
+
+const single = panel.applyDiarizedTranscript({ ...declared, speakers: [roster[0]], activeSpeakerId: 'mediator' }, 'recording', 0, segments, [])
+assert.ok(single.entries.every(({ speakerId }) => speakerId === ''), 'A single name or active selection does not identify an unknown voice')
+const changedRoster = panel.applyDiarizedTranscript({ ...declared, speakers: [roster[1]] }, 'recording', 0, matchedSegments, [], ['mediator', 'client'])
+assert.ok(changedRoster.entries.every(({ speakerId }) => speakerId === ''), 'Removed participants must not be restored by a late result')
+const malicious = panel.applyDiarizedTranscript(declared, 'recording', 0,
+  [{ ...segments[0], participantId: 'invented', participantSource: 'context' }], [])
+assert.equal(malicious.entries[0].speakerId, '')
+const persisted = panel.sanitizeRecord(plain(matched))
+assert.equal(persisted.entries[0].participantSource, 'context')
+assert.equal(persisted.entries[1].recording.speakerKey, groups[1].id)
+assert.match(panel.buildReport(persisted), /조정위원 \[맥락 추정·확인 필요\]/)
+assert.match(panel.buildReport(persisted), /참여자 확인 필요/)
+assert.equal(panel.assignRecordSpeaker(matched, groups[1].id, 'invented'), matched)
+console.log('declared participant roster, provisional context labels, manual confirmation, sample trust, and saved reports verified')

@@ -99,6 +99,13 @@ try {
     }
     Object.defineProperty(globalThis, 'MediaRecorder', { value: FakeMediaRecorder })
     Object.defineProperty(globalThis, 'AudioContext', { value: FakeAudioContext })
+    Object.defineProperty(globalThis, 'OfflineAudioContext', { value: class {
+      async decodeAudioData() {
+        if (globalThis.__failSpeakerDecode) throw new Error('sample decode failure')
+        const samples = new Float32Array(16_000 * 20).fill(0.2)
+        return { sampleRate: 16_000, numberOfChannels: 1, length: samples.length, getChannelData: () => samples }
+      }
+    } })
     Object.defineProperty(navigator, 'mediaDevices', {
       value: {
         getUserMedia: async () => ({ getTracks: () => [{ stop() {} }] })
@@ -532,6 +539,8 @@ try {
   }
   console.log('immediate new/saved record switches flush deletions and read current saved content')
 
+  await shellPanel.locator('.hearing-template-btn', { hasText: '민사' }).click()
+  const initialRosterCount = await speakerPicker.locator('option').count()
   const diarizationEntryOffset = await messages.count()
   let nextDiarizationIndex = await app.evaluate(() => globalThis.__hearingTranscriptions.length)
   const diarizeToggle = shellPanel.getByRole('checkbox', { name: '화자 자동 분리' })
@@ -549,33 +558,39 @@ try {
     ok: true,
     text: '첫 질문 첫 답변 다음 질문',
     segments: [
-      { speaker: 'A', text: '첫 질문', start: 0.5, end: 2 },
-      { speaker: 'B', text: '첫 답변', start: 2.5, end: 5 },
-      { speaker: 'A', text: '다음 질문', start: 6, end: 8 }
+      { speaker: 'A', text: '첫 질문', start: 0.5, end: 2, participantId: 'court', participantSource: 'context' },
+      { speaker: 'B', text: '첫 답변', start: 2.5, end: 5, participantId: 'plaintiff', participantSource: 'context' },
+      { speaker: 'A', text: '다음 질문', start: 6, end: 8, participantId: 'court', participantSource: 'context' }
     ]
   }
   await resolveDictation(nextDiarizationIndex++, diarizedResult)
-  await shellPanel.getByRole('combobox', { name: '화자 1 일괄 지정' }).waitFor()
+  await shellPanel.getByRole('combobox', { name: '참여자 확인 1 일괄 지정' }).waitFor()
   assert.equal(await app.evaluate(() => globalThis.__hearingTranscriptions.at(-1).payload.diarize), true)
   assert.deepEqual(await messages.locator('textarea').evaluateAll((inputs, offset) => inputs.slice(offset).map((input) => input.value), diarizationEntryOffset),
     ['첫 질문', '첫 답변', '다음 질문', '녹음과 별개로 작성 중인 메모'],
     '한 녹음의 발언 순서를 보존하고 전사 대기 중 작성한 메모도 유지해야 한다')
-  const firstDetectedId = await messages.nth(diarizationEntryOffset + 0).getByRole('combobox').inputValue()
-  assert.equal(await messages.nth(diarizationEntryOffset + 2).getByRole('combobox').inputValue(), firstDetectedId)
-  assert.notEqual(await messages.nth(diarizationEntryOffset + 1).getByRole('combobox').inputValue(), firstDetectedId)
+  assert.equal(await speakerPicker.locator('option').count(), initialRosterCount, 'Preconfigured participants must not grow from detected voices')
+  assert.equal(await messages.nth(diarizationEntryOffset).getByRole('combobox').inputValue(), 'court')
+  assert.equal(await messages.nth(diarizationEntryOffset + 1).getByRole('combobox').inputValue(), 'plaintiff')
+  assert.equal(await messages.nth(diarizationEntryOffset + 2).getByRole('combobox').inputValue(), 'court')
+  assert.equal(await messages.locator('span', { hasText: '맥락 추정·확인 필요' }).count(), 3)
+  const firstPayload = await app.evaluate(() => globalThis.__hearingTranscriptions.at(-1).payload)
+  assert.deepEqual(firstPayload.context.participants.map(({ id }) => id), ['court', 'plaintiff', 'defendant'])
+  assert.equal(firstPayload.context.speaker, undefined, 'Current UI selection cannot be used as voice identity')
   await page.waitForTimeout(1_100)
   await shellPanel.getByRole('button', { name: '읽기', exact: true }).click()
   await shellPanel.locator('.hearing-reader-item').first().click()
-  await shellPanel.getByRole('combobox', { name: '화자 1 일괄 지정' }).waitFor()
+  await shellPanel.getByRole('combobox', { name: '참여자 확인 1 일괄 지정' }).waitFor()
   await page.screenshot({ path: '/tmp/legal-terminal-diarization-check.png' })
+  await shellPanel.getByRole('combobox', { name: '참여자 확인 1 일괄 지정' }).selectOption('court')
+  // Confirming the first group renumbers the remaining pending group.
+  await shellPanel.getByRole('combobox', { name: '참여자 확인 1 일괄 지정' }).selectOption('plaintiff')
+  assert.equal(await shellPanel.locator('.hearing-detected-speakers select').count(), 0)
+  assert.equal(await messages.locator('span', { hasText: '맥락 추정·확인 필요' }).count(), 0)
   await shellPanel.locator('.hearing-template-btn', { hasText: '형사' }).click()
-  assert.equal(await shellPanel.locator('.hearing-detected-speakers select').count(), 2,
-    '템플릿을 바꿔도 이미 기록한 화자는 유지해야 한다')
-  assert.equal(await messages.nth(diarizationEntryOffset + 0).getByRole('combobox').inputValue(), firstDetectedId)
-  await shellPanel.getByRole('combobox', { name: '화자 1 일괄 지정' }).selectOption('court')
-  assert.equal(await messages.nth(diarizationEntryOffset + 0).getByRole('combobox').inputValue(), 'court')
-  assert.equal(await messages.nth(diarizationEntryOffset + 2).getByRole('combobox').inputValue(), 'court')
-  assert.notEqual(await messages.nth(diarizationEntryOffset + 1).getByRole('combobox').inputValue(), 'court')
+  assert.equal(await messages.nth(diarizationEntryOffset).getByRole('combobox').inputValue(), 'court')
+  assert.equal(await messages.nth(diarizationEntryOffset + 1).getByRole('combobox').inputValue(), 'plaintiff')
+  const declaredRosterCount = await speakerPicker.locator('option').count()
   await page.waitForTimeout(1_100)
   const separatedRecord = await app.evaluate(() => JSON.parse(globalThis.__hearingWrites.at(-1).content))
   const savedDiarization = separatedRecord.entries.slice(diarizationEntryOffset)
@@ -585,17 +600,20 @@ try {
   assert.ok(Date.parse(savedDiarization[0].createdAt) >= recordingStartedAt)
   assert.equal(Date.parse(savedDiarization[2].createdAt) - Date.parse(savedDiarization[0].createdAt), 5500)
   console.log('one recording splits by speaker, preserves drafts and timestamps, and supports persisted bulk assignment')
+  const unknownResult = { ...diarizedResult, segments: diarizedResult.segments.map(({ participantId, participantSource, ...segment }) => segment) }
+
 
   await dictationButton.click()
   await shellPanel.locator('.hearing-dictation-btn.recording').waitFor()
   await dictationButton.click()
   await messages.last().getByRole('status').waitFor()
-  await resolveDictation(nextDiarizationIndex++, diarizedResult)
+  await resolveDictation(nextDiarizationIndex++, unknownResult)
   await page.waitForFunction((expected) => document.querySelectorAll('.hearing-message').length === expected, diarizationEntryOffset + 7)
-  assert.notEqual(await messages.nth(diarizationEntryOffset + 4).getByRole('combobox').inputValue(), 'court',
-    '새 녹음의 A 화자를 이전 녹음에서 지정한 재판부로 추정하면 안 된다')
-  assert.notEqual(await messages.nth(diarizationEntryOffset + 5).getByRole('combobox').inputValue(),
-    await messages.nth(diarizationEntryOffset + 1).getByRole('combobox').inputValue(), '화자 번호는 녹음마다 독립적이어야 한다')
+  assert.equal(await messages.nth(diarizationEntryOffset + 4).getByRole('combobox').inputValue(), '',
+    'Unrecognized voices must not be assigned by roster order')
+  assert.equal(await messages.nth(diarizationEntryOffset + 5).getByRole('combobox').inputValue(), '')
+  assert.equal(await speakerPicker.locator('option').count(), declaredRosterCount)
+  assert.equal(await shellPanel.locator('.hearing-detected-speakers select').count(), 2)
 
   await dictationButton.click()
   await shellPanel.locator('.hearing-dictation-btn.recording').waitFor()
@@ -609,7 +627,7 @@ try {
   assert.equal(await messages.count(), diarizationEntryOffset + 8, '위쪽 방향키가 재시도할 녹음과 실패 행을 제거하면 안 된다')
   await messages.last().getByRole('button', { name: '전사 재시도', exact: true }).click()
   await messages.last().getByRole('status').waitFor()
-  await resolveDictation(nextDiarizationIndex++, diarizedResult)
+  await resolveDictation(nextDiarizationIndex++, unknownResult)
   await page.waitForFunction((expected) => document.querySelectorAll('.hearing-message').length === expected, diarizationEntryOffset + 10)
   assert.equal(await messages.count(), diarizationEntryOffset + 10, '재녹음 없이 실패한 행을 화자별 발언으로 바꿔야 한다')
   assert.equal(await app.evaluate(() => globalThis.__hearingTranscriptions.at(-1).payload.audio.byteLength), 10)
@@ -623,16 +641,73 @@ try {
   await retryButton.click()
   await dictationButton.click()
   await shellPanel.locator('.hearing-dictation-btn.recording').waitFor()
-  await resolveDictation(nextDiarizationIndex++, diarizedResult)
+  await resolveDictation(nextDiarizationIndex++, unknownResult)
   await page.waitForFunction((expected) => document.querySelectorAll('.hearing-message').length === expected, diarizationEntryOffset + 13)
   assert.equal(await dictationButton.getAttribute('aria-label'), '녹음 정지',
     '전사 재시도가 완료되어도 다른 녹음은 계속되어야 한다')
   await dictationButton.click()
   await messages.last().getByRole('status').waitFor()
-  await resolveDictation(nextDiarizationIndex++, diarizedResult)
+  await resolveDictation(nextDiarizationIndex++, unknownResult)
   await page.waitForFunction((expected) => document.querySelectorAll('.hearing-message').length === expected, diarizationEntryOffset + 16)
+
+  const detectedPickers = shellPanel.locator('.hearing-detected-speakers select')
+  const beforeMergeCount = await detectedPickers.count()
+  const beforeMergeText = await messages.locator('textarea').evaluateAll((inputs) => inputs.map((input) => input.value))
+  await detectedPickers.first().selectOption('plaintiff')
+  await detectedPickers.first().selectOption('plaintiff')
+  assert.equal(await detectedPickers.count(), beforeMergeCount - 2)
+  for (const index of [4, 5, 6]) assert.equal(await messages.nth(diarizationEntryOffset + index).getByRole('combobox').inputValue(), 'plaintiff')
+  assert.equal(await speakerPicker.locator('option').count(), declaredRosterCount)
+  assert.deepEqual(await messages.locator('textarea').evaluateAll((inputs) => inputs.map((input) => input.value)), beforeMergeText,
+    'Combining extra detected voices under a declared participant must preserve every transcript')
+  await page.screenshot({ path: '/tmp/legal-terminal-speaker-merge-check.png' })
+
+  const beforeReuse = await messages.count()
+  const beforeReuseSpeakers = await speakerPicker.locator('option').count()
+  const queuedIndex = nextDiarizationIndex
+  for (let index = 0; index < 2; index++) {
+    await dictationButton.click()
+    await shellPanel.locator('.hearing-dictation-btn.recording').waitFor()
+    await dictationButton.click()
+    await messages.last().getByRole('status').waitFor()
+  }
+  assert.equal(await app.evaluate(() => globalThis.__hearingTranscriptions.length), queuedIndex + 1,
+    'Later diarized requests must wait for earlier reference extraction, while recording remains available')
+  const resolveKnownDictation = (index) => app.evaluate(async (_electron, index) => {
+    const deadline = Date.now() + 5000
+    while (!globalThis.__hearingTranscriptions[index] && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 20))
+    const request = globalThis.__hearingTranscriptions[index]
+    const reference = request.payload.knownSpeakers.find(({ participantId }) => participantId === 'court')
+    if (!reference) throw new Error('Confirmed court sample missing; reference history: ' + JSON.stringify(globalThis.__hearingTranscriptions.filter(({ payload }) => payload.diarize).map(({ payload }) => payload.knownSpeakers.map(({ name, participantId }) => ({ name, participantId })))))
+    request.resolve({ ok: true, segments: [
+      { speaker: reference.name, text: '기존 재판부의 추가 질문', start: 0, end: 3, participantId: 'court', participantSource: 'voice' },
+      { speaker: reference.name, text: '기존 재판부의 다음 질문', start: 4, end: 7, participantId: 'court', participantSource: 'voice' }
+    ] })
+  }, index)
+  await resolveKnownDictation(nextDiarizationIndex++)
+  await resolveKnownDictation(nextDiarizationIndex++)
+  await page.waitForFunction((expected) => document.querySelectorAll('.hearing-message').length === expected, beforeReuse + 4)
+  assert.equal(await speakerPicker.locator('option').count(), beforeReuseSpeakers, 'Known voices should not add speakers')
+  for (let index = beforeReuse; index < beforeReuse + 4; index++) {
+    assert.equal(await messages.nth(index).getByRole('combobox').inputValue(), 'court')
+  }
+  assert.ok(await app.evaluate((_electron, index) => globalThis.__hearingTranscriptions.slice(index).every(({ payload }) =>
+    payload.knownSpeakers.length > 0 && payload.knownSpeakers.length <= 4 && payload.knownSpeakers.every(({ name, audio }) =>
+      /^speaker_[0-3]$/.test(name) && Buffer.from(audio).toString('ascii', 0, 4) === 'RIFF')), queuedIndex))
+
+  await page.evaluate(() => { globalThis.__failSpeakerDecode = true })
+  await dictationButton.click()
+  await shellPanel.locator('.hearing-dictation-btn.recording').waitFor()
+  await dictationButton.click()
+  await messages.last().getByRole('status').waitFor()
+  await resolveKnownDictation(nextDiarizationIndex++)
+  await page.waitForFunction((expected) => document.querySelectorAll('.hearing-message').length === expected, beforeReuse + 6)
+  assert.equal(await messages.last().locator('textarea').inputValue(), '기존 재판부의 다음 질문')
+  assert.equal(await messages.last().locator('.hearing-dictation-status').count(), 0,
+    'Sample extraction failure must not discard a successful transcript')
+  await page.evaluate(() => { globalThis.__failSpeakerDecode = false })
   await diarizeToggle.uncheck()
-  console.log('speaker groups remain distinct across recordings; failed recordings are retried without interrupting new recordings')
+  console.log('declared roster stays fixed; context assignments require confirmation; unknown voices map to participants; queued recordings reuse confirmed voices')
 
   const ordinaryRetryIndex = await app.evaluate(() => globalThis.__hearingTranscriptions.length)
   await speakerPicker.selectOption('court')
@@ -672,6 +747,51 @@ try {
       payload.diarize === false && Buffer.from(original.audio).equals(Buffer.from(payload.audio)))
   }, ordinaryRetryIndex), '일반 받아쓰기도 재녹음 없이 원래 음성으로 재시도해야 한다')
   console.log('ordinary dictation survives quota and repeated connection failures, deduplicates retries, and preserves audio, speaker, and drafts')
+
+  await shellPanel.getByRole('button', { name: '새 기록', exact: true }).click()
+  await shellPanel.locator('.hearing-template-btn', { hasText: '조정·면담' }).click()
+  for (const label of ['김 변호사', '박 의뢰인']) {
+    await shellPanel.getByPlaceholder('대화자명', { exact: true }).fill(label)
+    await shellPanel.getByPlaceholder('대화자명', { exact: true }).press('Enter')
+  }
+  const customParticipants = await speakerPicker.locator('option').evaluateAll((options) => options.map((option) => ({
+    id: option.value, label: option.textContent.replace(/^\d+\.\s*/, '').trim()
+  })))
+  assert.deepEqual(customParticipants.map(({ label }) => label), ['김 변호사', '박 의뢰인'])
+  await speakerPicker.selectOption(customParticipants[0].id)
+  await composer.fill('앞선 상담에서 계약 해제를 논의했습니다.')
+  await submit.click()
+  await diarizeToggle.check()
+  const customRequestIndex = await app.evaluate(() => globalThis.__hearingTranscriptions.length)
+  await dictationButton.click()
+  await shellPanel.locator('.hearing-dictation-btn.recording').waitFor()
+  await dictationButton.click()
+  await messages.last().getByRole('status').waitFor()
+  const customContext = await resolveDictation(customRequestIndex, { ok: true, segments: [
+    { speaker: 'A', text: '김 변호사입니다. 지난 상담을 이어가겠습니다.', start: 0, end: 3,
+      participantId: customParticipants[0].id, participantSource: 'context' },
+    { speaker: 'B', text: '박 의뢰인입니다. 계약서를 가져왔습니다.', start: 3, end: 6,
+      participantId: customParticipants[1].id, participantSource: 'context' },
+    { speaker: 'C', text: '박 의뢰인입니다. 대금도 지급했습니다.', start: 7, end: 10,
+      participantId: customParticipants[1].id, participantSource: 'context' }
+  ] })
+  assert.deepEqual(customContext.participants, customParticipants)
+  assert.deepEqual(customContext.recentDialogue, [{ speakerId: customParticipants[0].id, text: '앞선 상담에서 계약 해제를 논의했습니다.' }])
+  await shellPanel.getByRole('combobox', { name: '참여자 확인 1 일괄 지정' }).waitFor()
+  assert.equal(await speakerPicker.locator('option').count(), 2)
+  assert.deepEqual(await messages.getByRole('combobox').evaluateAll((inputs) => inputs.map((input) => input.value)),
+    [customParticipants[0].id, customParticipants[0].id, customParticipants[1].id, customParticipants[1].id])
+  await shellPanel.locator('.hearing-detected-speakers').scrollIntoViewIfNeeded()
+  await page.screenshot({ path: '/tmp/legal-terminal-declared-participants-check.png' })
+  for (const target of [customParticipants[0].id, customParticipants[1].id, customParticipants[1].id]) {
+    await shellPanel.getByRole('combobox', { name: '참여자 확인 1 일괄 지정' }).selectOption(target)
+  }
+  assert.equal(await shellPanel.locator('.hearing-detected-speakers select').count(), 0)
+  await page.waitForTimeout(1100)
+  const savedCustomRecord = await app.evaluate(() => JSON.parse(globalThis.__hearingWrites.at(-1).content))
+  assert.deepEqual(savedCustomRecord.speakers.map(({ id, label }) => ({ id, label })), customParticipants)
+  assert.ok(savedCustomRecord.entries.every((entry) => !entry.participantSource))
+  console.log('custom participant names and recent confirmed conversation are sent, reused, confirmed, and saved without extra speakers')
 
   await page.locator('.activity-item[title*="새 사건 추가"]').click()
   await page.locator('.new-case-recent-row', { hasText: recent.name }).click()

@@ -1,6 +1,6 @@
 {
   "name": "legal-terminal",
-  "version": "0.1.264",
+  "version": "0.1.265",
   "description": "대한민국 송무 변호사를 위한 AI 통합 작업환경 — Claude Code + 준비서면 에디터 + 전자소송기록 뷰어 + 사건 대시보드 + 원격(SSH) 작업",
   "main": "./out/main/index.js",
   "author": "lawpid",
@@ -77,7 +77,7 @@
     "verify:case-management-app": "node scripts/verify-case-management-app.mjs && node scripts/verify-todo-app.mjs && node scripts/verify-case-management-ui.mjs && node scripts/verify-hearing-followups.mjs",
     "verify:desktop": "node scripts/verify-nsis-user-path.mjs && node scripts/verify-installed-windows-cleanup.mjs && npm run typecheck && npm run verify:hearing-diarization && npm run verify:agent-runtime && npm run verify:todo-summary && npm run verify:todo-files && npm run verify:agent-case-context && npm run verify:agent-mcp && npm run verify:agent-todo && npm run verify:inline-selection && npm run verify:case-management && npm run verify:node-pty && npm run build && npm run verify:case-management-app",
     "verify:installed-windows": "node scripts/verify-installed-windows.mjs",
-    "verify:hearing-diarization": "node --experimental-strip-types --no-warnings scripts/verify-hearing-diarization.mjs",
+    "verify:hearing-diarization": "node --experimental-strip-types --no-warnings scripts/verify-hearing-diarization.mjs && npm run verify:hearing-participants && npm run verify:speaker-reference-audio",
     "verify:media": "node --experimental-strip-types --no-warnings scripts/verify-media.mjs",
     "verify:media-backend": "node scripts/verify-media-backend.mjs",
     "verify:media-viewer": "node scripts/verify-media-viewer.mjs",
@@ -105,7 +105,9 @@
     "verify:filetree-state": "node scripts/verify-filetree-state.mjs",
     "verify:editor-refresh": "node scripts/verify-editor-refresh.mjs",
     "verify:detached-window": "node scripts/verify-app-dialog-cancellation.mjs && node scripts/verify-detached-agent-window.mjs",
-    "verify:document-agent-memory-ui": "node scripts/verify-document-agent-memory-ui.mjs"
+    "verify:document-agent-memory-ui": "node scripts/verify-document-agent-memory-ui.mjs",
+    "verify:hearing-participants": "node --experimental-strip-types --no-warnings scripts/verify-hearing-participants.mjs",
+    "verify:speaker-reference-audio": "node --experimental-strip-types --no-warnings scripts/verify-speaker-reference-audio.mjs"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.3.270",

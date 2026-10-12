@@ -6,12 +6,13 @@ import {
   useState,
   type KeyboardEvent
 } from 'react'
-import type { JsHearing, JsTodo } from '../env'
+import type { DictationSegment, JsHearing, JsTodo } from '../env'
 import { TodoDialog } from '../dashboard/TodoDetails'
 import { setTodoDate } from '../../../shared/todoSummary'
 import { isCommittedEnter, isImeComposing } from '../ime'
 import { insertDictationText, isDictationShortcut } from './dictationText'
 import { shouldKeepPendingRecord } from './loadPolicy'
+import { extractSpeakerReferences } from './speakerReferenceAudio'
 
 type SpeakerRole = 'court' | 'plaintiff' | 'defendant' | 'preparation' | 'other'
 type SaveStatus = 'idle' | 'saving' | 'saved' | 'error'
@@ -56,7 +57,8 @@ interface HearingEntry {
   text: string
   createdAt: string
   important?: boolean
-  recording?: { id: string; start: number; end: number }
+  recording?: { id: string; start: number; end: number; speakerKey?: string }
+  participantSource?: 'context'
   dictation?: { status: 'transcribing' | 'error'; message: string }
 }
 
@@ -394,11 +396,15 @@ function recordHasContent(record: HearingRecordData): boolean {
 
 function mergePendingRecord(
   loaded: HearingRecordData,
-  pending: HearingRecordData
+  pending: HearingRecordData,
+  removedSpeakerIds: ReadonlySet<string> = new Set()
 ): HearingRecordData {
-  const speakerIds = new Set(loaded.speakers.map((speaker) => speaker.id))
+  const pendingSpeakerIds = new Set(pending.speakers.map((speaker) => speaker.id))
+  const loadedSpeakers = loaded.speakers.filter((speaker) =>
+    !removedSpeakerIds.has(speaker.id) || pendingSpeakerIds.has(speaker.id))
+  const speakerIds = new Set(loadedSpeakers.map((speaker) => speaker.id))
   const speakers = withSequentialShortcuts([
-    ...loaded.speakers,
+    ...loadedSpeakers,
     ...pending.speakers.filter((speaker) => !speakerIds.has(speaker.id))
   ])
   const mergeById = <T extends { id: string },>(saved: T[], added: T[]): T[] => {
@@ -424,7 +430,7 @@ function mergePendingRecord(
     // 파일을 읽는 동안 완료된 전사문을 이전 전사 상태로 덮어쓰지 않는다.
     entries: mergeById(loaded.entries.flatMap((entry) => entry.dictation
       ? recordingEntries.get(entry.id) ?? [pendingEntries.get(entry.id) ?? entry]
-      : [entry]), pending.entries),
+      : [pendingEntries.get(entry.id) ?? entry]), pending.entries),
     result: {
       status: pending.result.status || loaded.result.status,
       nextDate: pending.result.nextDate || loaded.result.nextDate,
@@ -437,6 +443,117 @@ function mergePendingRecord(
     },
     updatedAt: new Date().toISOString(),
     jsSync: loaded.jsSync
+  }
+}
+
+function selectSpeakerReferences(
+  record: HearingRecordData,
+  samples: ReadonlyMap<string, Uint8Array>,
+  includePending = false
+) {
+  const entries = new Map(record.entries.map((entry) => [entry.id, entry]))
+  const speakers = new Map(record.speakers.map((speaker) => [speaker.id, speaker]))
+  const candidates = [...samples].flatMap(([entryId, audio]) => {
+    const entry = entries.get(entryId)
+    if (!entry) return []
+    const speaker = speakers.get(entry.speakerId)
+    const pending = !speaker || entry.participantSource === 'context'
+    if (pending && (!includePending || !entry.recording?.speakerKey)) return []
+    return [{ entryId, audio, groupId: pending ? entry.recording!.speakerKey! : speaker!.id,
+      participantId: !pending && !speaker!.detected ? speaker!.id : undefined,
+      priority: pending ? 2 : speaker!.detected ? 1 : 0 }]
+  }).sort((a, b) => a.priority - b.priority || b.audio.length - a.audio.length)
+  const seen = new Set<string>()
+  return candidates.filter(({ groupId }) => {
+    if (seen.has(groupId)) return false
+    seen.add(groupId)
+    return true
+  }).slice(0, 4).map(({ entryId, audio, participantId }, index) => ({ entryId, audio, participantId, name: `speaker_${index}` }))
+}
+
+function speakerAssignmentGroups(record: HearingRecordData) {
+  const existingIds = new Set(record.speakers.map((speaker) => speaker.id))
+  const groups = new Map(record.speakers.filter((speaker) => speaker.detected)
+    .map((speaker) => [speaker.id, { id: speaker.id, label: speaker.label, suggestedId: '', preview: '' }]))
+  let number = 1
+  for (const entry of record.entries) {
+    const key = entry.recording?.speakerKey
+    if (!key || (existingIds.has(entry.speakerId) && entry.participantSource !== 'context') || groups.has(key)) continue
+    groups.set(key, { id: key, label: `참여자 확인 ${number++}`, suggestedId: entry.speakerId, preview: entry.text.slice(0, 48) })
+  }
+  return [...groups.values()]
+}
+
+function applyDiarizedTranscript(
+  current: HearingRecordData,
+  entryId: string,
+  startedAt: number,
+  segments: DictationSegment[],
+  references: { name: string; entryId: string }[],
+  participantIds = current.speakers.filter((speaker) => !speaker.detected).map((speaker) => speaker.id)
+): HearingRecordData {
+  if (!current.entries.some((item) => item.id === entryId)) return current
+  const detectedIds = [...new Set(segments.map((segment) => segment.speaker))]
+  const existingIds = new Set(current.speakers.map((speaker) => speaker.id))
+  const declaredIds = new Set(current.speakers.filter((speaker) => !speaker.detected).map((speaker) => speaker.id))
+  const constrained = participantIds.length > 0 || declaredIds.size > 0
+  const speakerKeys = new Map(detectedIds.map((id, index) => [id, `${entryId}-speaker-${index}`]))
+  const contextualIds = new Map<string, string>()
+  for (const segment of segments) {
+    if (segment.participantSource !== 'context' || !segment.participantId) continue
+    const previous = contextualIds.get(segment.speaker)
+    contextualIds.set(segment.speaker, previous !== undefined && previous !== segment.participantId ? '' : segment.participantId)
+  }
+  const inferred = new Set<string>()
+  const speakerIds = new Map(detectedIds.map((id) => {
+    const reference = references.find((item) => item.name === id)
+    // Resolve references through current entries so user corrections made while waiting win.
+    const source = reference && current.entries.find((item) => item.id === reference.entryId)
+    if (source && source.participantSource !== 'context' && existingIds.has(source.speakerId) &&
+      (!constrained || declaredIds.has(source.speakerId))) return [id, source.speakerId]
+    const contextualId = contextualIds.get(id)
+    if (contextualId && participantIds.includes(contextualId) && declaredIds.has(contextualId)) {
+      inferred.add(id)
+      return [id, contextualId]
+    }
+    // A declared roster is closed: unresolved voices remain entries, not new participants.
+    return [id, constrained ? '' : speakerKeys.get(id)!]
+  }))
+  const usedLabels = new Set(current.speakers.map((speaker) => speaker.label))
+  let nextNumber = 1
+  const detected: HearingSpeaker[] = detectedIds.flatMap((id) => {
+    const speakerId = speakerIds.get(id)!
+    if (!speakerId || existingIds.has(speakerId)) return []
+    while (usedLabels.has(`화자 ${nextNumber}`)) nextNumber++
+    return [{ id: speakerId, label: `화자 ${nextNumber++}`, role: 'other', detected: true }]
+  })
+  const entries: HearingEntry[] = segments.map((segment, index) => ({
+    id: index === 0 ? entryId : `${entryId}-segment-${index}`,
+    speakerId: speakerIds.get(segment.speaker)!,
+    participantSource: inferred.has(segment.speaker) ? 'context' : undefined,
+    text: segment.text,
+    createdAt: new Date(startedAt + segment.start * 1000).toISOString(),
+    recording: { id: entryId, start: segment.start, end: segment.end, speakerKey: speakerKeys.get(segment.speaker) }
+  }))
+  return {
+    ...current,
+    speakers: withSequentialShortcuts([...current.speakers, ...detected]),
+    activeSpeakerId: current.activeSpeakerId || entries[0]?.speakerId || '',
+    entries: current.entries.flatMap((item) => item.id === entryId ? entries : [item])
+  }
+}
+
+function assignRecordSpeaker(current: HearingRecordData, sourceId: string, targetId: string): HearingRecordData {
+  if (sourceId === targetId || !current.speakers.some((speaker) => speaker.id === targetId)) return current
+  const existingIds = new Set(current.speakers.map((speaker) => speaker.id))
+  const matches = (entry: HearingEntry): boolean => entry.speakerId === sourceId ||
+    (entry.recording?.speakerKey === sourceId && (!existingIds.has(entry.speakerId) || entry.participantSource === 'context'))
+  if (!current.speakers.some((speaker) => speaker.id === sourceId) && !current.entries.some(matches)) return current
+  return {
+    ...current,
+    speakers: withSequentialShortcuts(current.speakers.filter((speaker) => speaker.id !== sourceId)),
+    activeSpeakerId: current.activeSpeakerId === sourceId ? targetId : current.activeSpeakerId,
+    entries: current.entries.map((entry) => matches(entry) ? { ...entry, speakerId: targetId, participantSource: undefined } : entry)
   }
 }
 
@@ -481,7 +598,8 @@ function buildReport(record: HearingRecordData): string {
     ? record.entries
         .map((entry) => {
           const speaker = speakerMap.get(entry.speakerId)
-          return `- ${formatTime(entry.createdAt)} ${speaker?.label ?? '사전준비'}: ${entry.text}${entry.dictation ? ` [${entry.dictation.message}]` : ''}`
+          const label = speaker?.label ?? (entry.recording?.speakerKey ? '참여자 확인 필요' : '사전준비')
+          return `- ${formatTime(entry.createdAt)} ${label}${entry.participantSource === 'context' ? ' [맥락 추정·확인 필요]' : ''}: ${entry.text}${entry.dictation ? ` [${entry.dictation.message}]` : ''}`
         })
         .join('\n')
     : '- 기록 없음'
@@ -704,9 +822,12 @@ export default function HearingRecordPanel({
   const recordingSessionRef = useRef({ diarize: false, startedAt: 0 })
   const pendingDictationsRef = useRef(new Set<string>())
   const deletedEntryIdsRef = useRef(new Set<string>())
-
+  const diarizationQueueRef = useRef(Promise.resolve())
+  // Keep at most four short samples in memory, tied to entries so corrections follow them.
+  const speakerReferencesRef = useRef(new Map<string, Uint8Array>())
   // ponytail: failed audio lives only in this record; use a sidecar file if recovery after closing is needed.
   const retryDictationsRef = useRef(new Map<string, () => Promise<void>>())
+  const removedSpeakerIdsRef = useRef(new Set<string>())
   const dictationSelectionRef = useRef({ value: '', start: 0, end: 0, message: '전사 중...' })
   // onSavedPath는 부모가 인라인으로 넘겨 렌더마다 바뀌므로 ref로 받아
   // saveRecord/flushAutoSave의 useCallback 재생성(→ 렌더마다 저장 루프)을 막는다.
@@ -719,6 +840,8 @@ export default function HearingRecordPanel({
   }, [])
 
   const speakers = record.speakers
+  const assignmentGroups = speakerAssignmentGroups(record)
+  const participants = speakers.filter((speaker) => !speaker.detected)
   const activeSpeaker =
     speakers.find((speaker) => speaker.id === record.activeSpeakerId) ?? speakers[0]
   const recordTitle = buildHearingRecordTitle(record.case, record.hearing)
@@ -733,6 +856,9 @@ export default function HearingRecordPanel({
     const entryIds = new Set(record.entries.map((entry) => entry.id))
     for (const id of retryDictationsRef.current.keys()) {
       if (!entryIds.has(id)) retryDictationsRef.current.delete(id)
+    }
+    for (const id of speakerReferencesRef.current.keys()) {
+      if (!entryIds.has(id)) speakerReferencesRef.current.delete(id)
     }
   }, [record])
 
@@ -807,6 +933,11 @@ export default function HearingRecordPanel({
       const request = async (): Promise<void> => {
         if (pendingDictationsRef.current.has(entry.id)) return
         pendingDictationsRef.current.add(entry.id)
+        const previousDiarization = diarizationQueueRef.current
+        let finishDiarization: (() => void) | undefined
+        if (session.diarize) {
+          diarizationQueueRef.current = new Promise<void>((resolve) => { finishDiarization = resolve })
+        }
         touch((current) => ({
           ...current,
           entries: current.entries.map((item) => item.id === entry.id
@@ -814,53 +945,59 @@ export default function HearingRecordPanel({
             : item)
         }))
         try {
+          if (session.diarize) await previousDiarization
+          if (!latestRecordRef.current.entries.some((item) => item.id === entry.id)) return
           const audio = new Uint8Array(await new Blob(chunks, { type: mimeType }).arrayBuffer())
           if (audio.byteLength === 0) throw new Error('녹음된 음성이 없습니다.')
           const speaker = currentRecord.speakers.find(
             (item) => item.id === currentRecord.activeSpeakerId
           )?.label
+          const contextRecord = session.diarize ? latestRecordRef.current : currentRecord
+          const participants = contextRecord.speakers.filter((item) => !item.detected)
+            .map(({ id, label }) => ({ id, label }))
+          const participantIds = participants.map((item) => item.id)
+          const references = session.diarize
+            ? selectSpeakerReferences(latestRecordRef.current, speakerReferencesRef.current)
+            : []
           const result = await window.lt.dictation.transcribe({
             audio,
             mimeType: mimeType || 'audio/webm',
             diarize: session.diarize,
+            knownSpeakers: session.diarize ? references.map(({ name, audio, participantId }) => ({ name, audio, participantId })) : undefined,
             context: {
-              court: currentRecord.case.court,
-              caseNumber: currentRecord.case.caseNumber,
-              caseName: currentRecord.case.caseName,
-              client: currentRecord.case.client,
-              opponent: currentRecord.case.opponent,
-              partyNames: currentRecord.case.partyNames,
-              speaker
+              court: contextRecord.case.court,
+              caseNumber: contextRecord.case.caseNumber,
+              caseName: contextRecord.case.caseName,
+              client: contextRecord.case.client,
+              opponent: contextRecord.case.opponent,
+              partyNames: contextRecord.case.partyNames,
+              speaker: session.diarize ? undefined : speaker,
+              participants: session.diarize ? participants : undefined,
+              recentDialogue: session.diarize ? contextRecord.entries
+                .filter((item) => !item.dictation && item.participantSource !== 'context' && participantIds.includes(item.speakerId))
+                .slice(-20).map((item) => ({ speakerId: item.speakerId, text: item.text.slice(0, 500) })) : undefined
             }
           })
           if (!result.ok) throw new Error(result.error || '전사 결과가 없습니다.')
           if (session.diarize) {
             const segments = result.segments
             if (!segments?.length) throw new Error('화자별 전사 결과가 없습니다.')
-            const detectedIds = [...new Set(segments.map((segment) => segment.speaker))]
-            const speakerIds = new Map(detectedIds.map((id, index) => [id, `${entry.id}-speaker-${index}`]))
-            const entries: HearingEntry[] = segments.map((segment, index) => ({
-              id: index === 0 ? entry.id : `${entry.id}-segment-${index}`,
-              speakerId: speakerIds.get(segment.speaker)!,
-              text: segment.text,
-              createdAt: new Date(session.startedAt + segment.start * 1000).toISOString(),
-              recording: { id: entry.id, start: segment.start, end: segment.end }
-            }))
-            touch((current) => {
-              if (!current.entries.some((item) => item.id === entry.id)) return current
-              const usedLabels = new Set(current.speakers.map((speaker) => speaker.label))
-              let nextNumber = 1
-              const detected: HearingSpeaker[] = detectedIds.map((id) => {
-                while (usedLabels.has(`화자 ${nextNumber}`)) nextNumber++
-                const label = `화자 ${nextNumber++}`
-                return { id: speakerIds.get(id)!, label, role: 'other', detected: true }
+            const samples = await extractSpeakerReferences(audio, segments)
+            // Install entries and samples together before releasing the next queued recording.
+            await new Promise<void>((resolve) => {
+              touch((current) => {
+                const next = applyDiarizedTranscript(current, entry.id, session.startedAt, segments, references, participantIds)
+                const entryIds = new Set(next.entries.map((item) => item.id))
+                for (const sample of samples) {
+                  const sampleEntryId = sample.segmentIndex === 0 ? entry.id : `${entry.id}-segment-${sample.segmentIndex}`
+                  if (entryIds.has(sampleEntryId)) speakerReferencesRef.current.set(sampleEntryId, sample.audio)
+                }
+                // Keep pending samples for manual confirmation, without sending them as known voices.
+                speakerReferencesRef.current = new Map(selectSpeakerReferences(next, speakerReferencesRef.current, true)
+                  .map((reference) => [reference.entryId, reference.audio]))
+                resolve()
+                return next
               })
-              return {
-                ...current,
-                speakers: withSequentialShortcuts([...current.speakers, ...detected]),
-                activeSpeakerId: current.activeSpeakerId || detected[0].id,
-                entries: current.entries.flatMap((item) => item.id === entry.id ? entries : [item])
-              }
             })
             retryDictationsRef.current.delete(entry.id)
             return
@@ -889,6 +1026,7 @@ export default function HearingRecordPanel({
           }))
         } finally {
           pendingDictationsRef.current.delete(entry.id)
+          finishDiarization?.()
         }
       }
       retryDictationsRef.current.set(entry.id, request)
@@ -1100,7 +1238,11 @@ export default function HearingRecordPanel({
     async (path: string): Promise<void> => {
       const previousPath = loadedPathRef.current
       const keepPending = shouldKeepPendingRecord(previousPath, path)
-      if (!keepPending) deletedEntryIdsRef.current.clear()
+      if (!keepPending) {
+        deletedEntryIdsRef.current.clear()
+        removedSpeakerIdsRef.current.clear()
+        speakerReferencesRef.current.clear()
+      }
       loadedPathRef.current = path
       updateLoadState('loading')
       const stat = await window.lt.fs
@@ -1141,7 +1283,7 @@ export default function HearingRecordPanel({
         loaded.entries = loaded.entries.filter((entry) => !deletedEntryIdsRef.current.has(entry.id))
         const pending = latestRecordRef.current
         const hasPending = keepPending && (recordHasContent(pending) || deletedEntryIdsRef.current.size > 0)
-        const next = hasPending ? mergePendingRecord(loaded, pending) : loaded
+        const next = hasPending ? mergePendingRecord(loaded, pending, removedSpeakerIdsRef.current) : loaded
         lastSavedSourceStampRef.current = hasPending ? '' : next.updatedAt
         latestRecordRef.current = next
         setRecord(next)
@@ -1174,6 +1316,8 @@ export default function HearingRecordPanel({
 
   useEffect(() => {
     if (initialPath || loadedPathRef.current) return
+    speakerReferencesRef.current.clear()
+    removedSpeakerIdsRef.current.clear()
     setRecord(createInitialRecord(initialCase, initialHearing))
     setRecordPath(undefined)
   }, [initialCase, initialHearing, initialPath])
@@ -1252,6 +1396,8 @@ export default function HearingRecordPanel({
       }
     }
     deletedEntryIdsRef.current.clear()
+    removedSpeakerIdsRef.current.clear()
+    speakerReferencesRef.current.clear()
     lastSavedSourceStampRef.current = ''
     if (nextPath) loadedPathRef.current = nextPath
     setRecord(next)
@@ -1336,6 +1482,7 @@ export default function HearingRecordPanel({
   }
 
   const removeSpeaker = (speakerId: string): void => {
+    removedSpeakerIdsRef.current.add(speakerId)
     touch((current) => {
       const index = current.speakers.findIndex((speaker) => speaker.id === speakerId)
       if (index < 0) return current
@@ -1369,17 +1516,9 @@ export default function HearingRecordPanel({
 
   const assignDetectedSpeaker = (sourceId: string, targetId: string): void => {
     if (sourceId === targetId) return
-    touch((current) => {
-      if (!current.speakers.some((speaker) => speaker.id === targetId)) return current
-      return {
-        ...current,
-        speakers: withSequentialShortcuts(current.speakers.filter((speaker) => speaker.id !== sourceId)),
-        activeSpeakerId: current.activeSpeakerId === sourceId ? targetId : current.activeSpeakerId,
-        entries: current.entries.map((entry) => entry.speakerId === sourceId
-          ? { ...entry, speakerId: targetId }
-          : entry)
-      }
-    })
+    if (!latestRecordRef.current.speakers.some((speaker) => speaker.id === targetId)) return
+    removedSpeakerIdsRef.current.add(sourceId)
+    touch((current) => assignRecordSpeaker(current, sourceId, targetId))
   }
 
   const addRequest = (text: string): void => {
@@ -1876,19 +2015,20 @@ export default function HearingRecordPanel({
             <span>진행 메모</span>
             <small>Enter 저장 · Tab 화자 전환 · ↑ 직전 수정</small>
           </div>
-          {speakers.some((speaker) => speaker.detected) && (
+          {assignmentGroups.length > 0 && (
             <div className="hearing-detected-speakers">
-              <small>화자 지정 · 같은 화자의 발언 전체에 적용</small>
-              {speakers.filter((speaker) => speaker.detected).map((speaker) => (
-                <label key={speaker.id}>
-                  {speaker.label}
+              <small>{participants.length ? '참여자 확인 · 선택하면 같은 목소리의 발언 전체에 적용' : '화자 지정·합치기 · 같은 사람이 나뉘면 하나로 합치세요'}</small>
+              {assignmentGroups.map((group) => (
+                <label key={group.id} title={group.preview}>
+                  {group.label}{group.preview && ` · ${group.preview}`}
                   <select
-                    aria-label={`${speaker.label} 일괄 지정`}
-                    value={speaker.id}
-                    onChange={(event) => assignDetectedSpeaker(speaker.id, event.currentTarget.value)}
+                    aria-label={`${group.label} 일괄 지정`}
+                    value={group.id}
+                    onChange={(event) => assignDetectedSpeaker(group.id, event.currentTarget.value)}
                   >
-                    <option value={speaker.id}>미지정</option>
-                    {speakers.filter((target) => !target.detected).map((target) => (
+                    <option value={group.id}>{group.suggestedId
+                      ? `${speakers.find((item) => item.id === group.suggestedId)?.label ?? '참여자'} (맥락 추정)` : '참여자 선택'}</option>
+                    {(participants.length ? participants : speakers).filter((target) => target.id !== group.id).map((target) => (
                       <option key={target.id} value={target.id}>{target.label}</option>
                     ))}
                   </select>
@@ -1919,17 +2059,18 @@ export default function HearingRecordPanel({
                         aria-label="발화자 수정"
                         value={speaker?.id ?? ''}
                         onChange={(event) =>
-                          updateEntry(entry.id, { speakerId: event.currentTarget.value })
+                          updateEntry(entry.id, { speakerId: event.currentTarget.value, participantSource: undefined })
                         }
                         disabled={speakers.length === 0}
                       >
-                        {!speaker && <option value="">사전준비</option>}
+                        {!speaker && <option value="">{entry.recording?.speakerKey ? '참여자 확인 필요' : '사전준비'}</option>}
                         {speakers.map((item) => (
                           <option key={item.id} value={item.id}>
                             {item.label}
                           </option>
                         ))}
                       </select>
+                      {entry.participantSource === 'context' && <span title="대화 내용으로 추정한 참여자입니다. 위 참여자 확인에서 확정할 수 있습니다.">맥락 추정·확인 필요</span>}
                       <button
                         type="button"
                         className="hearing-small-btn"
@@ -2099,7 +2240,7 @@ export default function HearingRecordPanel({
           </label>
           <span>
             {diarize
-              ? '한 번 녹음 → 정지 후 화자별 텍스트 저장 · 화자 이름은 직접 지정 · 최대 80분 · '
+              ? '등록 참여자·최근 대화 참고 · 불명확한 참여자는 직접 확인 · 목소리 참고는 이 기록을 열어 둔 동안 최대 4명 · 최대 80분 · '
               : 'Ctrl/Cmd+Shift+D: 시작·정지 · 정지 후 대화목록에서 전사 · 바로 다음 입력 가능 · '}
             음성은 OpenAI API로 전송
             · 관련 법령·고지 절차 확인
