@@ -86,6 +86,7 @@ jobs:
         run: |
           npm run verify:remote-agent-transport
           npm run verify:agent-remote-recovery
+          npm run verify:agent-missing-session
           npm run verify:agent-restored-history
           npm run verify:agent-progress
           npm run verify:agent-auth-queue
@@ -156,6 +157,9 @@ jobs:
 
       - name: Verify restored Agent history
         run: npm run verify:agent-restored-history
+
+      - name: Verify fresh remote Claude session recovery
+        run: npm run verify:agent-missing-session
 
       - name: Verify HTML selection and quoting
         run: npm run verify:html-quote

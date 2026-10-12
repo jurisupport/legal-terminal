@@ -117,6 +117,7 @@ interface AgentSession {
   permissionMode: AgentPermissionMode
   resumeSessionId?: string
   freshSession?: boolean
+  claudeFreshConversation?: boolean
   tools?: string[]
   allowedTools?: string[]
   disallowedTools?: string[]
@@ -383,6 +384,7 @@ function restoreRemoteSession(session: AgentSession, retryDelay = 3000): void {
         return
       }
       const meta = info.metadata
+      session.claudeFreshConversation = false
       if (meta.cwd !== session.cwd) throw new Error('저장된 원격 작업의 폴더가 현재 작업과 다릅니다.')
       if (session.workspaceContext?.kind === 'project') {
         if (meta.projectId !== session.workspaceContext.projectId || meta.clientRequired !== true) {
@@ -2763,6 +2765,10 @@ function handleSdkMessage(session: AgentSession, sdkMessage: unknown): void {
   emit(session, { type: 'raw', sessionId: session.id, message: sdkMessage })
   const message = asRecord(sdkMessage)
   if (!message) return
+  if (message.type === 'assistant' || message.type === 'user' || message.type === 'stream_event' ||
+    (message.type === 'result' && message.subtype === 'success' && message.is_error !== true)) {
+    session.claudeFreshConversation = false
+  }
 
   const authError = message.type === 'assistant' || message.type === 'auth_status'
     ? stringValue(message.error)
@@ -4050,16 +4056,21 @@ function handleRemoteControlRequest(session: AgentSession, messageValue: unknown
   return true
 }
 
+function isMissingClaudeSessionError(message: string): boolean {
+  return /^(?:Error: )?No conversation found with session ID:\s*\S+\s*$/im.test(message)
+}
+
 function runRemoteAgentMessage(
   session: AgentSession,
   prompt: string,
   abortController: AbortController,
-  restoring?: RemoteAgentRunInfo
+  restoring?: RemoteAgentRunInfo,
+  allowFreshRetry = true
 ): Promise<void> {
   const ssh = session.ssh
   if (!ssh) throw new Error('원격 Agent 세션에 SSH 연결 정보가 없습니다.')
 
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     const proc = new RemoteAgentTransport({ ...remoteOptions(session),
       ...(restoring ? { runId: restoring.runId } : { command: remoteClaudeCommand(session), metadata: session.remoteRunMetadata }) })
     session.remoteProcess = proc
@@ -4068,6 +4079,8 @@ function runRemoteAgentMessage(
     let stdoutBuffer = ''
     let stderrBuffer = ''
     let sawJson = false
+    let missingSessionResult: string | undefined
+    let processFailed = false
     let contextRequestId: string | undefined
     let contextTimer: ReturnType<typeof setTimeout> | undefined
     let sawResult = false
@@ -4174,6 +4187,31 @@ function runRemoteAgentMessage(
       resolve()
     })
 
+    const handleLine = (line: string, closed = false): void => {
+      // Startup failures can arrive in both result JSON and stderr; report them once on close.
+      try {
+        const message = asRecord(JSON.parse(line))
+        if (message?.type === 'result' && (message.is_error === true || message.subtype !== 'success')) {
+          const error = [stringValue(message.result), ...stringArrayValue(message.errors)].filter(Boolean).join('\n')
+          if (isMissingClaudeSessionError(error)) {
+            missingSessionResult = error
+            endRemoteInput()
+            return
+          }
+        }
+      } catch {
+        /* Non-JSON output is handled by the normal stream parser. */
+      }
+      if (line.trim()) sawJson = true
+      const message = handleRemoteJsonLine(session, line)
+      if (closed) {
+        if (message?.type === 'result') endRemoteInput()
+      } else {
+        handleMcpBootstrap(message)
+        handleRemoteUsageMessage(message)
+      }
+    }
+
     proc.stdout.on('data', (chunk: Buffer) => {
       if (abortController.signal.aborted || session.running !== abortController) return
       stdoutBuffer += chunk.toString('utf8')
@@ -4181,10 +4219,7 @@ function runRemoteAgentMessage(
       stdoutBuffer = lines.pop() ?? ''
       for (const line of lines) {
         if (abortController.signal.aborted || session.running !== abortController) return
-        if (line.trim()) sawJson = true
-        const message = handleRemoteJsonLine(session, line)
-        handleMcpBootstrap(message)
-        handleRemoteUsageMessage(message)
+        handleLine(line)
       }
     })
 
@@ -4193,6 +4228,7 @@ function runRemoteAgentMessage(
     })
 
     proc.on('error', (error) => {
+      processFailed = true
       if (abortController.signal.aborted) return
       rejectPendingPermissions(session, '원격 Claude 프로세스 오류로 권한 요청이 취소되었습니다.')
       emit(session, {
@@ -4210,23 +4246,33 @@ function runRemoteAgentMessage(
       if (contextTimer) clearTimeout(contextTimer)
       if (session.remoteProcess === proc) session.remoteProcess = undefined
       abortController.signal.removeEventListener('abort', stopRemote)
-      if (abortController.signal.aborted || session.running !== abortController) {
+      if (abortController.signal.aborted || session.running !== abortController || session.detached || processFailed) {
         resolve()
         return
       }
       if (stdoutBuffer.trim()) {
-        sawJson = true
-        const message = handleRemoteJsonLine(session, stdoutBuffer)
-        if (message?.type === 'result') endRemoteInput()
+        handleLine(stdoutBuffer, true)
         stdoutBuffer = ''
       }
       rejectPendingPermissions(session, '원격 Claude 프로세스가 종료되었습니다.')
-      if (code !== 0 || signal) {
+      const failure = missingSessionResult ?? stderrBuffer.trim()
+      if (!restoring && allowFreshRetry && session.claudeFreshConversation &&
+        session.assistantMessages.size === 0 && session.startedTools.size === 0 &&
+        !sawJson && !signal && isMissingClaudeSessionError(failure)) {
+        // An init ID can outlive a first run that stopped before Claude saved its transcript.
+        session.resumeSessionId = undefined
+        session.freshSession = true
+        emitProcessEvent(session, 'claude-session-recovery', '새 대화 다시 시작',
+          '첫 대화 기록이 저장되지 않아 같은 요청으로 다시 시작합니다.', 'completed')
+        void runRemoteAgentMessage(session, prompt, abortController, undefined, false).then(resolve, reject)
+        return
+      }
+      if (code !== 0 || signal || missingSessionResult) {
         emit(session, {
           type: 'error',
           sessionId: session.id,
           message:
-            stderrBuffer.trim() ||
+            failure ||
             `원격 Claude 종료: code=${code}${signal ? ` signal=${signal}` : ''}`,
           recoverable: true
         })
@@ -4680,6 +4726,7 @@ export function createAgentSession(opts: AgentCreateOptions, webContents: WebCon
     model: opts.model,
     permissionMode: opts.permissionMode ?? 'ask',
     resumeSessionId: opts.resumeSessionId,
+    claudeFreshConversation: provider === 'claude' && !opts.resumeSessionId,
     codexThreadId: provider === 'codex' ? opts.resumeSessionId : undefined,
     tools: opts.tools,
     allowedTools: opts.allowedTools,
