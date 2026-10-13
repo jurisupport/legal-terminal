@@ -70,6 +70,9 @@ jobs:
       - name: Verify desktop and case-management runtime
         run: npm run verify:desktop
 
+      - name: Verify general questions and phone-compatible conversations
+        run: npm run verify:general-chat && npm run verify:general-chat-ui
+
       - name: Verify detached conversation windows
         run: npm run verify:detached-window
 
@@ -110,6 +113,7 @@ jobs:
           name: release-runtime-macos-${{ matrix.arch }}
           path: |
             .omx/screenshots/**
+            .omx/state/general-chat-preview/**
             output/playwright/html-quote/**
             output/playwright/document-agent-memory/**
           if-no-files-found: warn
@@ -150,6 +154,9 @@ jobs:
       - name: Verify desktop and case-management runtime
         run: npm run verify:desktop
 
+      - name: Verify general questions and phone-compatible conversations
+        run: npm run verify:general-chat && npm run verify:general-chat-ui
+
       - name: Verify detached conversation windows
         run: npm run verify:detached-window
 
@@ -186,6 +193,7 @@ jobs:
           name: release-runtime-windows-x64
           path: |
             .omx/screenshots/**
+            .omx/state/general-chat-preview/**
             output/playwright/html-quote/**
             output/playwright/document-agent-memory/**
           if-no-files-found: warn

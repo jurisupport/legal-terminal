@@ -314,6 +314,11 @@ const globalSuggestions = [
   { label: '완료 근거 확인', prompt: '같은 사건의 자료로 완료를 확인할 수 있는 할일 후보와 근거를 보여줘. 상태는 바꾸지 말아줘.' },
   { label: '앞으로 7일', prompt: '한국 시간 기준 오늘부터 앞으로 7일 안의 기일과 기한을 정리해줘.' }
 ]
+const generalSuggestions = [
+  { label: '개념 설명', prompt: '궁금한 개념을 쉽게 이해하고 싶어. 주제를 물어봐 줘.' },
+  { label: '글 다듬기', prompt: '글을 자연스럽고 명확하게 다듬고 싶어. 원문을 요청해 줘.' },
+  { label: '아이디어 정리', prompt: '생각을 정리하고 싶어. 어떤 주제인지 먼저 물어봐 줘.' }
+]
 const folderSuggestions = [
   { label: '폴더 내용 정리', prompt: '현재 폴더의 자료를 살펴보고 확인된 내용과 아직 확인할 내용을 정리해줘.' },
   { label: '다음 작업', prompt: '현재 폴더에서 진행하던 작업과 다음 할 일을 정리해줘.' }
@@ -1937,6 +1942,7 @@ export default function AgentPanel({
   onPrepareAttachment,
   onInlineActions
 }: AgentPanelProps): JSX.Element {
+  const isGeneralChat = workspaceContext?.kind === 'global' && workspaceContext.todoManagement === undefined
   const usesClaudeRemoteAuth = Boolean(ssh) && provider === 'claude'
   const usesAgentAuth = provider === 'claude' || provider === 'codex'
   const [items, setItems] = useState<TimelineItem[]>([])
@@ -3784,7 +3790,11 @@ export default function AgentPanel({
         <div className="agent-title">
           <span className="agent-title-main">{title}</span>
           <span className="agent-title-sub" title={cwd}>
-            {cwd}
+            {isGeneralChat
+              ? ssh
+                ? provider === 'claude' ? `폰과 이어쓰기 · 같은 서버 ${ssh.host}` : 'Codex 대화 · PC에서 이어쓰기'
+                : '이 컴퓨터에서 대화합니다'
+              : cwd}
           </span>
         </div>
         <div className="agent-head-actions">
@@ -3888,10 +3898,12 @@ export default function AgentPanel({
               <div className="agent-empty-icon" aria-hidden="true">
                 <IconClaude size={30} />
               </div>
-              <div className="agent-empty-title">{workspaceContext?.kind === 'project' ? '프로젝트 AI 작업' : `${agentLabel} Agent`}</div>
+              <div className="agent-empty-title">{isGeneralChat ? '무엇이 궁금하신가요?' : workspaceContext?.kind === 'project' ? '프로젝트 AI 작업' : `${agentLabel} Agent`}</div>
               <div className="agent-empty-sub">
                 {pendingHandoff
                   ? `이전 대화 ${pendingHandoff.count}개 메시지를 이어받았습니다. 하던 이야기를 그대로 이어서 지시하세요.`
+                  : isGeneralChat
+                    ? '사건이나 폴더를 선택하지 않고 바로 질문하세요. 궁금한 점, 글쓰기, 아이디어 정리를 도와드립니다.'
                   : workspaceContext?.kind === 'project'
                     ? '목표·메모·연결된 사건과 폴더를 함께 참고합니다. 근거는 출처별로 구분하고 접근할 수 없는 자료는 따로 알려드립니다.'
                   : workspaceContext?.kind === 'global'
@@ -3901,7 +3913,7 @@ export default function AgentPanel({
                       : '사건 폴더를 기반으로 검토·정리·초안 작업을 시킬 수 있습니다.'}
               </div>
               <div className="agent-empty-suggestions">
-                {(workspaceContext?.kind === 'project' ? projectSuggestions : workspaceContext?.kind === 'global' ? globalSuggestions : workspaceContext?.kind === 'folder' ? folderSuggestions : emptyStateSuggestions).map((suggestion) => (
+                {(isGeneralChat ? generalSuggestions : workspaceContext?.kind === 'project' ? projectSuggestions : workspaceContext?.kind === 'global' ? globalSuggestions : workspaceContext?.kind === 'folder' ? folderSuggestions : emptyStateSuggestions).map((suggestion) => (
                   <button
                     key={suggestion.label}
                     type="button"
@@ -4722,7 +4734,7 @@ export default function AgentPanel({
           <textarea
           ref={textareaRef}
           value={input}
-          placeholder={authActive ? `${agentLabel} 로그인 진행 중 · 입력은 미리 작성할 수 있습니다` : `${agentLabel}에게 요청 · @로 파일 첨부, /로 명령`}
+          placeholder={authActive ? `${agentLabel} 로그인 진행 중 · 입력은 미리 작성할 수 있습니다` : isGeneralChat ? '궁금한 점을 물어보세요' : `${agentLabel}에게 요청 · @로 파일 첨부, /로 명령`}
           onChange={(e) => {
             setInput(e.target.value)
             updateMentionFromTextarea(e.currentTarget)

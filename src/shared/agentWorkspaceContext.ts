@@ -1,3 +1,5 @@
+import { isGeneralChatDirectory } from './generalChat.ts'
+
 export type AgentContextKind = 'case' | 'global' | 'folder' | 'project'
 
 export interface AgentWorkspaceContext {
@@ -19,6 +21,7 @@ export interface AgentWorkspaceContext {
 
 export function resolveAgentContextKind(source: {
   contextKind?: AgentContextKind
+  cwd?: string
   projectId?: string
   jsId?: string
   caseNumber?: string
@@ -27,6 +30,7 @@ export function resolveAgentContextKind(source: {
   if (source.contextKind === 'project') return 'project'
   if (source.contextKind === 'global') return 'global'
   if (source.jsId || source.caseNumber || source.caseName || source.contextKind === 'case') return 'case'
+  if (isGeneralChatDirectory(source.cwd)) return 'global'
   return 'folder'
 }
 
@@ -48,7 +52,8 @@ export function buildAgentWorkspaceContext(context: AgentWorkspaceContext): stri
 - 새 산출물은 workingDirectory의 프로젝트 전용 작업 폴더에 저장하세요. 사용자가 요청한 범위를 넘어 연결 사건의 기록·서면을 일괄 수정하지 마세요.`
     : kind === 'global'
     ? `전체 작업 범위:
-- 특정 사건을 전제로 하지 않는 사건 횡단 작업입니다. 작업을 위해 사건 작성서류 폴더를 자동 생성하지 마세요.
+- 특정 사건을 전제로 하지 않는 대화입니다. 일반 질문은 질문 자체에 답하고, 사용자가 요청하지 않은 사건 조회나 폴더 탐색을 먼저 수행하지 마세요.
+- 작업을 위해 사건 작성서류 폴더를 자동 생성하지 마세요.
 - 항목별 사건 식별정보와 근거를 확인하고, 다른 사건의 자료를 혼합하지 마세요.
 - 제목이나 파일명만으로 할일을 완료·종료하거나 사건 연결을 바꾸지 마세요.`
     : kind === 'folder'

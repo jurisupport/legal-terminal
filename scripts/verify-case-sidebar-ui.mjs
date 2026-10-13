@@ -53,6 +53,8 @@ function runApp({ root, temp, screenshot }) {
   const real = new Set(['app:info', 'app:setWindowTitle', 'tabs:ready', 'caseManagement:get', 'caseManagement:update'])
   ipcMain.handle = (channel, handler) => handle(channel, async (event, ...args) => {
     calls.push({ channel, args })
+    // The user opens a case while the general-chat directory is still loading.
+    if (channel === 'app:generalChatDirectory') return new Promise(() => {})
     if (real.has(channel)) return handler(event, ...args)
     if (channel === 'setup:status') return { items: [], ready: true }
     if (channel === 'settings:get') return { sshProfiles: [activeProfile], notifyDone: false }

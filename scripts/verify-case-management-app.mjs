@@ -36,6 +36,8 @@ function runApp({ root, temp, chosenDir, screenshot }) {
   ipcMain.handle = (channel, handler) => register(channel, async (event, ...args) => {
     const call = { channel, args }
     calls.push(call)
+    // The user opens a case while the general-chat directory is still loading.
+    if (channel === 'app:generalChatDirectory') return new Promise(() => {})
     if (channel === 'workspace:autoLoad' && delayedLoad) { delayedLoad = false; await new Promise(resolve => { releaseLoad = resolve }) }
     if (realChannels.has(channel)) {
       const result = await handler(event, ...args)

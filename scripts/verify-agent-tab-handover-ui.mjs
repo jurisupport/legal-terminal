@@ -42,6 +42,8 @@ function runApp({ root, temp }) {
   const real = new Set(['app:info', 'app:setWindowTitle', 'tabs:ready', 'caseManagement:get', 'caseManagement:update'])
   ipcMain.handle = (channel, handler) => handle(channel, async (event, ...args) => {
     calls.push({ channel, args })
+    // The user opens a case while the general-chat directory is still loading.
+    if (channel === 'app:generalChatDirectory') return new Promise(() => {})
     if (real.has(channel)) return handler(event, ...args)
     if (channel === 'setup:status') return { items: [], ready: true }
     if (channel === 'settings:get') return { sshProfiles: [profile], notifyDone: false }
@@ -146,9 +148,9 @@ function runApp({ root, temp }) {
       await wait(() => evaluate(`document.body.innerText.includes('다른 컴퓨터의 새 대화')`))
       assert.equal(await evaluate(`[...document.querySelectorAll('.tab.active')].some(tab => tab.innerText.includes('폰에서 열린 대화'))`), true,
         'focus refresh keeps the existing active agent')
-      await evaluate(`document.querySelector('.activity-item[title^="사건탭"]').click()`)
+      await evaluate(`document.querySelector('.case-sidebar-trigger').click()`)
       await wait(() => evaluate(`document.body.innerText.includes('다른 컴퓨터의 사건')`))
-      await evaluate(`document.querySelector('.activity-item[title^="사건탭"]').click()`)
+      await evaluate(`document.querySelector('.case-sidebar-trigger').click()`)
       await evaluate(`[...document.querySelectorAll('.tab')].find(tab => tab.innerText.includes('빈 에이전트 탭')).querySelector('.tab-close').click(); window.dispatchEvent(new Event('focus'))`)
       await wait(() => !snapshot.terminals.some((tab) => tab.id === 'blank-agent'))
       assert.equal(await evaluate(`document.body.innerText.includes('빈 에이전트 탭')`), false,

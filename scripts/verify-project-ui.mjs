@@ -42,6 +42,8 @@ function runApp({ root, temp, screenshotDir, agentSmoke, claudeAuthSmoke, remote
   ipcMain.on = (channel, cb) => on(channel, channel.startsWith('fs:') || channel.startsWith('pty:') ? () => {} : cb)
   ipcMain.handle = (channel, handler) => handle(channel, async (event, ...args) => {
     calls.push({ channel, args })
+    // The user opens a project while the general-chat directory is still loading.
+    if (channel === 'app:generalChatDirectory') return new Promise(() => {})
     if (channel === 'projects:save' && failSave) throw Error('검증용 저장 실패')
     if (channel === 'projects:workspace' && remoteAgentSmoke) {
       const project = JSON.parse(fs.readFileSync(path.join(temp, 'profile', 'projects.json'), 'utf8')).projects.find(project => project.id === args[0])

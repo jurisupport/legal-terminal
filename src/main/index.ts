@@ -1,6 +1,7 @@
 import { openRemotionPreview, closeRemotionPreview, disposeRemotionPreviews } from './remotionPreview'
 import { registerFileDragIpc } from './fileDrag'
 import type { RemotionPreviewOptions } from '../shared/remotionPreview'
+import { GENERAL_CHAT_FOLDER } from '../shared/generalChat'
 import { MEDIA_SCHEME, copyCachedMedia, registerMediaIpc, registerMediaProtocol } from './media'
 import { normalizeMediaSelection, type MediaAskRequest } from '../shared/media'
 import { app, protocol, BrowserWindow, shell, ipcMain, dialog, screen, session, Menu, clipboard, Notification, powerMonitor, type WebContents } from 'electron'
@@ -716,6 +717,25 @@ ipcMain.handle('app:info', () => ({
     chrome: process.versions.chrome
   }
 }))
+
+ipcMain.handle('app:generalChatDirectory', async (_event, profileId?: string) => {
+  if (profileId) {
+    const profile = (await getSettings()).sshProfiles?.find((item) => item.id === profileId)
+    if (!profile) throw new Error('일반 질문에 사용할 원격 연결을 찾을 수 없습니다.')
+    const home = await listRemoteDir(profile, '~', { refresh: true })
+    if (!home.ok) throw new Error(home.error)
+    const directory = posix.join(home.cwd, GENERAL_CHAT_FOLDER)
+    try {
+      await rfsMkdir(makeRemote(profileId, home.cwd), GENERAL_CHAT_FOLDER)
+    } catch (error) {
+      if (!(await rfsStat(makeRemote(profileId, directory)).catch(() => null))?.isDir) throw error
+    }
+    return directory
+  }
+  const directory = join(app.getPath('home'), GENERAL_CHAT_FOLDER)
+  await mkdir(directory, { recursive: true })
+  return directory
+})
 
 // ── 수동 업데이트 확인 (설정화면) ──
 ipcMain.handle('update:check', () => checkUpdate())

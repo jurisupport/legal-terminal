@@ -21,6 +21,9 @@ async function electronCheck({ root, temp, output }) {
   fs.stat = (file, ...args) => frozenSource?.path === file ? Promise.resolve(frozenSource.info) : realStat(file, ...args)
   app.setPath('userData', path.join(temp, 'profile'))
   require(path.join(root, 'out/main/index.js'))
+  // The user opens media while the general-chat directory is still loading.
+  ipcMain.removeHandler('app:generalChatDirectory')
+  ipcMain.handle('app:generalChatDirectory', () => new Promise(() => {}))
   // No provider process or model request is created by the UI fixture.
   ipcMain.removeHandler('agent:create')
   let agentCreated = false

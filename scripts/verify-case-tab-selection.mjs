@@ -4,6 +4,7 @@ import vm from 'node:vm'
 import ts from 'typescript'
 import { closeTab } from '../src/renderer/src/tabSelection.ts'
 import { resolveAgentContextKind } from '../src/shared/agentWorkspaceContext.ts'
+import { isGeneralChatDirectory } from '../src/shared/generalChat.ts'
 
 const app = readFileSync(new URL('../src/renderer/src/App.tsx', import.meta.url), 'utf8')
 const parsed = ts.createSourceFile('App.tsx', app, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX)
@@ -22,13 +23,19 @@ function loadHandlers(names, context = {}) {
   }).join('\n') + `\n({ ${names.join(', ')} })`
   return vm.runInNewContext(ts.transpileModule(source, {
     compilerOptions: { target: ts.ScriptTarget.ES2022 }
-  }).outputText, context)
+  }).outputText, Object.assign(context, { isGeneralChatDirectory }))
 }
 const caseHelpers = [
   'safeHash', 'normalizedCasePathKey', 'caseProfileKey', 'caseIdentityKey', 'caseTabId', 'findCaseTab',
   'caseTabFromCurrentCase', 'currentCaseFromCaseTab', 'upsertCaseTab', 'mergeCaseTabs'
 ]
 const actual = loadHandlers(caseHelpers)
+const generalSource = { drafts: '/home/lawyer/legal-terminal-general', name: '일반 질문' }
+const generalId = actual.caseTabFromCurrentCase(generalSource).id
+const linkedGeneralA = actual.caseTabFromCurrentCase({ ...generalSource, meta: { jsId: 'case-a' } })
+const linkedGeneralB = actual.caseTabFromCurrentCase({ ...generalSource, meta: { jsId: 'case-b' } })
+assert.notEqual(linkedGeneralA.id, linkedGeneralB.id, 'explicit cases using the general directory remain separate')
+assert.notEqual(linkedGeneralA.id, generalId, 'general questions are not absorbed into an explicit case')
 const folderCase = { drafts: '/drafts/홍길동', name: '홍길동' }
 const linkedCase = { ...folderCase, meta: { jsId: 'case-1', caseNumber: '2026가단1' } }
 const globalCase = { ...folderCase, meta: { contextKind: 'global' } }

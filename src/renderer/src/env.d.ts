@@ -880,6 +880,7 @@ export interface LtApi {
       platform: string
       versions: { electron: string; node: string; chrome: string }
     }>
+    generalChatDirectory: (profileId?: string) => Promise<string>
     openExternal: (url: string) => Promise<void>
     openHtml: (path: string) => Promise<void>
     newWindow: (opts?: NewWindowOptions) => Promise<void>

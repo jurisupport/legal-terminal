@@ -104,6 +104,7 @@ import {
 } from './caseFolderMatch'
 import { mergeWorkspaceSessions } from './workspaceSessions'
 import { agentTabsOnly, isAgentTabClosed } from '../../shared/workspaceAgentTabs'
+import { isGeneralChatDirectory } from '../../shared/generalChat'
 import type {
   AppSettings,
   AgentAttachment,
@@ -1292,8 +1293,10 @@ const caseProfileKey = (source: CurrentCase): string =>
 
 const caseIdentityKey = (source: CurrentCase): string => {
   const profileKey = caseProfileKey(source)
-  if (source.meta?.contextKind === 'project') {
-    const id = `project:${source.meta.projectId ?? normalizedCasePathKey(source.drafts)}`
+  if (source.meta?.contextKind === 'project' || isGeneralChatDirectory(source.remotePath ?? source.drafts)) {
+    const id = source.meta?.contextKind === 'project'
+      ? `project:${source.meta.projectId ?? normalizedCasePathKey(source.drafts)}`
+      : `general:${profileKey}:${normalizedCasePathKey(source.remotePath ?? source.drafts)}:${source.meta?.jsId ?? ''}`
     return source.ssh ? `${id}:${profileKey}:${JSON.stringify([source.ssh.host, source.ssh.user, source.ssh.port ?? 22, source.ssh.identityFile ?? '', Boolean(source.ssh.remoteControl)])}:${normalizedCasePathKey(source.remotePath ?? source.drafts)}` : id
   }
   if (source.meta?.contextKind === 'global') return `global:${profileKey}:${normalizedCasePathKey(source.remotePath ?? source.drafts)}`
@@ -1317,7 +1320,7 @@ const findCaseTab = (
   const identity = caseIdentityKey(source)
   const path = normalizedCasePathKey(source.remotePath ?? source.drafts)
   const exact = tabs.find((tab) => caseIdentityKey(tab) === identity)
-  if (exact || source.meta?.contextKind === 'project') return exact
+  if (exact || source.meta?.contextKind === 'project' || isGeneralChatDirectory(source.remotePath ?? source.drafts)) return exact
   return tabs.find((tab) =>
     !!path &&
     (tab.meta?.contextKind === 'global') === (source.meta?.contextKind === 'global') &&
@@ -1744,6 +1747,11 @@ export default function App(): JSX.Element {
   const workspaceHostsRef = useRef(workspaceHostsSignature)
   workspaceHostsRef.current = workspaceHostsSignature
   const [workspaceSettingsReady, setWorkspaceSettingsReady] = useState(false)
+  const [generalChatDirectory, setGeneralChatDirectory] = useState('')
+  const [generalChatError, setGeneralChatError] = useState('')
+  const [generalChatRetry, setGeneralChatRetry] = useState(0)
+  const generalChatStartedRef = useRef(false)
+
   const [connMenu, setConnMenu] = useState(false)
   const [newCaseOpen, setNewCaseOpen] = useState(false)
   const [remotePick, setRemotePick] = useState<SshProfile | null>(null)
@@ -1834,6 +1842,19 @@ export default function App(): JSX.Element {
     window.addEventListener(SETTINGS_UPDATED_EVENT, onSettingsUpdated)
     return () => window.removeEventListener(SETTINGS_UPDATED_EVENT, onSettingsUpdated)
   }, [])
+
+  useEffect(() => {
+    if (docOnly || termOnly || !workspaceSettingsReady) return
+    let cancelled = false
+    setGeneralChatDirectory('')
+    setGeneralChatError('')
+    void window.lt.app.generalChatDirectory(caseOpenProfileId(caseOpenTarget)).then((directory) => {
+      if (!cancelled) setGeneralChatDirectory(directory)
+    }).catch((error) => {
+      if (!cancelled) setGeneralChatError(`일반 질문을 준비하지 못했습니다: ${String(error)}`)
+    })
+    return () => { cancelled = true }
+  }, [docOnly, termOnly, workspaceSettingsReady, caseOpenTarget, workspaceHostsSignature, generalChatRetry])
 
   useEffect(() => {
     const clearHideTimer = (): void => {
@@ -2745,7 +2766,7 @@ export default function App(): JSX.Element {
     }
     const sessionSource = currentCaseSessionSource(source, sshProfiles)
     preloadPastSessions(sessionSource?.cwd, sessionSource)
-    if (source.meta?.contextKind !== 'project') void window.lt.case.addHistory({
+    if (source.meta?.contextKind !== 'project' && !isGeneralChatDirectory(source.drafts)) void window.lt.case.addHistory({
       drafts: source.drafts,
       records: source.records,
       name: source.name
@@ -2776,7 +2797,7 @@ export default function App(): JSX.Element {
       registerCaseTabFromTerm(tab, true)
       setWorkActive(termSide(tab), termKeyOf(tab.id))
       preloadPastSessions(tab.cwd, tab)
-      if (receivedCase.meta?.contextKind !== 'project') void window.lt.case
+      if (receivedCase.meta?.contextKind !== 'project' && !isGeneralChatDirectory(receivedCase.drafts)) void window.lt.case
         .addHistory({ drafts: receivedCase.drafts, records: receivedCase.records, name: receivedCase.name })
         .then(setRecent)
       return
@@ -2936,7 +2957,7 @@ export default function App(): JSX.Element {
     }
     setCurrentCase(source)
     registerCaseTab(source, activeTermId)
-    if (caseMeta?.contextKind !== 'project') window.lt.case.addHistory({ drafts, records, name }).then(setRecent)
+    if (caseMeta?.contextKind !== 'project' && !isGeneralChatDirectory(drafts)) window.lt.case.addHistory({ drafts, records, name }).then(setRecent)
   }
 
   // ── 사건 작업 탭 (기본: Agent Panel, 명시 fallback: PTY 터미널) ──
@@ -2989,6 +3010,42 @@ export default function App(): JSX.Element {
     agentProviderOverride?: AgentProvider
   ): TermTab =>
     createLocalCaseTab('agent', drafts, name, records, suggested, caseMeta, side, suggestedOptions, agentProviderOverride)
+
+  const openGeneralChat = (): void => {
+    if (!generalChatDirectory) {
+      if (generalChatError) setGeneralChatRetry((retry) => retry + 1)
+      return
+    }
+    const profile = sshProfiles.find((item) => item.id === caseOpenProfileId(caseOpenTarget))
+    const existing = termTabsRef.current.find((tab) =>
+      isAgentTab(tab) && resolveAgentContextKind(tab) === 'global' && tab.cwd === generalChatDirectory && tab.todoManagement === undefined &&
+      (profile
+        ? tab.profileId === profile.id && tab.ssh?.host === profile.host && tab.ssh?.user === profile.user &&
+          (tab.ssh?.port ?? 22) === (profile.port ?? 22) && tab.ssh?.identityFile === profile.identityFile &&
+          Boolean(tab.ssh?.remoteControl) === Boolean(profile.remoteControl)
+        : !tab.ssh))
+    if (existing) {
+      selectTerm(existing.id)
+      setTermFocusNonce((current) => bumpFocusNonce(current, existing.id))
+    } else {
+      const tab = profile
+        ? createRemoteCase(profile, generalChatDirectory, '일반 질문', { contextKind: 'folder' }, undefined, 'right', 'agent', 'claude')
+        : createCase(generalChatDirectory, '일반 질문', undefined, undefined, { contextKind: 'folder' })
+      termTabsRef.current = [...termTabsRef.current, tab]
+      setDocTabs((tabs) => tabs.map((doc) =>
+        doc.kind === 'welcome' && !doc.caseTabId ? { ...doc, caseTabId: tab.caseTabId } : doc))
+      void autoRestoreWorkspaceRef.current(currentCaseFromTerm(tab)).catch(() => {})
+    }
+    setMode('explorer')
+  }
+
+  useEffect(() => {
+    if (docOnly || termOnly || !workspaceSettingsReady || !generalChatDirectory || generalChatStartedRef.current) return
+    generalChatStartedRef.current = true
+    // A received tab or an already opened workspace takes precedence over the launch screen.
+    if (mode !== 'explorer' || termTabsRef.current.length || caseTabsRef.current.length || docTabsRef.current.some((doc) => doc.kind !== 'welcome')) return
+    openGeneralChat()
+  }, [docOnly, termOnly, workspaceSettingsReady, generalChatDirectory, mode]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const createCaseTerminal = (
     drafts: string,
@@ -3078,7 +3135,7 @@ export default function App(): JSX.Element {
     setCurrentCase(source)
     registerCaseTab(source, tab.id)
     preloadPastSessions(tab.cwd, tab)
-    if (meta?.contextKind !== 'project') window.lt.case.addHistory({ drafts: draftsUri, records, name: title }).then(setRecent)
+    if (meta?.contextKind !== 'project' && !isGeneralChatDirectory(remotePath)) window.lt.case.addHistory({ drafts: draftsUri, records, name: title }).then(setRecent)
     markWorkspaceReopened(source, tab)
     // 소송기록이 정해졌으면 페어링 기억(다음에 자동 적용) — 로컬과 동일
     if (records) window.lt.case.setPairing(draftsUri, records)
@@ -3607,11 +3664,7 @@ export default function App(): JSX.Element {
     const ssh = cur?.ssh ?? currentCase?.ssh
     const cwd = cur?.cwd ?? (ssh ? currentCase?.remotePath : currentCase?.drafts)
     if (!cwd) {
-      void (async () => {
-        const picked = await window.lt.dialog.openCase()
-        if (!picked) return
-        createCase(picked.path, picked.name, undefined, undefined, undefined, side, undefined, agentProviderOverride)
-      })()
+      openGeneralChat()
       return undefined
     }
     const title = cur?.title ?? currentCase?.name ?? cwd.split(/[\\/]/).pop() ?? '세션'
@@ -4353,6 +4406,15 @@ export default function App(): JSX.Element {
     mountedTermIds.has(term.id) || activeTermIds.has(term.id)
   const activeDocTab = visibleDocTabs.find((t) => t.id === activeDoc)
   const activeTermTab = visibleTermTabs.find((t) => t.id === activeTerm)
+  const generalChatSide = mode === 'explorer' && isAgentTab(activeTermTab) &&
+    isGeneralChatDirectory(activeTermTab.cwd) && resolveAgentContextKind(activeTermTab) === 'global' &&
+    activeTermTab.todoManagement === undefined &&
+    visibleDocTabs.every((doc) => doc.kind === 'welcome') &&
+    visibleTermTabs.every((term) => termSide(term) === termSide(activeTermTab))
+    ? termSide(activeTermTab) : undefined
+  useEffect(() => {
+    if (generalChatSide) setTermFocusNonce((current) => bumpFocusNonce(current, activeTerm))
+  }, [generalChatSide, activeTerm])
   const rememberedAgentForDoc = (doc?: DocTab): (TermTab & { kind: 'agent' }) | undefined =>
     doc && visibleTermTabs.find((term): term is TermTab & { kind: 'agent' } =>
       term.id === documentAgentTabs[documentAgentKey(doc)] && isAgentTab(term))
@@ -5113,7 +5175,7 @@ export default function App(): JSX.Element {
   })
 
   const workspaceLocationKey = (source: CurrentCase): string => {
-    if (source.meta?.contextKind === 'project') return caseIdentityKey(source)
+    if (source.meta?.contextKind === 'project' || isGeneralChatDirectory(source.remotePath ?? source.drafts)) return caseIdentityKey(source)
     const location = workspaceLocation(source)
     return `${location.profileId ?? 'local'}\0${normalizedCasePathKey(location.cwd)}\0${location.caseId ?? ''}`
   }
@@ -5240,9 +5302,11 @@ export default function App(): JSX.Element {
         // A background response must not undo a tab closed while the read was in flight.
         if (refresh && termsBeforeLoad !== termTabsRef.current) return true
         const cachedSource = result.local?.snapshot?.currentCase as CurrentCase | undefined
-        const localProjectMatches = source.meta?.contextKind !== 'project' ||
-          (cachedSource?.meta?.contextKind === 'project' && caseIdentityKey(cachedSource) === caseIdentityKey(source))
-        const local = !refresh && result.local?.snapshot && localProjectMatches
+        const localScopeMatches = source.meta?.contextKind === 'project'
+          ? cachedSource?.meta?.contextKind === 'project' && caseIdentityKey(cachedSource) === caseIdentityKey(source)
+          : !isGeneralChatDirectory(source.remotePath ?? source.drafts) ||
+            (!!cachedSource && caseIdentityKey(cachedSource) === caseIdentityKey(source))
+        const local = !refresh && result.local?.snapshot && localScopeMatches
           ? rebaseRemoteWorkspace(agentTabsOnly(result.local.snapshot), source)
           : undefined
         const remote = result.remote?.snapshot
@@ -8436,7 +8500,7 @@ export default function App(): JSX.Element {
           : t.sessionTitle
             ? `${t.title} · ${t.sessionTitle}`
             : isAgentTab(t)
-              ? `Agent · ${t.title}`
+              ? generalChatSide ? t.title : `Agent · ${t.title}`
               : t.title,
         attention: termAttention.has(t.id) && termStatus.get(t.id) !== 'question',
         working: termStatus.get(t.id) === 'working',
@@ -8492,8 +8556,8 @@ export default function App(): JSX.Element {
             if (parsed.kind === 'doc') void closeDoc(parsed.id)
             else closeTerm(parsed.id)
           }}
-          onAdd={() => (side === 'right' ? addAgentSame(side) : addDoc(side))}
-          addTitle={side === 'right' ? '새 Agent' : '새 문서'}
+          onAdd={() => (generalChatSide || side === 'right' ? addAgentSame(side) : addDoc(side))}
+          addTitle={generalChatSide ? '새 대화' : side === 'right' ? '새 Agent' : '새 문서'}
           dropSide={side}
           onReorder={(from, to) => {
             const f = parseWorkKey(from)
@@ -8525,7 +8589,7 @@ export default function App(): JSX.Element {
             return parsed?.kind === 'terminal' ? agentTabContextMenuItems(parsed.id, side) : []
           }}
           extraLeft={[
-            ...(canMoveActiveTab
+            ...(canMoveActiveTab && !generalChatSide
               ? [
                   {
                     label: side === 'left' ? '⇥' : '⇤',
@@ -8565,7 +8629,7 @@ export default function App(): JSX.Element {
               : [])
           ]}
           extra={
-            side === 'left'
+            side === 'left' && !generalChatSide
               ? {
                   label: '＋A',
                   title: '새 Agent',
@@ -8574,7 +8638,7 @@ export default function App(): JSX.Element {
               : undefined
           }
           menu={
-            side === 'right'
+            generalChatSide ? undefined : side === 'right'
               ? {
                   label: '▾',
                   title: '작업 추가 메뉴',
@@ -8640,9 +8704,11 @@ export default function App(): JSX.Element {
                 />
               ) : (
                 <Empty
-                  label="오른쪽에 열린 탭이 없습니다"
-                  actionLabel="새 사건 추가"
-                  onAction={openNewCaseLauncher}
+                  label={generalChatError || '오른쪽에 열린 탭이 없습니다'}
+                  actionLabel="일반 질문 시작"
+                  onAction={openGeneralChat}
+                  secondaryLabel="새 사건 추가"
+                  onSecondary={openNewCaseLauncher}
                 />
               )
             ) : (
@@ -9043,7 +9109,7 @@ export default function App(): JSX.Element {
   return (
     <div
       ref={shellRef}
-      className={`shell ${isViewer ? 'mode-viewer' : 'mode-default'} ${explorerVisible ? '' : 'explorer-hidden'} ${projectManagementVisible && !projectAgentVisible ? 'project-management' : ''}`}
+      className={`shell ${isViewer ? 'mode-viewer' : 'mode-default'} ${explorerVisible ? '' : 'explorer-hidden'} ${projectManagementVisible && !projectAgentVisible ? 'project-management' : ''} ${generalChatSide ? `general-chat general-chat-${generalChatSide}` : ''}`}
       style={shellStyle}
       {...shellDragProps}
     >
@@ -9188,6 +9254,9 @@ export default function App(): JSX.Element {
           </div>
           <button className="project-open-button" type="button" aria-pressed={projectManagementVisible} onClick={showProjects}>
             <IconWorkspace size={15} /> 프로젝트 관리
+          </button>
+          <button className="general-chat-button" type="button" disabled={!generalChatDirectory && !generalChatError} title={generalChatError || undefined} onClick={openGeneralChat}>
+            일반 질문
           </button>
           {sidebarView === 'cases' ? (
             <CaseSidebar
@@ -11434,9 +11503,10 @@ function Welcome({
       )}
 
       <ul className="welcome-list">
+        <li>💬 <b>일반 질문</b> — 대화창에 바로 질문하세요. 사건이나 폴더를 선택하지 않아도 됩니다.</li>
         <li>📁 <b>탐색기 모드</b> — 작성서류 폴더의 파일트리에서 문서를 본문에 엽니다</li>
         <li>📄 <b>기록뷰어 모드</b> — 문서 | 본문 | 서증·첨부서류 | 터미널</li>
-        <li>✳️ <b>Claude</b> — 오른쪽 터미널에서 <code>/brief-protocol</code> 실행 (모드 전환에도 유지)</li>
+        <li>✳️ <b>AI 대화</b> — Claude 또는 Codex를 선택해 질문하고 작업을 이어갑니다.</li>
       </ul>
     </div>
   )
