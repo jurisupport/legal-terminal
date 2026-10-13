@@ -43,6 +43,8 @@ function runApp({ root, temp, screenshotDir, provider, mode, remote }) {
   app.setPath('userData', path.join(temp, 'profile'))
   app.setPath('home', homeDir)
   BrowserWindow.prototype.show = function () {}
+  // Startup maximization would override the hidden test window's requested viewport.
+  BrowserWindow.prototype.maximize = function () {}
   const loadFile = BrowserWindow.prototype.loadFile
   BrowserWindow.prototype.loadFile = function (file, options) {
     return loadFile.call(this, file, mode && mode !== 'navigate' ? { ...options, hash: mode } : options)
@@ -116,7 +118,8 @@ function runApp({ root, temp, screenshotDir, provider, mode, remote }) {
   let win
   const ready = new Promise(resolve => app.once('browser-window-created', (_event, window) => {
     win = window
-    win.setSize(1440, 940)
+    win.webContents.setZoomFactor(1)
+    win.setContentSize(1440, 940)
     win.webContents.on('console-message', details => { if (details.level === 'error') errors.push(details.message) })
     win.webContents.on('render-process-gone', (_event, details) => errors.push(`Renderer exited: ${details.reason}`))
     win.webContents.once('did-finish-load', resolve)
@@ -314,12 +317,18 @@ function runApp({ root, temp, screenshotDir, provider, mode, remote }) {
         })
         await test('keeps one input and preserves its draft in a narrow window', async () => {
           await evaluate(`(() => { const input = window.visibleComposer(); Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set.call(input, '아직 전송하지 않은 일반 질문'); input.dispatchEvent(new Event('input', { bubbles: true })) })()`)
+          if (win.isMaximized()) {
+            win.unmaximize()
+            await wait(() => !win.isMaximized(), 'test window restored before resizing')
+          }
           win.setMinimumSize(680, 480)
-          win.setSize(900, 760)
-          await wait(() => evaluate(`innerWidth <= 900`), 'narrow general chat')
+          win.webContents.setZoomFactor(1)
+          win.setContentSize(900, 760)
+          await wait(() => evaluate(`innerWidth === 900 && innerHeight === 760`), '900x760 content viewport')
+          assert.equal(await evaluate(`innerWidth <= 900`), true, 'narrow general chat')
           assert.equal((await checkUnifiedChat()).draft, '아직 전송하지 않은 일반 질문')
           await capture(`unified-narrow-${provider}`)
-          win.setSize(1440, 940)
+          win.setContentSize(1440, 940)
         })
         await test('opens a document beside the conversation and reunites the view without losing the draft', async () => {
           win.webContents.send('tabs:receive', { kind: 'doc', tab: {
@@ -387,7 +396,7 @@ function runApp({ root, temp, screenshotDir, provider, mode, remote }) {
     } catch (error) {
       await capture(`failure-${provider}${mode ? `-${mode}` : ''}`).catch(() => {})
       console.error(error)
-      console.error(JSON.stringify({ errors, unexpected, dom: await evaluate('document.body.innerText').catch(() => '') }))
+      console.error(JSON.stringify({ errors, unexpected, window: { maximized: win.isMaximized(), contentSize: win.getContentSize(), zoomFactor: win.webContents.getZoomFactor() }, viewport: await evaluate('({ width: innerWidth, height: innerHeight, devicePixelRatio })').catch(() => null), dom: await evaluate('document.body.innerText').catch(() => '') }))
       app.exit(1)
     }
   })()

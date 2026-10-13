@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { isGeneralChatDirectory } from '../src/shared/generalChat.ts'
 import { createHash } from 'node:crypto'
 import { execFile, spawn } from 'node:child_process'
 import { mkdtemp, mkdir, readFile, writeFile, rm } from 'node:fs/promises'
@@ -268,6 +269,7 @@ try {
   const alerts = []
   const observed = []
   const context = {
+    isGeneralChatDirectory,
     docOnly: false, termOnly: false,
     resolveCaseTabId: () => 'case', workspaceLocationKey: () => 'key', workspaceLocation: () => location,
     autoRestoreDoneRef: { current: new Set() }, autoRestoreInFlightRef: { current: new Map() },
