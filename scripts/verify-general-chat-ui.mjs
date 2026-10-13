@@ -323,10 +323,12 @@ function runApp({ root, temp, screenshotDir, provider, mode, remote }) {
           }
           win.setMinimumSize(680, 480)
           win.webContents.setZoomFactor(1)
-          win.setContentSize(900, 760)
-          await wait(() => evaluate(`innerWidth === 900 && innerHeight === 760`), '900x760 content viewport')
+          // The hosted Mac display caps content height at 656px; use a smaller real viewport.
+          win.setContentSize(900, 600)
+          await wait(() => evaluate(`innerWidth === 900 && innerHeight === 600`), '900x600 content viewport')
           assert.equal(await evaluate(`innerWidth <= 900`), true, 'narrow general chat')
           assert.equal((await checkUnifiedChat()).draft, '아직 전송하지 않은 일반 질문')
+          assert.equal(await evaluate(`window.visibleComposer().getBoundingClientRect().bottom <= innerHeight && window.visibleComposer().closest('.agent-panel').querySelector('.agent-send-btn').getBoundingClientRect().bottom <= innerHeight`), true, 'input and send control remain visible at the smaller height')
           await capture(`unified-narrow-${provider}`)
           win.setContentSize(1440, 940)
         })
