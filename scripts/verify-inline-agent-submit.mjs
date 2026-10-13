@@ -44,6 +44,7 @@ const fixture = (createPromise = Promise.resolve({ ok: true })) => {
     setInput: unchanged, setAttachments: unchanged, setQuotedMessage: unchanged, resetPromptHistoryCursor: unchanged,
     focusPrompt: unchanged, scrollTimelineToBottom: unchanged, onStatus: unchanged,
     PROMPT_HISTORY_LIMIT: 100, promptHistoryRef: { current: [] },
+    historyLoadRef: { current: undefined },
     codexPanelSlashCommandNames: new Set(['/compact', '/model', '/permissions']),
     claudeTerminalOnlySlashCommandNames: new Set(['/permissions', '/exit']),
     setError: (error) => errors.push(error),
@@ -191,6 +192,26 @@ for (const change of ['unmount', 'id', 'provider', 'auth']) {
     assert.equal(stale.actions.suggest('이'), undefined)
     assert.equal((await stale.actions.submit(request)).ok, false)
   }
+}
+
+for (const outcome of ['ready', 'failure', 'history-cleanup', 'provider', 'unmount']) {
+  const loading = deferred()
+  const resumed = fixture()
+  // The history effect catches read errors so a failed snapshot still permits sending.
+  resumed.ctx.historyLoadRef.current = loading.promise.catch(() => {})
+  const pending = resumed.actions.submit(request)
+  await new Promise(setImmediate)
+  assert.equal(resumed.sent.length, 0, 'inline submission must wait for the initial history snapshot')
+  assert.equal((await resumed.actions.submit(request)).ok, false, 'history waiting must preserve the duplicate submission guard')
+  if (outcome === 'history-cleanup') resumed.ctx.historyLoadRef.current = undefined
+  if (outcome === 'provider') resumed.ctx.inlineStateRef.current.session = { ...resumed.ctx.inlineSession, provider: 'codex' }
+  if (outcome === 'unmount') resumed.unmount()
+  if (outcome === 'failure') loading.reject(new Error('history unavailable'))
+  else loading.resolve()
+  const result = await pending
+  const shouldSend = outcome === 'ready' || outcome === 'failure'
+  assert.equal(result.ok, shouldSend, `${outcome} after history waiting must use the current session`)
+  assert.equal(resumed.sent.length, shouldSend ? 1 : 0)
 }
 
 console.log('inline Agent submission: draft/quote preservation, create readiness/failure, auth/settings, attachment preparation, queue/handoff/history, slash gates and stale sessions passed')

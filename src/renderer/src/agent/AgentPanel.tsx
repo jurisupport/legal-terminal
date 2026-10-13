@@ -2011,6 +2011,8 @@ export default function AgentPanel({
   const openedAuthUrlsRef = useRef<Set<string>>(new Set())
   const copyFeedbackTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const loadedHistoryKeyRef = useRef<string | null>(null)
+  const historyLoadRef = useRef<Promise<void>>()
+  const pendingHistorySendRef = useRef<Promise<void>>()
   const restoredTurnStartedAtRef = useRef<number>()
   const hasLiveMessagesRef = useRef(false)
   const handledAttachmentRequestIdsRef = useRef<Set<string>>(new Set())
@@ -2060,6 +2062,7 @@ export default function AgentPanel({
     if (providerRef.current === provider) return
     providerRef.current = provider
     loadedHistoryKeyRef.current = null
+    pendingHistorySendRef.current = undefined
     restoredTurnStartedAtRef.current = undefined
     hasLiveMessagesRef.current = false
     handledAttachmentRequestIdsRef.current.clear()
@@ -2424,7 +2427,7 @@ export default function AgentPanel({
     loadedHistoryKeyRef.current = historyKey
     setResumedModel(undefined)
     let alive = true
-    void loadSessionTranscript(resumeSessionId, ssh)
+    const historyLoad = loadSessionTranscript(resumeSessionId, ssh)
       .then((transcript) => {
         // 이어 열린 순간부터 대화가 늘어나므로, 프리로드본은 여기서 한 번 쓰고 버린다.
         invalidateSessionTranscript(resumeSessionId, ssh)
@@ -2449,8 +2452,11 @@ export default function AgentPanel({
         if (alive) setResumedModel(null)
         /* Resume context still works even when the transcript cannot be displayed. */
       })
+    historyLoadRef.current = historyLoad
     return () => {
       alive = false
+      if (historyLoadRef.current === historyLoad) historyLoadRef.current = undefined
+      if (pendingHistorySendRef.current === historyLoad) pendingHistorySendRef.current = undefined
     }
   }, [agentLabel, provider, rememberPrompts, resumeSessionId, ssh])
 
@@ -2985,6 +2991,11 @@ export default function AgentPanel({
           const created = await session.creation
           if (!isCurrent()) return unavailable()
           if (!created.ok) return { ok: false, error: created.error ?? 'Agent 세션을 만들 수 없습니다.' }
+          const historyLoad = historyLoadRef.current
+          if (historyLoad) {
+            await historyLoad
+            if (!isCurrent() || historyLoadRef.current !== historyLoad) return unavailable()
+          }
           let state = inlineStateRef.current
           if (state.sendBlockedReason) return { ok: false, error: state.sendBlockedReason }
           const commandName = slashCommandName(rawText)
@@ -3129,6 +3140,7 @@ export default function AgentPanel({
       if (sendBlockedReason) setError(sendBlockedReason)
       return
     }
+    if (pendingHistorySendRef.current) return
     scrollTimelineToBottom()
     const nextMode = expanded.mode ?? mode
     if (expanded.mode) selectPermissionMode(expanded.mode, false)
@@ -3142,6 +3154,14 @@ export default function AgentPanel({
     const quote = quotedMessage
     const requestText = quote ? quoteAgentRequest(quote.text, text) : text
     const displayText = text || (quote ? '인용한 답변에 대해' : '')
+    // Finish the initial snapshot before a new turn can appear in that transcript.
+    const historyLoad = historyLoadRef.current
+    if (historyLoad) {
+      pendingHistorySendRef.current = historyLoad
+      await historyLoad
+      if (pendingHistorySendRef.current === historyLoad) pendingHistorySendRef.current = undefined
+      if (historyLoadRef.current !== historyLoad) return
+    }
     // 미저장 문서 첨부 등을 전송 시점 내용으로 치환한다.
     const outgoingAttachments = onPrepareAttachment
       ? await Promise.all(

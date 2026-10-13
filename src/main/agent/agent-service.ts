@@ -1540,15 +1540,6 @@ function commonOverlapLength(left: string, right: string): number {
   return 0
 }
 
-function mergeAssistantDelta(current: string, chunk: string): string {
-  if (!current) return chunk
-  if (!chunk) return current
-  if (chunk.startsWith(current)) return chunk
-  if (chunk.length >= MIN_TEXT_OVERLAP && current.endsWith(chunk)) return current
-  const overlap = commonOverlapLength(current, chunk)
-  return overlap >= MIN_TEXT_OVERLAP ? `${current}${chunk.slice(overlap)}` : `${current}${chunk}`
-}
-
 function mergeAssistantSnapshot(current: string, snapshot: string): string {
   if (!current) return snapshot
   if (!snapshot) return current
@@ -1569,14 +1560,9 @@ function appendAssistantText(session: AgentSession, messageId: string, text: str
   startAssistant(session, messageId)
   session.assistantStreamed.add(messageId)
   const current = session.assistantText.get(messageId) ?? ''
-  const next = mergeAssistantDelta(current, text)
-  if (next === current) return
-  session.assistantText.set(messageId, next)
-  if (next.startsWith(current)) {
-    emit(session, { type: 'message:assistant_delta', sessionId: session.id, messageId, text: next.slice(current.length) })
-  } else {
-    emit(session, { type: 'message:assistant_replace', sessionId: session.id, messageId, text: next })
-  }
+  // Provider deltas are incremental; removing repeated text corrupts the final snapshot match.
+  session.assistantText.set(messageId, current + text)
+  emit(session, { type: 'message:assistant_delta', sessionId: session.id, messageId, text })
 }
 
 function reconcileAssistantSnapshot(session: AgentSession, messageId: string, text: string): void {
