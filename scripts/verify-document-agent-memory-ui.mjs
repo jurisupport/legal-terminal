@@ -213,6 +213,9 @@ async function electronCheck({ root, temp, output, channels }) {
     checks.push('Returning from B to A restores its remembered panel 1')
     await clickTab('문서 B 대화')
     await wait(activeAgent('문서 B 대화'), 'Another panel can be selected manually')
+    // Tab activation schedules composer focus after rendering; let it finish before native selection.
+    await wait("document.activeElement === document.querySelector('[data-term-id=\"memory-agent-b\"] .agent-composer textarea')", 'Selected agent composer focus')
+    await run('await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))')
     const markdownScroll = await quoteMarkdown('memory-agent-a')
     await screenshot('markdown-quote-memory')
     await sendQuote('memory-agent-a', '문서 A.md', markdownScroll)
