@@ -36,11 +36,14 @@ const xref = Buffer.byteLength(pdf)
 pdf += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n${offsets.slice(1).map((offset) => `${String(offset).padStart(10, '0')} 00000 n \n`).join('')}trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF\n`
 
 async function electronCheck({ root, temp, output, channels, pdf }) {
+  const assert = require('node:assert/strict')
   const { app, BrowserWindow, ipcMain, session } = require('electron')
   const fs = require('node:fs')
   const path = require('node:path')
   app.setPath('userData', path.join(temp, 'profile'))
   const calls = []
+  const badgeCounts = []
+  ipcMain.on('app:setBadgeCount', (_event, count) => badgeCounts.push(count))
   const created = new Set()
   const settings = { sshProfiles: [], draftsRoot: '/synthetic', notificationSound: 'none', agentDefaultProvider: 'claude' }
   for (const channel of channels) ipcMain.handle(channel, (_event, ...args) => {
@@ -49,13 +52,15 @@ async function electronCheck({ root, temp, output, channels, pdf }) {
     if (channel === 'setup:status') return { items: [], ready: true }
     if (channel === 'settings:get' || channel === 'settings:set') return settings
     if (channel === 'app:info') return { platform: process.platform, version: 'UI fixture', homeDirectory: '/synthetic' }
+    if (channel === 'app:generalChatDirectory') return ''
     if (channel === 'fs:readBytes') return Uint8Array.from(Buffer.from(pdf, 'base64')).buffer
     if (channel === 'fs:stat') return { ok: true, isDir: !String(args[0]).endsWith('.pdf'), size: 100, mtimeMs: 0 }
     if (['fs:list', 'fs:listPdfs', 'case:history', 'case:addHistory', 'sessions:list', 'sessions:byFolder', 'sessions:workLog'].includes(channel)) return []
     if (channel === 'sessions:byCase') return {}
     if (channel === 'sessions:transcript' || channel === 'sessions:current') return null
     if (channel === 'js:hasToken') return false
-    if (channel === 'js:tokenStatus' || channel === 'dictation:keyStatus') return 'missing'
+    if (channel === 'js:tokenStatus') return { hasToken: false, error: null }
+    if (channel === 'dictation:keyStatus') return 'missing'
     if (channel === 'js:listCases') return { ok: true, cases: [] }
     if (channel === 'js:listHearings') return { ok: true, hearings: [] }
     if (channel === 'js:hearingSummary') return { ok: true, summary: { todayCount: 0, weekCount: 0 } }
@@ -205,6 +210,27 @@ async function electronCheck({ root, temp, output, channels, pdf }) {
     await wait("!!document.querySelector('.case-sidebar-empty')", 'Resolved tasks leave empty attention view')
     await run(`check(document.querySelector('.case-sidebar-empty').textContent.includes('확인이 필요한 작업 없음') && document.querySelector('.case-sidebar-filter button').disabled, 'Empty attention view disables next action')`)
     await status('fixture-a', 'idle')
+    await status('fixture-a', 'working')
+    await status('fixture-a', 'done')
+    await wait("document.querySelector('.case-sidebar-trigger')?.title.includes('완료 작업 1개')", 'Unread completion badge')
+    assert.equal(badgeCounts.at(-1), 1, 'Dock badge counts the unread completion')
+    await run(`click('.case-sidebar-case[title*="/synthetic/case-a"]')`)
+    await wait("!document.querySelector('.case-sidebar-trigger .activity-badge')", 'Viewing completion clears badge')
+    assert.equal(badgeCounts.at(-1), 0, 'Reading completion clears the Dock badge')
+    await run(`openCases(); click('.case-sidebar-filter input')`)
+    await wait("!!document.querySelector('.case-sidebar-case[title*=\"/synthetic/case-b\"]')", 'Show all cases after reading')
+    await run(`click('.case-sidebar-case[title*="/synthetic/case-b"]')`)
+    await status('fixture-a', 'done')
+    await status('fixture-a', 'idle')
+    await status('fixture-a', 'done')
+    await run(`check(!document.querySelector('.case-sidebar-trigger .activity-badge'), 'Repeated completion stays read after switching cases')`)
+    assert.equal(badgeCounts.at(-1), 0, 'Repeated completion cannot restore the Dock badge')
+    await status('fixture-a', 'working')
+    await status('fixture-a', 'done')
+    await wait("document.querySelector('.case-sidebar-trigger')?.title.includes('완료 작업 1개')", 'New turn gets a completion badge')
+    await run(`openCases(); click('.case-sidebar-case[title*="/synthetic/case-a"]')`)
+    await wait("!document.querySelector('.case-sidebar-trigger .activity-badge')", 'Reading new completion clears badge')
+    await run(`openCases(); click('.case-sidebar-filter input')`)
     await run(`
       click('.case-sidebar-filter input');
       window.agentBeforeClose = visible('.agent-panel')[0].closest('[data-term-id]').dataset.termId;

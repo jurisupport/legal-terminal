@@ -577,6 +577,19 @@ flushStatusUpdates()
 assert.equal(termStatuses.get('batched'), 'idle')
 assert.ok(!termAttention.has('batched'), 'a newer question then idle must clear a prior completion')
 
+onTermStatus('read-completion', 'working')
+onTermStatus('read-completion', 'done')
+flushStatusUpdates()
+termAttention.delete('read-completion')
+onTermStatus('read-completion', 'done')
+onTermStatus('read-completion', 'idle')
+flushStatusUpdates()
+assert.ok(!termAttention.has('read-completion'), 'repeated completion status must not restore a badge after reading')
+onTermStatus('read-completion', 'working')
+onTermStatus('read-completion', 'done')
+flushStatusUpdates()
+assert.ok(termAttention.has('read-completion'), 'a new turn still gets its own completion badge')
+
 // Each replacement transport must initialize anew; callbacks from the disposed
 // process cannot clear the new transport or its pending turn.
 const freshProcess = () => Object.assign(new EventEmitter(), {

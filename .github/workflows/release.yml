@@ -73,6 +73,9 @@ jobs:
       - name: Verify general questions and phone-compatible conversations
         run: npm run verify:general-chat && npm run verify:general-chat-ui
 
+      - name: Verify completion acknowledgement and badges
+        run: npm run verify:completion-badge
+
       - name: Verify detached conversation windows
         run: npm run verify:detached-window
 
@@ -156,6 +159,9 @@ jobs:
 
       - name: Verify general questions and phone-compatible conversations
         run: npm run verify:general-chat && npm run verify:general-chat-ui
+
+      - name: Verify completion acknowledgement and badges
+        run: npm run verify:completion-badge
 
       - name: Verify detached conversation windows
         run: npm run verify:detached-window

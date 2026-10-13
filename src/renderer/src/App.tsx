@@ -4047,6 +4047,7 @@ export default function App(): JSX.Element {
       clearNotices()
       return
     }
+    if (status === 'done' && previousStatus === 'done') return
     setTermAttention((s) => new Set(s).add(id))
     if (status === 'done' && !notifyDone) {
       dismissToastForTerm(id)
