@@ -28,7 +28,7 @@ legal-terminal은 사건 폴더, 전자소송기록 뷰어, 문서 에디터, AI
 
 프로젝트에는 사건과 로컬·SSH 참고 폴더를 함께 연결할 수 있습니다. **사건 없이 자료 폴더만 연결한 프로젝트**도 만들 수 있습니다.
 
-[빠른 설치](#빠른-설치) · [처음 쓰는 순서](#처음-쓰는-순서) · [프로젝트 사용법](#프로젝트로-함께-작업하기) · [v0.1.274 주요 변경](#이번-업데이트)
+[빠른 설치](#빠른-설치) · [처음 쓰는 순서](#처음-쓰는-순서) · [프로젝트 사용법](#프로젝트로-함께-작업하기) · [v0.1.275 주요 변경](#이번-업데이트)
 
 ## 빠른 설치
 
@@ -207,7 +207,7 @@ AI에는 매 요청마다 최신 목표·메모와 연결 자료 목록이 전�
 
 ## 이번 업데이트
 
-최신 릴리스: [v0.1.274](https://github.com/jurisupport/legal-terminal/releases/tag/v0.1.274)
+최신 릴리스: [v0.1.275](https://github.com/jurisupport/legal-terminal/releases/tag/v0.1.275)
 
 - **기일기록 바로 열기**: 파일 목록에 `.hearings` 폴더가 표시됩니다. 로컬·원격·OneDrive에서 기존 기일기록을 찾아 열 수 있습니다.
 - **기일 화자 수정**: 화자를 A·B·C로 구분하고 이름을 직접 수정하거나 참여자로 일괄 지정합니다. 변경은 같은 화자의 발언 전체에 적용되며, 저장한 기록을 다시 열어도 유지됩니다.
@@ -269,12 +269,12 @@ legal-terminal의 Claude Agent는 Claude Code 기반으로 동작합니다. [`ju
 
 ## 개발
 
-이 README의 사용자 기능 설명은 **정식 배포 v0.1.274 기준**입니다. 같은 소스로 실행하려면 해당 릴리스 태그를 사용합니다.
+이 README의 사용자 기능 설명은 **정식 배포 v0.1.275 기준**입니다. 같은 소스로 실행하려면 해당 릴리스 태그를 사용합니다.
 
 ```bash
 git clone https://github.com/jurisupport/legal-terminal.git
 cd legal-terminal
-git switch --detach v0.1.274
+git switch --detach v0.1.275
 npm ci
 npm run dev
 ```

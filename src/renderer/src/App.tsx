@@ -1706,6 +1706,8 @@ export default function App(): JSX.Element {
   const [retainedSharedCases, setRetainedSharedCases] = useState<Set<string>>(new Set())
   const refreshAutomaticCasesRef = useRef<() => Promise<void>>(async () => {})
   const automaticCasesLoadingRef = useRef(false)
+  const automaticCasesRefreshPendingRef = useRef(false)
+  const automaticCasesRefreshActiveRef = useRef(false)
   const lastCaseDiscoveryRef = useRef(0)
   const [workspaceSyncError, setWorkspaceSyncError] = useState('')
   const autoWorkspaceSaveChainRef = useRef<Promise<void>>(Promise.resolve())
@@ -5385,8 +5387,13 @@ export default function App(): JSX.Element {
   }
 
   refreshAutomaticCasesRef.current = async () => {
-    if (automaticCasesLoadingRef.current) return
+    if (!automaticCasesRefreshActiveRef.current) return
+    if (automaticCasesLoadingRef.current) {
+      automaticCasesRefreshPendingRef.current = true
+      return
+    }
     automaticCasesLoadingRef.current = true
+    automaticCasesRefreshPendingRef.current = false
     const refresh = async (): Promise<void> => {
       const account = todoAccountGeneration.current
       let expectedTerms = termTabsRef.current
@@ -5458,12 +5465,15 @@ export default function App(): JSX.Element {
       await autoWorkspaceSaveChainRef.current
     } finally {
       automaticCasesLoadingRef.current = false
-      if (workspaceHostsRef.current !== workspaceHostsSignature) void refreshAutomaticCasesRef.current()
+      if (automaticCasesRefreshPendingRef.current || workspaceHostsRef.current !== workspaceHostsSignature) {
+        void refreshAutomaticCasesRef.current()
+      }
     }
   }
 
   useEffect(() => {
     if (!workspaceSettingsReady || docOnly || termOnly) return
+    automaticCasesRefreshActiveRef.current = true
     lastCaseDiscoveryRef.current = 0
     const refresh = (): void => { void refreshAutomaticCasesRef.current() }
     const reconnect = (): void => {
@@ -5482,6 +5492,8 @@ export default function App(): JSX.Element {
       if (document.hasFocus()) refresh()
     }, 30_000)
     return () => {
+      automaticCasesRefreshActiveRef.current = false
+      automaticCasesRefreshPendingRef.current = false
       window.removeEventListener('focus', refresh)
       window.removeEventListener('online', reconnect)
       window.removeEventListener('blur', flush)

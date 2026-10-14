@@ -27,6 +27,8 @@ function runApp({ root, temp, appMain }) {
   }
   const sharedCases = new Map([[cwd, snapshot]])
   const knownTabs = new Map()
+  let releaseCloseObservation
+  let holdCloseObservation = true
   const sharedModule = { exports: {} }
   const sharedCode = require(require('node:path').join(root, 'node_modules/typescript')).transpileModule(
     require('node:fs').readFileSync(require('node:path').join(root, 'src/shared/workspaceAgentTabs.ts'), 'utf8'),
@@ -69,6 +71,11 @@ function runApp({ root, temp, appMain }) {
     }
     if (channel === 'workspace:autoObserve') {
       knownTabs.set(args[0].cwd, structuredClone(args[1]))
+      // Hold the acknowledgement until the next focus event arrives during this refresh.
+      if (holdCloseObservation && args[1].closedAgentTabs?.some(tab => tab?.id === 'new-remote-agent')) {
+        holdCloseObservation = false
+        await new Promise(resolve => { releaseCloseObservation = resolve })
+      }
       return
     }
     if (channel === 'workspace:autoSave') {
@@ -168,8 +175,10 @@ function runApp({ root, temp, appMain }) {
       await evaluate(`window.dispatchEvent(new Event('focus'))`)
       await wait(() => evaluate(`!document.body.innerText.includes('다른 컴퓨터의 새 대화')`))
       assert.equal(snapshot.terminals.some((tab) => tab.id === 'new-remote-agent'), false, 'an old desktop cannot republish a remote tab closure')
+      await wait(() => typeof releaseCloseObservation === 'function')
       snapshot.workspaceOpen = false
       await evaluate(`window.dispatchEvent(new Event('focus'))`)
+      releaseCloseObservation()
       await wait(() => evaluate(`!document.body.innerText.includes('폰에서 열린 대화')`))
       assert.equal(snapshot.workspaceOpen, false, 'background flush preserves the other computer’s case close')
       snapshot.workspaceOpen = true
