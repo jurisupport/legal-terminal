@@ -18,7 +18,7 @@ const api = {}
 vm.runInNewContext(ts.transpileModule(source, {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 }
 }).outputText, {
-  exports: api, process: { platform: process.platform, pid: process.pid }, setTimeout, clearTimeout,
+  exports: api, process: { platform: process.platform, pid: process.pid }, Buffer, setTimeout, clearTimeout,
   require(name) {
     if (name === 'electron') return { app: { getPath: () => path.join(directory, 'userData') } }
     if (name === 'fs/promises') return fs

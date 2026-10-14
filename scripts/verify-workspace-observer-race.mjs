@@ -48,7 +48,7 @@ for (const phase of ['local write', 'shared read', 'shared write']) {
         return contents
       },
       writeFile: async (path, contents) => {
-        if (path === localPath) await pause('local write')
+        if (path.startsWith(`${localPath}.`) && path.endsWith('.tmp')) await pause('local write')
         if (path.startsWith(`${sharedPath}.`) && path.endsWith('.tmp')) await pause('shared write')
         files.set(path, contents)
       },
@@ -58,6 +58,7 @@ for (const phase of ['local write', 'shared read', 'shared write']) {
         files.delete(from)
       },
       rmdir: async (path) => { directories.delete(path) },
+      unlink: async (path) => { files.delete(path) },
       stat: async () => ({ mtimeMs: Date.now() }),
       readdir: async () => []
     }

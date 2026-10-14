@@ -3,7 +3,7 @@ import { createHash } from 'crypto'
 import { execFile, spawn } from 'child_process'
 import { homedir, hostname } from 'os'
 import { basename, dirname, isAbsolute, join } from 'path'
-import { mkdir, readFile, readdir, rename, rmdir, stat, writeFile } from 'fs/promises'
+import { mkdir, readFile, readdir, rename, rmdir, stat, unlink, writeFile } from 'fs/promises'
 import { buildSshArgs, type SshProfileLike } from './sshOptions'
 import { agentTabsOnly, mergeSharedAgentTabs } from '../shared/workspaceAgentTabs'
 
@@ -315,12 +315,19 @@ async function loadSnapshotFile(filePath: string): Promise<WorkspaceLoadResult> 
   }
 }
 
-async function saveSharedLocal(snapshot: WorkspaceSnapshot, cwd: string, caseId?: string): Promise<void> {
-  const path = sharedWorkspacePath(cwd, caseId)
+async function writeWorkspaceFile(path: string, content: string): Promise<void> {
   const tmp = `${path}.${process.pid}.${++sharedWriteSeq}.tmp`
   await mkdir(dirname(path), { recursive: true })
-  await writeFile(tmp, JSON.stringify(snapshot, null, 2), 'utf8')
-  await rename(tmp, path)
+  try {
+    await writeFile(tmp, content, 'utf8')
+    await rename(tmp, path)
+  } finally {
+    await unlink(tmp).catch(() => {})
+  }
+}
+
+async function saveSharedLocal(snapshot: WorkspaceSnapshot, cwd: string, caseId?: string): Promise<void> {
+  await writeWorkspaceFile(sharedWorkspacePath(cwd, caseId), JSON.stringify(snapshot, null, 2))
 }
 
 function sharedRemoteFile(cwd: string, caseId?: string): string {
@@ -412,12 +419,22 @@ function saveSharedRemote(
   caseId?: string
 ): Promise<void> {
   const name = sharedRemoteFile(cwd, caseId)
+  const content = JSON.stringify(snapshot, null, 2)
+  const expectedBytes = Buffer.byteLength(content, 'utf8')
+  // An interrupted SSH stdin can reach EOF successfully with only part of the JSON.
   const command = [
     'dir="$HOME/.claude/legal-terminal-workspaces"',
     `file="$dir/${name}"`,
     'mkdir -p "$dir" || exit 1',
     'tmp="$file.$$.tmp"',
-    'cat > "$tmp" && mv "$tmp" "$file"'
+    'trap \'rm -f "$tmp"\' 0',
+    'cat > "$tmp" || exit 1',
+    'actual=$(wc -c < "$tmp") || exit 1',
+    `if [ "$actual" -ne ${expectedBytes} ]; then`,
+    `  printf '%s\\n' "원격 작업환경 전송이 완료되지 않아 기존 기록을 유지했습니다. 다시 시도하세요. (예상 ${expectedBytes}바이트, 수신 \${actual}바이트)" >&2`,
+    '  exit 1',
+    'fi',
+    'mv "$tmp" "$file"'
   ].join('\n')
   return new Promise((resolve, reject) => {
     const proc = spawn(sshBin, [...buildSshArgs(ssh, { usage: 'oneshot' }), command], {
@@ -435,7 +452,7 @@ function saveSharedRemote(
       else reject(new Error(stderr.trim() || `원격 작업환경 저장 실패 (${code ?? 'unknown'})`))
     })
     proc.stdin?.on('error', () => {})
-    proc.stdin?.end(JSON.stringify(snapshot, null, 2))
+    proc.stdin?.end(content)
   })
 }
 
@@ -500,12 +517,10 @@ async function readWorkspaceIndex(): Promise<WorkspaceEntry[]> {
 }
 
 async function writeWorkspaceIndex(entries: WorkspaceEntry[]): Promise<void> {
-  await mkdir(workspaceStoreDir(), { recursive: true })
   const sorted = [...entries].sort((a, b) => b.savedAt.localeCompare(a.savedAt))
-  await writeFile(
+  await writeWorkspaceFile(
     workspaceIndexPath(),
-    JSON.stringify({ version: WORKSPACE_INDEX_VERSION, entries: sorted }, null, 2),
-    'utf8'
+    JSON.stringify({ version: WORKSPACE_INDEX_VERSION, entries: sorted }, null, 2)
   )
 }
 
@@ -542,8 +557,7 @@ export async function saveWorkspaceSnapshot(
 ): Promise<WorkspaceSaveResult> {
   try {
     if (filePath) {
-      await mkdir(dirname(filePath), { recursive: true })
-      await writeFile(filePath, JSON.stringify(snapshot, null, 2), 'utf8')
+      await writeWorkspaceFile(filePath, JSON.stringify(snapshot, null, 2))
       return { ok: true, path: filePath, savedAt: snapshot.savedAt }
     }
 
@@ -555,8 +569,7 @@ export async function saveWorkspaceSnapshot(
       workspaceLabel: identity.label
     }
     const entry = entryFromSnapshot(savedSnapshot, path, identity)
-    await mkdir(dirname(path), { recursive: true })
-    await writeFile(path, JSON.stringify(savedSnapshot, null, 2), 'utf8')
+    await writeWorkspaceFile(path, JSON.stringify(savedSnapshot, null, 2))
     await saveEntry(entry)
     return { ok: true, path, savedAt: savedSnapshot.savedAt, entry }
   } catch (e) {
