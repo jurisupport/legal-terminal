@@ -122,16 +122,25 @@ try {
     socket?.close()
     const exited = () => child.exitCode !== null || child.signalCode !== null
     if (!child?.pid || exited()) return
+    let terminationError
     try {
       execFileSync('taskkill.exe', ['/PID', String(child.pid), '/T', '/F'], { timeout: 10000, stdio: 'ignore' })
     } catch (error) {
-      // The process may have exited while the PID-scoped termination was starting.
-      await new Promise(setImmediate)
-      if (!exited()) throw error
+      // taskkill can report a missing PID before Node receives the child's exit event.
+      terminationError = error
     }
     if (!exited()) await new Promise((resolve, reject) => {
-      const timer = setTimeout(() => reject(Error('Installed app did not exit after taskkill')), 10000)
-      child.once('exit', () => { clearTimeout(timer); resolve() })
+      const finish = error => {
+        clearTimeout(timer)
+        child.removeListener('exit', onExit)
+        child.removeListener('error', onError)
+        error ? reject(error) : resolve()
+      }
+      const onExit = () => { if (exited()) finish() }
+      const onError = error => finish(terminationError ?? error)
+      const timer = setTimeout(() => finish(terminationError ?? Error('Installed app did not exit after taskkill')), 10000)
+      child.once('exit', onExit)
+      child.once('error', onError)
     })
   })
   await cleanup(() => { if (firewallAdded) powershell(`Remove-NetFirewallRule -DisplayName ${psQuote(ruleName)}`) })

@@ -28,7 +28,7 @@ legal-terminal은 사건 폴더, 전자소송기록 뷰어, 문서 에디터, AI
 
 프로젝트에는 사건과 로컬·SSH 참고 폴더를 함께 연결할 수 있습니다. **사건 없이 자료 폴더만 연결한 프로젝트**도 만들 수 있습니다.
 
-[빠른 설치](#빠른-설치) · [처음 쓰는 순서](#처음-쓰는-순서) · [프로젝트 사용법](#프로젝트로-함께-작업하기) · [v0.1.277 주요 변경](#이번-업데이트)
+[빠른 설치](#빠른-설치) · [처음 쓰는 순서](#처음-쓰는-순서) · [프로젝트 사용법](#프로젝트로-함께-작업하기) · [v0.1.278 주요 변경](#이번-업데이트)
 
 ## 빠른 설치
 
@@ -207,7 +207,7 @@ AI에는 매 요청마다 최신 목표·메모와 연결 자료 목록이 전�
 
 ## 이번 업데이트
 
-최신 릴리스: [v0.1.277](https://github.com/jurisupport/legal-terminal/releases/tag/v0.1.277)
+최신 릴리스: [v0.1.278](https://github.com/jurisupport/legal-terminal/releases/tag/v0.1.278)
 
 - **작업환경 저장 보호**: 원격으로 전송한 작업환경의 전체 크기를 확인한 뒤 교체합니다. 전송이 끊기거나 로컬 저장이 실패해도 기존 대화 탭 목록을 빈 파일로 덮어쓰지 않습니다.
 
@@ -271,12 +271,12 @@ legal-terminal의 Claude Agent는 Claude Code 기반으로 동작합니다. [`ju
 
 ## 개발
 
-이 README의 사용자 기능 설명은 **정식 배포 v0.1.277 기준**입니다. 같은 소스로 실행하려면 해당 릴리스 태그를 사용합니다.
+이 README의 사용자 기능 설명은 **정식 배포 v0.1.278 기준**입니다. 같은 소스로 실행하려면 해당 릴리스 태그를 사용합니다.
 
 ```bash
 git clone https://github.com/jurisupport/legal-terminal.git
 cd legal-terminal
-git switch --detach v0.1.277
+git switch --detach v0.1.278
 npm ci
 npm run dev
 ```
