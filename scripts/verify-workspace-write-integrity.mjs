@@ -140,8 +140,10 @@ test('concurrent readers see complete local snapshots, exports and workspace ind
   })().catch(error => { readError = error })
   try {
     for (let revision = 1; revision <= 20; revision++) {
-      assert.equal((await api.saveWorkspaceSnapshot(snapshot(revision))).ok, true)
-      assert.equal((await api.saveWorkspaceSnapshot(snapshot(revision), manualPath)).ok, true)
+      const stored = await api.saveWorkspaceSnapshot(snapshot(revision))
+      assert.equal(stored.ok, true, `snapshot revision ${revision}: ${stored.error ?? 'save failed'}`)
+      const exported = await api.saveWorkspaceSnapshot(snapshot(revision), manualPath)
+      assert.equal(exported.ok, true, `export revision ${revision}: ${exported.error ?? 'save failed'}`)
     }
   } finally {
     done = true
