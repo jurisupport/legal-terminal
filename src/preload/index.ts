@@ -3,6 +3,7 @@ import type { CaseManagementState, CaseManagementPatch } from '../shared/caseMan
 import type { RemotionPreviewOptions, RemotionPreviewSelection, RemotionPreviewResult } from '../shared/remotionPreview'
 import type { MediaApi, MediaSelection, MediaViewState } from '../shared/media'
 import type { AgentWorkspaceContext } from '../shared/agentWorkspaceContext'
+import type { SendClaudeOptions } from '../shared/claudeAsk'
 import type { Project, ProjectInput } from '../shared/project'
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import type { SetupStatus } from '../main/setupCheck'
@@ -1274,9 +1275,9 @@ const api = {
     importFile: (): Promise<WorkspaceLoadResult> => ipcRenderer.invoke('workspace:importFile')
   },
   claude: {
-    ask: (payload: string): Promise<void> => ipcRenderer.invoke('claude:ask', payload),
-    onIncoming: (cb: (payload: string) => void): (() => void) => {
-      const listener = (_e: unknown, payload: string): void => cb(payload)
+    ask: (payload: string, opts?: SendClaudeOptions): Promise<void> => ipcRenderer.invoke('claude:ask', payload, opts),
+    onIncoming: (cb: (payload: string, opts?: SendClaudeOptions) => void): (() => void) => {
+      const listener = (_e: unknown, payload: string, opts?: SendClaudeOptions): void => cb(payload, opts)
       ipcRenderer.on('claude:incoming', listener)
       return () => ipcRenderer.removeListener('claude:incoming', listener)
     }

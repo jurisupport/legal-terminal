@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import vm from 'node:vm'
 import ts from 'typescript'
-import { closeTab } from '../src/renderer/src/tabSelection.ts'
+import { closeTab, closeTabs } from '../src/renderer/src/tabSelection.ts'
 import { resolveAgentContextKind } from '../src/shared/agentWorkspaceContext.ts'
 import { isGeneralChatDirectory } from '../src/shared/generalChat.ts'
 
@@ -234,7 +234,7 @@ closeTab(
 assert.equal(active, last.id, 'closing an agent must still activate its same-case neighbor')
 
 for (const scenario of ['active', 'active-middle', 'active-end', 'empty-neighbor', 'last', 'background', 'cancel-dirty', 'cancel-working', 'switch-during-save', 'remove-neighbor-during-save',
-  'remote-idle', 'remote-dirty', 'remote-working', 'remote-question', 'remote-draft', 'remote-attachment']) {
+  'remote-idle', 'remote-dirty', 'remote-working', 'remote-question', 'remote-draft', 'remote-attachment', 'remote-inline']) {
   const fromSync = scenario.startsWith('remote-')
   const closing = { id: 'closing', drafts: '/closing', name: '닫을 사건' }
   const other = { id: 'other', drafts: '/other', name: '다른 사건', activeDocId: 'other-draft', activeTermId: 'other-agent', activeWork: { left: 'doc:other-draft', right: 'terminal:other-agent' } }
@@ -270,7 +270,7 @@ for (const scenario of ['active', 'active-middle', 'active-end', 'empty-neighbor
   }
   const closedAgents = []
   const savedSnapshots = []
-  const context = { ...state, docOnly: false, termOnly: false, inlineSelection: null }
+  const context = { ...state, docOnly: false, termOnly: false, inlineSelection: scenario === 'remote-inline' ? { caseId: closing.id } : null }
   for (const [key, value] of Object.entries(state)) {
     context[`${key}Ref`] = { current: value }
     context[`set${key[0].toUpperCase()}${key.slice(1)}`] = (update) => {
@@ -365,4 +365,134 @@ for (const detached of ['docOnly', 'termOnly']) {
   assert.equal(visibleInActiveCase('other'), true, `${detached}: detached work remains visible`)
 }
 
-console.log('case tab selection ok')
+for (const scenario of ['active', 'last', 'background', 'cancel-working', 'cancel-question', 'cancel-draft',
+  'cancel-attachment', 'accept-working', 'switch-during-confirm', 'new-tab-during-confirm', 'removed-during-confirm', 'queued-removal']) {
+  const ids = ['agent-left', 'agent-right']
+  const state = {
+    caseTabs: [{ id: 'case' }, { id: 'other' }],
+    termTabs: [
+      { id: ids[0], kind: 'agent', agentProvider: 'claude', caseTabId: 'case', side: 'left' },
+      { id: ids[1], kind: 'agent', agentProvider: 'codex', caseTabId: 'case', side: 'right' },
+      ...(scenario === 'last' ? [] : [{ id: 'shell', kind: 'terminal', caseTabId: 'case', side: 'right' }]),
+      { id: 'other-agent', kind: 'agent', caseTabId: 'other', side: 'right' }
+    ],
+    docTabs: scenario === 'last' ? [] : [{ id: 'draft', caseTabId: 'case', side: 'left' }],
+    dirtyDocs: new Set(['draft']),
+    activeCaseTabId: scenario === 'background' ? 'other' : 'case',
+    activeTerm: scenario === 'background' ? 'other-agent' : ids[1],
+    activeDoc: 'draft',
+    activeWork: scenario === 'background' ? { left: '', right: 'terminal:other-agent' }
+      : { left: 'terminal:agent-left', right: 'terminal:agent-right' },
+    agentDrafts: { 'other-agent': { input: '보존할 질문', attachments: [] } },
+    agentAttachmentRequests: { 'other-agent': [{}] },
+    agentDraftClearNonce: { 'agent-left': 1, 'other-agent': 2 },
+    termBracketedPasteMode: { 'agent-left': true, shell: true },
+    documentAgentTabs: { draft: 'agent-left', other: 'other-agent' },
+    termStatus: new Map([['agent-left', scenario.includes('question') ? 'question' : 'idle'], ['other-agent', 'working']]),
+    termAttention: new Set(['agent-left', 'other-agent']),
+    caseTabContextMenu: { tabId: 'case' }
+  }
+  const needsConfirm = !['active', 'last', 'background', 'queued-removal'].includes(scenario)
+  if (needsConfirm && !['cancel-question', 'cancel-draft', 'cancel-attachment'].includes(scenario)) {
+    state.termStatus.set('agent-left', 'working')
+  }
+  if (scenario === 'cancel-draft') state.agentDrafts['agent-left'] = { input: '전송 전 질문', attachments: [] }
+  if (scenario === 'cancel-attachment') state.agentAttachmentRequests['agent-left'] = [{}]
+  const before = structuredClone(state)
+  const context = { docOnly: false, termOnly: false }
+  const queuedTermUpdates = []
+  for (const [key, value] of Object.entries(state)) {
+    context[key] = value
+    context[`${key}Ref`] = { current: value }
+    context[`set${key[0].toUpperCase()}${key.slice(1)}`] = (update) => {
+      if (key === 'termTabs' && scenario === 'queued-removal') { queuedTermUpdates.push(update); return }
+      state[key] = typeof update === 'function' ? update(state[key]) : update
+      context[`${key}Ref`].current = state[key]
+    }
+  }
+  const closed = [], confirmations = []
+  Object.assign(context, {
+    closeTabs, caseIdForTerm: (tab) => tab.caseTabId, caseIdForDoc: (tab) => tab.caseTabId,
+    workspaceLocationKey: (source) => source.drafts,
+    currentCaseFromTerm: (term) => ({ drafts: '/' + term.caseTabId }),
+    pendingAgentClosesRef: { current: new Map() },
+    activateWorkKeyAfterClose: (side, key) => {
+      context.setActiveWork((active) => ({ ...active, [side]: key }))
+      if (key.startsWith('terminal:')) context.setActiveTerm(key.slice('terminal:'.length))
+      if (key.startsWith('doc:')) context.setActiveDoc(key.slice('doc:'.length))
+    },
+    window: { lt: {
+      agent: { close: (id) => {
+        assert.ok(context.pendingAgentClosesRef.current.get('/case')?.some(tab => tab.id === id),
+          'record pending closure before notifying the main process')
+        closed.push(id)
+        return Promise.resolve({ ok: true })
+      } },
+      dialog: { confirm: async (message) => {
+        confirmations.push(message)
+        if (scenario === 'switch-during-confirm') {
+          context.setActiveCaseTabId('other')
+          context.setActiveTerm('other-agent')
+          context.setActiveWork({ left: '', right: 'terminal:other-agent' })
+        }
+        if (scenario === 'new-tab-during-confirm') {
+          context.setTermTabs((tabs) => [...tabs, { id: 'new-agent', kind: 'agent', caseTabId: 'case', side: 'right' }])
+        }
+        if (scenario === 'removed-during-confirm') context.setTermTabs((tabs) => tabs.filter((tab) => tab.id !== 'agent-left'))
+        return !scenario.startsWith('cancel-')
+      } }
+    } }
+  })
+  const bulk = loadHandlers(['isAgentTab', 'isSharedDocTab', 'docSide', 'termSide', 'docKey', 'termKeyOf',
+    'workKeysForSide', 'resolveActiveWorkKey', 'nextWorkKeyAfterClose', 'hasAgentDraft', 'hasLocalTermWork',
+    'removeTermTabs', 'closeCaseAgentTabs'], context)
+  await bulk.closeCaseAgentTabs('case')
+  if (scenario === 'queued-removal') {
+    assert.equal(context.termTabsRef.current.some(tab => ids.includes(tab.id)), false,
+      'workspace readers see closed tabs removed before React applies queued state')
+    state.termTabs = queuedTermUpdates.reduce((tabs, update) => update(tabs), state.termTabs)
+  }
+  assert.deepEqual(Array.from(context.pendingAgentClosesRef.current.get('/case') ?? [], tab => tab.id), closed,
+    `${scenario}: sync tracks only conversations actually closed in this case`)
+  assert.equal(confirmations.length, needsConfirm ? 1 : 0, `${scenario}: ask once only for unfinished work`)
+  assert.deepEqual(state.caseTabs, before.caseTabs, `${scenario}: cases stay open`)
+  assert.deepEqual(state.docTabs, before.docTabs, `${scenario}: documents stay open`)
+  assert.deepEqual(state.dirtyDocs, before.dirtyDocs, `${scenario}: unsaved documents stay intact`)
+  assert.equal(state.caseTabContextMenu, null)
+  if (scenario.startsWith('cancel-')) {
+    assert.deepEqual(closed, [])
+    assert.deepEqual(state.termTabs, before.termTabs)
+    assert.deepEqual(state.agentDrafts, before.agentDrafts)
+    assert.deepEqual(state.agentAttachmentRequests, before.agentAttachmentRequests)
+    assert.deepEqual(state.activeWork, before.activeWork)
+    continue
+  }
+  assert.deepEqual(closed, scenario === 'removed-during-confirm' ? ['agent-right'] : ids)
+  assert.ok(state.termTabs.some((tab) => tab.id === 'other-agent'), `${scenario}: other case stays intact`)
+  assert.equal(state.termTabs.some((tab) => ids.includes(tab.id)), false)
+  if (scenario !== 'last') assert.ok(state.termTabs.some((tab) => tab.id === 'shell'))
+  if (scenario === 'new-tab-during-confirm') assert.ok(state.termTabs.some((tab) => tab.id === 'new-agent'))
+  assert.equal(state.agentDrafts['other-agent'].input, '보존할 질문')
+  assert.equal(state.agentAttachmentRequests['other-agent'].length, 1)
+  assert.equal(state.documentAgentTabs.other, 'other-agent')
+  if (scenario !== 'removed-during-confirm') {
+    assert.equal(state.documentAgentTabs.draft, undefined)
+    assert.equal(state.termStatus.has('agent-left'), false)
+    assert.equal(state.termAttention.has('agent-left'), false)
+    assert.equal(state.agentDraftClearNonce['agent-left'], undefined)
+  }
+  if (['background', 'switch-during-confirm'].includes(scenario)) {
+    assert.equal(state.activeCaseTabId, 'other')
+    assert.equal(state.activeTerm, 'other-agent')
+    assert.equal(state.activeWork.right, 'terminal:other-agent')
+  } else if (scenario !== 'removed-during-confirm') {
+    assert.equal(state.activeCaseTabId, 'case')
+    assert.equal(state.activeTerm, scenario === 'last' ? '' : 'shell')
+    assert.equal(state.activeWork.left, scenario === 'last' ? '' : 'doc:draft')
+    assert.equal(state.activeWork.right, scenario === 'last' ? '' : 'terminal:shell')
+  }
+  await bulk.closeCaseAgentTabs('missing-case')
+  assert.equal(confirmations.length, needsConfirm ? 1 : 0, 'empty cases do nothing')
+}
+
+console.log('case tab selection and bulk agent closing ok')

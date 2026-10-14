@@ -3,6 +3,7 @@ import type { CaseManagementState, CaseManagementPatch } from '../../shared/case
 import type { RemotionPreviewOptions, RemotionPreviewSelection, RemotionPreviewResult } from '../../shared/remotionPreview'
 import type { MediaApi, MediaSelection, MediaViewState } from '../../shared/media'
 import type { AgentWorkspaceContext } from '../../shared/agentWorkspaceContext'
+import type { SendClaudeOptions } from '../../shared/claudeAsk'
 import type { Project, ProjectInput } from '../../shared/project'
 
 export type SetupItemState = 'ok' | 'warn' | 'missing' | 'off'
@@ -1143,8 +1144,8 @@ export interface LtApi {
     importFile: () => Promise<WorkspaceLoadResult>
   }
   claude: {
-    ask: (payload: string) => Promise<void>
-    onIncoming: (cb: (payload: string) => void) => () => void
+    ask: (payload: string, opts?: SendClaudeOptions) => Promise<void>
+    onIncoming: (cb: (payload: string, opts?: SendClaudeOptions) => void) => () => void
   }
   tabs: {
     beginDrag: (payload: TabPayload) => Promise<void>

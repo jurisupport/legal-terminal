@@ -166,7 +166,7 @@ interface AgentPanelProps {
 
 export interface AgentAttachmentRequest {
   id: string
-  attachment: AgentAttachment
+  attachment?: AgentAttachment
   focusPrompt?: boolean
   inputText?: string
 }
@@ -2925,7 +2925,10 @@ export default function AgentPanel({
     if (pending.length === 0) return
 
     for (const request of pending) handledAttachmentRequestIdsRef.current.add(request.id)
-    setAttachments((current) => appendUniqueAttachments(current, pending.map((request) => request.attachment)))
+    const nextAttachments = pending.flatMap((request) => request.attachment ? [request.attachment] : [])
+    if (nextAttachments.length) {
+      setAttachments((current) => appendUniqueAttachments(current, nextAttachments))
+    }
 
     const inputText = pending
       .map((request) => request.inputText)
@@ -2940,13 +2943,13 @@ export default function AgentPanel({
       })
     }
 
-    const selectionCount = pending.filter((request) => request.attachment.kind === 'selection').length
-    const fileCount = pending.length - selectionCount
+    const selectionCount = nextAttachments.filter((attachment) => attachment.kind === 'selection').length
+    const fileCount = nextAttachments.length - selectionCount
     const parts = [
       selectionCount > 0 ? `선택 영역 ${selectionCount}개` : undefined,
       fileCount > 0 ? `첨부 ${fileCount}개` : undefined
     ].filter((part): part is string => Boolean(part))
-    showTransientFeedback(`${parts.join(', ')} 추가됨`)
+    if (parts.length) showTransientFeedback(`${parts.join(', ')} 추가됨`)
 
     if (pending.some((request) => request.focusPrompt)) {
       focusPrompt()

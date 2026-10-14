@@ -4340,6 +4340,7 @@ body {
   gap: 8px;
   font-size: 12px;
 }
+.hearing-detected-speakers input,
 .hearing-detected-speakers select {
   padding: 4px;
   border: 1px solid var(--border);
@@ -4347,6 +4348,10 @@ body {
   color: var(--fg);
   background: var(--bg);
   font: inherit;
+}
+.hearing-detected-speakers input {
+  width: 100px;
+  min-width: 0;
 }
 .hearing-dictation-note strong {
   color: #d7ba7d;

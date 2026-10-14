@@ -1,6 +1,7 @@
 import { openRemotionPreview, closeRemotionPreview, disposeRemotionPreviews } from './remotionPreview'
 import { registerFileDragIpc } from './fileDrag'
 import type { RemotionPreviewOptions } from '../shared/remotionPreview'
+import type { SendClaudeOptions } from '../shared/claudeAsk'
 import { GENERAL_CHAT_FOLDER } from '../shared/generalChat'
 import { MEDIA_SCHEME, copyCachedMedia, registerMediaIpc, registerMediaProtocol } from './media'
 import { normalizeMediaSelection, type MediaAskRequest } from '../shared/media'
@@ -564,9 +565,9 @@ ipcMain.handle('app:setWindowTitle', (e, title: string) => {
 })
 
 // 문서 전용(찢어낸) 창 등에서 'Claude에 물어보기' → 메인 창의 활성 터미널로 전달
-ipcMain.handle('claude:ask', (_e, payload: string) => {
+ipcMain.handle('claude:ask', (_e, payload: string, opts?: SendClaudeOptions) => {
   if (mainWindow && !mainWindow.isDestroyed()) {
-    mainWindow.webContents.send('claude:incoming', payload)
+    mainWindow.webContents.send('claude:incoming', payload, opts)
     mainWindow.focus()
   }
 })
@@ -1641,7 +1642,7 @@ async function hydrateLocalCloudFile(filePath: string, timeoutMs = LOCAL_CLOUD_H
 }
 
 function hasVisibleDirEntry(entries: Dirent[]): boolean {
-  return entries.some((entry) => !entry.name.startsWith('.'))
+  return entries.some((entry) => entry.name === '.hearings' || !entry.name.startsWith('.'))
 }
 
 async function hydrateLocalCloudFolder(dirPath: string): Promise<void> {
@@ -2454,7 +2455,7 @@ ipcMain.handle('fs:rename', async (_e, p: { path: string; name: string }) => {
 ipcMain.handle('fs:list', async (_e, dirPath: string, opts?: { refresh?: boolean }) => {
   if (isRemote(dirPath)) return rfsList(dirPath, { refresh: !!opts?.refresh })
   const entries = await readLocalDirEntries(dirPath)
-  const visible = entries.filter((e) => !e.name.startsWith('.'))
+  const visible = entries.filter((e) => e.name === '.hearings' || !e.name.startsWith('.'))
   const out = await Promise.all(
     visible.map(async (e) => {
       const path = join(dirPath, e.name)

@@ -225,16 +225,19 @@ const quoteHandlers = [
   'selectionSourceForElement', 'selectionAttachmentLabel', 'selectionAttachmentForAgent',
   'markdownRangeFromAttachmentSource', 'openAgentAttachmentSource',
   'attachmentSource', 'attachmentOrigin', 'attachmentAccess', 'normalizeAgentAttachments',
-  'askClaude', 'agentSelectionInputText', 'rememberedAgentForDoc', 'documentAgentKey'
+  'askClaude', 'sendClaude', 'agentSelectionInputText', 'rememberedAgentForDoc', 'documentAgentKey'
 ]
 let queuedQuote, queuedTarget
 const agents = []
 const documentAgentTabs = {}
+const forwarded = []
+const pasted = []
+const sent = []
 const pdf = runInNewContext(ts.transpileModule(
   quoteHandlers.map((name) => {
     assert.ok(declarations.has(name), `missing quote handler: ${name}`)
     return declarations.get(name)
-  }).join('\n') + `\n;({ ${quoteHandlers.join(', ')} })`,
+  }).join('\n') + `\n;({ ${quoteHandlers.join(', ')}, setDocOnly(value) { docOnly = value } })`,
   { compilerOptions: { target: ts.ScriptTarget.ES2022 } }
 ).outputText, {
   asRecord, stringValue, numberValue, recordArray, normalizeMediaSelection,
@@ -255,7 +258,10 @@ const pdf = runInNewContext(ts.transpileModule(
   confirmCaseFileScope: async () => true,
   isAgentTab: (tab) => tab?.kind === 'agent',
   createClaudeAgentForPrompt: () => ({ id: 'new-agent', kind: 'agent' }),
-  queueAgentAttachment: (tab, attachment) => { queuedTarget = tab; queuedQuote = attachment }
+  queueAgentAttachment: (tab, attachment) => { queuedTarget = tab; queuedQuote = attachment },
+  window: { lt: { claude: { ask: (...args) => { forwarded.push(args) } } } },
+  pasteDraftToAgent: (...args) => { pasted.push(args) },
+  sendToClaudeAgent: (...args) => { sent.push(args) }
 })
 const captured = pdf.selectionSourceForElement(pdfElement, '인용한 계약 조항')
 assert.equal(captured.range.startPage, 12)
@@ -318,6 +324,29 @@ agents.length = 0
 pdf.askClaude('닫힌 패널 대신 질문', { selectionSource: captured })
 await new Promise(setImmediate)
 assert.equal(queuedTarget.id, 'new-agent', 'a closed remembered panel falls back to an available agent')
+
+pdf.setDocOnly(true)
+const draftOptions = { pasteOnly: true, contextPath: '/drafts/contract.md', displayText: '문서 질문' }
+pdf.sendClaude('위 파일에 대해 ', draftOptions)
+assert.deepEqual(forwarded.pop(), ['위 파일에 대해 ', draftOptions],
+  'cross-window prompts must retain draft-only intent and context')
+pdf.askClaude('분리 창에서 인용한 계약 조항', { selectionSource: captured, sourceLabel: '계약서 원본' })
+await new Promise(setImmediate)
+assert.equal(forwarded.length, 1, 'a detached selection is forwarded once')
+const [forwardedText, forwardedOptions] = forwarded.pop()
+assert.equal(forwardedText, '분리 창에서 인용한 계약 조항')
+assert.equal(forwardedOptions.selection.selectionSource.range.startPage, 12)
+assert.equal(forwardedOptions.selection.docPath, captured.docPath)
+assert.equal(forwardedOptions.selection.sourceLabel, '계약서 원본')
+pdf.setDocOnly(false)
+pdf.askClaude(forwardedText, forwardedOptions.selection)
+await new Promise(setImmediate)
+assert.equal(queuedQuote.kind, 'selection', 'the receiving window stages a quote attachment')
+assert.equal(queuedQuote.source.range.startPage, 12)
+assert.equal(queuedQuote.source.path, captured.docPath)
+assert.match(queuedQuote.label, /계약서 원본/)
+assert.equal(sent.length, 0, 'quoting across windows must not send a message')
+assert.equal(pasted.length, 0, 'quoted passages stay out of plain composer text')
 
 const media = { sourcePath: '/shorts/video.mp4', versionId: 'review-v1', time: 12.3, start: 12.3, end: 15.8 }
 const [mediaQuote] = pdf.normalizeAgentAttachments([{ kind: 'media-range', label: '12.3–15.8초', media }])

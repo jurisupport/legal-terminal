@@ -63,7 +63,8 @@ const REMOTE_MATERIALIZE_TMP_ROOT = '/tmp/legal-terminal-rclone-materialize'
 const REMOTE_LOCAL_MUTATION_WINDOW_MS = 30_000
 const REMOTE_DIR_CACHE_TTL_MS = 10 * 60_000
 const REMOTE_DIR_CACHE_MAX = 500
-const REMOTE_DIR_DISK_CACHE_NAMESPACE = 'remote-fs'
+// Older directory caches omit the user-visible .hearings folder.
+const REMOTE_DIR_DISK_CACHE_NAMESPACE = 'remote-fs-v2'
 const REMOTE_FILE_CACHE_NAMESPACE = 'remote-file'
 const REMOTE_PREFETCH_CONCURRENCY = 4
 const REMOTE_PREFETCH_COOLDOWN_MS = 10 * 60_000
@@ -258,7 +259,7 @@ async function listRemoteOneDriveEntries(
         const isDir = raw.endsWith('/')
         const rel = raw.replace(/\/+$/, '')
         const name = posix.basename(rel)
-        if (!name || name.startsWith('.')) return []
+        if (!name || (name.startsWith('.') && name !== '.hearings')) return []
         return [
           {
             name,
@@ -879,7 +880,7 @@ async function readRemoteDir(profileId: string, path: string, prefetch = true, f
     )
     localListed = true
     for (const e of list) {
-      if (e.filename.startsWith('.')) continue
+      if (e.filename.startsWith('.') && e.filename !== '.hearings') continue
       const remotePath = posix.join(actualPath, e.filename)
       let isDir = (e.attrs.mode & S_IFMT) === S_IFDIR
       if ((e.attrs.mode & S_IFMT) === S_IFLNK) {

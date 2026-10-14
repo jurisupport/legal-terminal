@@ -66,6 +66,7 @@ import FindBar from './search/FindBar'
 import CasesDashboard, { JS_TOKEN_UPDATED_EVENT } from './dashboard/CasesDashboard'
 import ProjectsDashboard from './dashboard/ProjectsDashboard'
 import type { Project, ProjectCaseLink, ProjectFolderLink } from '../../shared/project'
+import type { ClaudeAskOptions, ClaudeSelectionSource, SendClaudeOptions } from '../../shared/claudeAsk'
 import SetupChecklist from './welcome/SetupChecklist'
 import { clearCaseListCache } from './dashboard/caseListCache'
 import UpcomingHearings from './dashboard/UpcomingHearings'
@@ -86,7 +87,7 @@ import HearingRecordPanel, {
   type HearingRecordCase
 } from './hearing/HearingRecordPanel'
 import { cancelIfTerminalPointerDrag } from './dragGuard'
-import { closeTab } from './tabSelection'
+import { closeTab, closeTabs } from './tabSelection'
 import {
   normalizeRemoteQuickStartPaths,
   remoteQuickStartInputToPaths,
@@ -609,20 +610,6 @@ interface ClaudeDraftPromptOptions {
   sourceTitle?: string
   instruction?: string
 }
-interface ClaudeSelectionSource {
-  docId?: string
-  docPath?: string
-  docTitle?: string
-  text?: string
-  range?: NonNullable<AgentAttachment['source']>['range']
-}
-interface ClaudeAskOptions extends ClaudeDraftPromptOptions {
-  docPath?: string | null
-  sourceLabel?: string
-  selectionSource?: ClaudeSelectionSource
-  agentQuoteMessageId?: string
-}
-
 interface InlineSelectionContext {
   key: string
   caseId: string
@@ -1915,7 +1902,7 @@ export default function App(): JSX.Element {
   useEffect(() => {
     if (!caseTabContextMenu) return
     const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null
-    const buttons = Array.from(caseTabContextMenuRef.current?.querySelectorAll<HTMLButtonElement>('button') ?? [])
+    const buttons = Array.from(caseTabContextMenuRef.current?.querySelectorAll<HTMLButtonElement>('button:not(:disabled)') ?? [])
     buttons[0]?.focus()
     const close = (): void => setCaseTabContextMenu(null)
     const closeFromKey = (event: KeyboardEvent): void => {
@@ -3927,49 +3914,64 @@ export default function App(): JSX.Element {
     window.lt.case.addHistory({ drafts, records: rec, name: nextSource.name }).then(setRecent)
   }
 
-  const removeTermTab = (id: string): void => {
-    const tab = termTabs.find((t) => t.id === id)
-    const side = termSide(tab)
-    const closingKey = termKeyOf(id)
-    const sideKeys = workKeysForSide(visibleDocTabs, visibleTermTabs, side)
-    const nextKey =
-      tab && resolveActiveWorkKey(sideKeys, activeWork[side]) === closingKey
-        ? nextWorkKeyAfterClose(sideKeys, closingKey)
-        : undefined
-    termTabsRef.current = termTabsRef.current.filter((term) => term.id !== id)
-    setTermTabs((tabs) => closeTab(tabs, id, activeTerm, setActiveTerm, visibleTermTabs))
-    setDocumentAgentTabs((links) => Object.fromEntries(Object.entries(links).filter(([, agentId]) => agentId !== id)))
+  const removeTermTabs = (ids: ReadonlySet<string>): void => {
+    const inActiveCase = (caseId?: string): boolean =>
+      docOnly || termOnly || (caseId ?? '') === activeCaseTabIdRef.current
+    const visibleTerms = termTabsRef.current.filter((term) => inActiveCase(caseIdForTerm(term)))
+    const visibleDocs = docTabsRef.current.filter((doc) => isSharedDocTab(doc) || inActiveCase(caseIdForDoc(doc)))
+    const closingKeys = new Set([...ids].map(termKeyOf))
+    const nextWork: Partial<Record<DockSide, WorkTabKey | ''>> = {}
+    for (const side of ['left', 'right'] as const) {
+      const sideKeys = workKeysForSide(visibleDocs, visibleTerms, side)
+      const activeKey = resolveActiveWorkKey(sideKeys, activeWorkRef.current[side])
+      if (activeKey && closingKeys.has(activeKey)) {
+        nextWork[side] = nextWorkKeyAfterClose(
+          sideKeys.filter((key) => key === activeKey || !closingKeys.has(key)), activeKey
+        )
+      }
+    }
+    setActiveTerm((active) => {
+      let next = active
+      closeTabs(visibleTerms, ids, active, (id) => { next = id }, visibleTerms)
+      return next
+    })
+    termTabsRef.current = termTabsRef.current.filter((term) => !ids.has(term.id))
+    setTermTabs((tabs) => tabs.filter((tab) => !ids.has(tab.id)))
+    setDocumentAgentTabs((links) => Object.fromEntries(Object.entries(links).filter(([, agentId]) => !ids.has(agentId))))
     setTermBracketedPasteMode((m) => {
-      if (!(id in m)) return m
       const n = { ...m }
-      delete n[id]
+      for (const id of ids) delete n[id]
       return n
     })
+    setAgentAttachmentRequests((requests) => {
+      const next = { ...requests }
+      for (const id of ids) delete next[id]
+      return next
+    })
     setAgentDrafts((drafts) => {
-      if (!drafts[id]) return drafts
       const next = { ...drafts }
-      delete next[id]
+      for (const id of ids) delete next[id]
       return next
     })
     setAgentDraftClearNonce((nonces) => {
-      if (!(id in nonces)) return nonces
       const next = { ...nonces }
-      delete next[id]
+      for (const id of ids) delete next[id]
       return next
     })
     setTermAttention((s) => {
-      if (!s.has(id)) return s
       const n = new Set(s)
-      n.delete(id)
+      for (const id of ids) n.delete(id)
       return n
     })
     setTermStatus((m) => {
-      if (!m.has(id)) return m
       const n = new Map(m)
-      n.delete(id)
+      for (const id of ids) n.delete(id)
       return n
     })
-    if (nextKey !== undefined) activateWorkKeyAfterClose(side, nextKey)
+    for (const side of ['left', 'right'] as const) {
+      const key = nextWork[side]
+      if (key !== undefined) activateWorkKeyAfterClose(side, key)
+    }
   }
   const closeTerm = (id: string): boolean => {
     const tab = termTabsRef.current.find((t) => t.id === id)
@@ -3979,11 +3981,11 @@ export default function App(): JSX.Element {
       pendingAgentClosesRef.current.set(key, [...(pendingAgentClosesRef.current.get(key) ?? []), tab])
       window.lt.agent.close(id)
     } else window.lt.pty.kill(id)
-    removeTermTab(id)
+    removeTermTabs(new Set([id]))
     return true
   }
   const detachTerm = (id: string): boolean => {
-    removeTermTab(id)
+    removeTermTabs(new Set([id]))
     return true
   }
 
@@ -4567,7 +4569,7 @@ export default function App(): JSX.Element {
       setAgentAttachmentRequests((current) => {
         const draftKeys = hasAgentDraft(draft) ? new Set(draft.attachments.map(agentAttachmentKey)) : undefined
         const moving = (current[fromId] ?? pendingRequests).filter(
-          (request) => !draftKeys?.has(agentAttachmentKey(request.attachment))
+          (request) => !request.attachment || !draftKeys?.has(agentAttachmentKey(request.attachment))
         )
         if (moving.length === 0) {
           const next = { ...current }
@@ -4605,7 +4607,7 @@ export default function App(): JSX.Element {
 
   const queueAgentAttachment = (
     term: TermTab,
-    attachment: AgentAttachment,
+    attachment: AgentAttachment | undefined,
     inputText?: string
   ): void => {
     const request: AgentAttachmentRequest = {
@@ -5999,8 +6001,6 @@ export default function App(): JSX.Element {
     window.lt.pty.write(termId, text)
   }
 
-  type SendClaudeOptions = { displayText?: string; contextPath?: string; pasteOnly?: boolean }
-
   const focusTermTabForPrompt = (tab: TermTab): void => {
     setActiveTerm(tab.id)
     setWorkActive(termSide(tab), termKeyOf(tab.id))
@@ -6008,20 +6008,7 @@ export default function App(): JSX.Element {
   }
 
   const pasteDraftToAgent = (tab: TermTab & { kind: 'agent' }, payload: string): void => {
-    setAgentDrafts((current) => {
-      const draft = current[tab.id]
-      const input = draft?.input
-        ? `${draft.input}${/\s$/.test(draft.input) ? '' : '\n'}${payload}`
-        : payload
-      return {
-        ...current,
-        [tab.id]: {
-          input,
-          attachments: draft?.attachments ?? []
-        }
-      }
-    })
-    focusTermTabForPrompt(tab)
+    queueAgentAttachment(tab, undefined, payload)
   }
 
   const sendToClaudeAgent = (
@@ -6076,7 +6063,7 @@ export default function App(): JSX.Element {
   // Claude 질문 전송: Claude Agent 탭을 우선 사용하고, 없으면 새 Claude Agent 탭에 초안으로 붙인다.
   const sendClaude = (payload: string, opts?: SendClaudeOptions): void => {
     if (docOnly) {
-      void window.lt.claude.ask(payload)
+      void window.lt.claude.ask(payload, opts)
       return
     }
     const tab = resolveClaudeAgentTargetTab(visibleTermTabs, activeTerm, activeWork)
@@ -6256,17 +6243,6 @@ export default function App(): JSX.Element {
       `${docName ? `「${docName}」 ` : ''}선택 본문 ${formatCharCount(text.length)}자를 Claude 컨텍스트로 추가했습니다.`,
       '원문은 화면 표시에서 숨겼습니다.'
     ].join('\n')
-  // 메인 창: 다른 창에서 온 Claude 질문을 활성 Claude surface에 주입.
-  const sendClaudeRef = useRef(sendClaude)
-  sendClaudeRef.current = sendClaude
-  useEffect(
-    () =>
-      window.lt.claude.onIncoming((payload) => {
-        sendClaudeRef.current(payload)
-      }),
-    []
-  )
-
   // 파일 1개를 "물어보기" 형태로 전송 (경로 포함 → claude가 실제 파일을 읽음).
   const askAboutFile = async (termId: string, path: string, label: string): Promise<void> => {
     const term = termTabsRef.current.find((t) => t.id === termId)
@@ -6336,7 +6312,16 @@ export default function App(): JSX.Element {
               text: opts.selectionSource.text ?? t
             }
           : undefined
-      if (t && !docOnly) {
+      if (t && docOnly) {
+        // 창을 건너도 선택 본문은 전송할 메시지가 아니라 작성 중인 질문의 첨부다.
+        sendClaude(t, {
+          pasteOnly: true,
+          contextPath: docPath,
+          selection: { ...opts, docPath: docPath ?? null, sourcePath, sourceTitle, sourceLabel, selectionSource }
+        })
+        return
+      }
+      if (t) {
         const selectionTarget = isAgentTab(targetTab) ? targetTab : createClaudeAgentForPrompt(docPath)
         if (selectionTarget) {
           const attachment = selectionAttachmentForAgent(
@@ -6387,6 +6372,16 @@ export default function App(): JSX.Element {
       else sendClaude(payload, { displayText, contextPath: docPath, pasteOnly: true })
     })()
   }
+
+  const claudeIncomingRef = useRef({ sendClaude, askClaude })
+  claudeIncomingRef.current = { sendClaude, askClaude }
+  useEffect(
+    () => window.lt.claude.onIncoming((payload, opts) => {
+      if (opts?.selection) claudeIncomingRef.current.askClaude(payload, opts.selection)
+      else claudeIncomingRef.current.sendClaude(payload, opts)
+    }),
+    []
+  )
 
   const sendMarkdownToJuriSupport = (doc: MarkdownDocumentPayload): void => {
     const prompt = buildJuriSupportLegalDocumentPrompt(doc, {
@@ -7093,6 +7088,23 @@ export default function App(): JSX.Element {
   const hasLocalTermWork = (term: TermTab): boolean =>
     !isAgentTab(term) || ['working', 'question'].includes(termStatusRef.current.get(term.id) ?? '') ||
     hasAgentDraft(agentDraftsRef.current[term.id]) || !!agentAttachmentRequestsRef.current[term.id]?.length
+
+  const closeCaseAgentTabs = async (tabId: string): Promise<void> => {
+    setCaseTabContextMenu(null)
+    const agents = termTabsRef.current.filter((term) => isAgentTab(term) && caseIdForTerm(term) === tabId)
+    if (agents.length === 0) return
+    if (agents.some(hasLocalTermWork) && !(await window.lt.dialog.confirm(
+      '이 사건에 진행 중인 작업이나 전송하지 않은 질문·첨부가 있습니다.\n에이전트 탭을 모두 닫으면 작업이 중단되고 작성 중인 내용은 사라집니다.\n\n에이전트 탭을 모두 닫을까요?'
+    ))) return
+    const ids = new Set(agents.map((term) => term.id))
+    const closing = termTabsRef.current.filter((term) => ids.has(term.id) && isAgentTab(term) && caseIdForTerm(term) === tabId)
+    for (const term of closing) {
+      const key = workspaceLocationKey(currentCaseFromTerm(term))
+      pendingAgentClosesRef.current.set(key, [...(pendingAgentClosesRef.current.get(key) ?? []), term])
+      void window.lt.agent.close(term.id)
+    }
+    removeTermTabs(new Set(closing.map((term) => term.id)))
+  }
 
   const closeCaseTab = async (tabId: string, fromSync = false): Promise<void> => {
     const tab = caseTabsRef.current.find((item) => item.id === tabId)
@@ -9245,6 +9257,18 @@ export default function App(): JSX.Element {
             }}
           >
             <span>소송기록 폴더 지정</span>
+          </button>
+          <button
+            className="tab-context-menu-item"
+            role="menuitem"
+            title="이 사건에서 열린 에이전트 탭을 모두 닫습니다"
+            disabled={!termTabs.some((term) => isAgentTab(term) && caseIdForTerm(term) === caseTabContextMenu.tabId)}
+            onClick={(e) => {
+              e.stopPropagation()
+              void closeCaseAgentTabs(caseTabContextMenu.tabId)
+            }}
+          >
+            <span>에이전트 탭 모두 닫기</span>
           </button>
           <button
             className="tab-context-menu-item"

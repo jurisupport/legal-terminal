@@ -16,6 +16,8 @@ function runApp({ root, temp, closeMode }) {
   const { app, BrowserWindow, ipcMain, screen, session } = require('electron')
   const assert = require('node:assert/strict')
   const calls = [], errors = [], windows = [], sessions = new Map()
+  const movedAgentOwners = new Map()
+  let draggedAgentId
   const profile = { id: 'detached-test', label: '검증 서버', host: 'example.invalid', user: 'test' }
   const cwd = '/cases/detached-window'
   const recent = { drafts: `ssh://${profile.id}${cwd}`, name: '창 분리 검증', ts: Date.now() }
@@ -29,6 +31,9 @@ function runApp({ root, temp, closeMode }) {
   }
   let blockedSaveWindow = null
   app.setPath('userData', require('node:path').join(temp, closeMode))
+  const home = require('node:path').join(temp, closeMode, 'home')
+  require('node:fs').mkdirSync(home, { recursive: true })
+  app.setPath('home', home)
   // Keep the real windows hidden. Focus refresh uses backend ownership state,
   // which belongs to the separate workspace regression rather than this mock.
   BrowserWindow.prototype.show = function () {}
@@ -40,16 +45,23 @@ function runApp({ root, temp, closeMode }) {
   const on = ipcMain.on.bind(ipcMain)
   ipcMain.on = (channel, callback) => on(channel, channel.startsWith('fs:') || channel.startsWith('pty:') ? () => {} : callback)
   const real = new Set([
-    'app:info', 'app:setWindowTitle', 'tabs:ready', 'tabs:beginDrag', 'tabs:endDrag',
+    'app:info', 'app:generalChatDirectory', 'app:setWindowTitle', 'tabs:ready', 'tabs:beginDrag', 'tabs:endDrag',
     'tabs:dropOnTabBar', 'window:close', 'window:forceClose',
     'caseManagement:get', 'caseManagement:update'
   ])
   ipcMain.handle = (channel, handler) => handle(channel, async (event, ...args) => {
     const windowId = BrowserWindow.fromWebContents(event.sender)?.id
     calls.push({ channel, windowId, args, at: Date.now() })
-    // The user opens a case while the general-chat directory is still loading.
-    if (channel === 'app:generalChatDirectory') return new Promise(() => {})
-    if (real.has(channel)) return handler(event, ...args)
+    if (real.has(channel)) {
+      if (channel === 'tabs:beginDrag') draggedAgentId = args[0]?.kind === 'terminal' && args[0].tab?.kind === 'agent' ? args[0].tab.id : undefined
+      const windowCount = windows.length
+      const result = await handler(event, ...args)
+      if (draggedAgentId && result?.action === 'moved') {
+        if (channel === 'tabs:dropOnTabBar') movedAgentOwners.set(draggedAgentId, event.sender.id)
+        else if (channel === 'tabs:endDrag' && windows.length > windowCount) movedAgentOwners.set(draggedAgentId, windows.at(-1).webContents.id)
+      }
+      return result
+    }
     if (channel === 'setup:status') return { items: [], ready: true }
     if (channel === 'settings:get') return { sshProfiles: [profile], notifyDone: false }
     if (channel === 'case:history' || channel === 'case:addHistory') return [recent]
@@ -67,18 +79,11 @@ function runApp({ root, temp, closeMode }) {
     if (channel === 'sessions:transcript') return { sessionId: args[0], messages: [] }
     if (channel === 'workspace:autoList') return { ok: true, snapshots: args[0] ? [snapshot] : [] }
     if (channel === 'workspace:list') return { ok: true, entries: [] }
-    if (channel === 'workspace:autoLoad') {
-      // Source focus refresh must respect its latest saved subset. The detached
-      // window still sees the full shared case, exposing any accidental restore.
-      // Actual ownership merging is covered by the separate workspace regression.
-      const saved = windowId === windows[0]?.id
-        ? calls.findLast((call) => call.channel === 'workspace:autoSave' && call.windowId === windowId)?.args[0].snapshot
-        : undefined
-      const visible = saved
-        ? { ...snapshot, terminals: snapshot.terminals.filter((tab) => saved.terminals.some((live) => live.id === tab.id)) }
-        : snapshot
-      return { ok: true, remote: { ok: true, snapshot: visible } }
-    }
+    // Match workspaceForWindow: moved conversations belong to their receiving window.
+    if (channel === 'workspace:autoLoad') return { ok: true, remote: { ok: true, snapshot: args[0].cwd === cwd ? {
+      ...snapshot,
+      terminals: snapshot.terminals.filter(tab => !movedAgentOwners.has(tab.id) || movedAgentOwners.get(tab.id) === event.sender.id)
+    } : null } }
     if (channel === 'workspace:autoObserve') return undefined
     if (channel === 'workspace:autoSave') {
       if (windowId === blockedSaveWindow) return new Promise(() => {})
@@ -109,7 +114,7 @@ function runApp({ root, temp, closeMode }) {
     throw Error(`Timed out: ${label}`)
   }
   const tabTitles = (win) => evaluate(win, `[...document.querySelectorAll('.tab .tab-title')].map(tab => tab.textContent.replace(/^Agent · /, ''))`)
-  const saves = (win) => calls.filter((call) => call.channel === 'workspace:autoSave' && call.windowId === win.id)
+  const saves = (win) => calls.filter((call) => call.channel === 'workspace:autoSave' && call.windowId === win.id && call.args[0].location.cwd === cwd)
   const dragStart = (win, title) => evaluate(win, `(() => {
     const tab = [...document.querySelectorAll('.tab')].find(tab => tab.innerText.includes(${JSON.stringify(title)}));
     if (!tab || !tab.draggable) throw Error('Draggable tab missing');
@@ -143,8 +148,8 @@ function runApp({ root, temp, closeMode }) {
     try {
       await wait('main window', () => windows.length > 0)
       const source = windows[0]
-      await wait('case discovery', () => evaluate(source, `!!document.querySelector('.case-sidebar-case')`))
-      await evaluate(source, `document.querySelector('.case-sidebar-case').click()`)
+      await wait('case discovery', () => evaluate(source, `[...document.querySelectorAll('.case-sidebar-case')].some(tab => tab.textContent.includes(${JSON.stringify(recent.name)}))`))
+      await evaluate(source, `[...document.querySelectorAll('.case-sidebar-case')].find(tab => tab.textContent.includes(${JSON.stringify(recent.name)})).click()`)
       await wait('two source conversations', async () => (await tabTitles(source)).filter((title) => title.includes('대화')).length === 2)
       await wait('initial source workspace save', () => saves(source).length > 0)
 

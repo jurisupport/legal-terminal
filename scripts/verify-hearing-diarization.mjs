@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs'
 import { runInNewContext } from 'node:vm'
 import ts from 'typescript'
 import { shouldUseDictationCorrection } from '../src/main/dictationGuard.ts'
+import { shouldKeepPendingRecord } from '../src/renderer/src/hearing/loadPolicy.ts'
 
 // Exercise the real transcription path without Electron, stored secrets, or network access.
 const source = readFileSync(new URL('../src/main/dictation.ts', import.meta.url), 'utf8')
@@ -174,7 +175,7 @@ console.log('hearing diarization request, segments, validation, and ordinary dic
 // A disk read may finish after one pending row has expanded into several speakers.
 const panel = {}
 const panelSource = readFileSync(new URL('../src/renderer/src/hearing/HearingRecordPanel.tsx', import.meta.url), 'utf8')
-runInNewContext(ts.transpileModule(`${panelSource}\nObject.assign(exports, { mergePendingRecord, selectSpeakerReferences, applyDiarizedTranscript, assignRecordSpeaker, speakerAssignmentGroups, sanitizeRecord, buildReport })`, {
+runInNewContext(ts.transpileModule(`${panelSource}\nObject.assign(exports, { mergePendingRecord, selectSpeakerReferences, applyDiarizedTranscript, assignRecordSpeaker, speakerAssignmentGroups, sanitizeRecord, buildReport, renameRecordSpeaker, alphabeticSpeakerLabel, createInitialRecord, recordHasContent })`, {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX }
 }).outputText, { exports: panel, require: () => ({}) })
 const base = { speakers: [], case: {}, requests: [], activeSpeakerId: '', result: {} }
@@ -196,6 +197,10 @@ const plain = (value) => JSON.parse(JSON.stringify(value))
 const overSplit = [...segments, { speaker: 'C', text: '같은 사람의 다른 발언', start: 6, end: 9 }]
 const original = panel.applyDiarizedTranscript({ ...base, entries: [placeholder, manual] }, 'recording', 0, overSplit, [])
 const [speakerA, speakerB, speakerC] = original.speakers.map(({ id }) => id)
+assert.deepEqual(plain(original.speakers.map(({ label }) => label)), ['A', 'B', 'C'])
+assert.equal(panel.alphabeticSpeakerLabel(25), 'Z')
+assert.equal(panel.alphabeticSpeakerLabel(26), 'AA')
+assert.equal(panel.alphabeticSpeakerLabel(701), 'ZZ')
 const combined = panel.assignRecordSpeaker(original, speakerC, speakerA)
 assert.equal(combined.speakers.length, 2, 'Detected speakers can merge with one another')
 assert.equal(combined.entries[3].speakerId, speakerA)
@@ -254,40 +259,158 @@ const matchedSegments = [
   { ...segments[2], speaker: 'C', participantId: 'mediator', participantSource: 'context' }
 ]
 const matched = panel.applyDiarizedTranscript(declared, 'recording', 0, matchedSegments, [])
-assert.deepEqual(plain(matched.speakers.map(({ id }) => id)), ['mediator', 'client'], 'A declared roster must not grow from detected labels')
-assert.deepEqual(plain(matched.entries.map(({ speakerId }) => speakerId)), ['mediator', '', 'mediator'])
-assert.equal(matched.entries[0].participantSource, 'context', 'Context-based attribution must be visibly provisional')
-assert.equal(matched.entries[1].participantSource, undefined)
-assert.deepEqual(plain(matched.entries.map(({ text, recording }) => [text, recording.start, recording.end])),
-  matchedSegments.map(({ text, start, end }) => [text, start, end]), 'Participant assignment must not rewrite speech')
+assert.deepEqual(plain(matched.speakers.map(({ label }) => label)), ['조정위원', '홍길동', 'A', 'B', 'C'],
+  'A declared roster must not prevent anonymous voice groups')
 const groups = panel.speakerAssignmentGroups(matched)
-assert.equal(groups.length, 3)
-assert.equal(groups[0].suggestedId, 'mediator')
-assert.equal(groups[1].suggestedId, '')
-const pendingCache = new Map([['recording', referenceAudio], ['recording-segment-1', referenceAudio]])
-assert.equal(panel.selectSpeakerReferences(matched, pendingCache).length, 0, 'Guesses and unresolved voices must not become trusted references')
-assert.equal(panel.selectSpeakerReferences(matched, pendingCache, true).length, 2, 'Keep samples for a later manual confirmation')
-const confirmed = panel.assignRecordSpeaker(matched, groups[0].id, 'client')
-assert.equal(confirmed.entries[0].speakerId, 'client')
-assert.equal(confirmed.entries[0].participantSource, undefined)
-assert.equal(panel.selectSpeakerReferences(confirmed, pendingCache)[0].participantId, 'client')
-const named = panel.assignRecordSpeaker(confirmed, groups[1].id, 'mediator')
-assert.equal(named.entries[1].speakerId, 'mediator')
-assert.equal(panel.selectSpeakerReferences(named, pendingCache).length, 2)
-const finalConfirmed = panel.assignRecordSpeaker(named, groups[2].id, 'mediator')
-assert.equal(panel.speakerAssignmentGroups(finalConfirmed).length, 0)
+assert.deepEqual(plain(groups.map(({ label }) => label)), ['A', 'B', 'C'])
+assert.deepEqual(plain(matched.entries.map(({ speakerId }) => speakerId)), plain(groups.map(({ id }) => id)),
+  'Two voices suggested as the same participant must remain distinct')
+assert.ok(matched.entries.every(({ participantSource }) => participantSource === undefined))
+assert.deepEqual(plain(matched.entries.map(({ text, recording }) => [text, recording.start, recording.end])),
+  matchedSegments.map(({ text, start, end }) => [text, start, end]), 'Grouping must not rewrite speech')
 
-const single = panel.applyDiarizedTranscript({ ...declared, speakers: [roster[0]], activeSpeakerId: 'mediator' }, 'recording', 0, segments, [])
-assert.ok(single.entries.every(({ speakerId }) => speakerId === ''), 'A single name or active selection does not identify an unknown voice')
-const changedRoster = panel.applyDiarizedTranscript({ ...declared, speakers: [roster[1]] }, 'recording', 0, matchedSegments, [], ['mediator', 'client'])
-assert.ok(changedRoster.entries.every(({ speakerId }) => speakerId === ''), 'Removed participants must not be restored by a late result')
-const malicious = panel.applyDiarizedTranscript(declared, 'recording', 0,
-  [{ ...segments[0], participantId: 'invented', participantSource: 'context' }], [])
-assert.equal(malicious.entries[0].speakerId, '')
-const persisted = panel.sanitizeRecord(plain(matched))
-assert.equal(persisted.entries[0].participantSource, 'context')
-assert.equal(persisted.entries[1].recording.speakerKey, groups[1].id)
-assert.match(panel.buildReport(persisted), /조정위원 \[맥락 추정·확인 필요\]/)
-assert.match(panel.buildReport(persisted), /참여자 확인 필요/)
+const repeated = panel.applyDiarizedTranscript(declared, 'recording', 0, segments, [])
+const [a, b] = panel.speakerAssignmentGroups(repeated)
+const renamed = panel.renameRecordSpeaker(repeated, a.id, '  김 변호사  ')
+assert.equal(renamed.speakers.find(({ id }) => id === a.id).label, '김 변호사')
+assert.deepEqual(plain(renamed.entries), plain(repeated.entries), 'Rename preserves IDs, content, order and timestamps')
+assert.equal(panel.renameRecordSpeaker(renamed, a.id, '   '), renamed, 'Empty names are ignored')
+assert.equal(panel.renameRecordSpeaker(renamed, 'missing', '이름'), renamed)
+const delayedRename = panel.mergePendingRecord(repeated, renamed, new Set(), new Map([[a.id, '김 변호사']]))
+assert.equal(delayedRename.speakers.find(({ id }) => id === a.id).label, '김 변호사',
+  'A late disk read must not undo a rename')
+assert.equal(panel.mergePendingRecord(renamed, repeated).speakers.find(({ id }) => id === a.id).label, '김 변호사',
+  'Unedited defaults must not overwrite a saved speaker name')
+const syncLinks = { syncedAt: '2026-10-14T00:00:00Z', todoId: 'saved-record',
+  followups: [{ action: '서면 검토', source: 'record-source', todoId: 'open-followup' }] }
+const linkedRename = panel.mergePendingRecord({ ...repeated, jsSync: syncLinks }, renamed,
+  new Set(), new Map([[a.id, '김 변호사']]))
+assert.deepEqual(plain(linkedRename.jsSync), syncLinks, 'A rename during loading must preserve saved followup and record-sync links')
+assert.deepEqual(plain(panel.sanitizeRecord(plain(linkedRename)).jsSync), syncLinks,
+  'Speaker normalization and reloading must preserve followup task links')
+const report = panel.buildReport(panel.sanitizeRecord(plain(renamed)))
+assert.equal(report.match(/김 변호사:/g)?.length, 2, 'All A entries use the renamed label after reload and export')
+assert.equal(report.match(/ B:/g)?.length, 1, 'Renaming A leaves B untouched')
+assert.doesNotMatch(report, /맥락 추정|참여자 확인 필요/)
+const duplicateNames = panel.renameRecordSpeaker(renamed, b.id, '김 변호사')
+assert.equal(new Set(duplicateNames.entries.map(({ speakerId }) => speakerId)).size, 2,
+  'Display names never silently merge distinct voice identities')
+const renamedCache = new Map([['recording', referenceAudio], ['recording-segment-1', referenceAudio]])
+const renamedReferences = panel.selectSpeakerReferences(renamed, renamedCache)
+assert.equal(renamedReferences.length, 2, 'Anonymous voices can be reused without a participant guess')
+assert.ok(renamedReferences.every(({ participantId }) => participantId === undefined))
+const reusedNamed = panel.applyDiarizedTranscript({ ...renamed, entries: [...renamed.entries, { id: 'next' }] },
+  'next', 10_000, [{ ...segments[0], speaker: renamedReferences[0].name }], renamedReferences)
+assert.equal(reusedNamed.entries.at(-1).speakerId, a.id, 'Renaming preserves identity across recordings')
+assert.equal(reusedNamed.speakers.length, renamed.speakers.length)
+const assigned = panel.assignRecordSpeaker(reusedNamed, a.id, 'mediator')
+assert.deepEqual(plain(assigned.entries.map(({ speakerId }) => speakerId)), ['mediator', b.id, 'mediator', 'mediator'],
+  'Reassignment changes all entries of the source voice, across recordings')
+assert.deepEqual(plain(assigned.entries.map(({ text, recording }) => ({ text, recording }))),
+  plain(reusedNamed.entries.map(({ text, recording }) => ({ text, recording }))))
+const reassignedParticipant = panel.assignRecordSpeaker(assigned, 'mediator', 'client')
+assert.ok(reassignedParticipant.speakers.some(({ id }) => id === 'mediator'), 'Keep declared participants when moving their speech')
+assert.deepEqual(plain(reassignedParticipant.entries.map(({ speakerId }) => speakerId)), ['client', b.id, 'client', 'client'])
+assert.equal(panel.selectSpeakerReferences(reassignedParticipant, renamedCache)[0].participantId, 'client')
 assert.equal(panel.assignRecordSpeaker(matched, groups[1].id, 'invented'), matched)
-console.log('declared participant roster, provisional context labels, manual confirmation, sample trust, and saved reports verified')
+
+const old = { ...declared, entries: [
+  { ...repeated.entries[0], speakerId: 'mediator', participantSource: 'context' },
+  { ...repeated.entries[1], speakerId: '' },
+  { ...repeated.entries[2], speakerId: 'mediator', participantSource: 'context' }
+] }
+const migrated = panel.sanitizeRecord(plain(old))
+assert.deepEqual(plain(panel.speakerAssignmentGroups(migrated).map(({ label }) => label)), ['A', 'B'])
+assert.equal(migrated.entries[0].speakerId, migrated.entries[2].speakerId)
+assert.notEqual(migrated.entries[0].speakerId, migrated.entries[1].speakerId)
+assert.ok(migrated.entries.every(({ participantSource }) => participantSource === undefined))
+assert.deepEqual(plain(panel.sanitizeRecord(plain(migrated))), plain(migrated), 'Migration is stable after saving and reopening')
+console.log('anonymous A/B/C groups, global rename and assignment, voice reuse, roster preservation, reload and report labels verified')
+
+// Run the actual load, rename, autosave, and flush callbacks with controlled file I/O.
+const panelAst = ts.createSourceFile('panel.tsx', panelSource, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX)
+const componentBody = panelAst.statements.find((statement) =>
+  ts.isFunctionDeclaration(statement) && statement.name?.text === 'HearingRecordPanel').body
+const callbackNames = ['touch', 'loadFromPath', 'renameSpeaker', 'flushAutoSave']
+const callbackStatements = callbackNames.map((name) => componentBody.statements.find((statement) =>
+  ts.isVariableStatement(statement) && statement.declarationList.declarations.some((declaration) => declaration.name.getText(panelAst) === name)))
+const autosaveStatement = componentBody.statements.find((statement) =>
+  ts.isExpressionStatement(statement) && statement.getText(panelAst).includes('saveTimer.current = window.setTimeout'))
+assert.ok(callbackStatements.every(Boolean) && autosaveStatement, 'Real hearing callbacks must be available to the regression')
+const callbackSource = [...callbackStatements, autosaveStatement].map((statement) => statement.getText(panelAst)).join('\n')
+const callbackCode = ts.transpileModule(`${callbackSource}\nObject.assign(exports, { loadFromPath, renameSpeaker, flushAutoSave })`, {
+  compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 }
+}).outputText
+function renameHarness() {
+  const record = panel.createInitialRecord()
+  record.updatedAt = '2026-10-01T00:00:00.000Z'
+  const writes = []
+  const context = {
+    exports: {}, record, initialCase: undefined, initialHearing: undefined,
+    draftsDir: '/records', recordPath: '/records/hearing.json', loadState: 'idle', hasContent: false,
+    latestRecordRef: { current: record }, loadedPathRef: { current: undefined }, loadStateRef: { current: 'idle' },
+    hasContentRef: { current: false }, saveTimer: { current: null }, pendingSaveRef: { current: Promise.resolve() },
+    deletedEntryIdsRef: { current: new Set() }, removedSpeakerIdsRef: { current: new Set() },
+    renamedSpeakerLabelsRef: { current: new Map() }, speakerReferencesRef: { current: new Map() },
+    pendingDictationsRef: { current: new Set() }, lastSavedSourceStampRef: { current: record.updatedAt },
+    onSavedPathRef: { current: undefined }, shouldKeepPendingRecord, ...panel,
+    useCallback: (callback) => callback,
+    useEffect: (callback) => { context.autosave = callback },
+    setRecord: (value) => {
+      context.record = typeof value === 'function' ? value(context.record) : value
+      context.latestRecordRef.current = context.record
+    },
+    setRecordPath: (path) => { context.recordPath = path },
+    updateLoadState: (state) => { context.loadState = state; context.loadStateRef.current = state },
+    setSaveStatus: () => {}, setSaveMessage: () => {}, setLastSavedAt: () => {},
+    buildHearingRecordTitle: () => '기일기록',
+    saveRecord: async (saved) => {
+      writes.push(plain(saved))
+      context.lastSavedSourceStampRef.current = saved.updatedAt
+      return context.recordPath
+    },
+    window: {
+      lt: { fs: { stat: async () => ({ ok: true }), readText: async () => ({ text: JSON.stringify(record) }) } },
+      setTimeout: (callback) => { context.timer = callback; return 1 },
+      clearTimeout: () => { context.timer = undefined }
+    }
+  }
+  runInNewContext(callbackCode, context)
+  return { context, callbacks: context.exports, writes }
+}
+for (const exists of [true, false]) {
+  const { context, callbacks, writes } = renameHarness()
+  let finishStat
+  context.window.lt.fs.stat = () => new Promise((resolve) => { finishStat = resolve })
+  const loading = callbacks.loadFromPath('/records/hearing.json')
+  callbacks.renameSpeaker('court', '김 재판장')
+  context.autosave()
+  assert.equal(context.timer, undefined, 'A rename must wait for the file read before saving')
+  finishStat({ ok: exists })
+  await loading
+  assert.equal(context.record.speakers.find(({ id }) => id === 'court').label, '김 재판장',
+    `A name-only edit must survive a delayed initial ${exists ? 'read' : 'missing-file result'}`)
+  context.autosave()
+  assert.equal(typeof context.timer, 'function', 'Name-only edits must schedule autosave on an otherwise empty record')
+  context.timer()
+  assert.equal(writes[0].speakers.find(({ id }) => id === 'court').label, '김 재판장')
+  assert.equal(writes[0].entries.length, 0)
+  await callbacks.flushAutoSave()
+  assert.equal(writes.length, 1, 'Flushing an already saved rename must not write it twice')
+}
+const flushingRename = renameHarness()
+flushingRename.callbacks.renameSpeaker('court', '담당 재판장')
+await flushingRename.callbacks.flushAutoSave()
+assert.equal(flushingRename.writes[0].speakers.find(({ id }) => id === 'court').label, '담당 재판장',
+  'Closing a blank record before the autosave timer must preserve a name-only edit')
+const unchangedRename = renameHarness()
+unchangedRename.callbacks.renameSpeaker('court', '  재판부  ')
+unchangedRename.callbacks.renameSpeaker('court', '   ')
+unchangedRename.callbacks.renameSpeaker('missing', '이름')
+assert.equal(unchangedRename.context.renamedSpeakerLabelsRef.current.size, 0, 'Unchanged, empty, and missing names must not create dirty edits')
+assert.equal(unchangedRename.context.record.updatedAt, '2026-10-01T00:00:00.000Z')
+unchangedRename.context.autosave()
+await unchangedRename.callbacks.flushAutoSave()
+assert.equal(unchangedRename.context.timer, undefined)
+assert.equal(unchangedRename.writes.length, 0, 'Focusing and blurring a name must not create an empty record')
+console.log('name-only edits survive delayed loads, empty-record autosave and close; unchanged blur stays clean')
