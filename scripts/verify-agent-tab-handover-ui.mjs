@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url'
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const temp = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-tab-ui-'))
-function runApp({ root, temp }) {
+function runApp({ root, temp, appMain }) {
   const { app, BrowserWindow, ipcMain, session } = require('electron')
   const assert = require('node:assert/strict')
   const calls = [], errors = [], sessions = new Map()
@@ -95,7 +95,7 @@ function runApp({ root, temp }) {
     window.webContents.on('console-message', (details) => { if (details.level === 'error') errors.push(details.message) })
     window.webContents.once('did-finish-load', resolve)
   }))
-  require(require('node:path').join(root, 'out/main/index.js'))
+  require(appMain)
   const evaluate = (source) => win.webContents.executeJavaScript(source, true)
   const wait = async (check) => {
     for (let i = 0; i < 150; i++) { if (await check()) return; await new Promise((resolve) => setTimeout(resolve, 40)) }
@@ -152,6 +152,14 @@ function runApp({ root, temp }) {
       await wait(() => evaluate(`document.body.innerText.includes('다른 컴퓨터의 사건')`))
       await evaluate(`document.querySelector('.case-sidebar-trigger').click()`)
       await evaluate(`[...document.querySelectorAll('.tab')].find(tab => tab.innerText.includes('빈 에이전트 탭')).querySelector('.tab-close').click(); window.dispatchEvent(new Event('focus'))`)
+      for (let visit = 0; visit < 3; visit++) {
+        for (const title of ['다른 컴퓨터의 사건', '탭 공유 검증']) {
+          await evaluate(`[...document.querySelectorAll('.case-sidebar-case')].find(button => button.innerText.includes(${JSON.stringify(title)})).click()`)
+          await wait(() => evaluate(`document.querySelector('.case-sidebar-case.active')?.innerText.includes(${JSON.stringify(title)})`))
+        }
+        assert.equal(await evaluate(`[...document.querySelectorAll('.tab')].some(tab => tab.innerText.includes('빈 에이전트 탭'))`), false,
+          'a closed AI tab stays closed while switching cases before and after autosave')
+      }
       await wait(() => !snapshot.terminals.some((tab) => tab.id === 'blank-agent'))
       assert.equal(await evaluate(`document.body.innerText.includes('빈 에이전트 탭')`), false,
         'focus refresh flushes a just-closed agent before reading remote state')
@@ -170,7 +178,7 @@ function runApp({ root, temp }) {
       assert.equal(await evaluate(`!![...document.querySelectorAll('.tab')].find(tab => tab.innerText.includes('폰에서 열린 대화'))`), false, 'remote reopen does not eagerly reactivate a case')
       assert.equal(calls.some((call) => call.channel === 'agent:send' || call.channel === 'dialog:message'), false)
       assert.deepEqual(errors, [])
-      console.log('agent tab UI: startup discovery, focus refresh, empty cases, preserved focus, SSH restoration and repeat-open dedupe OK')
+      console.log('agent tab UI: startup discovery, focus refresh, close/navigation persistence, empty cases, preserved focus, SSH restoration and repeat-open dedupe OK')
       app.exit(0)
     } catch (error) {
       console.error(error)
@@ -179,7 +187,8 @@ function runApp({ root, temp }) {
     }
   })()
 }
-await fs.writeFile(path.join(temp, 'main.cjs'), `(${runApp.toString()})(${JSON.stringify({ root, temp })})`)
+const appMain = process.env.LT_TEST_APP_MAIN || path.join(root, 'out/main/index.js')
+await fs.writeFile(path.join(temp, 'main.cjs'), `(${runApp.toString()})(${JSON.stringify({ root, temp, appMain })})`)
 const env = { ...process.env }
 delete env.ELECTRON_RUN_AS_NODE
 try {

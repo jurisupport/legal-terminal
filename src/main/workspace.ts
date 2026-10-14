@@ -94,6 +94,13 @@ const knownSharedWorkspaces = new Map<string, WorkspaceSnapshot>()
 const movedAgentTabOwners = new Map<string, number>()
 let sharedSaveChain: Promise<unknown> = Promise.resolve()
 
+// Observations and saves must keep request order, including time spent saving the local backup.
+function queueSharedWorkspaceOperation<T>(operation: () => Promise<T>): Promise<T> {
+  const pending = sharedSaveChain.then(operation, operation)
+  sharedSaveChain = pending.catch(() => undefined)
+  return pending
+}
+
 function workspaceForWindow(snapshot: WorkspaceSnapshot, observerId: number): WorkspaceSnapshot {
   if (!Array.isArray(snapshot.terminals)) return snapshot
   return { ...snapshot, terminals: snapshot.terminals.filter((tab) => {
@@ -610,10 +617,18 @@ export async function listWorkspaceSnapshots(): Promise<WorkspaceListResult> {
   }
 }
 
-export async function saveAutomaticWorkspace(
+export function saveAutomaticWorkspace(
   snapshot: WorkspaceSnapshot,
   location: AutomaticWorkspaceLocation,
   observerId = 0
+): Promise<WorkspaceSaveResult & { remoteError?: string }> {
+  return queueSharedWorkspaceOperation(() => saveAutomaticWorkspaceNow(snapshot, location, observerId))
+}
+
+async function saveAutomaticWorkspaceNow(
+  snapshot: WorkspaceSnapshot,
+  location: AutomaticWorkspaceLocation,
+  observerId: number
 ): Promise<WorkspaceSaveResult & { remoteError?: string }> {
   if (location.caseId && !snapshotMatchesCase(snapshot, location.caseId)) {
     return { ok: false, error: '작업환경의 사건 정보가 일치하지 않아 저장하지 않았습니다.' }
@@ -675,11 +690,7 @@ export async function saveAutomaticWorkspace(
       // Track only this device's tabs; preserved unseen tabs must survive its next save too.
       knownSharedWorkspaces.set(key, workspaceForWindow(owned, observerId))
     }
-    // ponytail: serialize workspace writes in this process; use per-host queues if saves become slow.
-    const lockedSave = (): Promise<void> => withSharedWorkspaceLock(location, save)
-    const pending = sharedSaveChain.then(lockedSave, lockedSave)
-    sharedSaveChain = pending.catch(() => undefined)
-    await pending
+    await withSharedWorkspaceLock(location, save)
     return local
   } catch (e) {
     // 로컬 자동 저장은 성공했으므로 복원 가능하다. 원격 실패만 별도로 알려 다음 변경 때 재시도한다.
@@ -736,10 +747,19 @@ export async function listAutomaticWorkspaces(ssh?: SshProfileLike, includeClose
   }
 }
 
-export async function loadAutomaticWorkspace(
+export function loadAutomaticWorkspace(
   location: AutomaticWorkspaceLocation,
   observerId = 0,
   observe = true
+): Promise<AutomaticWorkspaceLoadResult> {
+  const load = (): Promise<AutomaticWorkspaceLoadResult> => loadAutomaticWorkspaceNow(location, observerId, observe)
+  return observe ? queueSharedWorkspaceOperation(load) : load()
+}
+
+async function loadAutomaticWorkspaceNow(
+  location: AutomaticWorkspaceLocation,
+  observerId: number,
+  observe: boolean
 ): Promise<AutomaticWorkspaceLoadResult> {
   const local = await loadCaseWorkspace(
     (caseId) => loadWorkspaceSnapshot(workspaceIdForLocation(location.cwd, location.profileId, caseId)),
@@ -776,10 +796,12 @@ export function observeAutomaticWorkspace(
   location: AutomaticWorkspaceLocation,
   snapshot: WorkspaceSnapshot,
   observerId = 0
-): void {
+): Promise<void> {
   if (!isSnapshot(snapshot)) throw new Error('작업환경 파일 형식이 올바르지 않습니다.')
   if (location.caseId && !snapshotMatchesCase(snapshot, location.caseId)) {
     throw new Error('작업환경의 사건 정보가 일치하지 않아 적용하지 않았습니다.')
   }
-  knownSharedWorkspaces.set(sharedLocationKey(location, observerId), agentTabsOnly(workspaceForWindow(snapshot, observerId)))
+  return queueSharedWorkspaceOperation(async () => {
+    knownSharedWorkspaces.set(sharedLocationKey(location, observerId), agentTabsOnly(workspaceForWindow(snapshot, observerId)))
+  })
 }

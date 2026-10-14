@@ -79,6 +79,9 @@ jobs:
       - name: Verify detached conversation windows
         run: npm run verify:detached-window
 
+      - name: Verify closed agent tabs stay closed
+        run: npm run verify:agent-tab-close
+
       - name: Verify projects and unreleased desktop additions
         run: npm run verify:release-additions
 
@@ -165,6 +168,9 @@ jobs:
 
       - name: Verify detached conversation windows
         run: npm run verify:detached-window
+
+      - name: Verify closed agent tabs stay closed
+        run: npm run verify:agent-tab-close
 
       - name: Verify projects and unreleased desktop additions
         run: npm run verify:release-additions

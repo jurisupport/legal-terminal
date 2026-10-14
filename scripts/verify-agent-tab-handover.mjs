@@ -277,7 +277,7 @@ try {
     termTabsRef: { current: [term('live-pc', 'pc')] }, activeCaseTabIdRef: { current: 'case' },
     caseIdForTerm: () => 'case', rebaseRemoteWorkspace: (s) => s,
     agentTabsOnly: shared.agentTabsOnly, isAgentTabClosed: shared.isAgentTabClosed, mergeWorkspaceSessions,
-    pendingWorkspaceReopensRef: { current: new Map() }, hasLocalTermWork: () => false,
+    pendingWorkspaceReopensRef: { current: new Map() }, pendingAgentClosesRef: { current: new Map() }, hasLocalTermWork: () => false,
     closeTerm: (id) => { context.termTabsRef.current = context.termTabsRef.current.filter((term) => term.id !== id) },
     closeCaseTab: async () => { context.caseTabsRef.current = [] },
     window: { lt: { workspace: { autoLoad: async () => { loaded++; return response },
@@ -332,6 +332,25 @@ try {
   await refreshing
   assert.equal(restored, undefined, 'a late refresh cannot resurrect an individually closed agent')
   assert.equal(observed.length, 1, 'a discarded response never marks unknown remote tabs as observed')
+
+  context.autoRestoreDoneRef.current.clear()
+  context.termTabsRef.current = [term('closing-agent')]
+  context.window.lt.workspace.autoLoad = () => new Promise((resolve) => { finishRead = resolve })
+  const restoring = run({})
+  context.pendingAgentClosesRef.current.set('key', context.termTabsRef.current)
+  context.termTabsRef.current = []
+  finishRead({ ok: true, remote: { snapshot: snapshot([term('closing-agent'), phone]) } })
+  await restoring
+  assert.deepEqual(Array.from(restored.s.terminals, (tab) => tab.id), ['mobile'],
+    'initial restoration honors a local close while still importing unseen remote tabs')
+
+  context.autoRestoreDoneRef.current.clear()
+  restored = undefined
+  context.window.lt.workspace.autoLoad = async () => ({ ok: false, error: 'offline',
+    local: { snapshot: snapshot([term('other-tab-id', 'closing-agent')]) } })
+  await run({})
+  assert.equal(restored, undefined,
+    'retrying restoration after navigation must not reopen a locally closed conversation from an old backup')
 
   const service = await readFile(new URL('../src/main/agent/agent-service.ts', import.meta.url), 'utf8')
   const serviceTree = ts.createSourceFile('agent-service.ts', service, ts.ScriptTarget.Latest, true)

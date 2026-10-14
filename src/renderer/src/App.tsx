@@ -1715,6 +1715,7 @@ export default function App(): JSX.Element {
   const closedAutomaticCasesRef = useRef<Set<string>>(new Set())
   const pendingCaseClosesRef = useRef(new Map<string, () => Promise<void>>())
   const pendingWorkspaceReopensRef = useRef(new Map<string, { id: string; terminals: TermTab[] }>())
+  const pendingAgentClosesRef = useRef(new Map<string, TermTab[]>())
   const [retainedSharedCases, setRetainedSharedCases] = useState<Set<string>>(new Set())
   const refreshAutomaticCasesRef = useRef<() => Promise<void>>(async () => {})
   const automaticCasesLoadingRef = useRef(false)
@@ -2684,6 +2685,11 @@ export default function App(): JSX.Element {
 
   const markWorkspaceReopened = (source: CurrentCase, term?: TermTab): void => {
     const key = workspaceLocationKey(source)
+    if (term) {
+      const closed = pendingAgentClosesRef.current.get(key)
+      if (closed) pendingAgentClosesRef.current.set(key,
+        closed.filter((tab) => !isAgentTabClosed({ closedAgentTabs: [term] }, tab)))
+    }
     const terminals = pendingWorkspaceReopensRef.current.get(key)?.terminals ?? []
     pendingWorkspaceReopensRef.current.set(key, {
       id: newId(), terminals: term && isAgentTab(term)
@@ -3930,6 +3936,7 @@ export default function App(): JSX.Element {
       tab && resolveActiveWorkKey(sideKeys, activeWork[side]) === closingKey
         ? nextWorkKeyAfterClose(sideKeys, closingKey)
         : undefined
+    termTabsRef.current = termTabsRef.current.filter((term) => term.id !== id)
     setTermTabs((tabs) => closeTab(tabs, id, activeTerm, setActiveTerm, visibleTermTabs))
     setDocumentAgentTabs((links) => Object.fromEntries(Object.entries(links).filter(([, agentId]) => agentId !== id)))
     setTermBracketedPasteMode((m) => {
@@ -3965,10 +3972,13 @@ export default function App(): JSX.Element {
     if (nextKey !== undefined) activateWorkKeyAfterClose(side, nextKey)
   }
   const closeTerm = (id: string): boolean => {
-    const tab = termTabs.find((t) => t.id === id)
+    const tab = termTabsRef.current.find((t) => t.id === id)
     if (!tab) return false
-    if (isAgentTab(tab)) window.lt.agent.close(id)
-    else window.lt.pty.kill(id)
+    if (isAgentTab(tab)) {
+      const key = workspaceLocationKey(currentCaseFromTerm(tab))
+      pendingAgentClosesRef.current.set(key, [...(pendingAgentClosesRef.current.get(key) ?? []), tab])
+      window.lt.agent.close(id)
+    } else window.lt.pty.kill(id)
     removeTermTab(id)
     return true
   }
@@ -5260,6 +5270,10 @@ export default function App(): JSX.Element {
     }
     const reopen = pendingWorkspaceReopensRef.current.get(key)
     const snapshot = await buildWorkspaceSnapshot(caseTabIdValue, waitForSync)
+    const closed = pendingAgentClosesRef.current.get(key)
+    // A newer save may already have acknowledged a close while this snapshot was being built.
+    snapshot.terminals = snapshot.terminals.filter((term) =>
+      termTabsRef.current.some((live) => live.id === term.id) && !isAgentTabClosed({ closedAgentTabs: closed }, term))
     snapshot.workspaceLabel = tab.name
     snapshot.workspaceReopen = !!reopen
     snapshot.workspaceIntentId = reopen?.id
@@ -5271,6 +5285,7 @@ export default function App(): JSX.Element {
     const saving = window.lt.workspace.autoSave(snapshot, workspaceLocation(source)).then((result) => {
       if (!result.ok || result.remoteError) throw new Error(result.remoteError || result.error || '사건탭 저장 실패')
       if (pendingWorkspaceReopensRef.current.get(key) === reopen) pendingWorkspaceReopensRef.current.delete(key)
+      if (pendingAgentClosesRef.current.get(key) === closed) pendingAgentClosesRef.current.delete(key)
     })
     if (waitForSync) await saving
     else void saving.catch(() => {})
@@ -5325,6 +5340,8 @@ export default function App(): JSX.Element {
           }
         }
         const selected = local && remote ? mergeWorkspaceSessions(local, remote) : remote ?? local
+        if (selected) selected.terminals = selected.terminals.filter((term) =>
+          !isAgentTabClosed({ closedAgentTabs: pendingAgentClosesRef.current.get(key) }, term))
         // The case may have been closed while the remote read was in progress.
         if (!caseTabsRef.current.some((tab) => tab.id === id)) return true
         if (result.ok) autoRestoreDoneRef.current.add(key)
