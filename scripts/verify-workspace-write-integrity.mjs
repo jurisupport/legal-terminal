@@ -109,6 +109,41 @@ for (const target of ['manual', 'snapshot', 'index']) {
   }
 }
 
+for (const scenario of [
+  { platform: 'win32', code: 'EPERM', failures: 2, recovers: true },
+  { platform: 'win32', code: 'EBUSY', failures: 2, recovers: true },
+  { platform: 'win32', code: 'EPERM', failures: Infinity, recovers: false },
+  { platform: 'win32', code: 'EBUSY', failures: Infinity, recovers: false },
+  { platform: 'win32', code: 'EIO', failures: 2, recovers: false },
+  { platform: 'darwin', code: 'EPERM', failures: 2, recovers: false }
+]) {
+  test(`${scenario.platform} ${scenario.code} replacement ${scenario.recovers ? 'recovers from a temporary lock' : 'preserves and reports failure'}`,
+    { timeout: 2000 }, async t => {
+      let attempts = 0
+      const original = JSON.stringify(snapshot())
+      const fileSystem = { ...fs, async rename(from, to) {
+        attempts++
+        assert.equal(await fs.readFile(to, 'utf8'), original, 'every replacement attempt retains the original until it succeeds')
+        if (attempts <= scenario.failures) throw Object.assign(new Error(`simulated ${scenario.code}`), { code: scenario.code })
+        return fs.rename(from, to)
+      } }
+      const { api, userData } = await fixture(t, { fileSystem, platform: scenario.platform })
+      await fs.mkdir(userData, { recursive: true })
+      const path = join(userData, 'locked.json')
+      await fs.writeFile(path, original)
+      const result = await api.saveWorkspaceSnapshot(snapshot(1), path)
+      assert.equal(result.ok, scenario.recovers, result.error)
+      assert.equal(await fs.readFile(path, 'utf8'), scenario.recovers ? JSON.stringify(snapshot(1), null, 2) : original)
+      if (scenario.recovers) assert.equal(attempts, 3)
+      else {
+        assert.match(result.error, new RegExp(scenario.code))
+        if (scenario.failures === Infinity) assert.ok(attempts > 1 && attempts <= 10, 'transient Windows errors have a bounded retry limit')
+        else assert.equal(attempts, 1, 'other errors and platforms must fail immediately')
+      }
+      assert.deepEqual(await fs.readdir(userData), ['locked.json'], 'replacement success or failure removes its temporary file')
+    })
+}
+
 test('concurrent readers see complete local snapshots, exports and workspace index JSON', async t => {
   let slowWrites = false
   const fileSystem = { ...fs, async writeFile(path, content, options) {

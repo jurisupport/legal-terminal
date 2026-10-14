@@ -320,7 +320,17 @@ async function writeWorkspaceFile(path: string, content: string): Promise<void> 
   await mkdir(dirname(path), { recursive: true })
   try {
     await writeFile(tmp, content, 'utf8')
-    await rename(tmp, path)
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        await rename(tmp, path)
+        break
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code
+        // Windows can briefly deny replacement while another window reads the file.
+        if (process.platform !== 'win32' || (code !== 'EPERM' && code !== 'EBUSY') || attempt >= 5) throw error
+        await new Promise((resolve) => setTimeout(resolve, 20 * (attempt + 1)))
+      }
+    }
   } finally {
     await unlink(tmp).catch(() => {})
   }
