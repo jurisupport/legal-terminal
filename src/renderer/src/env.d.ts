@@ -126,6 +126,7 @@ export interface TerminalTabPayload {
   agentProvider?: AgentProvider
   jsId?: string
   court?: string
+  division?: string
   caseNumber?: string
   caseName?: string
   client?: string
@@ -196,6 +197,7 @@ export interface WorkspaceCaseTabPayload {
     projectId?: string
     jsId?: string
     court?: string
+    division?: string
     caseNumber?: string
     caseName?: string
     client?: string
@@ -273,6 +275,7 @@ export interface WorkspaceEntry {
   caseNumber?: string
   caseName?: string
   court?: string
+  division?: string
   client?: string
   recordsFolder?: string
   profileId?: string

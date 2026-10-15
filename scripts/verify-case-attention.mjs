@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import vm from 'node:vm'
 import ts from 'typescript'
+import { matchesSearch } from '../src/renderer/src/search/sessionSearch.ts'
 
 const source = readFileSync(new URL('../src/renderer/src/App.tsx', import.meta.url), 'utf8')
 const parsed = ts.createSourceFile('App.tsx', source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX)
@@ -86,14 +87,14 @@ function render() {
   return vm.runInNewContext(ts.transpileModule(`(() => { ${code} })()`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText, context)
 }
 const row = (id) => render().caseTabRows.find((item) => item.tab.id === id)
-function sidebarList(cases = render().sidebarCases, attentionOnly = state.caseAttentionOnly, visibleCases = 6, setVisibleCases = noop) {
+function sidebarList(cases = render().sidebarCases, attentionOnly = state.caseAttentionOnly, visibleCases = 6, setVisibleCases = noop, search = '') {
   return vm.runInNewContext(ts.transpileModule(`(() => {
     const orderedCases = ${sidebarDeclarations.get('orderedCases')};
     const count = ${sidebarDeclarations.get('count')};
     return { orderedCases, count, onMore: ${moreCasesOnClick} };
   })()`, {
     compilerOptions: { target: ts.ScriptTarget.ES2022 }
-  }).outputText, { cases, attentionOnly, visibleCases, setVisibleCases })
+  }).outputText, { cases, attentionOnly, visibleCases, setVisibleCases, search, matchesSearch })
 }
 const visibleCases = () => sidebarList().orderedCases
 
@@ -157,6 +158,24 @@ initialList.onMore()
 const expandedList = sidebarList(manyCases, false, visibleLimit)
 assert.equal(expandedList.count, 18, 'one More click extends the effective open-case count')
 assert.equal(expandedList.orderedCases.slice(0, expandedList.count).filter((item) => !item.open).length, 6, 'one More click reveals six history cases')
+const searchableCases = [
+  { id: 'damages', title: '2026가단12345 손해배상', participants: '김민수 / 대한건설', court: '서울중앙지방법원', division: '제55민사단독', subtitle: '로컬 /cases/Damages', open: true, noticeCount: 1 },
+  { id: 'lease', title: '2025가단54321 임대차보증금', participants: '이서연', subtitle: '로컬 /cases/lease', open: false, noticeCount: 0 },
+  ...manyCases,
+  { id: 'remote', title: '오래된 사건', participants: '박지훈', subtitle: '원격 사무실 /cases/remote', open: false, noticeCount: 1 }
+]
+const searchCases = (query, attentionOnly = false) => Array.from(sidebarList(searchableCases, attentionOnly, 6, noop, query).orderedCases, (item) => item.id)
+assert.deepEqual(searchCases('2026 가단 12345'), ['damages'], 'case number search ignores spacing')
+assert.deepEqual(searchCases('손해배상 대한건설'), ['damages'], 'tokens can match case title and party together')
+assert.deepEqual(searchCases('김민수'.normalize('NFD')), ['damages'], 'decomposed Korean input matches party names')
+assert.deepEqual(searchCases('DAMAGES'), ['damages'], 'folder search ignores case')
+assert.deepEqual(searchCases('서울중앙 55민사'), ['damages'], 'court and division can be combined')
+assert.deepEqual(searchCases('제55 민사 단독'), ['damages'], 'division search ignores spacing')
+assert.deepEqual(searchCases('박지훈'), ['remote'], 'search includes cases beyond the first page')
+assert.deepEqual(searchCases('이서연', true), [], 'search intersects the attention filter')
+assert.deepEqual(searchCases('대한건설', true), ['damages'])
+assert.deepEqual(searchCases('없는사건'), [], 'unmatched queries return no cases')
+assert.deepEqual(searchCases('   '), searchCases(''), 'whitespace restores the full list')
 assert.match(sidebarSource, /disabled=\{noticeCount === 0\}/)
 assert.match(sidebarSource, /type="checkbox" checked=\{attentionOnly\}/)
 assert.doesNotMatch(source, /case-tabs-flyout|visibleCaseTabRows/, 'attention navigation belongs to one sidebar')

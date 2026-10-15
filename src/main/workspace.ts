@@ -27,6 +27,7 @@ export interface WorkspaceEntry {
   caseNumber?: string
   caseName?: string
   court?: string
+  division?: string
   client?: string
   recordsFolder?: string
   profileId?: string
@@ -257,6 +258,7 @@ function workspaceEntryMetadata(snapshot: WorkspaceSnapshot): Partial<WorkspaceE
     caseName:
       asString(termRecord?.caseName) || asString(currentMeta?.caseName) || asString(currentCase?.caseName),
     court: asString(termRecord?.court) || asString(currentMeta?.court),
+    division: asString(termRecord?.division) || asString(currentMeta?.division),
     client: asString(termRecord?.client) || asString(currentMeta?.client),
     recordsFolder: asString(termRecord?.recordsFolder) || asString(currentCase?.records),
     profileId: asString(termRecord?.profileId) || asString(currentCase?.profileId),
@@ -491,6 +493,7 @@ function entryFromSnapshot(
       metadata.caseNumber,
       metadata.caseName,
       metadata.court,
+      metadata.division,
       metadata.client,
       metadata.folderName,
       metadata.cwd,

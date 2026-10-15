@@ -3,6 +3,7 @@ import type { SessionListEntry } from './env'
 import { IconExplorer, IconNewFile, IconSync } from './icons/Icons'
 import {
   expandSessionSearchLimit,
+  matchesSearch,
   SESSION_SEARCH_MAX_LIMIT,
   SESSION_SEARCH_RECENT_LIMIT
 } from './search/sessionSearch'
@@ -22,6 +23,8 @@ export interface SidebarCase {
   id: string
   title: string
   participants?: string
+  court?: string
+  division?: string
   subtitle: string
   open: boolean
   status?: string
@@ -190,7 +193,7 @@ function CaseGroup({
         <button
           type="button"
           className={`case-sidebar-case${item.active ? ' active' : ''}`}
-          title={[item.title, item.participants, item.status, item.subtitle].filter(Boolean).join('\n')}
+          title={[item.title, item.participants, item.court, item.division, item.status, item.subtitle].filter(Boolean).join('\n')}
           aria-current={item.active ? 'page' : undefined}
           onClick={() => { setExpanded(true); onOpenCase(item.id) }}
           onContextMenu={item.open ? (event) => {
@@ -296,8 +299,10 @@ function CaseGroup({
 export default function CaseSidebar({ cases, onAddCase, attentionOnly, onAttentionOnlyChange, noticeCount, onNextAttention, ...callbacks }: CaseSidebarProps): JSX.Element {
   const [days, setDays] = useState(readPeriod)
   const [visibleCases, setVisibleCases] = useState(6)
+  const [search, setSearch] = useState('')
   const orderedCases = cases
     .filter((item) => !attentionOnly || item.noticeCount > 0)
+    .filter((item) => matchesSearch([item.title, item.participants, item.court, item.division, item.subtitle], search))
     .sort((a, b) => Number(b.open) - Number(a.open) || b.updatedAt - a.updatedAt)
   const count = Math.max(visibleCases, orderedCases.filter((item) => item.open).length)
 
@@ -317,6 +322,24 @@ export default function CaseSidebar({ cases, onAddCase, attentionOnly, onAttenti
           {[7, 14, 30].map((value) => <option key={value} value={value}>최근 {value}일</option>)}
         </select>
       </div>
+      <input
+        type="search"
+        className="case-sidebar-search"
+        aria-label="사건별 작업 검색"
+        placeholder="사건·당사자·재판부 검색"
+        title="사건번호·사건명·당사자·법원·재판부·폴더명 검색"
+        autoComplete="off"
+        spellCheck={false}
+        value={search}
+        onChange={(event) => { setSearch(event.target.value); setVisibleCases(6) }}
+        onKeyDown={(event) => {
+          if (event.key === 'Escape' && !event.nativeEvent.isComposing) {
+            event.preventDefault()
+            event.stopPropagation()
+            setSearch('')
+          }
+        }}
+      />
       <div className="case-sidebar-filter">
         <label>
           <input type="checkbox" checked={attentionOnly} onChange={(event) => onAttentionOnlyChange(event.target.checked)} />
@@ -328,7 +351,7 @@ export default function CaseSidebar({ cases, onAddCase, attentionOnly, onAttenti
       </div>
       <div className="case-sidebar-list">
         {orderedCases.slice(0, count).map((item) => <CaseGroup key={`${item.id}:${item.historyKey ?? ''}`} item={item} days={days} {...callbacks} />)}
-        {orderedCases.length === 0 && <p className="case-sidebar-empty" role="status">{attentionOnly ? '확인이 필요한 작업 없음' : '사건을 열면 최근 작업이 여기에 표시됩니다.'}</p>}
+        {orderedCases.length === 0 && <p className="case-sidebar-empty" role="status">{search.trim() ? (attentionOnly ? '확인이 필요한 사건 중 검색 결과가 없습니다.' : '검색 결과가 없습니다.') : attentionOnly ? '확인이 필요한 작업 없음' : '사건을 열면 최근 작업이 여기에 표시됩니다.'}</p>}
         {orderedCases.length > count && (
           <button type="button" className="case-sidebar-more-cases" onClick={() => setVisibleCases(count + 6)}>
             사건 더 보기

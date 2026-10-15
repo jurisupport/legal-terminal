@@ -401,6 +401,7 @@ interface TermTab {
   // JuriSupport 사건에서 연 세션의 메타 (자동 명명·사건별 필터용)
   jsId?: string
   court?: string
+  division?: string
   caseNumber?: string
   caseName?: string
   client?: string
@@ -584,6 +585,7 @@ interface CaseMeta {
   projectId?: string
   jsId?: string
   court?: string
+  division?: string
   caseNumber?: string
   caseName?: string
   client?: string
@@ -1167,6 +1169,7 @@ const currentCaseSessionSource = (
     projectId: currentCase.meta?.projectId,
     jsId: currentCase.meta?.jsId,
     court: currentCase.meta?.court,
+    division: currentCase.meta?.division,
     caseNumber: currentCase.meta?.caseNumber,
     caseName: currentCase.meta?.caseName,
     client: currentCase.meta?.client,
@@ -2655,6 +2658,7 @@ export default function App(): JSX.Element {
         projectId: t.projectId,
         jsId: t.jsId,
         court: t.court,
+        division: t.division,
         caseNumber: t.caseNumber,
         caseName: t.caseName,
         client: t.client,
@@ -3503,6 +3507,7 @@ export default function App(): JSX.Element {
       projectId: source?.projectId ?? base?.meta?.projectId,
       jsId: source?.jsId,
       court: source?.court,
+      division: source?.division,
       caseNumber: source?.caseNumber,
       caseName: source?.caseName,
       client: source?.client,
@@ -3634,6 +3639,7 @@ export default function App(): JSX.Element {
       projectId: cur.projectId,
       jsId: cur.jsId,
       court: cur.court,
+      division: cur.division,
       caseNumber: cur.caseNumber,
       caseName: cur.caseName,
       client: cur.client,
@@ -3679,6 +3685,7 @@ export default function App(): JSX.Element {
       projectId: cur?.projectId ?? currentCase?.meta?.projectId,
       jsId: cur?.jsId ?? currentCase?.meta?.jsId,
       court: cur?.court ?? currentCase?.meta?.court,
+      division: cur?.division ?? currentCase?.meta?.division,
       caseNumber: cur?.caseNumber ?? currentCase?.meta?.caseNumber,
       caseName: cur?.caseName ?? currentCase?.meta?.caseName,
       client: cur?.client ?? currentCase?.meta?.client,
@@ -4998,6 +5005,7 @@ export default function App(): JSX.Element {
       projectId: typeof t.projectId === 'string' ? t.projectId : undefined,
       jsId: typeof t.jsId === 'string' ? t.jsId : undefined,
       court: typeof t.court === 'string' ? t.court : undefined,
+      division: typeof t.division === 'string' ? t.division : undefined,
       caseNumber: typeof t.caseNumber === 'string' ? t.caseNumber : undefined,
       caseName: typeof t.caseName === 'string' ? t.caseName : undefined,
       client: typeof t.client === 'string' ? t.client : undefined,
@@ -6760,6 +6768,8 @@ export default function App(): JSX.Element {
       id: tab.id,
       title: [tab.meta?.caseNumber ?? saved?.caseNumber, tab.meta?.caseName ?? saved?.caseName].filter(Boolean).join(' ') || tab.name || '사건',
       participants: tab.meta?.partyNames || [tab.meta?.client ?? saved?.client, tab.meta?.opponent].filter(Boolean).join(' / ') || undefined,
+      court: tab.meta?.court ?? saved?.court,
+      division: tab.meta?.division ?? saved?.division,
       subtitle: caseTabSubtitle(tab),
       open: !!row,
       status: row ? joinStatus([
@@ -7577,6 +7587,7 @@ export default function App(): JSX.Element {
     const meta: CaseMeta = {
       jsId: c.id || undefined,
       court: court || undefined,
+      division: c.division || undefined,
       caseNumber: c.caseNumber || undefined,
       caseName: c.caseName || undefined,
       client: client || undefined,
@@ -7717,6 +7728,7 @@ export default function App(): JSX.Element {
       meta: {
         jsId: shellCase.jsId,
         court: shellCase.court,
+        division: shellCase.division,
         caseNumber: shellCase.caseNumber,
         caseName: shellCase.caseName,
         client: shellCase.client,
@@ -7804,6 +7816,7 @@ export default function App(): JSX.Element {
     const meta: CaseMeta = {
       jsId: c.id || undefined,
       court: court || undefined,
+      division: c.division || undefined,
       caseNumber: c.caseNumber || undefined,
       caseName: c.caseName || undefined,
       client: client || undefined,

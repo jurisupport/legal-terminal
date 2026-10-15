@@ -28,7 +28,7 @@ function runApp({ root, temp, screenshot }) {
     terminals: [{ id: `agent-${i}`, title: i ? '보증금 반환 검토' : '준비서면 쟁점 정리', kind: 'agent',
       agentProvider: 'claude', cwd: entry.drafts, resumeSessionId: `open-session-${i}`, createdAt: now - 60 * day }]
   }))
-  const meta = { court: '서울중앙지방법원', caseNumber: '2026가단12345', caseName: '손해배상(기)', client: '김민수', opponent: '주식회사 대한건설', partyNames: '김민수 / 주식회사 대한건설' }
+  const meta = { court: '서울중앙지방법원', division: '제55민사단독', caseNumber: '2026가단12345', caseName: '손해배상(기)', client: '김민수', opponent: '주식회사 대한건설', partyNames: '김민수 / 주식회사 대한건설' }
   snapshots[0].currentCase.meta = meta
   Object.assign(snapshots[0].terminals[0], meta, { originDevice: 'android' })
   const remoteSnapshot = { version: 1, savedAt: new Date(now - 8 * day).toISOString(), workspaceOpen: false,
@@ -43,6 +43,8 @@ function runApp({ root, temp, screenshot }) {
     cwd: '/cases/kim', mtime: now - (i === 0 ? 2 : 9 + i) * day
   }))
   let failLee = true
+  let dashboardReady = false
+  let releaseSearch
   let delaySessionList = false
   let activeProfile = profile, holdDiscovery = false, releaseDiscovery
   app.setPath('userData', require('node:path').join(temp, 'profile'))
@@ -53,15 +55,21 @@ function runApp({ root, temp, screenshot }) {
   const real = new Set(['app:info', 'app:setWindowTitle', 'tabs:ready', 'caseManagement:get', 'caseManagement:update'])
   ipcMain.handle = (channel, handler) => handle(channel, async (event, ...args) => {
     calls.push({ channel, args })
+    if (real.has(channel)) return handler(event, ...args)
     // The user opens a case while the general-chat directory is still loading.
     if (channel === 'app:generalChatDirectory') return new Promise(() => {})
-    if (real.has(channel)) return handler(event, ...args)
     if (channel === 'setup:status') return { items: [], ready: true }
     if (channel === 'settings:get') return { sshProfiles: [activeProfile], notifyDone: false }
     if (channel === 'case:history' || channel === 'case:addHistory') return history
-    if (channel === 'js:tokenStatus') return { hasToken: false, error: null }
+    if (channel === 'js:tokenStatus') return dashboardReady ? 'ok' : 'missing'
     if (channel === 'js:hasToken') return false
-    if (channel === 'js:listCases') return { ok: true, cases: [] }
+    if (channel === 'js:listCases' && args[0]?.search === '늦은검색') await new Promise((resolve) => { releaseSearch = resolve })
+    if (channel === 'js:listCases') return { ok: true, cases: args[0]?.search || !dashboardReady ? [] : [
+      { id: 'kim', ...meta, status: 'active', caseType: 'civil', parties: [], hearings: [] },
+      { id: 'lee', court: '서울서부지방법원', division: '제2민사부', caseNumber: '2025가단54321', caseName: '임대차보증금', status: 'active', caseType: 'civil', parties: [], hearings: [] }
+    ] }
+    if (channel === 'sessions:byCase') return {}
+    if (channel === 'sessions:byFolder') return []
     if (channel === 'js:upcomingHearings') return { ok: true, hearings: [], complete: true, fetchedAt: new Date().toISOString() }
     if (channel === 'js:hearingSummary') return { ok: true, summary: { todayCount: 0, weekCount: 0 } }
     if (channel === 'todo:list') return { ok: true, todos: [] }
@@ -89,7 +97,9 @@ function runApp({ root, temp, screenshot }) {
       if (args[0].host !== profile.host) return { ok: true, snapshots: [{ ...remoteSnapshot, workspaceOpen: true, savedAt: new Date().toISOString(), currentCase: { drafts: '/cases/new-server', name: '변경된 서버의 사건' } }] }
       return { ok: true, snapshots: args[1] ? [remoteSnapshot, phoneSnapshot] : [] }
     }
-    if (channel === 'workspace:autoLoad') return { ok: true, remote: { ok: true, snapshot: args[0].ssh ? args[0].cwd === '/cases/phone-only' ? phoneSnapshot : remoteSnapshot : snapshots.find((s) => s.currentCase.drafts === args[0].cwd) } }
+    if (channel === 'workspace:autoLoad') return { ok: true, remote: { ok: true, snapshot: args[0].ssh
+      ? args[0].cwd === '/cases/phone-only' ? phoneSnapshot : remoteSnapshot
+      : snapshots.find((s) => s.currentCase.drafts === args[0].cwd) } }
     if (channel === 'workspace:autoSave') return { ok: true }
     if (channel === 'workspace:list') return { ok: true, entries: [{ id: 'legacy', label: history[1].name, cwd: history[1].drafts, caseNumber: '2025가단54321', caseName: '임대차보증금', client: '이서연', savedAt: new Date().toISOString() }] }
     if (channel === 'workspace:autoObserve') return
@@ -115,6 +125,11 @@ function runApp({ root, temp, screenshot }) {
   }
   const group = (title) => `[...document.querySelectorAll('.case-sidebar-group')].find(el => el.querySelector('.case-sidebar-case')?.textContent.includes(${JSON.stringify(title)}))`
   const clickText = (title, text) => evaluate(`[...${group(title)}.querySelectorAll('button')].find(el => el.textContent.includes(${JSON.stringify(text)})).click()`)
+  const searchCases = (query) => evaluate(`{
+    const input = document.querySelector('.case-sidebar-search');
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(input, ${JSON.stringify(query)});
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  }`)
   ;(async () => {
     try {
       await ready
@@ -127,6 +142,30 @@ function runApp({ root, temp, screenshot }) {
       assert.equal(await evaluate(`${group('김민수')}.querySelector('.case-sidebar-case-title').textContent`), '2026가단12345 손해배상(기)')
       assert.equal(await evaluate(`${group('김민수')}.textContent.includes('/cases/kim')`), false, 'paths do not crowd the party line')
       assert.equal(await evaluate(`${group('이서연')}.querySelector('.case-sidebar-case-participants').textContent`), '이서연', 'legacy history uses locally saved party information without opening the case')
+      assert.equal(await evaluate(`document.querySelector('.case-sidebar-search').getAttribute('aria-label')`), '사건별 작업 검색')
+      for (const query of ['2026 가단 12345', '손해배상 대한건설', '김민수'.normalize('NFD'), '서울중앙 55민사', '제55 민사 단독']) {
+        await searchCases(query)
+        assert.equal(await evaluate(`document.querySelectorAll('.case-sidebar-group').length`), 1, `one matching case for ${query}`)
+        assert.equal(await evaluate(`!!${group('김민수')}`), true)
+      }
+      await searchCases('/CASES/LEE')
+      assert.equal(await evaluate(`document.querySelectorAll('.case-sidebar-group').length === 1 && !!${group('이서연')}`), true, 'folder names are searchable without case sensitivity')
+      await searchCases('이전 사건 5')
+      assert.equal(await evaluate(`document.querySelectorAll('.case-sidebar-group').length === 1 && !!${group('이전 사건 5')}`), true, 'search reaches history beyond the initial page')
+      await searchCases('검색결과없음987654')
+      assert.equal(await evaluate(`document.querySelector('.case-sidebar-empty[role="status"]').textContent`), '검색 결과가 없습니다.')
+      await searchCases('대한건설')
+      await evaluate(`document.querySelector('.case-sidebar-filter input').click()`)
+      assert.equal(await evaluate(`document.querySelector('.case-sidebar-empty').textContent`), '확인이 필요한 사건 중 검색 결과가 없습니다.', 'search respects the attention filter')
+      await evaluate(`document.querySelector('.case-sidebar-filter input').click()`)
+      assert.equal(await evaluate(`document.querySelectorAll('.case-sidebar-group').length`), 1)
+      await evaluate(`document.querySelector('.case-sidebar-search').focus(); document.querySelector('.case-sidebar-search').dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', isComposing: true, bubbles: true }))`)
+      assert.equal(await evaluate(`document.querySelector('.case-sidebar-search').value`), '대한건설', 'IME Escape does not clear search')
+      await evaluate(`document.querySelector('.case-sidebar-search').dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`)
+      assert.equal(await evaluate(`document.querySelector('.case-sidebar-search').value`), '', 'Escape clears search')
+      assert.equal(await evaluate(`document.activeElement === document.querySelector('.case-sidebar-search')`), true, 'clearing retains input focus')
+      assert.equal(await evaluate(`document.querySelectorAll('.case-sidebar-group').length`), 6, 'clearing restores the original page')
+      assert.equal(calls.some((call) => ['sessions:list', 'sessions:transcript', 'workspace:autoLoad'].includes(call.channel)), false, 'search does not load conversations or activate cases')
       await evaluate(`${group('김민수')}.querySelector('.case-sidebar-case').click()`)
       await wait(() => agents.has('agent-0'))
       assert.equal(await evaluate(`${group('김민수')}.dataset.open`), 'true', 'opened cases are marked in the same list')
@@ -253,12 +292,18 @@ function runApp({ root, temp, screenshot }) {
       await evaluate(`document.querySelector('.modal-overlay').dispatchEvent(new MouseEvent('mousedown', { bubbles: true }))`)
       await evaluate(`document.querySelector('.shell').style.setProperty('--side-pane-width', '160px')`)
       assert.equal(await evaluate(`document.querySelector('.case-sidebar').scrollWidth <= document.querySelector('.side-col').clientWidth`), true, 'minimum width does not overflow')
+      assert.equal(await evaluate(`document.querySelector('.case-sidebar-search').getBoundingClientRect().right <= document.querySelector('.side-col').getBoundingClientRect().right`), true, 'search field fits the minimum sidebar width')
       await evaluate(`document.querySelector('.shell').style.setProperty('--side-pane-width', '272px')`)
       await clickText('김민수', '증거목록 검토')
       await evaluate('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))')
       win.setSize(1440, 940)
       await new Promise((resolve) => setTimeout(resolve, 200))
       await require('node:fs/promises').writeFile(screenshot, (await win.webContents.capturePage()).toPNG())
+      await searchCases('제55 민사 단독')
+      assert.equal(await evaluate(`document.querySelectorAll('.case-sidebar-group').length === 1 && !!${group('김민수')}`), true, 'division survives restoring and resuming an open case')
+      await evaluate('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))')
+      await require('node:fs/promises').writeFile(screenshot.replace('.png', '-search.png'), (await win.webContents.capturePage()).toPNG())
+      await searchCases('')
       const localAgentIds = [...agents.values()].filter((agent) => agent.cwd === '/cases/kim' && !agent.ssh).map((agent) => agent.id)
       assert.ok(localAgentIds.length >= 2, 'bulk close covers multiple open agents')
       const closeCount = calls.filter((call) => call.channel === 'agent:close').length
@@ -294,8 +339,31 @@ function runApp({ root, temp, screenshot }) {
       await wait(() => evaluate(`document.querySelector('.case-sidebar').textContent.includes('변경된 서버의 사건')`))
       assert.equal(await evaluate(`document.querySelector('.case-sidebar').textContent.includes('이전 서버에서 늦게 도착한 사건')`), false, 'stale discovery cannot put a previous SSH host back in the sidebar')
       assert.equal(calls.some((call) => call.channel === 'workspace:autoLoad' && call.args[0].cwd === '/cases/new-server'), false)
+      dashboardReady = true
+      await evaluate(`document.querySelector('.activitybar-top .activity-item').click()`)
+      await wait(() => evaluate(`!!document.querySelector('.dash-search')`))
+      await wait(() => evaluate(`document.querySelectorAll('.case-card').length === 2`))
+      await evaluate(`{
+        const input = document.querySelector('.dash-search');
+        Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(input, '늦은검색');
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+      }`)
+      await wait(() => typeof releaseSearch === 'function')
+      for (const query of ['제55 민사 단독', '서울중앙 55민사']) {
+        await evaluate(`{
+          const input = document.querySelector('.dash-search');
+          Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(input, ${JSON.stringify(query)});
+          input.dispatchEvent(new Event('input', { bubbles: true }));
+        }`)
+        await wait(() => calls.some((call) => call.channel === 'js:listCases' && call.args[0]?.search === query))
+        await wait(() => evaluate(`document.querySelectorAll('.case-card').length === 1 && document.querySelector('.case-card').textContent.includes('제55민사단독')`))
+      }
+      releaseSearch()
+      await evaluate('new Promise(resolve => setTimeout(resolve, 150))')
+      assert.equal(await evaluate(`document.querySelectorAll('.case-card').length === 1 && document.querySelector('.case-card').textContent.includes('제55민사단독')`), true, 'a delayed older query cannot replace the latest results')
+      await require('node:fs/promises').writeFile(screenshot.replace('.png', '-dashboard-search.png'), (await win.webContents.capturePage()).toPNG())
       assert.deepEqual(errors, [])
-      console.log('case sidebar UI: lazy startup, retained party labels, no refresh flash, pagination, retry, SSH source changes and resume isolation OK')
+      console.log('case sidebar UI: case/party/folder search, hidden history search, attention filter, IME/Escape, lazy startup, pagination, retry and SSH resume isolation OK')
       console.log(`Screenshot: ${screenshot}`)
       app.exit(0)
     } catch (error) {

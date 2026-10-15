@@ -160,6 +160,7 @@ function CasesDashboardContent({
   }
 
   const load = (q?: string, refresh = false, nextStatus = status): void => {
+    if (searchTimer.current) clearTimeout(searchTimer.current)
     const expected = ++loadGeneration.current
     const params = caseListParams(q, refresh, nextStatus)
     const cached = refresh ? undefined : readCachedCaseList(params)
@@ -231,6 +232,7 @@ function CasesDashboardContent({
 
   const onSearchChange = (v: string): void => {
     setSearch(v)
+    loadGeneration.current += 1
     if (searchTimer.current) clearTimeout(searchTimer.current)
     searchTimer.current = setTimeout(() => load(v.trim()), 350)
   }
@@ -329,7 +331,8 @@ function CasesDashboardContent({
       <div className="dash-bar">
         <input
           className="dash-search"
-          placeholder="사건번호·사건명·당사자 검색"
+          placeholder="사건번호·사건명·당사자·법원·재판부 검색"
+          aria-label="사건 검색"
           value={search}
           onChange={(e) => onSearchChange(e.target.value)}
         />

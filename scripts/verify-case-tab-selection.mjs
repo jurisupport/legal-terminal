@@ -37,7 +37,7 @@ const linkedGeneralB = actual.caseTabFromCurrentCase({ ...generalSource, meta: {
 assert.notEqual(linkedGeneralA.id, linkedGeneralB.id, 'explicit cases using the general directory remain separate')
 assert.notEqual(linkedGeneralA.id, generalId, 'general questions are not absorbed into an explicit case')
 const folderCase = { drafts: '/drafts/홍길동', name: '홍길동' }
-const linkedCase = { ...folderCase, meta: { jsId: 'case-1', caseNumber: '2026가단1' } }
+const linkedCase = { ...folderCase, meta: { jsId: 'case-1', caseNumber: '2026가단1', court: '서울중앙지방법원', division: '제55민사단독' } }
 const globalCase = { ...folderCase, meta: { contextKind: 'global' } }
 assert.notEqual(actual.caseTabFromCurrentCase(globalCase).id, actual.caseTabFromCurrentCase(folderCase).id)
 assert.equal(actual.upsertCaseTab([actual.caseTabFromCurrentCase(globalCase)], actual.caseTabFromCurrentCase(folderCase)).length, 2,
@@ -60,6 +60,16 @@ assert.equal(resumed.contextKind, 'global', 'resume keeps the chosen source scop
 assert.equal(resumed.jsId, undefined, 'same-cwd current case cannot overwrite global source')
 const folderTab = actual.caseTabFromCurrentCase(folderCase)
 const linkedTab = actual.caseTabFromCurrentCase(linkedCase)
+const metadataHandlers = loadHandlers(['currentCaseSessionSource', 'currentCaseFromTerm', 'sanitizeWorkspaceTerm'], {
+  caseTabsRef: { current: [] }, sshProfiles: [], parseRemoteUri: () => undefined,
+  resolveAgentProvider: (provider) => provider, isAgentProvider: () => true
+})
+const caseSession = metadataHandlers.currentCaseSessionSource(linkedCase, [])
+assert.equal(caseSession.division, '제55민사단독', 'opening a case retains division on its task')
+const restoredSession = metadataHandlers.sanitizeWorkspaceTerm(JSON.parse(JSON.stringify(caseSession)))
+assert.equal(restoredSession.division, '제55민사단독', 'workspace restoration retains division')
+assert.equal(metadataHandlers.currentCaseFromTerm(restoredSession).meta.division, '제55민사단독', 'task selection retains division on its case')
+assert.equal(actual.currentCaseFromCaseTab(linkedTab).meta.division, '제55민사단독', 'case tabs retain division')
 assert.notEqual(folderTab.id, linkedTab.id, 'reproduce the legacy folder/dashboard identity mismatch')
 for (const [existing, incoming] of [[folderTab, linkedTab], [linkedTab, folderTab]]) {
   const tabs = actual.upsertCaseTab([{ ...existing, activeDocId: 'draft', activeTermId: 'agent' }], incoming)

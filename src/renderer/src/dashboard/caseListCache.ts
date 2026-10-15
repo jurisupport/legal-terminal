@@ -1,4 +1,5 @@
 import type { JsCase } from '../env'
+import { matchesSearch } from '../search/sessionSearch'
 
 const CASE_LIST_CACHE_TTL_MS = 10 * 60_000
 
@@ -58,8 +59,20 @@ export function listCasesCached(params: CaseListParams = {}): Promise<CaseListRe
   }
 
   const expected = cacheGeneration
-  const request = window.lt.js
-    .listCases({ ...compactQuery(query), ...(refresh ? { refresh: true } : {}) })
+  const request = (async (): Promise<CaseListResult> => {
+    const result = await window.lt.js.listCases({ ...compactQuery(query), ...(refresh ? { refresh: true } : {}) })
+    if (expected !== cacheGeneration || !result.ok || !query.search?.trim() || query.page !== undefined || query.limit !== undefined) return result
+    // 서버 검색에서 빠진 재판부를 전체 목록으로 보완하고 기존 검색 결과는 유지한다.
+    const all = await listCasesCached({ ...query, search: undefined, refresh })
+    if (!all.ok) return all
+    const merged = new Map((result.cases ?? []).map((item) => [item.id, item]))
+    for (const item of all.cases ?? []) {
+      if (!merged.has(item.id) && matchesSearch([item.court ?? undefined, item.division ?? undefined], query.search)) {
+        merged.set(item.id, item)
+      }
+    }
+    return { ...result, cases: [...merged.values()] }
+  })()
     .then((result) => {
       if (expected !== cacheGeneration) return { ok: false, error: '연결이 변경되었습니다.' }
       if (result.ok) {
