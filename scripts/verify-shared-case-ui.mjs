@@ -28,7 +28,7 @@ const snapshot = (path, workspaceOpen = true, opened = '2026-10-01T00:00:00Z') =
   currentCase: { drafts: path, name: path }, terminals: [], docs: []
 })
 function harness(snapshots) {
-  const state = { cases: [], history: [], error: '', loads: [], closes: [], fail: false, onList: null }
+  const state = { cases: [], history: [], error: '', loads: [], closes: [], fail: false, onList: null, listCalls: 0 }
   const cases = { current: state.cases }
   const context = {
     isGeneralChatDirectory, console, Date,
@@ -50,12 +50,23 @@ function harness(snapshots) {
     setWorkspaceSyncError: value => { state.error = value }, autoWorkspaceSaveChainRef: { current: Promise.resolve() },
     refreshAutomaticCasesRef: { current: undefined },
     window: { lt: { workspace: { autoList: async ssh => {
-      if (ssh && state.onList) state.onList()
-      return state.fail ? { ok: false, error: 'offline' } : { ok: true, snapshots: ssh ? snapshots : [] }
+      const listed = ssh ? structuredClone(snapshots) : []
+      if (ssh) state.listCalls++
+      if (ssh && state.onList) await state.onList()
+      return state.fail ? { ok: false, error: 'offline' } : { ok: true, snapshots: listed }
     } } } }
   }
   const actual = vm.runInNewContext(code, context)
-  return { state, context, actual, run: () => context.refreshAutomaticCasesRef.current() }
+  const settle = async () => {
+    for (let pass = 0; pass < 10; pass++) {
+      const pending = context.autoWorkspaceSaveChainRef.current
+      await pending
+      await Promise.resolve()
+      if (!context.automaticCasesLoadingRef.current && pending === context.autoWorkspaceSaveChainRef.current) return
+    }
+    assert.fail('shared refresh did not settle after a coalesced retry')
+  }
+  return { state, context, actual, run: () => context.refreshAutomaticCasesRef.current(), settle }
 }
 
 const shared = [snapshot('/cases/later', true, '2026-10-01T00:00:00.001Z'), snapshot('/cases/earlier'), snapshot('/cases/closed', false),
@@ -111,11 +122,58 @@ await alias.run()
 assert.equal(alias.state.cases.length, 1, 'profile aliases for the same endpoint do not duplicate a case')
 assert.equal(alias.state.cases[0].profileId, 'another-name')
 
-const race = harness([snapshot('/cases/stale')])
-race.state.onList = () => race.context.setCaseTabs([race.actual.caseTabFromCurrentCase({ drafts: '/local/new', name: 'New local case' })])
+const changing = [snapshot('/cases/stale')]
+const race = harness(changing)
+race.state.onList = async () => {
+  race.state.onList = null
+  await new Promise(resolve => setTimeout(resolve, 20))
+  race.context.setCaseTabs([race.actual.caseTabFromCurrentCase({ drafts: '/local/new', name: 'New local case' })])
+  changing.splice(0, 1, snapshot('/cases/fresh'))
+}
 await race.run()
-assert.equal(race.state.cases.length, 1)
-assert.equal(race.state.cases[0].drafts, '/local/new', 'a response read during a local case change is discarded')
+await race.settle()
+assert.equal(race.state.listCalls, 2, 'a local case change coalesces one fresh read without another focus event')
+assert.equal(race.state.cases.some(tab => tab.remotePath === '/cases/stale'), false, 'the stale response is discarded')
+assert.equal(race.state.history.some(tab => tab.remotePath === '/cases/stale'), false, 'discarded snapshots never enter discovery history')
+assert.equal(race.state.cases.some(tab => tab.remotePath === '/cases/fresh'), true)
+assert.equal(race.state.cases.some(tab => tab.drafts === '/local/new'), true, 'the retry preserves the newer local case')
+
+for (const mutation of ['cases', 'terms', 'overlapping']) {
+  const remoteClose = harness([snapshot('/cases/remote-close', false)])
+  const localCase = remoteClose.actual.caseTabFromCurrentCase({ drafts: 'ssh://office/cases/remote-close',
+    remotePath: '/cases/remote-close', name: 'Close while reading', profileId: 'office', ssh: profile })
+  remoteClose.context.setCaseTabs([localCase])
+  remoteClose.state.onList = async () => {
+    remoteClose.state.onList = null
+    await new Promise(resolve => setTimeout(resolve, 20))
+    if (mutation === 'terms') remoteClose.context.termTabsRef.current = [{ id: 'new-local-work' }]
+    else remoteClose.context.setCaseTabs([{ ...localCase, updatedAt: Date.now() }])
+    if (mutation === 'overlapping') await Promise.all([remoteClose.run(), remoteClose.run()])
+  }
+  await remoteClose.run()
+  await remoteClose.settle()
+  assert.deepEqual(remoteClose.state.closes, [localCase.id], `${mutation}: remote close is applied without another focus event`)
+  assert.equal(remoteClose.state.listCalls, 2, `${mutation}: local changes and overlapping refresh requests share one retry`)
+}
+
+for (const change of ['inactive', 'account', 'host']) {
+  const staleOwner = harness([snapshot('/cases/wrong-owner')])
+  let replacementRefreshes = 0
+  staleOwner.state.onList = async () => {
+    staleOwner.state.onList = null
+    await new Promise(resolve => setTimeout(resolve, 20))
+    if (change === 'account') staleOwner.context.todoAccountGeneration.current++
+    else if (change === 'host') {
+      staleOwner.context.workspaceHostsRef.current = 'another-host'
+      staleOwner.context.refreshAutomaticCasesRef.current = async () => { replacementRefreshes++ }
+    } else staleOwner.context.automaticCasesRefreshActiveRef.current = false
+  }
+  await staleOwner.run()
+  await staleOwner.settle()
+  assert.equal(staleOwner.state.cases.length, 0, `${change}: late responses cannot update the inactive or replaced workspace`)
+  assert.equal(staleOwner.state.listCalls, 1, `${change}: no retry uses an inactive or superseded owner`)
+  assert.equal(replacementRefreshes, change === 'host' ? 1 : 0, 'host changes delegate to the current refresh handler')
+}
 
 const newTask = harness([snapshot('/cases/new-task')])
 await newTask.run()

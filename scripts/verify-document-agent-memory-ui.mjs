@@ -134,13 +134,13 @@ async function electronCheck({ root, temp, output, channels }) {
       r.setStart(node, 0); r.setEnd(node, node.textContent.indexOf('대금은') + '대금은'.length);
       if (r.getClientRects().length !== 1) throw Error('Markdown selection prefix must occupy one visual line');
       const b = r.getBoundingClientRect();
-      return { x: Math.ceil(b.left + 1), endX: Math.floor(b.right - 1), y: Math.round(b.top + b.height / 2) };
+      return { x: Math.ceil(b.left + 1), endX: Math.floor(b.right - 1), y: Math.round(b.top + b.height / 2), text: r.toString() };
     `)
     await drag(rect)
     const before = await run("return { top: visible('.cm-scroller')[0].scrollTop, text: getSelection().toString() }")
     before.scroll = "visible('.cm-scroller')[0].scrollTop"
     before.element = "visible('.cm-scroller')[0]"
-    assert.ok(before.text.includes('대금은'), 'Native drag selects the Markdown passage')
+    assert.equal(before.text, rect.text, 'Native drag selects the complete intended Markdown passage')
     await openInline(sessionId, before)
     return before
   }
@@ -238,6 +238,9 @@ async function electronCheck({ root, temp, output, channels }) {
     await clickTab('문서 A.md')
     await run("visible('.work-right .tab').find(el => el.querySelector('.tab-title')?.textContent === '문서 A 대화').querySelector('.tab-close').click()")
     await wait("!visible('.work-right .tab-title').some(el => el.textContent === '문서 A 대화')", 'Remembered panel closes')
+    // Closing activates and focuses the surviving panel across animation frames, after the tab is gone.
+    await wait("document.activeElement === document.querySelector('[data-term-id=\"memory-agent-b\"] .agent-composer textarea')", 'Surviving panel focus after closing')
+    await run('await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))')
     await clickTab('문서 B.md')
     await clickTab('문서 A.md')
     await wait(activeAgent('문서 B 대화'), 'Closed panel cannot be restored')

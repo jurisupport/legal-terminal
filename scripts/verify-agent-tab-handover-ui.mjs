@@ -30,6 +30,7 @@ function runApp({ root, temp, appMain }) {
   let releaseStartupDiscovery
   const startupDiscovery = new Promise(resolve => { releaseStartupDiscovery = resolve })
   let delayStartupDiscovery = true
+  let delayNextDiscovery
   let releaseCloseObservation
   let holdCloseObservation = true
   const sharedModule = { exports: {} }
@@ -66,6 +67,11 @@ function runApp({ root, temp, appMain }) {
     if (channel === 'sessions:remember') return undefined
     if (channel === 'sessions:transcript') return { sessionId: 'phone-session', messages: [{ role: 'user', text: '폰에서 보낸 질문' }] }
     if (channel === 'workspace:autoList') {
+      if (args[0] && delayNextDiscovery) {
+        const delay = delayNextDiscovery
+        delayNextDiscovery = undefined
+        await delay()
+      }
       if (args[0] && delayStartupDiscovery) {
         delayStartupDiscovery = false
         await startupDiscovery
@@ -195,7 +201,18 @@ function runApp({ root, temp, appMain }) {
         'focus refresh flushes a just-closed agent before reading remote state')
       snapshot.closedAgentTabs = [...(snapshot.closedAgentTabs ?? []), snapshot.terminals.find((tab) => tab.id === 'new-remote-agent')]
       snapshot.terminals = snapshot.terminals.filter((tab) => tab.id !== 'new-remote-agent')
+      let releaseDiscovery
+      delayNextDiscovery = async () => {
+        await new Promise(resolve => { releaseDiscovery = resolve })
+        await new Promise(resolve => setTimeout(resolve, 120))
+      }
       await evaluate(`window.dispatchEvent(new Event('focus'))`)
+      await wait(() => typeof releaseDiscovery === 'function')
+      for (const title of ['다른 컴퓨터의 사건', '탭 공유 검증']) {
+        await evaluate(`[...document.querySelectorAll('.case-sidebar-case')].find(button => button.innerText.includes(${JSON.stringify(title)})).click()`)
+        await wait(() => evaluate(`document.querySelector('.case-sidebar-case.active')?.innerText.includes(${JSON.stringify(title)})`))
+      }
+      releaseDiscovery()
       await wait(() => evaluate(`!document.body.innerText.includes('다른 컴퓨터의 새 대화')`))
       assert.equal(snapshot.terminals.some((tab) => tab.id === 'new-remote-agent'), false, 'an old desktop cannot republish a remote tab closure')
       await wait(() => typeof releaseCloseObservation === 'function')

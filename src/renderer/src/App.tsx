@@ -5419,9 +5419,16 @@ export default function App(): JSX.Element {
       // Flush local closes before reading. Only applied responses are acknowledged
       // so a discarded read cannot turn an unseen remote tab into a local deletion.
       if (!(await saveAllCaseWorkspacesRef.current())) return
-      if (account !== todoAccountGeneration.current || workspaceHostsRef.current !== workspaceHostsSignature) return
+      if (!automaticCasesRefreshActiveRef.current || account !== todoAccountGeneration.current || workspaceHostsRef.current !== workspaceHostsSignature) return
       let expectedTerms = termTabsRef.current
       let expectedCases = caseTabsRef.current
+      const discardStaleRead = (): boolean => {
+        if (!automaticCasesRefreshActiveRef.current || account !== todoAccountGeneration.current || workspaceHostsRef.current !== workspaceHostsSignature) return true
+        if (expectedTerms === termTabsRef.current && expectedCases === caseTabsRef.current) return false
+        // Discard the old response, then read again after the local change settles.
+        automaticCasesRefreshPendingRef.current = true
+        return true
+      }
       // Query each host once even when it has multiple local profile names.
       const profiles = [...new Map(sshProfiles.map((profile) =>
         [`${profile.user}@${profile.host}:${profile.port ?? 22}`, profile])).values()]
@@ -5430,13 +5437,13 @@ export default function App(): JSX.Element {
         if (!result.ok) throw new Error(result.error)
         return { profile, result }
       }))
-      if (account !== todoAccountGeneration.current || workspaceHostsRef.current !== workspaceHostsSignature) return
+      if (discardStaleRead()) return
       let failed = results.some((result) => result.status === 'rejected')
       for (const response of results) {
         if (response.status !== 'fulfilled') continue
         const { profile, result } = response.value
         for (const snapshot of result.snapshots ?? []) {
-          if (account !== todoAccountGeneration.current || expectedTerms !== termTabsRef.current || expectedCases !== caseTabsRef.current) return
+          if (discardStaleRead()) return
           const stored = sanitizeCurrentCase(snapshot.currentCase)
           if (!stored || !stored.drafts.startsWith('/')) continue
           let source: CurrentCase = {
