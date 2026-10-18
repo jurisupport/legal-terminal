@@ -31,6 +31,7 @@ const harness = () => {
     currentCaseFromCaseTab: (tab) => tab,
     workspaceLocationKey: () => 'key', workspaceLocation: () => ({ cwd: '/case' }),
     autoRestoreInFlightRef: { current: new Map() }, autoRestoreDoneRef: { current: new Set(['key']) },
+    unloadedSharedCasesRef: { current: new Set() }, findCaseTab: () => undefined,
     pendingWorkspaceReopensRef: { current: new Map() }, pendingAgentClosesRef: { current: new Map() },
     closedAutomaticCasesRef: { current: new Set() }, pendingCaseClosesRef: { current: new Map() },
     newId: () => 'reopen-intent', isAgentTab: (tab) => tab.kind === 'agent', setRetainedSharedCases: () => {},

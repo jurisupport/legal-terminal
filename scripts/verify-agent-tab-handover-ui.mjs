@@ -16,7 +16,7 @@ function runApp({ root, temp, appMain }) {
   const cwd = '/cases/tab-handover'
   const recent = { drafts: `ssh://${profile.id}${cwd}`, name: '탭 공유 검증', ts: Date.now() }
   const snapshot = {
-    version: 1, savedAt: new Date().toISOString(), mode: 'explorer', workspaceDevice: 'Android', workspaceOpen: true,
+    version: 1, savedAt: new Date().toISOString(), workspaceOpenedAt: '2026-10-01T00:00:00Z', mode: 'explorer', workspaceDevice: 'Android', workspaceOpen: true,
     currentCase: { drafts: cwd, name: recent.name }, activeTerm: 'mobile-agent',
     docs: [{ id: 'excluded-document', kind: 'markdown', title: '열리면 안 되는 문서', path: '/private.md' }],
     terminals: [
@@ -113,6 +113,10 @@ function runApp({ root, temp, appMain }) {
       await ready
       await wait(() => evaluate(`!!document.querySelector('.case-sidebar-case')`))
       assert.equal(sessions.size, 0, 'discovery leaves cases collapsed and agents unloaded')
+      assert.equal(await evaluate(`document.querySelector('.case-sidebar-group').dataset.open`), 'true',
+        'an open phone case is automatically an open desktop tab')
+      assert.equal(await evaluate(`!!document.querySelector('.case-sidebar-group.active')`), false,
+        'background discovery does not select a case')
       assert.equal(calls.some((call) => call.channel === 'workspace:autoLoad' || call.channel === 'sessions:list'), false)
       await evaluate(`document.querySelector('.case-sidebar-case').click()`)
       await wait(() => sessions.has('mobile-agent'))
@@ -145,12 +149,16 @@ function runApp({ root, temp, appMain }) {
       assert.equal(calls.filter((call) => call.channel === 'workspace:autoLoad').length, 1)
 
       const otherPath = '/cases/another-device'
-      sharedCases.set(otherPath, { ...snapshot, currentCase: { drafts: otherPath, name: '다른 컴퓨터의 사건' },
+      sharedCases.set(otherPath, { ...snapshot, workspaceOpenedAt: '2026-10-02T00:00:00.001Z', currentCase: { drafts: otherPath, name: '다른 컴퓨터의 사건' },
         activeTerm: undefined, docs: [], terminals: [] })
       snapshot.terminals.push({ id: 'new-remote-agent', title: '다른 컴퓨터의 새 대화', kind: 'agent', cwd,
         agentProvider: 'claude', resumeSessionId: 'new-remote-conversation' })
       await evaluate(`window.dispatchEvent(new Event('online'))`)
       await wait(() => evaluate(`document.body.innerText.includes('다른 컴퓨터의 사건')`))
+      assert.equal(await evaluate(`document.querySelectorAll('.case-sidebar-group[data-open="true"]').length`), 2,
+        'a new remote case appears as an open tab without user action')
+      const sharedOrder = await evaluate(`[...document.querySelectorAll('.case-sidebar-group[data-open="true"] .case-sidebar-case-title')].map(el => el.textContent)`)
+      assert.deepEqual(sharedOrder, [recent.name, '다른 컴퓨터의 사건'], 'shared opening order is stable across devices')
       assert.equal(calls.some((call) => call.channel === 'workspace:autoLoad' && call.args[0].cwd === otherPath), false, 'newly discovered cases stay unloaded')
       await wait(() => evaluate(`document.body.innerText.includes('다른 컴퓨터의 새 대화')`))
       assert.equal(await evaluate(`[...document.querySelectorAll('.tab.active')].some(tab => tab.innerText.includes('폰에서 열린 대화'))`), true,
@@ -181,9 +189,11 @@ function runApp({ root, temp, appMain }) {
       releaseCloseObservation()
       await wait(() => evaluate(`!document.body.innerText.includes('폰에서 열린 대화')`))
       assert.equal(snapshot.workspaceOpen, false, 'background flush preserves the other computer’s case close')
+      assert.equal(await evaluate(`document.querySelectorAll('.case-sidebar-group[data-open="true"]').length`), 1)
       snapshot.workspaceOpen = true
       await evaluate(`window.dispatchEvent(new Event('online'))`)
       await wait(() => evaluate(`document.querySelectorAll('.case-sidebar-case').length === 2`))
+      await wait(() => evaluate(`document.querySelectorAll('.case-sidebar-group[data-open="true"]').length === 2`))
       assert.equal(await evaluate(`!![...document.querySelectorAll('.tab')].find(tab => tab.innerText.includes('폰에서 열린 대화'))`), false, 'remote reopen does not eagerly reactivate a case')
       assert.equal(calls.some((call) => call.channel === 'agent:send' || call.channel === 'dialog:message'), false)
       assert.deepEqual(errors, [])

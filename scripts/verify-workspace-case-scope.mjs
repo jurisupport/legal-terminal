@@ -34,7 +34,7 @@ vm.runInNewContext(ts.transpileModule(source, {
           return
         }
         if (args.at(-1).startsWith('for file ')) {
-          queueMicrotask(() => callback(remoteError, [...remoteFiles.values()].join('\x1e')))
+          queueMicrotask(() => callback(remoteError, [...remoteFiles].map(([name, content]) => `${name}\n${content}`).join('\x1e')))
           return
         }
         assert.match(args.at(-1), /else exit 3; fi$/, 'only a missing file uses the empty-result exit code')
@@ -112,6 +112,7 @@ try {
   }
   const discovered = await api.listAutomaticWorkspaces()
   assert.equal(discovered.ok, true)
+  assert.equal(discovered.snapshots.length, 2, 'local canonical files replace legacy copies in discovery')
   assert.deepEqual([...new Set(discovered.snapshots.map(s => s.currentCase.meta.jsId))].sort(), ['A', 'B'],
     'discovery keeps distinct cases sharing one folder')
   const mixedShared = { ...mixed, workspaceOpen: true, currentCase: { ...mixed.currentCase, name: 'mixed' } }
@@ -158,6 +159,7 @@ try {
   assert.equal((await api.loadAutomaticWorkspace(otherProfile)).local.snapshot, null)
   assertSnapshot((await api.loadAutomaticWorkspace(otherProfile)).remote.snapshot, 'B', true)
   const remoteDiscovery = await api.listAutomaticWorkspaces(sshLocation.ssh)
+  assert.equal(remoteDiscovery.snapshots.length, 2, 'remote canonical files replace legacy copies in discovery')
   assert.deepEqual([...new Set(remoteDiscovery.snapshots.map(s => s.currentCase.meta.jsId))].sort(), ['A', 'B'])
   const exactRemoteName = crypto.createHash('sha256')
     .update(JSON.stringify(['case-workspace', sshLocation.cwd, 'B'])).digest('hex').slice(0, 24) + '.json'

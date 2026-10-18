@@ -27,6 +27,7 @@ export interface SidebarCase {
   division?: string
   subtitle: string
   open: boolean
+  openOrder?: number
   status?: string
   noticeCount: number
   active: boolean
@@ -303,7 +304,8 @@ export default function CaseSidebar({ cases, onAddCase, attentionOnly, onAttenti
   const orderedCases = cases
     .filter((item) => !attentionOnly || item.noticeCount > 0)
     .filter((item) => matchesSearch([item.title, item.participants, item.court, item.division, item.subtitle], search))
-    .sort((a, b) => Number(b.open) - Number(a.open) || b.updatedAt - a.updatedAt)
+    .sort((a, b) => Number(b.open) - Number(a.open) ||
+      (a.open && b.open ? (a.openOrder ?? 0) - (b.openOrder ?? 0) : b.updatedAt - a.updatedAt))
   const count = Math.max(visibleCases, orderedCases.filter((item) => item.open).length)
 
   return (

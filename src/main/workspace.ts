@@ -5,7 +5,7 @@ import { homedir, hostname } from 'os'
 import { basename, dirname, isAbsolute, join } from 'path'
 import { mkdir, readFile, readdir, rename, rmdir, stat, unlink, writeFile } from 'fs/promises'
 import { buildSshArgs, type SshProfileLike } from './sshOptions'
-import { agentTabsOnly, mergeSharedAgentTabs } from '../shared/workspaceAgentTabs'
+import { agentTabsOnly, compareSharedCaseOrder, mergeSharedAgentTabs, mergeSharedCaseState } from '../shared/workspaceAgentTabs'
 
 export interface WorkspaceSnapshot {
   version: number
@@ -94,6 +94,66 @@ let workspaceIndexChain: Promise<unknown> = Promise.resolve()
 const knownSharedWorkspaces = new Map<string, WorkspaceSnapshot>()
 const movedAgentTabOwners = new Map<string, number>()
 let sharedSaveChain: Promise<unknown> = Promise.resolve()
+let workspaceIntentChain: Promise<unknown> = Promise.resolve()
+
+interface PendingWorkspaceIntent {
+  caseId?: string
+  endpoint: string
+  cwd: string
+  profileId?: string
+  snapshot: WorkspaceSnapshot
+}
+
+function workspaceEndpoint(ssh?: SshProfileLike): string {
+  return ssh ? `${ssh.user}@${ssh.host}:${ssh.port ?? 22}` : 'local'
+}
+
+function workspaceIntentPath(): string {
+  return join(app.getPath('userData'), 'workspace-intents.json')
+}
+
+async function readWorkspaceIntents(): Promise<PendingWorkspaceIntent[]> {
+  try {
+    const intents: unknown = JSON.parse(await readFile(workspaceIntentPath(), 'utf8'))
+    if (!Array.isArray(intents) || !intents.every((intent) =>
+      intent && typeof intent.endpoint === 'string' && typeof intent.cwd === 'string' &&
+      (intent.caseId === undefined || typeof intent.caseId === 'string') &&
+      isSnapshot(intent.snapshot) && asString(intent.snapshot.workspaceIntentId))) {
+      throw new Error('보류 중인 사건탭 변경 파일 형식이 올바르지 않습니다.')
+    }
+    return intents
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return []
+    throw error
+  }
+}
+
+function updateWorkspaceIntents(update: (intents: PendingWorkspaceIntent[]) => PendingWorkspaceIntent[]): Promise<void> {
+  const save = async (): Promise<void> => {
+    const intents = update(await readWorkspaceIntents())
+    await writeWorkspaceFile(workspaceIntentPath(), JSON.stringify(intents))
+  }
+  const pending = workspaceIntentChain.then(save, save)
+  workspaceIntentChain = pending.catch(() => undefined)
+  return pending
+}
+
+async function retryWorkspaceIntents(ssh?: SshProfileLike): Promise<void> {
+  await workspaceIntentChain
+  const endpoint = workspaceEndpoint(ssh)
+  for (const intent of await readWorkspaceIntents()) {
+    if (intent.endpoint !== endpoint) continue
+    const location = { caseId: intent.caseId, cwd: intent.cwd, profileId: intent.profileId, ssh }
+    await publishAutomaticWorkspace(agentTabsOnly(intent.snapshot), intent.snapshot, location, 0, true)
+    await removeWorkspaceIntent(intent)
+  }
+}
+
+function removeWorkspaceIntent(intent: PendingWorkspaceIntent): Promise<void> {
+  return updateWorkspaceIntents((pending) => pending.filter((item) =>
+    item.endpoint !== intent.endpoint || item.cwd !== intent.cwd || item.caseId !== intent.caseId ||
+    item.snapshot.workspaceIntentId !== intent.snapshot.workspaceIntentId))
+}
 
 // Observations and saves must keep request order, including time spent saving the local backup.
 function queueSharedWorkspaceOperation<T>(operation: () => Promise<T>): Promise<T> {
@@ -643,6 +703,57 @@ export async function listWorkspaceSnapshots(): Promise<WorkspaceListResult> {
   }
 }
 
+async function publishAutomaticWorkspace(
+  shared: WorkspaceSnapshot,
+  request: WorkspaceSnapshot,
+  location: AutomaticWorkspaceLocation,
+  observerId: number,
+  recovering = false
+): Promise<void> {
+  const save = async (): Promise<void> => {
+    if (recovering) {
+      await workspaceIntentChain
+      const stillPending = (await readWorkspaceIntents()).some((intent) =>
+        intent.endpoint === workspaceEndpoint(location.ssh) && intent.cwd === location.cwd && intent.caseId === location.caseId &&
+        intent.snapshot.workspaceIntentId === request.workspaceIntentId)
+      if (!stillPending) return
+    }
+    const current = await loadCaseWorkspace((caseId) => location.ssh
+      ? loadSharedRemote(location.ssh, location.cwd, caseId)
+      : loadSnapshotFile(sharedWorkspacePath(location.cwd, caseId)), location.caseId)
+    if (!current.ok) throw new Error(current.error)
+    const key = sharedLocationKey(location, observerId)
+    const applied = Array.isArray(current.snapshot?.appliedWorkspaceIntents)
+      ? current.snapshot.appliedWorkspaceIntents.filter((id): id is string => typeof id === 'string') : []
+    const intentId = asString(request.workspaceIntentId)
+    const replay = !!intentId && applied.includes(intentId)
+    if (replay) return
+    const reopened = agentTabsOnly({ version: 1, savedAt: shared.savedAt, terminals: request.reopenAgentTabs }).terminals as
+      { id: string; cwd: string; agentProvider?: string; resumeSessionId?: string }[]
+    const owned = workspaceForWindow(shared, observerId)
+    const previous = knownSharedWorkspaces.get(key)
+    // State-only requests have never observed the conversation list and cannot edit it.
+    const mergedAgents = request.workspaceStateOnly === true
+      ? { ...owned, terminals: current.snapshot?.terminals ?? [],
+        closedAgentTabs: current.snapshot?.closedAgentTabs ?? [], activeTerm: current.snapshot?.activeTerm }
+      : mergeSharedAgentTabs(current.snapshot ?? undefined, owned,
+        recovering || shared.workspaceOpen === false ||
+          (current.snapshot?.workspaceOpen === false && previous?.workspaceOpen !== false && request.workspaceReopen !== true)
+          ? undefined : previous, reopened)
+    const merged = mergeSharedCaseState(current.snapshot ?? undefined, mergedAgents, request.workspaceReopen === true)
+    merged.appliedWorkspaceIntents = intentId ? [...applied, intentId] : applied
+    delete merged.workspaceReopen
+    delete merged.reopenAgentTabs
+    delete merged.workspaceIntentId
+    delete merged.workspaceStateOnly
+    if (location.ssh) await saveSharedRemote(location.ssh, location.cwd, merged, location.caseId)
+    else await saveSharedLocal(merged, location.cwd, location.caseId)
+    // Recovery/state-only writes have not displayed any conversations to this window.
+    if (!recovering && request.workspaceStateOnly !== true) knownSharedWorkspaces.set(key, workspaceForWindow(owned, observerId))
+  }
+  await withSharedWorkspaceLock(location, save)
+}
+
 export function saveAutomaticWorkspace(
   snapshot: WorkspaceSnapshot,
   location: AutomaticWorkspaceLocation,
@@ -669,6 +780,7 @@ async function saveAutomaticWorkspaceNow(
   delete savedSnapshot.workspaceReopen
   delete savedSnapshot.reopenAgentTabs
   delete savedSnapshot.workspaceIntentId
+  delete savedSnapshot.workspaceStateOnly
   const local = await saveWorkspaceSnapshot(savedSnapshot)
   if (!local.ok) return local
   try {
@@ -680,6 +792,7 @@ async function saveAutomaticWorkspaceNow(
       drafts: location.cwd,
       name: savedSnapshot.workspaceLabel,
       meta: location.caseId ? { ...asRecord(sourceCase?.meta), jsId: location.caseId } : sourceCase?.meta,
+      jsId: sourceCase?.jsId,
       records: !location.ssh ? records
         : records?.startsWith(`${remotePrefix}/`) ? records.slice(remotePrefix.length) : undefined
     }
@@ -693,30 +806,19 @@ async function saveAutomaticWorkspaceNow(
       suggestedRecords: undefined,
       suggestedRecordOptions: undefined
     }))
-    const save = async (): Promise<void> => {
-      const current = await loadCaseWorkspace((caseId) => location.ssh
-        ? loadSharedRemote(location.ssh, location.cwd, caseId)
-        : loadSnapshotFile(sharedWorkspacePath(location.cwd, caseId)), location.caseId)
-      if (!current.ok) throw new Error(current.error)
-      const key = sharedLocationKey(location, observerId)
-      const applied = Array.isArray(current.snapshot?.appliedWorkspaceIntents)
-        ? current.snapshot.appliedWorkspaceIntents.filter((id): id is string => typeof id === 'string') : []
-      const intentId = asString(snapshot.workspaceIntentId)
-      const replay = !!intentId && applied.includes(intentId)
-      const reopened = agentTabsOnly({ version: 1, savedAt: shared.savedAt, terminals: replay ? [] : snapshot.reopenAgentTabs }).terminals as
-        { id: string; cwd: string; agentProvider?: string; resumeSessionId?: string }[]
-      const owned = workspaceForWindow(shared, observerId)
-      const merged = mergeSharedAgentTabs(current.snapshot ?? undefined, owned,
-        shared.workspaceOpen === false ? undefined : knownSharedWorkspaces.get(key), reopened)
-      if (replay) merged.workspaceOpen = current.snapshot?.workspaceOpen
-      else if (current.snapshot?.workspaceOpen === false && snapshot.workspaceReopen !== true) merged.workspaceOpen = false
-      merged.appliedWorkspaceIntents = intentId && !replay ? [...applied, intentId] : applied
-      if (location.ssh) await saveSharedRemote(location.ssh, location.cwd, merged, location.caseId)
-      else await saveSharedLocal(merged, location.cwd, location.caseId)
-      // Track only this device's tabs; preserved unseen tabs must survive its next save too.
-      knownSharedWorkspaces.set(key, workspaceForWindow(owned, observerId))
-    }
-    await withSharedWorkspaceLock(location, save)
+    const intentId = asString(snapshot.workspaceIntentId)
+    const intent: PendingWorkspaceIntent | undefined = intentId && (snapshot.workspaceOpen === false || snapshot.workspaceReopen === true)
+      ? { endpoint: workspaceEndpoint(location.ssh), cwd: location.cwd, profileId: location.profileId, caseId: location.caseId,
+        snapshot: { ...shared, workspaceIntentId: intentId, workspaceReopen: snapshot.workspaceReopen,
+          workspaceStateOnly: snapshot.workspaceStateOnly,
+          reopenAgentTabs: Array.isArray(shared.terminals) ? shared.terminals.filter((tab) =>
+            Array.isArray(snapshot.reopenAgentTabs) && snapshot.reopenAgentTabs.some((open) => asRecord(open)?.id === tab.id)) : [] } }
+      : undefined
+    if (intent) await updateWorkspaceIntents((pending) => [
+      ...pending.filter((item) => item.endpoint !== intent.endpoint || item.cwd !== intent.cwd || item.caseId !== intent.caseId), intent
+    ])
+    await publishAutomaticWorkspace(shared, snapshot, location, observerId)
+    if (intent) await removeWorkspaceIntent(intent)
     return local
   } catch (e) {
     // 로컬 자동 저장은 성공했으므로 복원 가능하다. 원격 실패만 별도로 알려 다음 변경 때 재시도한다.
@@ -728,12 +830,13 @@ async function saveAutomaticWorkspaceNow(
 // their exact snapshot in the renderer. Old manual backups are not open cases.
 export async function listAutomaticWorkspaces(ssh?: SshProfileLike, includeClosed = false): Promise<AutomaticWorkspaceListResult> {
   try {
-    let contents: string[]
+    await queueSharedWorkspaceOperation(() => retryWorkspaceIntents(ssh))
+    let contents: { name: string; content: string }[]
     if (ssh) {
       const command = [
         'for file in "$HOME/.claude/legal-terminal-workspaces/"*.json; do',
         '  [ -f "$file" ] || continue',
-        "  printf '\\036'",
+        '  printf \'\\036%s\\n\' "${file##*/}"',
         '  cat "$file" || exit 1',
         'done'
       ].join('\n')
@@ -742,7 +845,10 @@ export async function listAutomaticWorkspaces(ssh?: SshProfileLike, includeClose
           { timeout: SHARED_WORKSPACE_TIMEOUT_MS, windowsHide: true, maxBuffer: SHARED_WORKSPACE_MAX_BYTES },
           (error, stdout) => error ? reject(error) : resolve(stdout))
       })
-      contents = output.split('\x1e').filter((part) => part.trim())
+      contents = output.split('\x1e').filter((part) => part.trim()).map((part) => {
+        const newline = part.indexOf('\n')
+        return { name: part.slice(0, newline), content: part.slice(newline + 1) }
+      })
     } else {
       const dir = dirname(sharedWorkspacePath(''))
       const names = await readdir(dir).catch((error: NodeJS.ErrnoException) => {
@@ -750,24 +856,28 @@ export async function listAutomaticWorkspaces(ssh?: SshProfileLike, includeClose
         throw error
       })
       contents = await Promise.all(names.filter((name) => /^[a-f0-9]{24}\.json$/.test(name))
-        .map((name) => readFile(join(dir, name), 'utf8')))
+        .map(async (name) => ({ name, content: await readFile(join(dir, name), 'utf8') })))
     }
-    const snapshots: WorkspaceSnapshot[] = []
-    for (const content of contents) {
+    const snapshots = new Map<string, WorkspaceSnapshot>()
+    for (const { name, content } of contents) {
       try {
         const snapshot: unknown = JSON.parse(content)
         // Android and older desktop snapshots lack workspaceOpen but still belong in history.
-        if (!isSnapshot(snapshot) || (!includeClosed && snapshot.workspaceOpen !== true)) continue
+        if (!isSnapshot(snapshot)) continue
         const source = asRecord(snapshot.currentCase)
-        if (!asString(source?.drafts)?.startsWith('/') || !asString(source?.name)) continue
+        const cwd = asString(source?.drafts)
+        if (!cwd?.startsWith('/') || !asString(source?.name)) continue
         const caseId = asString(asRecord(source?.meta)?.jsId)
         if (caseId && !snapshotMatchesCase(snapshot, caseId)) continue
-        snapshots.push(agentTabsOnly(snapshot))
+        const canonical = name === sharedRemoteFile(cwd, caseId)
+        const key = JSON.stringify([cwd, caseId ?? null])
+        if (!snapshots.has(key) || canonical) snapshots.set(key, agentTabsOnly(snapshot))
       } catch {
         // A damaged backup must not prevent other cases from being discovered.
       }
     }
-    return { ok: true, snapshots: snapshots.sort((a, b) => b.savedAt.localeCompare(a.savedAt)) }
+    return { ok: true, snapshots: [...snapshots.values()]
+      .filter((snapshot) => includeClosed || snapshot.workspaceOpen === true).sort(compareSharedCaseOrder) }
   } catch (error) {
     return { ok: false, error: String(error) }
   }
@@ -792,6 +902,12 @@ async function loadAutomaticWorkspaceNow(
     location.caseId
   )
   if (local.snapshot) local.snapshot = workspaceForWindow(local.snapshot, observerId)
+  try {
+    if (observe) await retryWorkspaceIntents(location.ssh)
+    else await queueSharedWorkspaceOperation(() => retryWorkspaceIntents(location.ssh))
+  } catch (error) {
+    return { ok: false, local, error: String(error) }
+  }
   if (!location.ssh) {
     const shared = await loadCaseWorkspace(
       (caseId) => loadSnapshotFile(sharedWorkspacePath(location.cwd, caseId)), location.caseId

@@ -25,6 +25,51 @@ export function agentTabsOnly<T extends {
   }
 }
 
+type SharedCaseSnapshot = {
+  savedAt: string
+  workspaceOpen?: unknown
+  workspaceOpenedAt?: unknown
+  currentCase?: unknown
+}
+
+const caseRecord = (value: unknown): Record<string, unknown> =>
+  value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {}
+
+// A phone may know only the folder name; absent fields must not erase desktop metadata.
+const populatedFields = (value: unknown): Record<string, unknown> =>
+  Object.fromEntries(Object.entries(caseRecord(value)).filter(([, field]) =>
+    field !== undefined && field !== null && (typeof field !== 'string' || !!field.trim())))
+
+export function mergeSharedCaseState<T extends SharedCaseSnapshot>(
+  current: T | undefined, incoming: T, reopen = false, replay = false
+): T {
+  const previousCase = caseRecord(current?.currentCase)
+  const nextCase = populatedFields(incoming.currentCase)
+  const workspaceOpen = replay ? current?.workspaceOpen
+    : current?.workspaceOpen === false && !reopen ? false : incoming.workspaceOpen
+  return {
+    ...incoming,
+    workspaceOpen,
+    workspaceOpenedAt: current?.workspaceOpen === false && workspaceOpen === true && reopen && !replay
+      ? incoming.savedAt : current?.workspaceOpenedAt ?? current?.savedAt ?? incoming.savedAt,
+    currentCase: {
+      ...previousCase, ...nextCase,
+      meta: { ...caseRecord(previousCase.meta), ...populatedFields(nextCase.meta) }
+    }
+  }
+}
+
+export function compareSharedCaseOrder(a: SharedCaseSnapshot, b: SharedCaseSnapshot): number {
+  const key = (snapshot: SharedCaseSnapshot): number =>
+    Date.parse(typeof snapshot.workspaceOpenedAt === 'string' ? snapshot.workspaceOpenedAt : snapshot.savedAt) || 0
+  const compare = (left: string, right: string): number => left < right ? -1 : left > right ? 1 : 0
+  return key(a) - key(b) || compare(
+    String(caseRecord(a.currentCase).drafts ?? '').normalize('NFC'),
+    String(caseRecord(b.currentCase).drafts ?? '').normalize('NFC')
+  ) || compare(String(caseRecord(caseRecord(a.currentCase).meta).jsId ?? ''),
+    String(caseRecord(caseRecord(b.currentCase).meta).jsId ?? ''))
+}
+
 export interface SharedAgentTabIdentity {
   id: string
   cwd: string

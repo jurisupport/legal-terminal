@@ -190,7 +190,7 @@ function runApp({ root, temp, screenshot }) {
       await evaluate(`window.sidebarLoadingFlashed = false; window.sidebarObserver = new MutationObserver(() => { if (document.querySelector('.case-sidebar')?.textContent.includes('작업 불러오는 중')) window.sidebarLoadingFlashed = true }); window.sidebarObserver.observe(document.querySelector('.case-sidebar'), { childList: true, subtree: true, characterData: true }); window.dispatchEvent(new Event('focus'))`)
       await evaluate('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))')
       assert.equal(calls.filter((call) => call.channel === 'sessions:list').length, readsBeforeFocus, 'focus reuses the fresh session list')
-      assert.equal(calls.filter((call) => call.channel === 'workspace:autoList').length, discoveriesBeforeFocus, 'focus reuses case discovery')
+      await wait(() => calls.filter((call) => call.channel === 'workspace:autoList').length > discoveriesBeforeFocus)
       delaySessionList = true
       await evaluate(`${group('김민수')}.querySelector('.case-sidebar-refresh').click()`)
       await wait(() => calls.filter((call) => call.channel === 'sessions:list').length > readsBeforeFocus)

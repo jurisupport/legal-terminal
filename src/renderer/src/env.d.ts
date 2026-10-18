@@ -213,6 +213,7 @@ export interface WorkspaceCaseTabPayload {
   activeTermId?: string
   activeWork?: { left?: string; right?: string }
   updatedAt?: number
+  workspaceOpenedAt?: string
 }
 
 export interface DocumentDraftIdentity {
@@ -246,6 +247,8 @@ export interface WorkspaceSnapshot {
   workspaceLabel?: string
   workspaceDevice?: string
   workspaceOpen?: boolean
+  workspaceOpenedAt?: string
+  workspaceStateOnly?: boolean
   workspaceReopen?: boolean
   workspaceIntentId?: string
   reopenAgentTabs?: TerminalTabPayload[]

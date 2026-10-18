@@ -79,6 +79,9 @@ jobs:
       - name: Verify detached conversation windows
         run: npm run verify:detached-window
 
+      - name: Verify shared case tabs across devices
+        run: npm run verify:shared-case-tabs
+
       - name: Verify closed agent tabs stay closed
         run: npm run verify:agent-tab-close
 
@@ -171,6 +174,9 @@ jobs:
 
       - name: Verify detached conversation windows
         run: npm run verify:detached-window
+
+      - name: Verify shared case tabs across devices
+        run: npm run verify:shared-case-tabs
 
       - name: Verify closed agent tabs stay closed
         run: npm run verify:agent-tab-close

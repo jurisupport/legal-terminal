@@ -305,6 +305,7 @@ for (const scenario of ['active', 'active-middle', 'active-end', 'empty-neighbor
     workspaceLocationKey: (source) => source.drafts,
     workspaceLocation: (source) => ({ cwd: source.drafts }),
     autoSaveEligibleRef: { current: new Set() }, autoRestoreDoneRef: { current: new Set() },
+    unloadedSharedCasesRef: { current: new Set() }, autoRestoreWorkspaceRef: { current: noop },
     closedAutomaticCasesRef: { current: new Set() },
     pendingCaseClosesRef: { current: new Map() },
     pendingWorkspaceReopensRef: { current: new Map() },
