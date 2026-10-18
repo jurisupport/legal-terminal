@@ -27,6 +27,9 @@ function runApp({ root, temp, appMain }) {
   }
   const sharedCases = new Map([[cwd, snapshot]])
   const knownTabs = new Map()
+  let releaseStartupDiscovery
+  const startupDiscovery = new Promise(resolve => { releaseStartupDiscovery = resolve })
+  let delayStartupDiscovery = true
   let releaseCloseObservation
   let holdCloseObservation = true
   const sharedModule = { exports: {} }
@@ -62,7 +65,14 @@ function runApp({ root, temp, appMain }) {
     if (['case:getPairing', 'case:getJsPairing', 'sessions:current'].includes(channel)) return null
     if (channel === 'sessions:remember') return undefined
     if (channel === 'sessions:transcript') return { sessionId: 'phone-session', messages: [{ role: 'user', text: '폰에서 보낸 질문' }] }
-    if (channel === 'workspace:autoList') return { ok: true, snapshots: args[0] ? [...sharedCases.values()].filter((s) => s.workspaceOpen || args[1]) : [] }
+    if (channel === 'workspace:autoList') {
+      if (args[0] && delayStartupDiscovery) {
+        delayStartupDiscovery = false
+        await startupDiscovery
+        await new Promise(resolve => setTimeout(resolve, 120))
+      }
+      return { ok: true, snapshots: args[0] ? [...sharedCases.values()].filter((s) => s.workspaceOpen || args[1]) : [] }
+    }
     if (channel === 'workspace:list') return { ok: true, entries: [] }
     if (channel === 'workspace:autoLoad') {
       const saved = sharedCases.get(args[0].cwd)
@@ -112,6 +122,11 @@ function runApp({ root, temp, appMain }) {
     try {
       await ready
       await wait(() => evaluate(`!!document.querySelector('.case-sidebar-case')`))
+      assert.equal(await evaluate(`document.querySelector('.case-sidebar-group').dataset.open`), 'false',
+        'recent history renders before the delayed shared-case discovery completes')
+      releaseStartupDiscovery()
+      // A history row is visible before the remote open state has been applied.
+      await wait(() => evaluate(`!!document.querySelector('.case-sidebar-group[data-open="true"] .case-sidebar-case')`))
       assert.equal(sessions.size, 0, 'discovery leaves cases collapsed and agents unloaded')
       assert.equal(await evaluate(`document.querySelector('.case-sidebar-group').dataset.open`), 'true',
         'an open phone case is automatically an open desktop tab')
