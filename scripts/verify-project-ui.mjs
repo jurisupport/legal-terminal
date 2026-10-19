@@ -13,10 +13,12 @@ const claudeAuthSmoke = process.argv.includes('--claude-auth')
 const remoteAgentSmoke = process.argv.includes('--remote-agent')
 const folderFocus = process.argv.find(arg => arg.startsWith('--folder-focus='))?.split('=')[1] ?? ''
 assert.ok(!folderFocus || ['close-local', 'close-remote', 'restore-local', 'restore-remote'].includes(folderFocus), 'known folder-focus scenario')
+const windowsFolderPaths = process.argv.includes('--windows-folder-paths')
+assert.ok(!windowsFolderPaths || folderFocus, 'Windows folder paths require a folder-focus scenario')
 const agentSmoke = process.argv.includes('--agent') || claudeAuthSmoke || remoteAgentSmoke
 await fs.mkdir(screenshotDir, { recursive: true })
 
-function runApp({ root, temp, screenshotDir, agentSmoke, claudeAuthSmoke, remoteAgentSmoke, folderFocus }) {
+function runApp({ root, temp, screenshotDir, agentSmoke, claudeAuthSmoke, remoteAgentSmoke, folderFocus, windowsFolderPaths }) {
   const { app, BrowserWindow, ipcMain, session } = require('electron')
   const fs = require('node:fs'), path = require('node:path'), assert = require('node:assert/strict')
   const calls = [], errors = []
@@ -28,20 +30,30 @@ function runApp({ root, temp, screenshotDir, agentSmoke, claudeAuthSmoke, remote
   fs.mkdirSync(contextDir)
   fs.writeFileSync(path.join(caseDir, 'evidence.txt'), 'keep this evidence')
   fs.writeFileSync(path.join(contextDir, 'contract.txt'), 'keep this context')
+  const sharedProfile = { id: 'office', label: '사무실 서버', host: 'example.invalid', user: 'lawyer' }
+  const sharedCaseDir = '/home/lawyer/cases/case-a'
+  const sharedCasePaths = [sharedCaseDir, '/home/lawyer/cases/case-b']
   const history = [
-    { drafts: caseDir, name: 'A사 거래대금 청구', ts: Date.now() },
-    { drafts: path.join(temp, 'case-b'), name: 'A사 채권 가압류', ts: Date.now() - 1000 }
+    { drafts: folderFocus ? `ssh://${sharedProfile.id}${sharedCasePaths[0]}` : caseDir, name: 'A사 거래대금 청구', ts: Date.now() },
+    { drafts: folderFocus ? `ssh://${sharedProfile.id}${sharedCasePaths[1]}` : path.join(temp, 'case-b'), name: 'A사 채권 가압류', ts: Date.now() - 1000 }
   ]
   const jsCase = { id: 'js-1', caseNumber: '2026타채12345', caseName: 'A사 채권압류 및 추심', court: '서울중앙지방법원', division: null, caseType: 'civil', status: 'active', parties: [], hearings: [] }
   let connected = false, failSave = false, cancelFolder = false
-  let profiles = [], caseOpenTarget = 'local', staleLocalWorkspace = null
+  let profiles = folderFocus ? [sharedProfile] : [], caseOpenTarget = 'local', staleLocalWorkspace = null
   const workspaceKey = location => JSON.stringify([location.cwd, location.profileId ?? null, location.ssh?.host ?? null, location.ssh?.user ?? null])
-  let pickedFolder = { path: contextDir, name: '공통 계약·증거' }
+  let pickedFolder = { path: windowsFolderPaths ? path.win32.join('C:/Users/fixture/Documents', '공통 계약·증거') : contextDir, name: '공통 계약·증거' }
   let holdFolder = false, releaseFolder, holdRestore = false, releaseRestore
   const sharedCases = folderFocus ? history.map((item, index) => ({
     version: 1, mode: 'explorer', savedAt: '2026-10-19T00:00:00Z', workspaceOpenedAt: `2026-10-0${index + 1}T00:00:00Z`,
-    workspaceOpen: true, currentCase: { drafts: item.drafts, name: item.name }, docs: [], terminals: []
+    workspaceOpen: true, currentCase: { drafts: sharedCasePaths[index], name: item.name }, docs: [], terminals: []
   })) : []
+  if (folderFocus) {
+    assert.ok(sharedCases.every(item => item.currentCase.drafts.startsWith('/') && !item.currentCase.drafts.includes('\\')),
+      'shared snapshots use Unix remote paths independently of Windows local paths')
+    assert.ok(history.every(item => item.drafts.startsWith(`ssh://${sharedProfile.id}/`)), 'history matches the shared SSH endpoint')
+    assert.ok(sharedCases.every(item => item.currentCase.drafts !== pickedFolder.path), 'local reference folders do not become shared case paths')
+    if (windowsFolderPaths) assert.ok(path.win32.isAbsolute(pickedFolder.path) && !pickedFolder.path.startsWith('/'), 'exercise a Windows native folder result')
+  }
   require('node:os').homedir = () => path.join(temp, 'home')
   app.setPath('userData', path.join(temp, 'profile'))
   BrowserWindow.prototype.show = function () {}
@@ -79,10 +91,10 @@ function runApp({ root, temp, screenshotDir, agentSmoke, claudeAuthSmoke, remote
     if (channel === 'fs:stat') return { ok: true, isDir: true, size: 0 }
     if (['case:getPairing', 'case:getJsPairing', 'sessions:current'].includes(channel)) return null
     if (channel === 'sessions:remember') return { ok: true }
-    if (channel === 'workspace:autoList') return { ok: true, snapshots: !args[0] ? structuredClone(sharedCases) : [] }
+    if (channel === 'workspace:autoList') return { ok: true, snapshots: folderFocus && args[0]?.host === sharedProfile.host && args[0]?.user === sharedProfile.user ? structuredClone(sharedCases) : [] }
     if (channel === 'workspace:autoLoad') {
       if (folderFocus) {
-        if (holdRestore && args[0].cwd === caseDir && args[1] === false) {
+        if (holdRestore && args[0].cwd === sharedCaseDir && args[1] === false) {
           holdRestore = false
           await new Promise(resolve => { releaseRestore = resolve })
         }
@@ -159,7 +171,7 @@ function runApp({ root, temp, screenshotDir, agentSmoke, claudeAuthSmoke, remote
         const remote = folderFocus.endsWith('-remote')
         await wait(() => evaluate(`document.querySelectorAll('.case-sidebar-group[data-open="true"]').length === 2`), 'shared case shells')
         await evaluate(`document.querySelector('.case-sidebar-case').click()`)
-        await wait(() => calls.some(call => call.channel === 'workspace:autoLoad' && call.args[0].cwd === caseDir), 'active empty case restored')
+        await wait(() => calls.some(call => call.channel === 'workspace:autoLoad' && call.args[0].cwd === sharedCaseDir), 'active empty case restored')
         await evaluate('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))')
         if (!closing) await evaluate(`window.lt.projects.save({name:'기존 프로젝트',goal:'기존 목표',nextAction:'',notes:'',cases:[],folders:[],status:'active'})`)
         await evaluate(`document.querySelector('.project-open-button').click()`)
@@ -173,15 +185,17 @@ function runApp({ root, temp, screenshotDir, agentSmoke, claudeAuthSmoke, remote
         await fill('goal', '선택 중에도 프로젝트 목표 유지')
         await fill('notes', '저장하지 않은 프로젝트 설명 유지')
         await evaluate(`void (window.projectEditorBeforePick = document.querySelector('.project-editor'))`)
-        if (remote) profiles = [{ id: 'office', label: '사무실 서버', host: 'example.invalid', user: 'lawyer' }]
-        else holdFolder = true
+        if (!remote) holdFolder = true
         await click('폴더 추가')
+        await wait(() => evaluate(`!!document.querySelector('.conn-menu')`), 'reference folder source chooser')
         if (remote) {
-          await wait(() => evaluate(`!!document.querySelector('.conn-menu')`), 'reference folder source chooser')
           await evaluate(`document.querySelectorAll('.conn-menu .conn-row')[1].click()`)
           await wait(() => evaluate(`document.querySelector('.remote-cwd')?.textContent === '/home/lawyer'`), 'remote picker ready')
           await evaluate(`(() => { const el = document.querySelector('.remote-picker input[placeholder^="원격 경로 입력"]'); Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(el, '~/research'); el.dispatchEvent(new Event('input', {bubbles:true})) })()`)
-        } else await wait(() => typeof releaseFolder === 'function', 'native picker reply held')
+        } else {
+          await evaluate(`document.querySelector('.conn-menu .conn-row').click()`)
+          await wait(() => typeof releaseFolder === 'function', 'native picker reply held')
+        }
         if (closing) sharedCases[0].workspaceOpen = false
         else holdRestore = true
         await evaluate(`window.dispatchEvent(new Event('focus'))`)
@@ -189,9 +203,9 @@ function runApp({ root, temp, screenshotDir, agentSmoke, claudeAuthSmoke, remote
           await wait(() => evaluate(`[...document.querySelectorAll('.case-sidebar-group')].find(el => el.querySelector('.case-sidebar-case-title')?.textContent === 'A사 거래대금 청구')?.dataset.open === 'false'`), 'shared active case closes while picking')
         } else {
           await wait(() => typeof releaseRestore === 'function', 'background restore reply held')
-          sharedCases[0].terminals = [{ id: 'late-folder-agent', title: '늦게 도착한 다른 작업', kind: 'agent', cwd: caseDir, agentProvider: 'claude', resumeSessionId: 'late-folder-session' }]
+          sharedCases[0].terminals = [{ id: 'late-folder-agent', title: '늦게 도착한 다른 작업', kind: 'agent', cwd: sharedCaseDir, agentProvider: 'claude', resumeSessionId: 'late-folder-session' }]
           releaseRestore()
-          await wait(() => calls.some(call => call.channel === 'workspace:autoObserve' && call.args[0].cwd === caseDir
+          await wait(() => calls.some(call => call.channel === 'workspace:autoObserve' && call.args[0].cwd === sharedCaseDir
             && call.args[1].terminals?.some(term => term.id === 'late-folder-agent')), 'late background restore applied')
         }
         await evaluate('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))')
@@ -528,7 +542,7 @@ function runApp({ root, temp, screenshotDir, agentSmoke, claudeAuthSmoke, remote
   })()
 }
 
-await fs.writeFile(path.join(temp, 'main.cjs'), `(${runApp.toString()})(${JSON.stringify({ root, temp, screenshotDir, agentSmoke, claudeAuthSmoke, remoteAgentSmoke, folderFocus })})`)
+await fs.writeFile(path.join(temp, 'main.cjs'), `(${runApp.toString()})(${JSON.stringify({ root, temp, screenshotDir, agentSmoke, claudeAuthSmoke, remoteAgentSmoke, folderFocus, windowsFolderPaths })})`)
 const env = { ...process.env }
 delete env.ELECTRON_RUN_AS_NODE
 try {
