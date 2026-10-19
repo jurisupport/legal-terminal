@@ -16,7 +16,7 @@ function runApp({ root, temp, appMain }) {
   const cwd = '/cases/tab-handover'
   const recent = { drafts: `ssh://${profile.id}${cwd}`, name: '탭 공유 검증', ts: Date.now() }
   const snapshot = {
-    version: 1, savedAt: new Date().toISOString(), workspaceOpenedAt: '2026-10-01T00:00:00Z', mode: 'explorer', workspaceDevice: 'Android', workspaceOpen: true,
+    version: 1, savedAt: new Date().toISOString(), workspaceOpenedAt: '2026-10-01T00:00:00Z', mode: 'todos', workspaceDevice: 'Android', workspaceOpen: true,
     currentCase: { drafts: cwd, name: recent.name }, activeTerm: 'mobile-agent',
     docs: [{ id: 'excluded-document', kind: 'markdown', title: '열리면 안 되는 문서', path: '/private.md' }],
     terminals: [
@@ -141,6 +141,8 @@ function runApp({ root, temp, appMain }) {
       assert.equal(calls.some((call) => call.channel === 'workspace:autoLoad' || call.channel === 'sessions:list'), false)
       await evaluate(`document.querySelector('.case-sidebar-case').click()`)
       await wait(() => sessions.has('mobile-agent'))
+      assert.equal(await evaluate(`document.querySelector('.activity-item[title^="탐색기 표시"]').getAttribute('aria-pressed')`), 'true',
+        'restoring a conversation does not switch to the remote device\'s saved Todos screen')
       assert.ok(calls.some((call) => call.channel === 'workspace:autoList'), 'startup discovers case names')
       assert.equal(sessions.get('mobile-agent').resumeSessionId, 'phone-session')
       assert.equal(sessions.get('mobile-agent').ssh.host, profile.host)
@@ -167,7 +169,8 @@ function runApp({ root, temp, appMain }) {
       await wait(() => evaluate(`!!document.querySelector('.new-case-recent-row')`))
       await evaluate(`document.querySelector('.new-case-recent-row').click()`)
       await evaluate('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))')
-      assert.equal(calls.filter((call) => call.channel === 'workspace:autoLoad').length, 1)
+      assert.equal(calls.filter((call) => call.channel === 'workspace:autoLoad' && call.args[1] !== false).length, 1,
+        'reopening reuses loaded conversations even if a scheduled background refresh ran')
 
       const otherPath = '/cases/another-device'
       sharedCases.set(otherPath, { ...snapshot, workspaceOpenedAt: '2026-10-02T00:00:00.001Z', currentCase: { drafts: otherPath, name: '다른 컴퓨터의 사건' },

@@ -373,13 +373,15 @@ try {
     await pendingRestore
     assert.deepEqual(Array.from(restored.s.terminals, (tab) => tab.id), ['mobile'])
     assert.equal(restored.activate, false, 'late restoration must preserve the current project form, even if it started in the workbench')
+    assert.equal(restored.s.mode, 'cases', 'automatic restoration retains the current screen instead of the saved one')
   }
   context.modeRef.current = 'explorer'
   for (const [refresh, activate, expected] of [[false, false, false], [true, undefined, false], [false, undefined, true]]) {
     context.autoRestoreDoneRef.current.clear()
-    context.window.lt.workspace.autoLoad = async () => ({ ok: true, remote: { snapshot: snapshot([phone]) } })
+    context.window.lt.workspace.autoLoad = async () => ({ ok: true, remote: { snapshot: { ...snapshot([phone]), mode: 'todos' } } })
     await run({}, refresh, activate)
     assert.equal(restored.activate, expected, 'only a foreground restore may select its first conversation')
+    assert.equal(restored.s.mode, 'explorer', 'restoring conversations never opens the remote device\'s saved Todos screen')
   }
   for (const [firstActivate, nextActivate, mode, expected] of [
     [false, true, 'explorer', true], [true, false, 'explorer', true], [false, true, 'cases', false]

@@ -20,6 +20,8 @@ function runApp({ root, temp, chosenDir, screenshot }) {
   const fs = require('node:fs')
   const assert = require('node:assert/strict')
   const calls = [], rendererErrors = [], unexpected = [], sessions = new Map()
+  let heldChannel
+  let heldRequests = []
   const rows = [
     { id: 'overdue', type: 'todo', title: '통합 검증 도과 할일', status: 'pending', dueDate: '2020-01-01', createdAt: '2019-01-01', version: 1 },
     { id: 'undated', type: 'todo', title: '통합 검증 기한 없는 할일', status: 'in_progress', createdAt: '2020-01-01', updatedAt: '2020-01-01', version: 1 },
@@ -37,6 +39,7 @@ function runApp({ root, temp, chosenDir, screenshot }) {
   ipcMain.handle = (channel, handler) => register(channel, async (event, ...args) => {
     const call = { channel, args }
     calls.push(call)
+    if (channel === heldChannel) await new Promise((resolve) => heldRequests.push(resolve))
     // The user opens a task while the general-chat directory is still loading.
     if (channel === 'app:generalChatDirectory') return new Promise(() => {})
     if (realChannels.has(channel)) {
@@ -126,6 +129,29 @@ function runApp({ root, temp, chosenDir, screenshot }) {
       await capture()
       await wait(() => evaluate(`Array.from(document.querySelectorAll('.welcome .todo-metric strong')).some(node => node.textContent === '27')`), 'Complete hearing aggregate ready')
       await evaluate(`smoke.check(Array.from(document.querySelectorAll('.welcome .todo-metric strong')).some(node => node.textContent === '27'), 'Today count is independent of case/list caps'); smoke.check(Array.from(document.querySelectorAll('.welcome .todo-metric strong')).some(node => node.textContent === '42'), 'Seven-day count is complete')`)
+      const checkDelayedTodoNavigation = async (channel) => {
+        const before = calls.filter(call => call.channel === 'agent:create').length
+        heldChannel = channel
+        await evaluate(`smoke.textButton('AI와 전체 할일 정리', document.querySelector('.welcome'))`)
+        await wait(() => heldRequests.length > 0, `Explicit todo opening waits for ${channel}`)
+        await evaluate(`smoke.click('.activity-item[title="사건"]')`)
+        await wait(() => evaluate(`document.querySelector('.activity-item[title="사건"]').getAttribute('aria-pressed') === 'true'`), 'Cases selected during todo loading')
+        heldChannel = undefined
+        const waiting = heldRequests
+        heldRequests = []
+        for (const resolve of waiting) resolve()
+        await evaluate(`new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))`)
+        assert.equal(await evaluate(`document.querySelector('.activity-item[title="사건"]').getAttribute('aria-pressed') === 'true'`), true, `Late ${channel} must preserve the Cases screen`)
+        assert.equal(calls.filter(call => call.channel === 'agent:create').length, before, 'Canceled todo opening must not create or select an agent')
+        await evaluate(`smoke.click('.activity-item[title^="탐색기 표시"]')`)
+        await wait(() => evaluate(`!!document.querySelector('.welcome .todo-summary')`), 'Welcome restored after canceled todo opening')
+      }
+      await checkDelayedTodoNavigation('settings:get')
+      settings.sshProfiles = [{ id: 'delayed-remote', label: '지연 검증 원격', host: 'delayed.example.invalid', user: 'tester' }]
+      settings.caseOpenTarget = 'remote:delayed-remote'
+      await checkDelayedTodoNavigation('ssh:listDir')
+      settings.sshProfiles = []
+      delete settings.caseOpenTarget
       await evaluate(`smoke.check(document.querySelector('.welcome .todo-summary').textContent.includes('통합 검증 도과 할일'), 'Welcome overdue item'); smoke.click('.workspace-todo-header .header-btn')`)
       await wait(() => evaluate(`document.querySelectorAll('.todo-card').length === 1 && document.querySelector('.todo-card').textContent.includes('통합 검증 도과 할일')`), 'Header opens overdue filter')
       await evaluate(`smoke.textButton('기한 없음')`)
@@ -277,7 +303,7 @@ function runApp({ root, temp, chosenDir, screenshot }) {
       assert.deepEqual([...new Set(unexpected)], [])
       assert.deepEqual(rendererErrors, [])
       await capture()
-      console.log('TODO_APP_RESULT ' + JSON.stringify({ checks: 49, remoteDefaults: true, ipcCalls: calls.length, actualWorkspaceSaveReload: true, rendererErrors, screenshot }))
+      console.log('TODO_APP_RESULT ' + JSON.stringify({ checks: 49, staleNavigationChecks: 2, remoteDefaults: true, ipcCalls: calls.length, actualWorkspaceSaveReload: true, rendererErrors, screenshot }))
       app.exit(0)
     } catch (error) {
       await capture()

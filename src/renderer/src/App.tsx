@@ -5413,8 +5413,9 @@ export default function App(): JSX.Element {
           const existingIds = new Set(termTabsRef.current.map((term) => term.id))
           const added = merged.terminals.filter((term) => !existingIds.has(term.id))
           if (added.length) {
+            // Automatic handover restores conversations without changing the user's current screen.
             restoreWorkspaceSnapshot(
-              { ...selected, terminals: added, activeTerm: merged.activeTerm },
+              { ...selected, mode: modeRef.current, terminals: added, activeTerm: merged.activeTerm },
               request.activate && modeRef.current === 'explorer' && activeCaseTabIdRef.current === id &&
                 !termTabsRef.current.some((term) => caseIdForTerm(term) === id)
             )
@@ -6643,9 +6644,14 @@ export default function App(): JSX.Element {
     setMode('todos')
   }
   const openGlobalTodoWork = async (rows?: JsTodo[]): Promise<void> => {
+    modeRef.current = 'todos'
+    setMode('todos')
     const accountGeneration = todoAccountGeneration.current
+    const isCurrent = (): boolean =>
+      modeRef.current === 'todos' && accountGeneration === todoAccountGeneration.current
     try {
       const settings = await window.lt.settings.get()
+      if (!isCurrent()) return
       const profileId = caseOpenProfileId(settings.caseOpenTarget)
       const profile = settings.sshProfiles?.find((item) => item.id === profileId)
       if (profileId && !profile) throw new Error('기본 원격 연결을 찾을 수 없습니다. 설정에서 연결을 확인해 주세요.')
@@ -6658,7 +6664,7 @@ export default function App(): JSX.Element {
         cwd = (await window.lt.app.info()).homeDirectory
       }
       if (!cwd) throw new Error('할일 대화의 작업 위치를 확인하지 못했습니다.')
-      if (accountGeneration !== todoAccountGeneration.current) return
+      if (!isCurrent()) return
       const atLocation = (term: TermTab): boolean =>
         normalizedCasePathKey(term.cwd) === normalizedCasePathKey(cwd) && (profile
           ? term.profileId === profile.id && term.ssh?.host === profile.host && term.ssh?.user === profile.user &&
@@ -6687,9 +6693,8 @@ export default function App(): JSX.Element {
         queueAgentAttachment(selected, { kind: 'selection', label: `선택한 할일 ${rows.length}건`, text: prompt }, '첨부한 선택 할일만 정리해줘.')
       }
       setTermFocusNonce((current) => ({ ...current, [selected.id]: (current[selected.id] ?? 0) + 1 }))
-      setMode('todos')
     } catch (error) {
-      if (accountGeneration === todoAccountGeneration.current) {
+      if (isCurrent()) {
         await window.lt.dialog.alert('할일 에이전트를 열지 못했습니다: ' + (error instanceof Error ? error.message : String(error)))
       }
     }
