@@ -79,8 +79,17 @@ function inputFields(value: unknown): ProjectInput & Pick<Project, 'folders'> {
   if (executionProfileId && /[\/\\\x00-\x1f\x7f]/.test(executionProfileId)) {
     throw new Error('AI 실행 위치를 확인해 주세요.')
   }
+  let workingFolder: ProjectFolderLink | undefined
+  if (row.workingFolder !== undefined) {
+    const entry = object(row.workingFolder)
+    const folder = { name: text(entry.name, '작업 폴더 이름', true).trim(), path: text(entry.path, '작업 폴더 경로', true) }
+    folderKey(folder.path)
+    const folderProfileId = /^ssh:\/\/([^/\\\s]+)\//.exec(folder.path)?.[1]
+    if (folderProfileId === executionProfileId?.trim()) workingFolder = folder
+  }
   return {
     ...(executionProfileId ? { executionProfileId: executionProfileId.trim() } : {}),
+    ...(workingFolder ? { workingFolder } : {}),
     name: text(row.name, '프로젝트 이름', true, 200).trim(),
     goal: text(row.goal, '목표', false, 4000),
     nextAction: text(row.nextAction, '다음 행동', false, 4000),

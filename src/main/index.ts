@@ -29,7 +29,7 @@ import {
 } from './caseStore'
 import { ProjectStore } from './projectStore'
 import { configureProjectAgent, getProjectWorkspace, disposeProjectMcp } from './projectAgent'
-import type { ProjectInput } from '../shared/project'
+import type { ProjectFolderLink, ProjectInput } from '../shared/project'
 import * as js from './jurisupport'
 import { pairedFileEvidence, containsCaseNumber, FILE_EVIDENCE_ENTRY_LIMIT } from './todoFileEvidence'
 import { setupStatus } from './setupCheck'
@@ -104,7 +104,7 @@ import {
   type AutomaticWorkspaceLocation,
   type WorkspaceSnapshot
 } from './workspace'
-import { disposeAgentSessions, reconnectAgentSessions, registerAgentIpc } from './agent/agent-service'
+import { disposeAgentSessions, reconnectAgentSessions, registerAgentIpc, retargetProjectAgentWorkspace } from './agent/agent-service'
 
 protocol.registerSchemesAsPrivileged([MEDIA_SCHEME])
 
@@ -1116,6 +1116,36 @@ configureProjectAgent({
 })
 ipcMain.handle('projects:list', () => projectStore.list())
 ipcMain.handle('projects:workspace', (_event, id: string) => getProjectWorkspace(id))
+ipcMain.handle('projects:setWorkingFolder', async (_event, id: string, folder: ProjectFolderLink, expectedUpdatedAt: string) => {
+  const workspace = await retargetProjectAgentWorkspace(id, async () => {
+    const current = (await projectStore.list()).find((project) => project.id === id)
+    if (!current) throw new Error('프로젝트를 찾을 수 없습니다.')
+    if (!expectedUpdatedAt || current.updatedAt !== expectedUpdatedAt) throw new Error('프로젝트가 변경되었습니다. 다시 열어 작업 폴더를 지정해 주세요.')
+    if (!folder || typeof folder.path !== 'string' || typeof folder.name !== 'string' || !folder.name.trim() || !folder.path || folder.path.includes('\0')) {
+      throw new Error('작업 폴더를 확인해 주세요.')
+    }
+    const remote = isRemote(folder.path) ? parseRemote(folder.path) : undefined
+    if (remote?.profileId !== current.executionProfileId || (!remote && !isAbsolute(folder.path))) {
+      throw new Error('프로젝트 AI 실행 위치와 같은 컴퓨터의 작업 폴더를 선택해 주세요.')
+    }
+    const path = remote ? await rfsRealpath(folder.path) : await realpath(folder.path)
+    const actual = isRemote(path) ? parseRemote(path) : undefined
+    if (remote ? actual?.profileId !== remote.profileId : !isAbsolute(path)) throw new Error('작업 폴더의 실제 경로를 확인할 수 없습니다.')
+    const info = remote ? await rfsStat(path) : await stat(path)
+    if (!('isDir' in info ? info.isDir : info.isDirectory())) throw new Error('작업 폴더로 기존 폴더를 지정해 주세요.')
+    const endpoint = current.executionProfileId ? await rfsProjectWorkspace(current.executionProfileId, id) : undefined
+    const cwd = actual?.path ?? path
+    return {
+      cwd, ssh: endpoint?.ssh,
+      commit: async () => {
+        const project = await projectStore.save({ ...current, expectedUpdatedAt, workingFolder: { name: folder.name, path } })
+        return { ...endpoint, cwd, project }
+      }
+    }
+  })
+  notifyProjectsChanged()
+  return workspace
+})
 ipcMain.handle('projects:save', async (_event, input: ProjectInput) => {
   const project = await projectStore.save(input)
   notifyProjectsChanged()

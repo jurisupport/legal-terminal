@@ -11,6 +11,7 @@ import * as shared from '../src/shared/workspaceAgentTabs.ts'
 
 const directory = await fs.mkdtemp(path.join(tmpdir(), 'legal-terminal-workspace-case-'))
 const remoteFiles = new Map()
+const remoteLocks = new Set()
 let remoteError
 const filename = command => command.match(/([a-f0-9]+\.json)/)?.[1] ?? assert.fail('hashed remote filename')
 const source = readFileSync(new URL('../src/main/workspace.ts', import.meta.url), 'utf8')
@@ -30,6 +31,7 @@ vm.runInNewContext(ts.transpileModule(source, {
     if (name === 'child_process') return {
       execFile(_bin, args, _options, callback) {
         if (args.at(-1).startsWith('mkdir ') || args.at(-1).startsWith('rmdir ')) {
+          if (args.at(-1).startsWith('mkdir ')) remoteLocks.add(filename(args.at(-1)))
           queueMicrotask(() => callback(remoteError, ''))
           return
         }
@@ -177,5 +179,186 @@ try {
   remoteError = undefined
   for (const key of remoteFiles.keys()) remoteFiles.set(key, '')
   assert.equal((await api.loadAutomaticWorkspace({ ...sshLocation, caseId: 'A' })).ok, false, 'empty/corrupt remote file is an error, not absent')
-  console.log('workspace case scope: local/SSH same-folder isolation, guarded legacy migration, folder compatibility, mismatches and load failures verified')
+  remoteFiles.clear()
+  const projectSnapshot = (projectId, cwd = '/synthetic/project-shared-folder') => ({
+    version: 1, savedAt: '2026-10-19T00:00:00.000Z', workspaceOpen: true,
+    workspaceLabel: `Project ${projectId}`,
+    currentCase: { drafts: cwd, name: `Project ${projectId}`, meta: { contextKind: 'project', projectId } },
+    caseTabs: [{ id: `project-${projectId}`, drafts: cwd, meta: { contextKind: 'project', projectId } }],
+    docs: [{ id: `doc-${projectId}`, path: `${cwd}/${projectId}.md` }],
+    terminals: [{ id: 'same-agent-id', kind: 'agent', cwd, contextKind: 'project', projectId, resumeSessionId: `project-session-${projectId}` }]
+  })
+  const projectName = (cwd, projectId) => crypto.createHash('sha256')
+    .update(JSON.stringify(['project-workspace', cwd, projectId])).digest('hex').slice(0, 24) + '.json'
+  const legacyName = cwd => crypto.createHash('sha256').update(cwd).digest('hex').slice(0, 24) + '.json'
+  const localFile = target => path.join(directory, 'userData/workspaces',
+    `${api.workspaceIdForLocation(target.cwd, target.profileId, target.caseId, target.projectId)}.json`)
+  const sharedFile = name => path.join(directory, 'home/.claude/legal-terminal-workspaces', name)
+  const seedLegacyProject = async (target, stored) => {
+    await fs.writeFile(localFile(target), JSON.stringify(stored))
+    if (target.ssh) remoteFiles.set(legacyName(target.cwd), JSON.stringify(shared.agentTabsOnly(stored)))
+    else await fs.writeFile(sharedFile(legacyName(target.cwd)), JSON.stringify(shared.agentTabsOnly(stored)))
+  }
+  const assertProject = (restored, projectId) => {
+    assert.equal(restored.ok, true)
+    for (const loaded of [restored.local, restored.remote]) {
+      assert.equal(loaded.snapshot.currentCase.meta.contextKind, 'project')
+      assert.equal(loaded.snapshot.currentCase.meta.projectId, projectId)
+      assert.equal(loaded.snapshot.currentCase.meta.jsId, undefined, 'project identity must not be encoded as a case id')
+      assert.deepEqual(Array.from(loaded.snapshot.terminals, tab => tab.resumeSessionId), [`project-session-${projectId}`])
+    }
+  }
+  assert.notEqual(api.workspaceIdForLocation(location.cwd, undefined, 'P'), api.workspaceIdForLocation(location.cwd, undefined, undefined, 'P'))
+  assert.notEqual(api.workspaceIdForLocation(location.cwd, undefined, undefined, 'P'), api.workspaceIdForLocation(location.cwd, undefined, undefined, 'Q'))
+  assert.notEqual(api.workspaceIdForLocation(location.cwd, 'ssh-1', undefined, 'P'), api.workspaceIdForLocation(location.cwd, 'ssh-2', undefined, 'P'))
+  assert.equal(api.snapshotMatchesProject(projectSnapshot('P'), 'P'), true)
+  assert.equal(api.snapshotMatchesProject(snapshot('P'), 'P'), false)
+  assert.equal(api.snapshotMatchesCase(projectSnapshot('P'), 'P'), false)
+  assert.equal(api.snapshotMatchesProject(projectSnapshot('P'), 'Q'), false)
+  const mixedProject = projectSnapshot('P')
+  mixedProject.terminals.push(...projectSnapshot('Q').terminals)
+  assert.equal(api.snapshotMatchesProject(mixedProject, 'P'), false)
+  const projectWithCase = projectSnapshot('P')
+  projectWithCase.terminals.push(...snapshot('case').terminals)
+  assert.equal(api.snapshotMatchesProject(projectWithCase, 'P'), false)
+  assert.equal((await api.saveAutomaticWorkspace(projectWithCase, { cwd: location.cwd, projectId: 'P' })).ok, false)
+  assert.equal((await api.saveAutomaticWorkspace(projectSnapshot('P'), { cwd: location.cwd, caseId: 'P' })).ok, false)
+  assert.equal((await api.saveAutomaticWorkspace(projectSnapshot('P'), { cwd: location.cwd, caseId: 'P', projectId: 'P' })).ok, false)
+  assert.throws(() => api.observeAutomaticWorkspace({ cwd: location.cwd, projectId: 'Q' }, projectSnapshot('P')), /일치하지 않아/)
+
+  for (const target of [
+    { cwd: '/synthetic/project-shared-folder' },
+    { cwd: '/remote/project-shared-folder', profileId: 'project-host', ssh: { user: 'tester', host: 'synthetic' } }
+  ]) {
+    // Legacy currentCase metadata alone is sufficient; old agents did not always repeat it.
+    const legacyProject = projectSnapshot('P', target.cwd)
+    legacyProject.caseTabs = undefined
+    delete legacyProject.terminals[0].contextKind
+    delete legacyProject.terminals[0].projectId
+    await seedLegacyProject(target, legacyProject)
+    assertProject(await api.loadAutomaticWorkspace({ ...target, projectId: 'P' }), 'P')
+    empty(await api.loadAutomaticWorkspace({ ...target, projectId: 'Q' }))
+    empty(await api.loadAutomaticWorkspace({ ...target, caseId: 'P' }))
+    empty(await api.loadAutomaticWorkspace(target))
+    let discovery = await api.listAutomaticWorkspaces(target.ssh)
+    assert.equal(discovery.snapshots.filter(s => s.currentCase.drafts === target.cwd).length, 1,
+      'legacy project currentCase remains discoverable before migration')
+
+    // The ordinary folder may be used first after upgrade; preserve the legacy project.
+    const plain = snapshot()
+    plain.currentCase = { drafts: target.cwd, name: 'Ordinary folder' }
+    plain.caseTabs = []
+    plain.terminals[0].cwd = target.cwd
+    const plainSave = await api.saveAutomaticWorkspace(plain, target, 41)
+    assert.equal(plainSave.ok, true)
+    assert.equal(plainSave.remoteError, undefined)
+    assertProject(await api.loadAutomaticWorkspace({ ...target, projectId: 'P' }), 'P')
+    assertSnapshot((await api.loadAutomaticWorkspace(target)).remote.snapshot, undefined, true)
+    empty(await api.loadAutomaticWorkspace({ ...target, projectId: 'Q' }))
+    for (const id of ['P', 'Q']) {
+      const saved = await api.saveAutomaticWorkspace(projectSnapshot(id, target.cwd), { ...target, projectId: id }, 41)
+      assert.equal(saved.ok, true)
+      assert.equal(saved.remoteError, undefined)
+      await api.loadAutomaticWorkspace({ ...target, projectId: id }, 41)
+    }
+    const caseSave = await api.saveAutomaticWorkspace(snapshot('P'), { ...target, caseId: 'P' }, 41)
+    assert.equal(caseSave.remoteError, undefined)
+    assert.notEqual(localFile({ ...target, caseId: 'P' }), localFile({ ...target, projectId: 'P' }))
+    assertProject(await api.loadAutomaticWorkspace({ ...target, projectId: 'P' }, 41), 'P')
+    assertProject(await api.loadAutomaticWorkspace({ ...target, projectId: 'Q' }, 41), 'Q')
+    assertSnapshot((await api.loadAutomaticWorkspace({ ...target, caseId: 'P' }, 41)).remote.snapshot, 'P', true)
+    discovery = await api.listAutomaticWorkspaces(target.ssh)
+    const here = discovery.snapshots.filter(s => s.currentCase.drafts === target.cwd)
+    assert.equal(here.length, 4, 'ordinary folder, case, and two projects sharing one path remain separate')
+    assert.deepEqual(Array.from(here.filter(s => s.currentCase.meta?.contextKind === 'project'), s => s.currentCase.meta.projectId).sort(), ['P', 'Q'])
+
+    const movedProjectLocation = { ...target, cwd: `${target.cwd}/new-working-folder`, projectId: 'P' }
+    const movedProject = projectSnapshot('P', movedProjectLocation.cwd)
+    movedProject.terminals[0].resumeSessionId = 'new-working-folder-session'
+    assert.equal((await api.saveAutomaticWorkspace(movedProject, movedProjectLocation)).remoteError, undefined)
+    assertProject(await api.loadAutomaticWorkspace({ ...target, projectId: 'P' }), 'P')
+    assert.equal((await api.loadAutomaticWorkspace(movedProjectLocation)).remote.snapshot.terminals[0].resumeSessionId, 'new-working-folder-session',
+      'changing the working folder preserves the old project history in its separate location')
+
+    const closedP = await api.saveAutomaticWorkspace({ ...projectSnapshot('P', target.cwd), terminals: [] }, { ...target, projectId: 'P' }, 41)
+    assert.equal(closedP.remoteError, undefined)
+    const projectP = (await api.loadAutomaticWorkspace({ ...target, projectId: 'P' }, 41)).remote.snapshot
+    assert.equal(projectP.terminals.length, 0)
+    assert.deepEqual(Array.from(projectP.closedAgentTabs, tab => tab.resumeSessionId), ['project-session-P'])
+    assertProject(await api.loadAutomaticWorkspace({ ...target, projectId: 'Q' }, 41), 'Q')
+    assertSnapshot((await api.loadAutomaticWorkspace(target, 41)).remote.snapshot, undefined, true)
+    assertSnapshot((await api.loadAutomaticWorkspace({ ...target, caseId: 'P' }, 41)).remote.snapshot, 'P', true)
+
+    // Exact wrong-project files must be rejected without merging or overwriting their contents.
+    const wrong = JSON.stringify(projectSnapshot('P', target.cwd))
+    const exactQ = projectName(target.cwd, 'Q')
+    const originalLocal = await fs.readFile(localFile({ ...target, projectId: 'Q' }), 'utf8')
+    await fs.writeFile(localFile({ ...target, projectId: 'Q' }), wrong)
+    assert.equal((await api.loadAutomaticWorkspace({ ...target, projectId: 'Q' })).ok, false)
+    await fs.writeFile(localFile({ ...target, projectId: 'Q' }), originalLocal)
+    const originalShared = target.ssh ? remoteFiles.get(exactQ) : await fs.readFile(sharedFile(exactQ), 'utf8')
+    if (target.ssh) remoteFiles.set(exactQ, wrong)
+    else await fs.writeFile(sharedFile(exactQ), wrong)
+    const rejected = await api.saveAutomaticWorkspace(projectSnapshot('Q', target.cwd), { ...target, projectId: 'Q' })
+    assert.match(rejected.remoteError, /일치하지 않아/)
+    assert.equal(target.ssh ? remoteFiles.get(exactQ) : await fs.readFile(sharedFile(exactQ), 'utf8'), wrong)
+    if (target.ssh) remoteFiles.set(exactQ, originalShared)
+    else await fs.writeFile(sharedFile(exactQ), originalShared)
+
+    // A later old-client save must not replace the canonical project state or vanish.
+    const lateLegacy = projectSnapshot('P', target.cwd)
+    lateLegacy.terminals[0].resumeSessionId = 'old-client-project-session'
+    await seedLegacyProject(target, lateLegacy)
+    assert.equal((await api.saveAutomaticWorkspace(plain, target)).remoteError, undefined)
+    const localBackups = await api.listWorkspaceSnapshots()
+    const recovered = await Promise.all(localBackups.entries.map(entry => api.loadWorkspaceSnapshot(entry.id)))
+    assert.ok(recovered.some(result => result.snapshot?.terminals?.some(tab => tab.resumeSessionId === 'old-client-project-session')),
+      'legacy history is retained even when a newer canonical project already exists')
+    const sharedContents = target.ssh ? [...remoteFiles.values()]
+      : await Promise.all((await fs.readdir(path.dirname(sharedFile('unused.json')))).filter(name => name.endsWith('.json'))
+        .map(name => fs.readFile(sharedFile(name), 'utf8')))
+    assert.ok(sharedContents.some(content => content.includes('old-client-project-session')), 'shared legacy history remains backed up')
+    assert.equal((await api.loadAutomaticWorkspace({ ...target, projectId: 'P' })).remote.snapshot.terminals.length, 0,
+      'preserving old history never reopens a closed canonical project conversation')
+    if (target.ssh) {
+      assert.ok(remoteLocks.has(projectName(target.cwd, 'P')))
+      assert.ok(remoteLocks.has(projectName(target.cwd, 'Q')), 'each project locks its own shared file')
+    }
+  }
+
+  // Failed project closes are queued and retried independently from the same-folder case.
+  const intentLocation = { cwd: '/remote/project-intents', profileId: 'project-host', ssh: { user: 'tester', host: 'synthetic' } }
+  const intentions = [
+    { ...intentLocation, projectId: 'P' }, { ...intentLocation, projectId: 'Q' }, { ...intentLocation, caseId: 'P' }
+  ]
+  for (const target of intentions) {
+    const stored = target.projectId ? projectSnapshot(target.projectId, target.cwd) : snapshot(target.caseId)
+    assert.equal((await api.saveAutomaticWorkspace(stored, target)).remoteError, undefined)
+  }
+  remoteError = Object.assign(new Error('synthetic close disconnect'), { code: 255 })
+  for (const target of intentions) {
+    const stored = target.projectId ? projectSnapshot(target.projectId, target.cwd) : snapshot(target.caseId)
+    const result = await api.saveAutomaticWorkspace({ ...stored, workspaceOpen: false,
+      workspaceIntentId: `close-${target.projectId ? 'project' : 'case'}-${target.projectId ?? target.caseId}` }, target)
+    assert.match(result.remoteError, /close disconnect/)
+  }
+  const intentPath = path.join(directory, 'userData/workspace-intents.json')
+  const pending = JSON.parse(await fs.readFile(intentPath, 'utf8'))
+  assert.equal(pending.length, 3)
+  assert.deepEqual(pending.map(item => item.projectId ?? `case:${item.caseId}`).sort(), ['P', 'Q', 'case:P'])
+  remoteError = undefined
+  assert.equal((await api.listAutomaticWorkspaces(intentLocation.ssh)).ok, true)
+  assert.deepEqual(JSON.parse(await fs.readFile(intentPath, 'utf8')), [])
+  for (const target of intentions) assert.equal((await api.loadAutomaticWorkspace(target)).remote.snapshot.workspaceOpen, false)
+
+  // Pending closes written by the old desktop infer their project identity from metadata.
+  await fs.writeFile(intentPath, JSON.stringify([{ endpoint: 'tester@synthetic:22', cwd: intentLocation.cwd,
+    profileId: intentLocation.profileId, snapshot: { ...projectSnapshot('Q', intentLocation.cwd),
+      workspaceOpen: true, workspaceReopen: true, workspaceIntentId: 'legacy-project-reopen' } }]))
+  assert.equal((await api.listAutomaticWorkspaces(intentLocation.ssh)).ok, true)
+  assert.equal((await api.loadAutomaticWorkspace({ ...intentLocation, projectId: 'Q' })).remote.snapshot.workspaceOpen, true)
+  assert.equal((await api.loadAutomaticWorkspace({ ...intentLocation, projectId: 'P' })).remote.snapshot.workspaceOpen, false)
+  assert.equal((await api.loadAutomaticWorkspace({ ...intentLocation, caseId: 'P' })).remote.snapshot.workspaceOpen, false)
+  assert.deepEqual(JSON.parse(await fs.readFile(intentPath, 'utf8')), [])
+  console.log('workspace case/project scope: local/SSH same-folder isolation, guarded legacy migration, folder compatibility, observers, locks, independent close recovery and mismatches verified')
 } finally { await fs.rm(directory, { recursive: true, force: true }) }

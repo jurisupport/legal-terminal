@@ -99,6 +99,35 @@ try {
   assert.equal((await new ProjectStore(file).list())[0].executionProfileId, undefined)
   await store.remove(local.id, local.updatedAt)
 
+  let selected = await store.save({ ...input, workingFolder: { name: '  기존 사건 폴더  ', path: '/cases/existing' } })
+  const selectedId = selected.id
+  assert.deepEqual(selected.workingFolder, { name: '기존 사건 폴더', path: '/cases/existing' })
+  assert.equal(selected.name, input.name, 'choosing a working folder does not adopt the folder or case name')
+  assert.deepEqual((await new ProjectStore(file).list())[0], selected, 'the selected working folder survives reopening')
+  selected = await store.save({ ...selected, expectedUpdatedAt: selected.updatedAt, notes: '변경한 메모' })
+  assert.equal(selected.id, selectedId, 'working folder changes retain project identity')
+  assert.equal(selected.workingFolder.path, '/cases/existing', 'ordinary edits preserve the selected working folder')
+  selected = await store.save({ ...selected, expectedUpdatedAt: selected.updatedAt, executionProfileId: 'office' })
+  assert.equal(selected.workingFolder, undefined, 'switching to remote execution clears a local working folder')
+  selected = await store.save({ ...selected, expectedUpdatedAt: selected.updatedAt,
+    workingFolder: { name: '원격 작업', path: 'ssh://office/cases/existing' } })
+  assert.equal((await new ProjectStore(file).list())[0].workingFolder.path, 'ssh://office/cases/existing')
+  selected = await store.save({ ...selected, expectedUpdatedAt: selected.updatedAt, executionProfileId: 'other' })
+  assert.equal(selected.workingFolder, undefined, 'changing the remote execution profile clears the old remote folder')
+  selected = await store.save({ ...selected, expectedUpdatedAt: selected.updatedAt,
+    workingFolder: { name: '다른 서버', path: 'ssh://other/cases/existing' } })
+  selected = await store.save({ ...selected, expectedUpdatedAt: selected.updatedAt, executionProfileId: undefined })
+  assert.equal(selected.workingFolder, undefined, 'switching to local execution clears a remote working folder')
+  assert.equal(selected.name, input.name)
+  assert.equal(selected.id, selectedId)
+  await store.remove(selected.id, selected.updatedAt)
+  for (const workingFolder of [null, 'folder', {}, { name: '', path: '/valid' },
+    { name: '폴더', path: 'relative' }, { name: '폴더', path: '/bad\0path' },
+    { name: '폴더', path: 'ssh://bad profile/folder' }, { name: '폴더', path: '/'.repeat(4097) }]) {
+    await assert.rejects(store.save({ ...input, workingFolder }))
+  }
+  assert.deepEqual(await store.list(), [], 'invalid working folders never modify storage')
+
   const boundary = await store.save({
     ...input,
     name: '가'.repeat(200),

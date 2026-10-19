@@ -4192,7 +4192,7 @@ export default function App(): JSX.Element {
     void window.lt.case.setJsPairing(key, drafts, records)
   }
 
-  const applyDraftsFolder = (
+  const applyDraftsFolder = async (
     target: { term?: TermTab; termId?: string; source?: CurrentCase } | undefined,
     next: {
       drafts: string
@@ -4203,15 +4203,33 @@ export default function App(): JSX.Element {
       profileId?: string
       remotePath?: string
     }
-  ): void => {
-    const cur =
-      target?.term ??
-      (target?.termId ? termTabs.find((t) => t.id === target.termId) : undefined) ??
-      termTabs.find((t) => t.id === activeTerm)
+  ): Promise<void> => {
+    const cur = target
+      ? target.term ?? (target.termId ? termTabsRef.current.find((t) => t.id === target.termId) : undefined)
+      : termTabsRef.current.find((t) => t.id === activeTerm)
+    if (target && !target.source && !cur) return
     const source = target?.source ?? (cur ? currentCaseFromTerm(cur) : currentCase ?? undefined)
-    const caseTabIdValue = cur?.caseTabId ?? activeCaseTabId ?? (source ? resolveCaseTabId(source) : undefined)
+    const caseTabIdValue = cur?.caseTabId ?? (source ? resolveCaseTabId(source) : activeCaseTabId)
+    const projectId = source?.meta?.contextKind === 'project' ? source.meta.projectId : undefined
+    let projectName: string | undefined
+    if (projectId) {
+      try {
+        const project = (await window.lt.projects.list()).find((item) => item.id === projectId)
+        if (!project) throw new Error('프로젝트를 찾을 수 없습니다. 프로젝트 관리에서 확인해 주세요.')
+        const workspace = await window.lt.projects.setWorkingFolder(projectId,
+          { name: next.name, path: next.drafts }, project.updatedAt)
+        projectName = `프로젝트 · ${workspace.project.name}`
+        next = { ...next, cwd: workspace.cwd,
+          drafts: next.profileId ? remoteUri(next.profileId, workspace.cwd) : workspace.cwd,
+          remotePath: next.profileId ? workspace.cwd : undefined }
+      } catch (error) {
+        await window.lt.dialog.alert('프로젝트 작업 폴더 변경 실패: ' + String(error))
+        return
+      }
+      if (!caseTabsRef.current.some((tab) => tab.id === caseTabIdValue && tab.meta?.projectId === projectId)) return
+    }
     const records = cur?.recordsFolder ?? source?.records
-    const name = source?.meta?.jsId ? source.name : next.name
+    const name = projectName ?? (source?.meta?.jsId ? source.name : next.name)
     const nextSource: CurrentCase = {
       drafts: next.drafts,
       records,
@@ -4222,13 +4240,14 @@ export default function App(): JSX.Element {
       profileId: next.profileId,
       remotePath: next.remotePath
     }
+    if (projectId) markWorkspaceReopened(nextSource)
 
     setTermTabs((tabs) =>
       tabs.map((t) =>
         caseTabIdValue && caseIdForTerm(t) === caseTabIdValue
           ? {
               ...t,
-              title: t.id === cur?.id ? name : t.title,
+              title: projectId ? (t.renamed || t.sessionTitle ? t.title : name) : t.id === cur?.id ? name : t.title,
               cwd: next.cwd,
               recordsFolder: records,
               suggestedRecords: undefined,
@@ -4240,19 +4259,22 @@ export default function App(): JSX.Element {
           : t
       )
     )
-    setCurrentCase(nextSource)
+    const stillActive = !projectId || activeCaseTabIdRef.current === caseTabIdValue
+    if (stillActive) setCurrentCase(nextSource)
     setCaseTabs((tabs) =>
       upsertCaseTab(tabs, {
         ...caseTabFromCurrentCase(nextSource, cur?.id),
         id: caseTabIdValue ?? resolveCaseTabId(nextSource)
       })
     )
-    setActiveCaseTabId(caseTabIdValue ?? resolveCaseTabId(nextSource))
-    void window.lt.case.addHistory({ drafts: next.drafts, records, name }).then(setRecent)
-    if (records) void window.lt.case.setPairing(next.drafts, records)
-    saveJsPairing(nextSource, next.drafts, records)
+    if (stillActive) setActiveCaseTabId(caseTabIdValue ?? resolveCaseTabId(nextSource))
+    if (!projectId) {
+      void window.lt.case.addHistory({ drafts: next.drafts, records, name }).then(setRecent)
+      if (records) void window.lt.case.setPairing(next.drafts, records)
+      saveJsPairing(nextSource, next.drafts, records)
+    }
     setTreeRefresh((n) => n + 1)
-    setMode('explorer')
+    if (stillActive) setMode('explorer')
   }
 
   const pickDrafts = async (): Promise<void> => {
@@ -4289,7 +4311,7 @@ export default function App(): JSX.Element {
       defaultPath: source.drafts || draftsRoot
     })
     if (!picked) return
-    applyDraftsFolder(
+    await applyDraftsFolder(
       { term: cur, source },
       { drafts: picked.path, cwd: picked.path, name: picked.name || pathLeaf(picked.path) || '사건' }
     )
@@ -5201,8 +5223,9 @@ export default function App(): JSX.Element {
     setTreeRefresh((n) => n + 1)
   }
 
-  const workspaceLocation = (source: CurrentCase): { cwd: string; profileId?: string; ssh?: SshConn; caseId?: string } => ({
+  const workspaceLocation = (source: CurrentCase): { cwd: string; profileId?: string; ssh?: SshConn; caseId?: string; projectId?: string } => ({
     caseId: source.meta?.jsId,
+    projectId: source.meta?.contextKind === 'project' ? source.meta.projectId : undefined,
     cwd: source.remotePath ?? parseRemoteUri(source.drafts)?.path ?? source.drafts,
     profileId: source.profileId,
     ssh: source.ssh
@@ -5344,17 +5367,25 @@ export default function App(): JSX.Element {
         const termsBeforeLoad = termTabsRef.current
         const result = await window.lt.workspace.autoLoad(workspaceLocation(source), !refresh)
         if (account !== todoAccountGeneration.current) return true
+        const liveProject = source.meta?.contextKind === 'project' ? caseTabsRef.current.find((tab) => tab.id === id) : undefined
+        if (liveProject && normalizedCasePathKey(liveProject.remotePath ?? liveProject.drafts) !==
+          normalizedCasePathKey(source.remotePath ?? source.drafts)) return true
         // A background response must not undo a tab closed while the read was in flight.
         if (refresh && termsBeforeLoad !== termTabsRef.current) return true
         const cachedSource = result.local?.snapshot?.currentCase as CurrentCase | undefined
-        const localScopeMatches = source.meta?.contextKind === 'project'
-          ? cachedSource?.meta?.contextKind === 'project' && caseIdentityKey(cachedSource) === caseIdentityKey(source)
+        const localScopeMatches = source.meta?.contextKind === 'project' || cachedSource?.meta?.contextKind === 'project'
+          ? source.meta?.contextKind === 'project' && cachedSource?.meta?.contextKind === 'project' &&
+            caseIdentityKey(cachedSource) === caseIdentityKey(source)
           : !isGeneralChatDirectory(source.remotePath ?? source.drafts) ||
             (!!cachedSource && caseIdentityKey(cachedSource) === caseIdentityKey(source))
         const local = !refresh && result.local?.snapshot && localScopeMatches
           ? rebaseRemoteWorkspace(agentTabsOnly(result.local.snapshot), source)
           : undefined
-        const remote = result.remote?.snapshot
+        const remoteSource = result.remote?.snapshot?.currentCase as CurrentCase | undefined
+        const remoteScopeMatches = (source.meta?.contextKind !== 'project' && remoteSource?.meta?.contextKind !== 'project') ||
+          Boolean(source.meta?.contextKind === 'project' && source.meta.projectId &&
+            remoteSource?.meta?.contextKind === 'project' && remoteSource.meta.projectId === source.meta.projectId)
+        const remote = result.remote?.snapshot && remoteScopeMatches
           ? rebaseRemoteWorkspace(agentTabsOnly(result.remote.snapshot), source)
           : undefined
         if (remote && local) local.terminals = local.terminals.filter((term) => !isAgentTabClosed(remote, term))
@@ -5392,7 +5423,7 @@ export default function App(): JSX.Element {
         }
         // Keep the local backup usable offline, but leave remote restoration retryable.
         if (!result.ok) throw new Error(result.error || '에이전트 탭을 불러오지 못했습니다.')
-        if (refresh && result.remote?.snapshot) {
+        if (refresh && remote && result.remote?.snapshot) {
           await window.lt.workspace.autoObserve(workspaceLocation(source), result.remote.snapshot)
         }
         return true
@@ -5446,6 +5477,9 @@ export default function App(): JSX.Element {
         if (!result.ok) throw new Error(result.error)
         return { profile, result }
       }))
+      const hasProjects = results.some((response) => response.status === 'fulfilled' &&
+        response.value.result.snapshots?.some((snapshot) => sanitizeCurrentCase(snapshot.currentCase)?.meta?.contextKind === 'project'))
+      const projects = new Map((hasProjects ? await window.lt.projects.list() : []).map((project) => [project.id, project]))
       if (discardStaleRead()) return
       let failed = results.some((result) => result.status === 'rejected')
       for (const response of results) {
@@ -5455,6 +5489,15 @@ export default function App(): JSX.Element {
           if (discardStaleRead()) return
           const stored = sanitizeCurrentCase(snapshot.currentCase)
           if (!stored || !stored.drafts.startsWith('/')) continue
+          const workingFolder = stored.meta?.contextKind === 'project' && stored.meta.projectId
+            ? projects.get(stored.meta.projectId)?.workingFolder : undefined
+          if (workingFolder) {
+            const remote = parseRemoteUri(workingFolder.path)
+            const expectedProfile = remote ? sshProfiles.find((item) => item.id === remote.profileId) : undefined
+            if (normalizedCasePathKey(stored.drafts) !== normalizedCasePathKey(remote?.path ?? workingFolder.path) ||
+              sessionListKey('', profile ? sshConnFromProfile(profile) : undefined) !==
+                sessionListKey('', expectedProfile ? sshConnFromProfile(expectedProfile) : undefined)) continue
+          }
           let source: CurrentCase = {
             name: stored.name,
             drafts: profile ? remoteUri(profile.id, stored.drafts) : stored.drafts,
@@ -5599,6 +5642,54 @@ export default function App(): JSX.Element {
       })
     }).catch(() => {})
   }), [])
+
+  // A project folder can be changed in another window while this conversation stays open.
+  useEffect(() => {
+    let generation = 0
+    const refresh = async (): Promise<void> => {
+      const request = ++generation
+      const projects = new Map((await window.lt.projects.list()).map((project) => [project.id, project]))
+      if (request !== generation) return
+      const relocate = (source: CurrentCase): CurrentCase => {
+        const project = source.meta?.contextKind === 'project' && source.meta.projectId ? projects.get(source.meta.projectId) : undefined
+        const folder = project?.workingFolder
+        if (!folder) return source
+        const remote = parseRemoteUri(folder.path)
+        if (source.profileId !== remote?.profileId || normalizedCasePathKey(source.remotePath ?? source.drafts) ===
+          normalizedCasePathKey(remote?.path ?? folder.path)) return source
+        return { ...source, drafts: folder.path, remotePath: remote?.path, name: `프로젝트 · ${project.name}` }
+      }
+      for (const tab of caseTabsRef.current) {
+        const source = currentCaseFromCaseTab(tab)
+        const moved = relocate(source)
+        if (moved !== source) markWorkspaceReopened(moved)
+      }
+      setTermTabs((tabs) => {
+        const next = tabs.map((tab) => {
+          const source = currentCaseFromTerm(tab)
+          const moved = relocate(source)
+          return moved === source ? tab : { ...tab, cwd: moved.remotePath ?? moved.drafts,
+            title: tab.renamed || tab.sessionTitle ? tab.title : moved.name }
+        })
+        if (next.every((tab, index) => tab === tabs[index])) return tabs
+        termTabsRef.current = next
+        return next
+      })
+      setCaseTabs((tabs) => {
+        const next = tabs.map((tab) => {
+          const source = currentCaseFromCaseTab(tab)
+          const moved = relocate(source)
+          return moved === source ? tab : { ...tab, ...moved }
+        })
+        if (next.every((tab, index) => tab === tabs[index])) return tabs
+        caseTabsRef.current = next
+        return next
+      })
+      setCurrentCase((source) => source ? relocate(source) : source)
+    }
+    const unsubscribe = window.lt.projects.onChanged(() => { void refresh().catch(() => {}) })
+    return () => { ++generation; unsubscribe() }
+  }, [])
 
   const saveWorkspace = async (exportFile = false): Promise<void> => {
     const snapshot = await buildWorkspaceSnapshot()

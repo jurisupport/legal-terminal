@@ -16,6 +16,7 @@ const remoteFiles = new Map([
   ['ssh://office/evidence/remote.txt', Buffer.from('원격 계약 자료\n채권 회수 근거')],
   ['ssh://office/.legal-terminal/project-workspaces/project/ai.txt', Buffer.from('프로젝트 결과물')]
 ])
+const remoteDirectories = new Set(['ssh://office/selected-output'])
 let pairings = { 'case-1': { drafts: data, records: separate }, 'remote:office:case-1': { drafts: '/remote-drafts', records: '/remote-records' } }
 let details = { id: 'case-1', name: '현재 사건 정보' }
 const base = { name: '채권 회수', goal: '회수 검토', nextAction: '자료 비교', notes: '', status: 'active', cases: [], folders: [] }
@@ -67,10 +68,16 @@ try {
       })
       : (await readdir(path, { withFileTypes: true })).filter((entry) => !entry.isSymbolicLink()).map((entry) => ({ name: entry.name, path: join(path, entry.name), isDir: entry.isDirectory() })),
     stat: async (path) => {
-      if (path.startsWith('ssh://')) { if (!remoteFiles.has(path)) throw new Error('원격 파일 없음'); return { size: remoteFiles.get(path).length, isDir: false } }
+      if (path.startsWith('ssh://')) {
+        if (remoteDirectories.has(path)) return { size: 0, isDir: true }
+        if (!remoteFiles.has(path)) throw new Error('원격 파일 없음')
+        return { size: remoteFiles.get(path).length, isDir: false }
+      }
       const value = await stat(path); return { size: value.size, isDir: value.isDirectory(), mtimeMs: value.mtimeMs }
     },
-    realpath: async (path) => path === 'ssh://office/evidence/escape.txt' ? 'ssh://office/private.txt' : path.startsWith('ssh://') ? path : realpath(path),
+    realpath: async (path) => path === 'ssh://office/evidence/escape.txt' ? 'ssh://office/private.txt'
+      : path === 'ssh://office/selected-alias' ? 'ssh://office/selected-output'
+      : path.startsWith('ssh://') ? path : realpath(path),
     readBytes: async (path) => { if (path.startsWith('ssh://')) { remoteReads++; return remoteFiles.get(path) } return readFile(path) },
     officeText: (path) => `${path.endsWith('.docx') ? 'DOCX' : 'HWP'} 채권 회수 자료`
   })
@@ -84,6 +91,28 @@ try {
   assert.equal(workspace.cwd, await realpath(join(root, 'app', 'project-workspaces', project.id)))
   assert.equal(workspace.project.id, project.id)
   assert.equal(workspace.ssh, undefined, 'local project behavior remains unchanged')
+  const selectedDirectory = join(root, 'existing-case-folder')
+  await mkdir(selectedDirectory)
+  await writeFile(join(selectedDirectory, 'workspace.json'), JSON.stringify({ caseName: '기존 사건', tabs: ['기존 대화'] }))
+  await writeFile(join(selectedDirectory, 'original.txt'), '원래 사건 자료')
+  const originalFiles = await readdir(selectedDirectory)
+  const originalWorkspace = await readFile(join(selectedDirectory, 'workspace.json'), 'utf8')
+  const selectedProject = await store.save({ ...base, workingFolder: { name: '기존 사건 폴더', path: selectedDirectory } })
+  const selectedWorkspace = await getProjectWorkspace(selectedProject.id)
+  assert.equal(selectedWorkspace.cwd, await realpath(selectedDirectory), 'explicitly selected local directory is the project execution cwd')
+  assert.equal(selectedWorkspace.project.id, selectedProject.id)
+  assert.equal(selectedWorkspace.project.name, base.name, 'the selected folder cannot replace project identity with a case name')
+  assert.equal((await getProjectWorkspace(selectedProject.id)).cwd, selectedWorkspace.cwd, 'reopening uses the durable working folder')
+  assert.deepEqual(await readdir(selectedDirectory), originalFiles, 'resolving a project folder adds no files to the existing case')
+  assert.equal(await readFile(join(selectedDirectory, 'workspace.json'), 'utf8'), originalWorkspace, 'existing case workspace is untouched')
+  assert.equal(await readFile(join(selectedDirectory, 'original.txt'), 'utf8'), '원래 사건 자료')
+  await assert.rejects(stat(join(root, 'app', 'project-workspaces', selectedProject.id)), { code: 'ENOENT' }, 'a chosen local folder does not create an unused managed workspace')
+  const fileProject = await store.save({ ...base, workingFolder: { name: '파일', path: join(data, 'facts.md') } })
+  await assert.rejects(getProjectWorkspace(fileProject.id), /기존 폴더/, 'a regular file cannot become a working directory')
+  const missingDirectory = join(root, 'missing-working-folder')
+  const missingProject = await store.save({ ...base, workingFolder: { name: '삭제된 폴더', path: missingDirectory } })
+  await assert.rejects(getProjectWorkspace(missingProject.id), { code: 'ENOENT' }, 'a deleted selection fails instead of silently returning another folder')
+  await assert.rejects(stat(missingDirectory), { code: 'ENOENT' }, 'opening a missing selection never recreates it')
   const remoteProject = await store.save({ ...base, name: '원격 실행', executionProfileId: 'office' })
   const remoteWorkspace = await getProjectWorkspace(remoteProject.id)
   assert.equal(remoteWorkspace.profileId, 'office')
@@ -94,6 +123,19 @@ try {
   assert.equal(remoteContext.includes('로컬 outputDirectory'), false)
   const explicitContext = await getProjectAgentContext(remoteProject.id, '/canonical/remote-output')
   assert.ok(explicitContext.includes('/canonical/remote-output'), 'execution passes the canonical directory into context')
+  const remoteFilesBefore = [...remoteFiles.entries()]
+  const selectedRemote = await store.save({ ...base, executionProfileId: 'office', workingFolder: { name: '원격 기존 폴더', path: 'ssh://office/selected-alias' } })
+  const selectedRemoteWorkspace = await getProjectWorkspace(selectedRemote.id)
+  assert.equal(selectedRemoteWorkspace.cwd, '/selected-output', 'selected remote directories use canonical server paths, not URI strings')
+  assert.equal(selectedRemoteWorkspace.profileId, 'office')
+  assert.equal(selectedRemoteWorkspace.ssh.host, 'saved-office')
+  assert.equal(selectedRemoteWorkspace.project.id, selectedRemote.id)
+  assert.equal(selectedRemoteWorkspace.project.name, base.name)
+  assert.deepEqual([...remoteFiles.entries()], remoteFilesBefore, 'remote workspace selection does not change source files')
+  const remoteFileProject = await store.save({ ...base, executionProfileId: 'office', workingFolder: { name: '원격 파일', path: 'ssh://office/evidence/remote.txt' } })
+  await assert.rejects(getProjectWorkspace(remoteFileProject.id), /기존 폴더/)
+  const remoteMissingProject = await store.save({ ...base, executionProfileId: 'office', workingFolder: { name: '원격 삭제 폴더', path: 'ssh://office/missing' } })
+  await assert.rejects(getProjectWorkspace(remoteMissingProject.id), /원격 파일 없음/)
   executionProfiles = {}
   await assert.rejects(getProjectWorkspace(remoteProject.id), /SSH 프로필을 찾을 수 없습니다/, 'missing remote profile never falls back to local')
   await assert.rejects(stat(join(root, 'app', 'project-workspaces', remoteProject.id)), { code: 'ENOENT' })
@@ -186,6 +228,7 @@ try {
     assert.equal(data.sources.find((source) => source.caseKey === 'linked-case' && source.kind === 'case-drafts')?.path,
       pairingPath, 'every send includes the current pairing after JSON decoding on any platform')
   }
+  project = await store.save({ ...project, expectedUpdatedAt: project.updatedAt, workingFolder: { name: '선택한 작업 폴더', path: selectedDirectory } })
   const noteInput = { note: '자료 비교 후 가압류 검토', expectedUpdatedAt: project.updatedAt, nextAction: '담보 자료 확인', sources: [{ sourceId: local.id, path: 'facts.md', startLine: 2, endLine: 3 }] }
   const remembered = await call('project_record_note', noteInput)
   assert.equal(remembered.saved, true)
@@ -196,6 +239,7 @@ try {
   assert.ok(project.notes.includes(local.name) && project.notes.includes('facts.md') && project.notes.includes('2~3행'), 'saved notes show human-readable source names, paths and lines')
   assert.equal(remembered.sources[0].sourceId, local.id, 'tool result preserves exact source identity')
   assert.equal(project.nextAction, '담보 자료 확인')
+  assert.equal(project.workingFolder.path, selectedDirectory, 'AI note updates preserve the chosen working folder')
   assert.equal((await call('project_record_note', noteInput)).failed, true, 'stale AI writes cannot overwrite newer state')
   const invalidSource = { ...noteInput, expectedUpdatedAt: project.updatedAt, sources: [{ sourceId: otherSources[0].id }] }
   assert.equal((await call('project_record_note', invalidSource)).failed, true)

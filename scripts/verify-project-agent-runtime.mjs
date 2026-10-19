@@ -21,6 +21,7 @@ const events = [], calls = [], launches = [], released = [], acquired = new Map(
 let revision = 1, deleted = false, failedSetup = false, disposed = false
 const remoteSsh = { host: 'project-host', user: 'lawyer', port: 22, identityFile: '/test/key' }
 const remoteCwd = '/home/lawyer/.legal-terminal/project-workspaces/project-remote'
+let localWorkspaceCwd = cwd, remoteWorkspaceCwd = remoteCwd
 const tunnels = []
 let failTunnel = false
 let remoteRunInfo = null
@@ -65,8 +66,8 @@ const query = ({ prompt, options }) => {
 const projectAgent = {
   getProjectWorkspace: async id => {
     if (deleted) throw new Error('프로젝트가 삭제되었습니다.')
-    if (id === 'project-remote') return { cwd: remoteCwd, ssh: remoteSsh, profileId: 'remote-profile' }
-    assert.equal(id, 'project-1'); return { cwd }
+    if (id === 'project-remote') return { cwd: remoteWorkspaceCwd, ssh: remoteSsh, profileId: 'remote-profile' }
+    assert.equal(id, 'project-1'); return { cwd: localWorkspaceCwd }
   },
   getProjectAgentContext: async () => `<project-context>revision-${revision}</project-context>`,
   acquireProjectMcp: async (id, projectId, options) => { acquired.set(id, options); return connection },
@@ -273,5 +274,84 @@ try {
   api.disposeAgentSessions()
   assert.equal(disposed, true)
   assert.equal(acquired.size, 0)
-  console.log('Project runtime: local/remote scope, host/cwd checks, tunnel and bootstrap gates, private Codex token, remote-close/disconnect lifecycle, approvals and deletion passed; no model calls')
+  // Folder changes preserve the same native conversation and never send an AI prompt.
+  deleted = false
+  for (const remote of [false, true]) {
+    for (const provider of ['claude', 'codex']) {
+      localWorkspaceCwd = cwd; remoteWorkspaceCwd = remoteCwd
+      const target = remote ? remoteSession(`retarget-remote-${provider}`, provider) : session(`retarget-local-${provider}`, provider)
+      const nativeId = `same-native-${remote}-${provider}`
+      target.resumeSessionId = nativeId
+      if (provider === 'codex') target.codexThreadId = nativeId
+      target.assistantText.set('previous', 'kept conversation')
+      target.model = 'kept-model'; target.reasoningEffort = 'high'; target.tokenUsage.turns = 4
+      await internals.prepareProjectContext(target)
+      if (provider === 'codex') await internals.ensureCodexThread(target)
+      const beforeNativeId = target.resumeSessionId
+      const oldProcess = target.codexProcess, oldTunnel = target.projectTunnel
+      const projectId = remote ? 'project-remote' : 'project-1'
+      const destination = remote ? '/home/lawyer/existing-case-folder' : tmpdir()
+      const noTurnBefore = calls.filter(call => call[0] === 'query' || call[0] === 'prompt' || call[1]?.type === 'user').length
+      let releasePrepare
+      const paused = new Promise(resolve => { releasePrepare = resolve })
+      const pending = api.retargetProjectAgentWorkspace(projectId, async () => {
+        await paused
+        return { cwd: destination, ssh: remote ? remoteSsh : undefined, commit: async () => {
+          if (remote) remoteWorkspaceCwd = destination; else localWorkspaceCwd = destination
+          return 'saved'
+        } }
+      })
+      assert.equal(api.sendAgentMessage(target.id, { text: 'must stay unsent' }).ok, false)
+      assert.equal(api.createAgentSession({ id: target.id, cwd: destination, workspaceContext: target.workspaceContext }, viewer).ok, false)
+      await assert.rejects(api.retargetProjectAgentWorkspace(projectId, async () => { throw Error('must not reach') }), /변경하고/)
+      releasePrepare()
+      assert.equal(await pending, 'saved')
+      assert.equal(target.cwd, destination)
+      assert.equal(target.workspaceContext.cwd, destination)
+      assert.equal(target.resumeSessionId, beforeNativeId)
+      assert.equal(target.assistantText.get('previous'), 'kept conversation')
+      assert.equal(target.model, 'kept-model'); assert.equal(target.reasoningEffort, 'high'); assert.equal(target.tokenUsage.turns, 4)
+      assert.equal(target.projectMcp, undefined)
+      assert.equal(target.codexProcess, undefined)
+      if (oldProcess) assert.equal(oldProcess.stdin.writableEnded, true)
+      if (oldTunnel) assert.equal(oldTunnel.closed, true)
+      assert.equal(calls.filter(call => call[0] === 'query' || call[0] === 'prompt' || call[1]?.type === 'user').length, noTurnBefore)
+      await assert.rejects(api.retargetProjectAgentWorkspace(projectId, async () => ({ cwd: 'never-applied', ssh: remote ? remoteSsh : undefined, commit: async () => { throw Error('store conflict') } })), /store conflict/)
+      assert.equal(target.cwd, destination)
+      if (provider === 'codex') {
+        await internals.prepareProjectContext(target)
+        await internals.ensureCodexThread(target)
+        const request = calls.filter(call => call[0] === 'rpc' && call[1].method === 'thread/resume').at(-1)[1]
+        assert.equal(request.params.cwd, destination)
+        assert.equal(request.params.threadId, beforeNativeId)
+      } else {
+        const start = calls.length
+        internals.startAgentTurn(target, { text: 'explicit later user request' }); await wait(() => !target.running)
+        if (remote) {
+          const command = launches.at(-1).args[0]
+          assert.ok(command.includes(destination)); assert.ok(command.includes(beforeNativeId))
+        } else {
+          const options = calls.slice(start).find(call => call[0] === 'query')[1]
+          assert.equal(options.cwd, destination); assert.equal(options.resume, beforeNativeId)
+        }
+      }
+      for (const [property, value] of [['running', new AbortController()], ['remoteRestoring', true], ['authProcess', {}]]) {
+        target[property] = value
+        await assert.rejects(api.retargetProjectAgentWorkspace(projectId, async () => { throw Error('must not prepare while busy') }), /끝난 뒤/)
+        target[property] = undefined
+      }
+      target.queue.push({ queueId: 'not-discarded', input: { text: 'queued' } })
+      await assert.rejects(api.retargetProjectAgentWorkspace(projectId, async () => { throw Error('must not prepare while queued') }), /끝난 뒤/)
+      assert.equal(target.queue.length, 1); target.queue.length = 0
+      await assert.rejects(api.retargetProjectAgentWorkspace(projectId, async () => ({ cwd: destination, ssh: remote ? { ...remoteSsh, host: 'different-host' } : remoteSsh, commit: async () => { throw Error('must not commit endpoint change') } })), /같은 컴퓨터/)
+      if (remote) {
+        remoteRunInfo = { sessionId: beforeNativeId, running: false, metadata: { cwd: remoteCwd, projectId, clientRequired: true } }
+        internals.restoreProjectCheck(target); await wait(() => !target.remoteRestoring)
+        assert.equal(target.resumeSessionId, beforeNativeId, 'reopening after folder change retains completed native history')
+        remoteRunInfo = null
+      }
+      api.closeAgentSession(target.id)
+    }
+  }
+  console.log('Project runtime: local/remote scope, bootstrap and lifecycle; idle folder retarget, native resume, busy guards, commit failure and concurrent-send exclusion passed; no model calls')
 } finally { api.disposeAgentSessions(); await rm(cwd, { recursive: true, force: true }) }

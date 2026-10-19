@@ -11,14 +11,16 @@ const temp = await fs.mkdtemp(path.join(os.tmpdir(), 'project-ui-'))
 const screenshotDir = path.join(os.tmpdir(), 'legal-terminal-project-preview')
 const claudeAuthSmoke = process.argv.includes('--claude-auth')
 const remoteAgentSmoke = process.argv.includes('--remote-agent')
+const projectFolderRaces = process.argv.includes('--project-folder-races')
+const projectFolderIdentity = process.argv.includes('--project-folder-identity') || projectFolderRaces
 const folderFocus = process.argv.find(arg => arg.startsWith('--folder-focus='))?.split('=')[1] ?? ''
 assert.ok(!folderFocus || ['close-local', 'close-remote', 'restore-local', 'restore-remote'].includes(folderFocus), 'known folder-focus scenario')
 const windowsFolderPaths = process.argv.includes('--windows-folder-paths')
 assert.ok(!windowsFolderPaths || folderFocus, 'Windows folder paths require a folder-focus scenario')
-const agentSmoke = process.argv.includes('--agent') || claudeAuthSmoke || remoteAgentSmoke
+const agentSmoke = process.argv.includes('--agent') || claudeAuthSmoke || remoteAgentSmoke || projectFolderIdentity
 await fs.mkdir(screenshotDir, { recursive: true })
 
-function runApp({ root, temp, screenshotDir, agentSmoke, claudeAuthSmoke, remoteAgentSmoke, folderFocus, windowsFolderPaths }) {
+function runApp({ root, temp, screenshotDir, agentSmoke, claudeAuthSmoke, remoteAgentSmoke, projectFolderIdentity, projectFolderRaces, folderFocus, windowsFolderPaths }) {
   const { app, BrowserWindow, ipcMain, session } = require('electron')
   const fs = require('node:fs'), path = require('node:path'), assert = require('node:assert/strict')
   const calls = [], errors = []
@@ -33,16 +35,17 @@ function runApp({ root, temp, screenshotDir, agentSmoke, claudeAuthSmoke, remote
   const sharedProfile = { id: 'office', label: '사무실 서버', host: 'example.invalid', user: 'lawyer' }
   const sharedCaseDir = '/home/lawyer/cases/case-a'
   const sharedCasePaths = [sharedCaseDir, '/home/lawyer/cases/case-b']
+  const remoteIdentity = projectFolderIdentity && remoteAgentSmoke
   const history = [
-    { drafts: folderFocus ? `ssh://${sharedProfile.id}${sharedCasePaths[0]}` : caseDir, name: 'A사 거래대금 청구', ts: Date.now() },
-    { drafts: folderFocus ? `ssh://${sharedProfile.id}${sharedCasePaths[1]}` : path.join(temp, 'case-b'), name: 'A사 채권 가압류', ts: Date.now() - 1000 }
+    { drafts: folderFocus || remoteIdentity ? `ssh://${sharedProfile.id}${sharedCasePaths[0]}` : caseDir, name: 'A사 거래대금 청구', ts: Date.now() },
+    { drafts: folderFocus || remoteIdentity ? `ssh://${sharedProfile.id}${sharedCasePaths[1]}` : path.join(temp, 'case-b'), name: 'A사 채권 가압류', ts: Date.now() - 1000 }
   ]
   const jsCase = { id: 'js-1', caseNumber: '2026타채12345', caseName: 'A사 채권압류 및 추심', court: '서울중앙지방법원', division: null, caseType: 'civil', status: 'active', parties: [], hearings: [] }
   let connected = false, failSave = false, cancelFolder = false
-  let profiles = folderFocus ? [sharedProfile] : [], caseOpenTarget = 'local', staleLocalWorkspace = null
-  const workspaceKey = location => JSON.stringify([location.cwd, location.profileId ?? null, location.ssh?.host ?? null, location.ssh?.user ?? null])
+  let profiles = folderFocus || remoteIdentity ? [sharedProfile] : [], caseOpenTarget = 'local', staleLocalWorkspace = null
+  const workspaceKey = location => JSON.stringify([location.cwd, location.profileId ?? null, location.ssh?.host ?? null, location.ssh?.user ?? null, location.projectId ?? location.workspaceContext?.projectId ?? null])
   let pickedFolder = { path: windowsFolderPaths ? path.win32.join('C:/Users/fixture/Documents', '공통 계약·증거') : contextDir, name: '공통 계약·증거' }
-  let holdFolder = false, releaseFolder, holdRestore = false, releaseRestore
+  let holdFolder = false, releaseFolder, holdRestore = false, releaseRestore, holdWorkingFolder = false, releaseWorkingFolder
   const sharedCases = folderFocus ? history.map((item, index) => ({
     version: 1, mode: 'explorer', savedAt: '2026-10-19T00:00:00Z', workspaceOpenedAt: `2026-10-0${index + 1}T00:00:00Z`,
     workspaceOpen: true, currentCase: { drafts: sharedCasePaths[index], name: item.name }, docs: [], terminals: []
@@ -59,15 +62,33 @@ function runApp({ root, temp, screenshotDir, agentSmoke, claudeAuthSmoke, remote
   BrowserWindow.prototype.show = function () {}
   global.fetch = async () => { throw Error('External network blocked by test') }
   const handle = ipcMain.handle.bind(ipcMain), on = ipcMain.on.bind(ipcMain)
+  const handlers = new Map()
   ipcMain.on = (channel, cb) => on(channel, channel.startsWith('fs:') || channel.startsWith('pty:') ? () => {} : cb)
-  ipcMain.handle = (channel, handler) => handle(channel, async (event, ...args) => {
-    calls.push({ channel, args })
+  ipcMain.handle = (channel, handler) => {
+    handlers.set(channel, handler)
+    return handle(channel, async (event, ...args) => {
+    calls.push({ channel, args, senderId: event.sender.id })
     // The user opens a project while the general-chat directory is still loading.
     if (channel === 'app:generalChatDirectory') return new Promise(() => {})
     if (channel === 'projects:save' && failSave) throw Error('검증용 저장 실패')
+    if (channel === 'projects:setWorkingFolder' && projectFolderIdentity) {
+      let result
+      if (remoteIdentity) {
+        const [id, folder, expectedUpdatedAt] = args
+        const current = JSON.parse(fs.readFileSync(path.join(temp, 'profile', 'projects.json'), 'utf8')).projects.find(project => project.id === id)
+        const project = await handlers.get('projects:save')(event, { ...current, expectedUpdatedAt, workingFolder: folder })
+        result = { project, cwd: folder.path.replace(/^ssh:\/\/[^/]+/, ''), profileId: sharedProfile.id, ssh: { host: sharedProfile.host, user: sharedProfile.user } }
+      } else result = await handler(event, ...args)
+      for (const [id, agent] of agents) if (agent.workspaceContext?.projectId === result.project.id) agents.set(id, { ...agent, cwd: result.cwd })
+      if (holdWorkingFolder) {
+        holdWorkingFolder = false
+        await new Promise(resolve => { releaseWorkingFolder = resolve })
+      }
+      return result
+    }
     if (channel === 'projects:workspace' && remoteAgentSmoke) {
       const project = JSON.parse(fs.readFileSync(path.join(temp, 'profile', 'projects.json'), 'utf8')).projects.find(project => project.id === args[0])
-      if (project?.executionProfileId) return { project, cwd: `/home/lawyer/.legal-terminal/project-workspaces/${project.id}` }
+      if (project?.executionProfileId) return { project, cwd: project.workingFolder?.path?.replace(/^ssh:\/\/[^/]+/, '') ?? `/home/lawyer/.legal-terminal/project-workspaces/${project.id}` }
     }
     if (channel.startsWith('projects:') || ['app:info', 'app:setWindowTitle', 'tabs:ready', 'caseManagement:get', 'caseManagement:update'].includes(channel)) return handler(event, ...args)
     if (channel === 'setup:status') return { items: [], ready: true }
@@ -76,7 +97,7 @@ function runApp({ root, temp, screenshotDir, agentSmoke, claudeAuthSmoke, remote
       if (holdFolder) { holdFolder = false; return new Promise(resolve => { releaseFolder = resolve }) }
       return cancelFolder ? null : pickedFolder
     }
-    if (channel === 'ssh:listDir') return { ok: true, cwd: args[0].path === '~/research' ? '/home/lawyer/research' : '/home/lawyer', entries: [] }
+    if (channel === 'ssh:listDir') return { ok: true, cwd: projectFolderIdentity && args[0].path.startsWith('/') ? args[0].path : args[0].path === '~/research' ? '/home/lawyer/research' : '/home/lawyer', entries: [] }
     if (channel === 'case:history' || channel === 'case:addHistory') return history
     if (channel === 'js:tokenStatus') return connected ? 'ok' : 'missing'
     if (channel === 'js:hasToken') return connected
@@ -104,7 +125,12 @@ function runApp({ root, temp, screenshotDir, agentSmoke, claudeAuthSmoke, remote
       return { ok: true, ...(staleLocalWorkspace ? { local: { ok: true, snapshot: staleLocalWorkspace } } : {}), remote: { ok: true, snapshot: workspaces.get(workspaceKey(args[0])) ?? null } }
     }
     if (channel === 'workspace:autoSave') {
-      if (agentSmoke) workspaces.set(workspaceKey(args[0].location), args[0].snapshot)
+      if (agentSmoke) {
+        const key = workspaceKey(args[0].location), snapshot = args[0].snapshot
+        workspaces.set(key, projectFolderIdentity ? { ...snapshot,
+          workspaceOpen: workspaces.get(key)?.workspaceOpen === false && !snapshot.workspaceReopen ? false : snapshot.workspaceOpen !== false
+        } : snapshot)
+      }
       return { ok: true }
     }
     if (channel === 'workspace:autoObserve') return
@@ -131,7 +157,11 @@ function runApp({ root, temp, screenshotDir, agentSmoke, claudeAuthSmoke, remote
       }, 30)
       return { ok: true }
     }
-    if (channel === 'agent:close' || channel === 'agent:setModel' || channel === 'agent:slashCommand') return { ok: true }
+    if (channel === 'agent:close') {
+      if (projectFolderIdentity) agents.delete(args[0])
+      return { ok: true }
+    }
+    if (channel === 'agent:setModel' || channel === 'agent:slashCommand') return { ok: true }
     if (channel === 'sessions:transcript') return { sessionId: args[0], messages: [{ role: 'user', text: '프로젝트 자료를 비교해 줘.' }] }
     if (channel === 'agent:send') {
       const { sessionId, input } = args[0]
@@ -141,7 +171,8 @@ function runApp({ root, temp, screenshotDir, agentSmoke, claudeAuthSmoke, remote
     }
     if (channel === 'dialog:message') return { response: 0 }
     throw Error(`Unexpected IPC: ${channel}`)
-  })
+    })
+  }
   app.whenReady().then(() => session.defaultSession.webRequest.onBeforeRequest({ urls: ['http://*/*', 'https://*/*'] }, (_details, cb) => cb({ cancel: true })))
   let win
   const ready = new Promise(resolve => app.once('browser-window-created', (_event, window) => {
@@ -166,6 +197,189 @@ function runApp({ root, temp, screenshotDir, agentSmoke, claudeAuthSmoke, remote
     try {
       await ready
       await wait(() => evaluate(`document.querySelectorAll('.case-sidebar-group').length === 2`), 'existing individual cases')
+      if (projectFolderIdentity) {
+        const name = '독립된 연구 프로젝트'
+        const referencePath = remoteIdentity ? `ssh://${sharedProfile.id}${sharedCaseDir}` : caseDir
+        const expectedCwd = remoteIdentity ? sharedCaseDir : fs.realpathSync.native(caseDir)
+        const workingPaths = new Set([referencePath, remoteIdentity ? referencePath : expectedCwd])
+        const selectRemoteReference = async () => {
+          await wait(() => evaluate(`!!document.querySelector('.conn-menu, .remote-picker')`), 'project reference source picker')
+          if (await evaluate(`!!document.querySelector('.conn-menu')`)) await evaluate(`document.querySelectorAll('.conn-menu .conn-row')[1].click()`)
+          await wait(() => evaluate(`!!document.querySelector('.remote-picker input[placeholder^="원격 경로 입력"]')`), 'remote reference browser')
+          await evaluate(`(() => { const el = document.querySelector('.remote-picker input[placeholder^="원격 경로 입력"]'); Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(el, ${JSON.stringify(sharedCaseDir)}); el.dispatchEvent(new Event('input', {bubbles:true})) })()`)
+          await click('입력 경로 선택', '.remote-picker')
+        }
+        pickedFolder = { path: caseDir, name: 'A사 거래대금 청구' }
+        await evaluate(`document.querySelector('.project-open-button').click()`)
+        await wait(() => evaluate(`!!document.querySelector('.project-dashboard') && !document.querySelector('.project-dashboard').textContent.includes('불러오는 중')`), 'identity project editor ready')
+        await click('+ 새 프로젝트')
+        await fill('name', name)
+        await fill('goal', '기존 사건 폴더를 참고자료로 연결')
+        await fill('notes', '프로젝트의 작업 위치는 그대로 유지')
+        if (remoteIdentity) await fill('executionProfileId', sharedProfile.id)
+        await evaluate(`void (window.identityProjectEditor = document.querySelector('.project-editor'))`)
+        await click('폴더 추가')
+        if (remoteIdentity) await selectRemoteReference()
+        await wait(() => evaluate(`document.querySelectorAll('.project-folder-option').length === 1`), 'existing case linked from project settings')
+        assert.equal(await evaluate(`document.querySelector('.project-editor') === window.identityProjectEditor`), true, 'choosing a known case folder keeps the same project form')
+        assert.equal(await evaluate(`document.querySelector('[name="name"]').value`), name, 'settings folder selection preserves project name before save')
+        assert.equal(await evaluate(`document.querySelector('[name="notes"]').value`), '프로젝트의 작업 위치는 그대로 유지')
+        assert.equal(await evaluate(`document.querySelector('.project-folder-option').textContent.includes(${JSON.stringify(referencePath)})`), true)
+        assert.equal(calls.some(call => ['case:addHistory', 'agent:create', 'agent:send'].includes(call.channel)), false, 'settings folder selection does not open the existing case or start a conversation')
+        // Remove this unsaved reference so the toolbar must perform a fresh link below.
+        await evaluate(`document.querySelector('.project-folder-option button').click()`)
+        await click('프로젝트 만들기')
+        await wait(() => evaluate(`!!document.querySelector('.project-detail')`), 'identity project saved')
+        const project = (await evaluate('window.lt.projects.list()'))[0]
+        const caseKey = workspaceKey({ cwd: expectedCwd, ...(remoteIdentity ? { profileId: sharedProfile.id, ssh: { host: sharedProfile.host, user: sharedProfile.user } } : {}) })
+        const existingCase = { version: 1, savedAt: new Date().toISOString(), mode: 'explorer', workspaceOpen: true,
+          currentCase: { drafts: expectedCwd, name: 'A사 거래대금 청구' }, docs: [],
+          terminals: [{ id: 'existing-case-agent', title: '기존 사건 대화', kind: 'agent', cwd: expectedCwd, resumeSessionId: 'unrelated-case-conversation' }] }
+        workspaces.set(caseKey, structuredClone(existingCase))
+        const closedProjectKey = workspaceKey({ cwd: expectedCwd, projectId: project.id,
+          ...(remoteIdentity ? { profileId: sharedProfile.id, ssh: { host: sharedProfile.host, user: sharedProfile.user } } : {}) })
+        workspaces.set(closedProjectKey, { version: 1, savedAt: new Date().toISOString(), mode: 'explorer', workspaceOpen: false,
+          currentCase: { drafts: expectedCwd, name: `프로젝트 · ${name}`, meta: { contextKind: 'project', projectId: project.id } }, docs: [], terminals: [] })
+        await evaluate(`document.querySelector('[aria-label="프로젝트 AI 작업"]').click()`)
+        await wait(() => agents.size === 1, 'identity project agent opened')
+        const original = structuredClone([...agents.values()][0])
+        const resumeSessionId = 'prior-project-conversation'
+        agents.set(original.id, { ...original, resumeSessionId })
+        win.webContents.send('agent:event', { type: 'status', sessionId: original.id, status: 'done' })
+        await wait(() => workspaces.get(workspaceKey({ ...original, ...(remoteIdentity ? { profileId: sharedProfile.id } : {}) }))?.currentCase?.meta?.projectId === project.id, 'initial project workspace saved')
+        const key = workspaceKey({ ...original, ...(remoteIdentity ? { profileId: sharedProfile.id } : {}) })
+        await wait(() => workspaces.get(key)?.terminals.some(term => term.resumeSessionId === resumeSessionId), 'existing project conversation remembered before changing folder')
+        const before = structuredClone(workspaces.get(key))
+        await evaluate(`[...document.querySelectorAll('.case-sidebar-case')].find(el => el.textContent.includes('프로젝트 · ' + ${JSON.stringify(name)})).click()`)
+        await evaluate(`document.querySelectorAll('.side-view-switch button')[1].click()`)
+        const showProjectFiles = async () => {
+          if (!await evaluate(`!!document.querySelector('[aria-label="작성서류 폴더 변경"]')`)) {
+            await evaluate(`document.querySelector('.activity-item[title^="탐색기 표시"]').click()`)
+          }
+          await wait(() => evaluate(`!!document.querySelector('[aria-label="작성서류 폴더 변경"]')`), 'project file toolbar')
+        }
+        const choose = async () => {
+          await showProjectFiles()
+          await evaluate(`document.querySelector('[aria-label="작성서류 폴더 변경"]').click()`)
+          if (remoteIdentity) await selectRemoteReference()
+        }
+        await choose()
+        await wait(async () => workingPaths.has((await evaluate('window.lt.projects.list()')).find(item => item.id === project.id)?.workingFolder?.path), 'existing case folder assigned to the project without changing its identity')
+        await choose()
+        await evaluate('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))')
+        await showProjectFiles()
+        const saved = (await evaluate('window.lt.projects.list()')).find(item => item.id === project.id)
+        assert.equal(saved.name, name, 'working folder selection keeps the project name')
+        assert.equal(workingPaths.has(saved.workingFolder.path), true, 'selected working folder is saved')
+        assert.equal(saved.folders.length, 0, 'working folder assignment is distinct from reference folders')
+        const assigned = await evaluate(`window.lt.projects.workspace(${JSON.stringify(project.id)})`)
+        assert.equal(assigned.cwd, expectedCwd, 'project backend reuses the selected working folder')
+        const nextKey = workspaceKey({ ...original, cwd: expectedCwd, ...(remoteIdentity ? { profileId: sharedProfile.id } : {}) })
+        await wait(() => workspaces.get(nextKey)?.terminals.some(term => term.resumeSessionId === resumeSessionId), 'assigned project workspace and original conversation saved')
+        assert.equal(agents.size, 1, 'folder assignment keeps the project conversation')
+        assert.equal([...agents.values()][0].cwd, expectedCwd, 'project agent uses the assigned folder')
+        assert.equal([...agents.values()][0].workspaceContext.projectId, project.id)
+        const after = workspaces.get(nextKey)
+        assert.equal(nextKey, closedProjectKey)
+        assert.equal(after.workspaceOpen, true, 'assigning a previously closed project folder explicitly reopens that scope')
+        assert.equal(after.currentCase.name, before.currentCase.name)
+        assert.equal(after.currentCase.drafts, remoteIdentity ? referencePath : expectedCwd)
+        assert.equal(after.currentCase.meta.projectId, project.id)
+        assert.equal(calls.some(call => ['case:addHistory', 'case:setPairing', 'case:setJsPairing', 'agent:send'].includes(call.channel)), false, 'folder assignment creates neither case history/pairing nor a prompt')
+        await evaluate(`document.querySelectorAll('.side-view-switch button')[0].click()`)
+        assert.equal(await evaluate(`[...document.querySelectorAll('.case-sidebar-case-title')].filter(el => el.textContent === 'A사 거래대금 청구').length`), 1, 'existing case name remains unchanged')
+        assert.equal(await evaluate(`[...document.querySelectorAll('.case-sidebar-case-title')].filter(el => el.textContent === '프로젝트 · ' + ${JSON.stringify(name)}).length`), 1, 'project remains separate from the case')
+        assert.equal(await evaluate(`[...document.querySelectorAll('.case-sidebar-group[data-open="true"]')].some(el => el.querySelector('.case-sidebar-case-title')?.textContent === '프로젝트 · ' + ${JSON.stringify(name)})`), true, 'assigned project remains open after returning to its previously closed folder')
+        agents.clear()
+        await new Promise(resolve => { win.webContents.once('did-finish-load', resolve); win.webContents.reload() })
+        await evaluate(`document.querySelector('.project-open-button').click()`)
+        await wait(() => evaluate(`!!document.querySelector('.project-card')`), 'assigned project listed after restart')
+        await evaluate(`document.querySelector('.project-card').click()`)
+        await evaluate(`document.querySelector('[aria-label="프로젝트 AI 작업"]').click()`)
+        await wait(() => agents.size === 1, 'assigned project reopens after restart')
+        const reopened = [...agents.values()][0]
+        assert.equal(reopened.cwd, expectedCwd, 'restart preserves assigned project working folder')
+        assert.equal(reopened.workspaceContext.projectId, project.id)
+        assert.equal(reopened.resumeSessionId, resumeSessionId, 'restart resumes the project conversation instead of the folder case')
+        assert.deepEqual(workspaces.get(caseKey), existingCase, 'project assignment and restart never overwrite the existing case workspace')
+        assert.equal(calls.some(call => call.channel === 'agent:send'), false, 'folder assignment and reopening never submit a prompt')
+        if (projectFolderRaces) {
+          assert.equal(remoteIdentity, false, 'race scenarios use the isolated local host')
+          const peer = new BrowserWindow({ show: false, width: 1440, height: 940,
+            webPreferences: { preload: path.join(root, 'out/preload/index.js'), sandbox: false, contextIsolation: true } })
+          peer.webContents.on('console-message', details => { if (details.level === 'error') errors.push(details.message) })
+          await peer.loadURL(win.webContents.getURL())
+          const peerEvaluate = source => peer.webContents.executeJavaScript(source, true)
+          await wait(() => peerEvaluate(`!!document.querySelector('.project-open-button')`), 'second renderer ready')
+          await peerEvaluate(`document.querySelector('.project-open-button').click()`)
+          await wait(() => peerEvaluate(`!!document.querySelector('.project-card')`), 'project shared with second window')
+          await peerEvaluate(`document.querySelector('.project-card').click()`)
+          await peerEvaluate(`document.querySelector('[aria-label="프로젝트 AI 작업"]').click()`)
+          await wait(() => calls.some(call => call.channel === 'agent:create' && call.senderId === peer.webContents.id && call.args[0].id === reopened.id) &&
+            peerEvaluate(`document.querySelector('[aria-label="프로젝트 새 대화"]')?.disabled === false`), 'second window project restored')
+          await peerEvaluate(`document.querySelector('[aria-label="프로젝트 새 대화"]').click()`)
+          await wait(() => calls.some(call => call.channel === 'agent:create' && call.senderId === peer.webContents.id && call.args[0].id !== reopened.id), 'independent project conversation in second window')
+          const peerAgent = calls.find(call => call.channel === 'agent:create' && call.senderId === peer.webContents.id && call.args[0].id !== reopened.id).args[0]
+          assert.notEqual(peerAgent.id, reopened.id)
+          const peerResume = 'independent-second-window-conversation'
+          agents.set(peerAgent.id, { ...agents.get(peerAgent.id), resumeSessionId: peerResume })
+          peer.webContents.send('agent:event', { type: 'status', sessionId: peerAgent.id, status: 'done' })
+          const projectSnapshot = windowId => calls.filter(call => call.channel === 'workspace:autoSave' && call.senderId === windowId &&
+            call.args[0].snapshot.currentCase?.meta?.projectId === project.id).at(-1)?.args[0].snapshot
+          await wait(() => projectSnapshot(peer.webContents.id)?.terminals.some(term => term.id === peerAgent.id && term.resumeSessionId === peerResume), 'second conversation persisted')
+          await peerEvaluate(`document.querySelectorAll('.side-view-switch button')[0].click()`)
+          await peerEvaluate(`[...document.querySelectorAll('.case-sidebar-case')].find(el => el.textContent.includes('A사 거래대금 청구')).click()`)
+          await wait(() => peerEvaluate(`document.querySelector('.case-sidebar-group.active .case-sidebar-case-title')?.textContent === 'A사 거래대금 청구'`), 'second window focuses a different case')
+          await evaluate(`document.querySelectorAll('.side-view-switch button')[0].click()`)
+          await evaluate(`[...document.querySelectorAll('.case-sidebar-case')].find(el => el.textContent.includes('프로젝트 · ' + ${JSON.stringify(name)})).click()`)
+          await evaluate(`document.querySelectorAll('.side-view-switch button')[1].click()`)
+          const movedCwd = fs.realpathSync.native(contextDir)
+          pickedFolder = { path: contextDir, name: '공통 계약·증거' }
+          await choose()
+          for (const windowId of [win.webContents.id, peer.webContents.id]) {
+            await wait(() => projectSnapshot(windowId)?.currentCase.drafts === movedCwd &&
+              projectSnapshot(windowId).terminals.every(term => term.cwd === movedCwd), 'both renderers persist the same moved project root')
+          }
+          for (const [windowId, id, resume] of [[win.webContents.id, reopened.id, resumeSessionId], [peer.webContents.id, peerAgent.id, peerResume]]) {
+            assert.ok(projectSnapshot(windowId).terminals.some(term => term.id === id && term.resumeSessionId === resume), 'each window keeps its own conversation identity')
+            assert.equal(agents.get(id).cwd, movedCwd)
+          }
+          assert.equal(await peerEvaluate(`document.querySelector('.case-sidebar-group.active .case-sidebar-case-title')?.textContent`), 'A사 거래대금 청구', 'project relocation never steals the other window focus')
+          assert.equal(workspaces.get(caseKey).currentCase.name, existingCase.currentCase.name, 'other window case keeps its identity after project relocation')
+          assert.equal(workspaces.get(caseKey).currentCase.drafts, expectedCwd)
+          assert.equal(workspaces.get(caseKey).terminals.some(term => term.projectId === project.id), false, 'project conversations never enter the other case workspace')
+
+          // Hold only the IPC reply: the real store transaction and cross-window event finish first.
+          pickedFolder = { path: caseDir, name: 'A사 거래대금 청구' }
+          holdWorkingFolder = true
+          await choose()
+          await wait(() => typeof releaseWorkingFolder === 'function', 'working folder reply held')
+          await evaluate(`document.querySelectorAll('.side-view-switch button')[0].click()`)
+          await evaluate(`[...document.querySelectorAll('.case-sidebar-group')].find(el => el.querySelector('.case-sidebar-case-title')?.textContent === '프로젝트 · ' + ${JSON.stringify(name)}).querySelector('.case-sidebar-manage').click()`)
+          await click('사건 닫기', '.tab-context-menu')
+          await wait(() => evaluate(`[...document.querySelectorAll('.case-sidebar-group[data-open="true"]')].every(el => el.querySelector('.case-sidebar-case-title')?.textContent !== '프로젝트 · ' + ${JSON.stringify(name)})`), 'project closed while folder reply pending')
+          await evaluate(`[...document.querySelectorAll('.case-sidebar-case')].find(el => el.textContent.includes('A사 채권 가압류')).click()`)
+          await wait(() => evaluate(`document.querySelector('.case-sidebar-group.active .case-sidebar-case-title')?.textContent === 'A사 채권 가압류'`), 'different case selected before folder reply')
+          const activeCaseState = `(() => { const el = document.querySelector('.case-sidebar-group.active'); return {id:el?.dataset.caseId,title:el?.querySelector('.case-sidebar-case-title')?.textContent,path:el?.querySelector('.case-sidebar-case')?.title.split('\\n').at(-1)} })()`
+          const activeCaseBefore = await evaluate(activeCaseState)
+          const savesBeforeReply = calls.length
+          releaseWorkingFolder()
+          await evaluate('new Promise(resolve => setTimeout(resolve, 1600))')
+          assert.deepEqual(await evaluate(activeCaseState), activeCaseBefore, 'late project response leaves the selected case unchanged')
+          assert.equal(await evaluate(`[...document.querySelectorAll('.case-sidebar-group[data-open="true"]')].some(el => el.querySelector('.case-sidebar-case-title')?.textContent === '프로젝트 · ' + ${JSON.stringify(name)})`), false, 'late response does not reopen the closed project')
+          assert.equal(calls.slice(savesBeforeReply).some(call => call.senderId === win.webContents.id && call.channel === 'workspace:autoSave' &&
+            call.args[0].snapshot.currentCase?.meta?.projectId === project.id && call.args[0].snapshot.workspaceOpen !== false), false, 'closed project is never republished as open by a late reply')
+          assert.equal((await evaluate('window.lt.projects.list()')).find(item => item.id === project.id).workingFolder.path, expectedCwd, 'completed folder transaction still persists after closing its view')
+          assert.equal(calls.some(call => call.channel === 'agent:send'), false)
+          console.log('project folder races: both real renderers relocate with distinct conversations and preserved focus; late assignment cannot reopen a closed project or overwrite another case OK')
+          peer.destroy()
+        }
+        assert.equal(fs.readFileSync(path.join(caseDir, 'evidence.txt'), 'utf8'), 'keep this evidence')
+        assert.deepEqual(errors, [])
+        console.log(`project folder identity: ${remoteIdentity ? 'SSH' : 'local'} existing case folder assignment preserves project identity/conversation, persists cwd across restart and sends no prompt OK`)
+        app.exit(0)
+        return
+      }
       if (folderFocus) {
         const closing = folderFocus.startsWith('close-')
         const remote = folderFocus.endsWith('-remote')
@@ -542,7 +756,7 @@ function runApp({ root, temp, screenshotDir, agentSmoke, claudeAuthSmoke, remote
   })()
 }
 
-await fs.writeFile(path.join(temp, 'main.cjs'), `(${runApp.toString()})(${JSON.stringify({ root, temp, screenshotDir, agentSmoke, claudeAuthSmoke, remoteAgentSmoke, folderFocus, windowsFolderPaths })})`)
+await fs.writeFile(path.join(temp, 'main.cjs'), `(${runApp.toString()})(${JSON.stringify({ root, temp, screenshotDir, agentSmoke, claudeAuthSmoke, remoteAgentSmoke, projectFolderIdentity, projectFolderRaces, folderFocus, windowsFolderPaths })})`)
 const env = { ...process.env }
 delete env.ELECTRON_RUN_AS_NODE
 try {

@@ -4,7 +4,7 @@ import type { RemotionPreviewOptions, RemotionPreviewSelection, RemotionPreviewR
 import type { MediaApi, MediaSelection, MediaViewState } from '../shared/media'
 import type { AgentWorkspaceContext } from '../shared/agentWorkspaceContext'
 import type { SendClaudeOptions } from '../shared/claudeAsk'
-import type { Project, ProjectInput } from '../shared/project'
+import type { Project, ProjectFolderLink, ProjectInput } from '../shared/project'
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import type { SetupStatus } from '../main/setupCheck'
 
@@ -318,6 +318,7 @@ interface WorkspaceListResult {
 
 interface AutomaticWorkspaceLocation {
   caseId?: string
+  projectId?: string
   cwd: string
   profileId?: string
   ssh?: SshConn
@@ -1044,7 +1045,9 @@ const api = {
     > => ipcRenderer.invoke('fs:stat', filePath)
   },
   projects: {
-    workspace: (id: string): Promise<{ cwd: string; project: Project }> => ipcRenderer.invoke('projects:workspace', id),
+    workspace: (id: string): Promise<{ cwd: string; project: Project; ssh?: SshConn; profileId?: string }> => ipcRenderer.invoke('projects:workspace', id),
+    setWorkingFolder: (id: string, folder: ProjectFolderLink, expectedUpdatedAt: string): Promise<{ cwd: string; project: Project; ssh?: SshConn; profileId?: string }> =>
+      ipcRenderer.invoke('projects:setWorkingFolder', id, folder, expectedUpdatedAt),
     list: (): Promise<Project[]> => ipcRenderer.invoke('projects:list'),
     save: (input: ProjectInput): Promise<Project> => ipcRenderer.invoke('projects:save', input),
     remove: (id: string, expectedUpdatedAt?: string): Promise<void> =>

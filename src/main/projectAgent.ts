@@ -107,11 +107,28 @@ async function sourceMap(value: Project): Promise<Source[]> {
 export async function getProjectWorkspace(projectId: string): Promise<{ cwd: string; project: Project; ssh?: AgentSshConn; profileId?: string }> {
   const current = await project(string(projectId, '프로젝트 ID', 128))
   if (!/^[a-zA-Z0-9_-]+$/.test(current.id)) throw new Error('프로젝트 ID가 작업 폴더 이름으로 안전하지 않습니다.')
+  let selectedCwd: string | undefined
+  if (current.workingFolder) {
+    const path = current.workingFolder.path
+    const host = remote(path)
+    if (host?.profileId !== current.executionProfileId || (!host && !isAbsolute(path))) {
+      throw new Error('작업 폴더와 AI 실행 위치가 다릅니다. 작업 폴더를 다시 지정해 주세요.')
+    }
+    const canonical = await deps().realpath(path)
+    const actualHost = remote(canonical)
+    if (host ? actualHost?.profileId !== host.profileId : !isAbsolute(canonical)) {
+      throw new Error('작업 폴더의 실제 경로를 확인할 수 없습니다.')
+    }
+    if (!(await deps().stat(canonical)).isDir) throw new Error('작업 폴더로 기존 폴더를 지정해 주세요.')
+    selectedCwd = actualHost?.path ?? canonical
+  }
   if (current.executionProfileId) {
     const prepare = deps().remoteWorkspace
     if (!prepare) throw new Error('프로젝트 원격 실행 연결이 준비되지 않았습니다.')
-    return { ...await prepare(current.executionProfileId, current.id), project: current }
+    const workspace = await prepare(current.executionProfileId, current.id)
+    return { ...workspace, cwd: selectedCwd ?? workspace.cwd, project: current }
   }
+  if (selectedCwd) return { cwd: selectedCwd, project: current }
   const base = resolve(deps().workspaceRoot)
   const cwd = join(base, current.id)
   await mkdir(base, { recursive: true })

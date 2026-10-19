@@ -42,10 +42,15 @@ const context = vm.createContext({
   projectSessionError() {}, isEmptyAgentInput: input => !input.text,
   startAgentTurn: (session, input) => turns.push({ session, input })
 })
-const names = ['isAuthFailureOutput', 'loggedInFromAuthStatusOutput', 'emitAuthStatus',
+const names = ['projectWorkspaceUpdating', 'isAuthFailureOutput', 'loggedInFromAuthStatusOutput', 'emitAuthStatus',
   'refreshAgentAuthStatus', 'startAgentAuthLogin', 'startNextQueuedMessage', 'handleSdkMessage',
   'handleResultMessage', 'sendAgentMessage']
-vm.runInContext(ts.transpileModule(names.map(handler).join('\n'), {
+const workspaceUpdateState = ['projectWorkspaceUpdates', 'PROJECT_WORKSPACE_UPDATING'].map(name => {
+  const source = service.match(new RegExp(`const ${name} = [^\\n]+`))?.[0]
+  assert.ok(source, `Missing project update state: ${name}`)
+  return source
+}).join('\n')
+vm.runInContext(ts.transpileModule(workspaceUpdateState + '\n' + names.map(handler).join('\n'), {
   compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS }
 }).outputText, context)
 const expired = 'Failed to authenticate: OAuth session expired and could not be refreshed'
@@ -115,6 +120,19 @@ for (const platform of ['win32', 'darwin']) {
   launches.at(-1).child.emit('close', -1)
   assert.equal(session.authStatus, 'unavailable')
 }
+
+const changingProject = { id: 'changing-project', provider: 'claude', source: 'local', cwd: '/project',
+  workspaceContext: { kind: 'project', projectId: 'project-1' }, queue: [{ queueId: 'preserved', input: { text: 'later' } }] }
+sessions.set(changingProject.id, changingProject)
+vm.runInContext("projectWorkspaceUpdates.add('project-1')", context)
+const launchCount = launches.length, turnCount = turns.length
+assert.equal(context.sendAgentMessage(changingProject.id, { text: 'wait for folder change' }).ok, false)
+assert.equal(context.startAgentAuthLogin(changingProject.id).ok, false)
+context.startNextQueuedMessage(changingProject)
+assert.equal(launches.length, launchCount, 'folder update must not launch login')
+assert.equal(turns.length, turnCount, 'folder update must not start queued work')
+assert.equal(changingProject.queue.length, 1, 'queued work is retained during folder update')
+vm.runInContext("projectWorkspaceUpdates.delete('project-1')", context)
 
 const remote = { id: 'remote', provider: 'claude', source: 'ssh', ssh: {}, queue: [] }
 sessions.set(remote.id, remote)

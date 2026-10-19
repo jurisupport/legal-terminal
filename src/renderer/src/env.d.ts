@@ -4,7 +4,7 @@ import type { RemotionPreviewOptions, RemotionPreviewSelection, RemotionPreviewR
 import type { MediaApi, MediaSelection, MediaViewState } from '../../shared/media'
 import type { AgentWorkspaceContext } from '../../shared/agentWorkspaceContext'
 import type { SendClaudeOptions } from '../../shared/claudeAsk'
-import type { Project, ProjectInput } from '../../shared/project'
+import type { Project, ProjectFolderLink, ProjectInput } from '../../shared/project'
 
 export type SetupItemState = 'ok' | 'warn' | 'missing' | 'off'
 
@@ -312,6 +312,7 @@ export interface WorkspaceListResult {
 
 export interface AutomaticWorkspaceLocation {
   caseId?: string
+  projectId?: string
   cwd: string
   profileId?: string
   ssh?: SshConn
@@ -1038,7 +1039,8 @@ export interface LtApi {
     }>
   }
   projects: {
-    workspace: (id: string) => Promise<{ cwd: string; project: Project }>
+    workspace: (id: string) => Promise<{ cwd: string; project: Project; ssh?: SshConn; profileId?: string }>
+    setWorkingFolder: (id: string, folder: ProjectFolderLink, expectedUpdatedAt: string) => Promise<{ cwd: string; project: Project; ssh?: SshConn; profileId?: string }>
     list: () => Promise<Project[]>
     save: (input: ProjectInput) => Promise<Project>
     remove: (id: string, expectedUpdatedAt?: string) => Promise<void>

@@ -254,11 +254,14 @@ try {
   assert.equal(latest.workspaceOpen, false, 'retrying an old reopen cannot erase a newer close')
 
   // Exercise the actual renderer restore handler, including async failure/retry and live work.
-  const app = await readFile(new URL('../src/renderer/src/App.tsx', import.meta.url), 'utf8')
+  const app = await readFile(process.argv.find(arg => arg.startsWith('--app-source='))?.slice('--app-source='.length) ?? new URL('../src/renderer/src/App.tsx', import.meta.url), 'utf8')
   const parsed = ts.createSourceFile('App.tsx', app, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX)
   let handler
+  const identityHelpers = []
+  const helperNames = ['remoteUri', 'isRemotePath', 'parseRemoteUri', 'normalizedCasePathKey', 'caseProfileKey', 'caseIdentityKey', 'remoteWorkspacePath', 'rebaseRemoteWorkspace']
   const visit = (node) => {
     if (ts.isVariableDeclaration(node) && node.name.getText(parsed) === 'restoreAutomaticWorkspace') handler = node.initializer.getText(parsed)
+    if (ts.isVariableDeclaration(node) && helperNames.includes(node.name.getText(parsed))) identityHelpers.push(`const ${node.getText(parsed)};`)
     ts.forEachChild(node, visit)
   }
   visit(parsed)
@@ -288,6 +291,11 @@ try {
   const run = vm.runInNewContext(ts.transpileModule(`(${handler})`, {
     compilerOptions: { target: ts.ScriptTarget.ES2022 }
   }).outputText, context)
+  const identity = vm.runInNewContext(ts.transpileModule(`${identityHelpers.join('\n')}\n({caseIdentityKey, normalizedCasePathKey, rebaseRemoteWorkspace})`, {
+    compilerOptions: { target: ts.ScriptTarget.ES2022 }
+  }).outputText, { isGeneralChatDirectory })
+  context.caseIdentityKey = identity.caseIdentityKey
+  context.normalizedCasePathKey = identity.normalizedCasePathKey
   for (const mode of ['docOnly', 'termOnly']) {
     context[mode] = true
     await run({})
@@ -388,6 +396,47 @@ try {
     assert.equal(reads, 1, 'joining a restore reuses the existing request')
     assert.equal(restored.activate, expected, 'explicit navigation can promote a pending restore, but cannot leave the current project screen')
     assert.equal(context.autoRestoreInFlightRef.current.size, 0)
+  }
+
+  // The host's shared response has no device-local SSH profile. Check its project scope
+  // before rebasing it, which otherwise overwrites currentCase with the requested source.
+  context.rebaseRemoteWorkspace = identity.rebaseRemoteWorkspace
+  context.termTabsRef.current = []
+  context.pendingAgentClosesRef.current.clear()
+  context.modeRef.current = 'explorer'
+  for (const ssh of [undefined, location.ssh]) {
+    const project = { drafts: ssh ? `ssh://desktop-profile${cwd}` : cwd, name: '독립 프로젝트',
+      meta: { contextKind: 'project', projectId: 'project-1' },
+      ...(ssh ? { ssh, profileId: 'desktop-profile', remotePath: cwd } : {}) }
+    for (const refresh of [false, true]) {
+      for (const incomingKind of ['case', 'other-project', 'same-project']) {
+        context.autoRestoreDoneRef.current.clear()
+        context.caseTabsRef.current = [{ ...project, id: 'case' }]
+        restored = undefined
+        const observationsBefore = observed.length
+        const incoming = { ...snapshot([{ ...term('project-incoming'), ...(incomingKind !== 'case' ? {
+          contextKind: 'project', projectId: incomingKind === 'same-project' ? 'project-1' : 'project-2'
+        } : {}) }]), currentCase: { drafts: cwd, name: '공유 작업',
+          ...(incomingKind !== 'case' ? { meta: { contextKind: 'project', projectId: incomingKind === 'same-project' ? 'project-1' : 'project-2' } } : {}) } }
+        context.window.lt.workspace.autoLoad = async () => ({ ok: true, remote: { ok: true, snapshot: incoming } })
+        await run(project, refresh)
+        if (incomingKind === 'same-project') {
+          assert.equal(restored.s.terminals[0].projectId, 'project-1', 'matching project still restores across SSH profile aliases')
+          assert.equal(restored.s.currentCase.meta.projectId, 'project-1')
+          if (ssh) assert.equal(restored.s.terminals[0].profileId, 'desktop-profile', 'matching shared project is rebound to this device')
+          assert.equal(observed.length, observationsBefore + (refresh ? 1 : 0))
+        } else {
+          assert.equal(restored, undefined, `${ssh ? 'SSH' : 'local'} project cannot import ${incomingKind} from its folder`)
+          assert.equal(observed.length, observationsBefore, 'a rejected project snapshot is never acknowledged')
+          if (refresh) {
+            incoming.workspaceOpen = false
+            await run(project, true)
+            assert.equal(context.caseTabsRef.current.length, 1, 'an unrelated closed workspace cannot close the project')
+            assert.equal(observed.length, observationsBefore, 'an unrelated close is never acknowledged')
+          }
+        }
+      }
+    }
   }
 
   const service = await readFile(new URL('../src/main/agent/agent-service.ts', import.meta.url), 'utf8')

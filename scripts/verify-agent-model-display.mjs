@@ -84,8 +84,15 @@ assert.match(panel, /modelOptions\.filter\(\(model\) => provider === 'codex' \|\
 
 const listSource = service.match(/export async function listAgentModels[\s\S]*?\n}\n/)?.[0]
 assert.ok(listSource)
-const listModels = compile(listSource.replace('export ', ''), {
-  sessions: new Map([['gpt-check', { provider: 'codex', cwd: '/tmp', model: 'gpt-6-astra', reasoningEffort: 'low' }]]),
+const updatingSource = service.match(/function projectWorkspaceUpdating[\s\S]*?\n}/)?.[0]
+const updatingMessage = service.match(/const PROJECT_WORKSPACE_UPDATING = [^\n]+/)?.[0]
+assert.ok(updatingSource); assert.ok(updatingMessage)
+const projectWorkspaceUpdates = new Set()
+const modelSession = { provider: 'codex', cwd: '/tmp', model: 'gpt-6-astra', reasoningEffort: 'low',
+  workspaceContext: { kind: 'project', projectId: 'model-project' } }
+const listModels = compile([updatingMessage, updatingSource, listSource.replace('export ', '')].join('\n'), {
+  projectWorkspaceUpdates,
+  sessions: new Map([['gpt-check', modelSession]]),
   ensureCodexInitialized: async () => {},
   codexRequest: async (_session, method) => method === 'config/read'
     ? { config: { model: 'gpt-5.6-sol', model_reasoning_effort: 'high' } }
@@ -98,6 +105,9 @@ const listModels = compile(listSource.replace('export ', ''), {
   stringValue: (value) => typeof value === 'string' ? value : undefined,
   codexModelOption: (value) => value
 }, 'listAgentModels')
+projectWorkspaceUpdates.add('model-project')
+assert.equal((await listModels('gpt-check')).ok, false, 'model lookup must not start a stale process while its project folder changes')
+projectWorkspaceUpdates.delete('model-project')
 const listed = await listModels('gpt-check')
 assert.equal(listed.ok, true)
 assert.equal(listed.models.find((model) => model.isDefault)?.model, 'gpt-5.6-sol')

@@ -67,6 +67,7 @@ function ProjectEditor({ project, cases, sshProfiles, defaultExecutionProfileId,
   const [members, setMembers] = useState<ProjectCaseLink[]>(initial?.cases ?? [])
   const [executionProfileId, setExecutionProfileId] = useState(initial ? initial.executionProfileId ?? '' : defaultExecutionProfileId ?? '')
   const [folders, setFolders] = useState<ProjectFolderLink[]>(initial?.folders ?? [])
+  const [workingFolder] = useState(initial?.workingFolder)
   const [pickingFolder, setPickingFolder] = useState(false)
   const [folderError, setFolderError] = useState('')
   const [folderNotice, setFolderNotice] = useState('')
@@ -81,8 +82,8 @@ function ProjectEditor({ project, cases, sshProfiles, defaultExecutionProfileId,
   const [retry, setRetry] = useState(0)
 
   useEffect(() => {
-    sessionDraft = { project, input: { name, goal, nextAction, notes, status, cases: members, folders, ...(executionProfileId ? { executionProfileId } : {}) } }
-  }, [project, name, goal, nextAction, notes, status, members, folders, executionProfileId])
+    sessionDraft = { project, input: { name, goal, nextAction, notes, status, cases: members, folders, workingFolder, ...(executionProfileId ? { executionProfileId } : {}) } }
+  }, [project, name, goal, nextAction, notes, status, members, folders, workingFolder, executionProfileId])
 
   useEffect(() => {
     let active = true
@@ -166,7 +167,7 @@ function ProjectEditor({ project, cases, sshProfiles, defaultExecutionProfileId,
     void onSave({
       ...(project ? { id: project.id, expectedUpdatedAt: project.updatedAt } : {}),
       name: name.trim(), goal: goal.trim(), nextAction: nextAction.trim(), notes: notes.trim(),
-      status, cases: members, folders, ...(executionProfileId ? { executionProfileId } : {})
+      status, cases: members, folders, workingFolder, ...(executionProfileId ? { executionProfileId } : {})
     })
   }
 
@@ -195,6 +196,7 @@ function ProjectEditor({ project, cases, sshProfiles, defaultExecutionProfileId,
             {executionProfileId && !sshProfiles.some((profile) => profile.id === executionProfileId) && <option value={executionProfileId}>연결 설정 없음 · {executionProfileId}</option>}
           </select>
           <span className="project-muted">{executionProfileId ? '선택한 원격 컴퓨터에서 AI를 실행합니다. 프로젝트 도구를 사용하려면 이 앱을 열어 두세요. 앱을 닫으면 실행 중인 요청은 종료되며, 저장된 대화는 다시 이어갈 수 있습니다.' : '이 PC에서 AI를 실행합니다. 설정에 저장한 원격 연결도 선택할 수 있습니다.'}</span>
+          {workingFolder && <span className="project-muted">작업 폴더: {workingFolder.path}</span>}
         </label>
         <label className="project-field">공통 목표
           <textarea name="goal" rows={3} maxLength={4000} value={goal} onChange={(event) => setGoal(event.target.value)} placeholder="이 프로젝트를 통해 무엇을 달성하려고 하나요?" />

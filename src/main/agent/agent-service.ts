@@ -199,6 +199,58 @@ interface AgentSession {
 }
 
 const sessions = new Map<string, AgentSession>()
+const projectWorkspaceUpdates = new Set<string>()
+const PROJECT_WORKSPACE_UPDATING = '프로젝트 작업 폴더를 변경하고 있습니다. 잠시 후 다시 시도해 주세요.'
+
+function projectWorkspaceUpdating(session: Pick<AgentSession, 'workspaceContext'>): boolean {
+  return session.workspaceContext?.kind === 'project' && Boolean(session.workspaceContext.projectId && projectWorkspaceUpdates.has(session.workspaceContext.projectId))
+}
+
+// Keep native conversation identity while replacing only an idle execution directory.
+// The caller validates the folder and supplies an optimistic store commit; no AI turn is sent.
+export async function retargetProjectAgentWorkspace<T>(
+  projectId: string,
+  prepare: () => Promise<{ cwd: string; ssh?: AgentSshConn; commit: () => Promise<T> }>
+): Promise<T> {
+  if (projectWorkspaceUpdates.has(projectId)) throw new Error(PROJECT_WORKSPACE_UPDATING)
+  projectWorkspaceUpdates.add(projectId)
+  try {
+    const targets = [...sessions.values()].filter((session) => session.workspaceContext?.kind === 'project' && session.workspaceContext.projectId === projectId)
+    if (targets.some((session) => session.running || session.authProcess || session.remoteRestoring || session.remoteProcess || session.queue.length || currentSessionStatus(session) !== 'idle')) {
+      throw new Error('프로젝트의 AI 작업과 대기 중인 지시가 끝난 뒤 작업 폴더를 변경해 주세요.')
+    }
+    const next = await prepare()
+    for (const session of targets) {
+      const current = session.ssh
+      const expected = next.ssh
+      if (session.source !== (expected ? 'ssh' : 'local') || Boolean(current) !== Boolean(expected) ||
+        (current && expected && (current.host !== expected.host || current.user !== expected.user || (current.port ?? 22) !== (expected.port ?? 22) ||
+          (current.identityFile ?? '') !== (expected.identityFile ?? '') || Boolean(current.remoteControl) !== Boolean(expected.remoteControl)))) {
+        throw new Error('기존 대화를 유지하려면 같은 컴퓨터의 작업 폴더를 선택해 주세요.')
+      }
+      session.commandProbe?.abort()
+      session.commandProbe = undefined
+    }
+    await Promise.all(targets.map((session) => withTimeout(stopCodexProcess(session), '작업 폴더 변경을 위한 실행 연결 종료')))
+    const result = await next.commit()
+    for (const session of targets) {
+      if (sessions.get(session.id) !== session) continue
+      releaseSessionProjectMcp(session)
+      session.projectConnectionLost = false
+      session.cwd = next.cwd
+      session.workspaceContext = { ...session.workspaceContext!, cwd: next.cwd }
+      session.codexThreadReady = false
+      session.codexMcpMode = undefined
+      session.remoteRunMetadata = undefined
+      session.slashCommands = undefined
+      emit(session, { type: 'session:init', sessionId: session.id, title: session.title, cwd: session.cwd, provider: session.provider, source: session.source })
+    }
+    return result
+  } finally {
+    projectWorkspaceUpdates.delete(projectId)
+  }
+}
+
 onAgentMcpAccountChange(() => {
   for (const session of sessions.values()) {
     if (!session.managedMcp && !session.workspaceContext?.todoManagement) continue
@@ -385,13 +437,14 @@ function restoreRemoteSession(session: AgentSession, retryDelay = 3000): void {
       }
       const meta = info.metadata
       session.claudeFreshConversation = false
-      if (meta.cwd !== session.cwd) throw new Error('저장된 원격 작업의 폴더가 현재 작업과 다릅니다.')
       if (session.workspaceContext?.kind === 'project') {
         if (meta.projectId !== session.workspaceContext.projectId || meta.clientRequired !== true) {
           throw new Error('저장된 원격 작업이 현재 프로젝트와 다릅니다. 프로젝트에서 새 대화를 열어 주세요.')
         }
         // Project tools belong to the open app. Never reattach a process with an expired tunnel/token.
         if (info.running) throw new Error('이 프로젝트의 이전 원격 요청이 실행 중입니다. 종료를 확인한 뒤 대화를 준비합니다.')
+        // A completed project conversation can resume after its selected working folder changes.
+        // The next turn validates the current project workspace before launching a fresh process.
         session.resumeSessionId = info.sessionId ?? session.resumeSessionId
         if (session.provider === 'codex') session.codexThreadId = session.resumeSessionId
         session.remoteRestoring = false
@@ -399,6 +452,7 @@ function restoreRemoteSession(session: AgentSession, retryDelay = 3000): void {
         prefetchClaudeSlashCommands(session)
         return
       }
+      if (meta.cwd !== session.cwd) throw new Error('저장된 원격 작업의 폴더가 현재 작업과 다릅니다.')
       if (meta.managedFingerprint) {
         const connection = await getAgentMcpConnection()
         if (!connection || managedFingerprint(connection) !== meta.managedFingerprint) {
@@ -2877,6 +2931,7 @@ function codexMaybeModel(session: AgentSession, includeEffort = false): Record<s
 }
 
 function startCodexProcess(session: AgentSession, protectExecution = false, restoring?: RemoteAgentRunInfo): void {
+  if (projectWorkspaceUpdating(session)) throw new Error(PROJECT_WORKSPACE_UPDATING)
   if (session.codexProcess) {
     if (protectExecution && !session.codexExecutionProtected) throw new Error('실행 연결이 변경되었습니다. 다시 보내 주세요.')
     return
@@ -4292,6 +4347,7 @@ function runRemoteAgentMessage(
 export function startAgentAuthLogin(sessionId: string): AgentCommandResult {
   const session = sessions.get(sessionId)
   if (!session) return { ok: false, error: 'Agent 세션을 찾을 수 없습니다.' }
+  if (projectWorkspaceUpdating(session)) return { ok: false, error: PROJECT_WORKSPACE_UPDATING }
   if (session.running) return { ok: false, error: 'Agent 작업 실행 중에는 로그인할 수 없습니다.' }
   const label = session.provider === 'codex' ? 'Codex' : 'Claude'
   if (session.authProcess) return { ok: false, error: `이미 ${label} 로그인 절차가 실행 중입니다.` }
@@ -4672,6 +4728,7 @@ function prefetchClaudeSlashCommands(session: AgentSession): void {
 
 export function createAgentSession(opts: AgentCreateOptions, webContents: WebContents): AgentCommandResult {
   const existing = sessions.get(opts.id)
+  if (projectWorkspaceUpdating(existing ?? opts)) return { ok: false, error: PROJECT_WORKSPACE_UPDATING }
   const projectError = projectSessionError(existing ?? { source: opts.source ?? 'local', workspaceContext: opts.workspaceContext }, opts.workspaceContext)
   if (projectError) return { ok: false, error: projectError }
   if (existing) {
@@ -4843,6 +4900,7 @@ function claudeModelOption(value: unknown): AgentModelOption | undefined {
 export async function listAgentModels(sessionId: string): Promise<AgentModelListResult> {
   const session = sessions.get(sessionId)
   if (!session) return { ok: false, error: 'Agent 세션을 찾을 수 없습니다.' }
+  if (projectWorkspaceUpdating(session)) return { ok: false, error: PROJECT_WORKSPACE_UPDATING }
   if (session.remoteRestoring) return { ok: false, error: '원격 작업을 확인하고 있습니다. 연결 후 다시 열어 주세요.' }
   if (session.provider === 'claude') {
     const abortController = new AbortController()
@@ -5163,6 +5221,7 @@ export async function runAgentSlashCommand(
 ): Promise<AgentCommandResult> {
   const session = sessions.get(sessionId)
   if (!session) return { ok: false, error: 'Agent 세션을 찾을 수 없습니다.' }
+  if (projectWorkspaceUpdating(session)) return { ok: false, error: PROJECT_WORKSPACE_UPDATING }
   if (session.provider !== 'codex') return { ok: false, error: '패널 slash command 실행은 Codex Agent에서만 지원합니다.' }
   return runCodexSlashCommand(session, command, argument)
 }
@@ -5301,6 +5360,7 @@ export function removeQueuedAgentMessage(sessionId: string, queueId: string): Ag
 }
 
 function startNextQueuedMessage(session: AgentSession): void {
+  if (projectWorkspaceUpdating(session)) return
   if (session.running || session.authProcess || session.remoteRestoring || session.detached) return
   if (session.projectConnectionLost) return
   if (session.authStatus === 'checking' || session.authStatus === 'unauthenticated' || session.authStatus === 'unavailable') return
@@ -5311,6 +5371,7 @@ function startNextQueuedMessage(session: AgentSession): void {
 }
 
 function startAgentTurn(session: AgentSession, input: AgentSendInput, codexCommand?: '/compact' | '/review'): void {
+  if (projectWorkspaceUpdating(session)) return
   const projectError = projectSessionError(session, input.workspaceContext)
   if (projectError) {
     emit(session, { type: 'error', sessionId: session.id, message: projectError, recoverable: true })
@@ -5555,6 +5616,7 @@ function startAgentTurn(session: AgentSession, input: AgentSendInput, codexComma
 export function sendAgentMessage(sessionId: string, input: AgentSendInput): AgentCommandResult {
   const session = sessions.get(sessionId)
   if (!session) return { ok: false, error: 'Agent 세션을 찾을 수 없습니다.' }
+  if (projectWorkspaceUpdating(session)) return { ok: false, error: PROJECT_WORKSPACE_UPDATING }
   const projectError = projectSessionError(session, input.workspaceContext)
   if (projectError) return { ok: false, error: projectError }
   if (session.authProcess) return { ok: false, error: '로그인 절차가 진행 중입니다.' }
