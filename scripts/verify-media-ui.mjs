@@ -19,6 +19,7 @@ async function electronCheck({ root, temp, output }) {
   let frozenSource
   const realStat = fs.stat.bind(fs)
   fs.stat = (file, ...args) => frozenSource?.path === file ? Promise.resolve(frozenSource.info) : realStat(file, ...args)
+  require('node:os').homedir = () => path.join(temp, 'home')
   app.setPath('userData', path.join(temp, 'profile'))
   require(path.join(root, 'out/main/index.js'))
   // The user opens media while the general-chat directory is still loading.

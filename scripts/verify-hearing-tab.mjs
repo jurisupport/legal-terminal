@@ -47,11 +47,18 @@ const dashboardCase = {
 const dashboardDrafts = path.join(os.tmpdir(), 'legal-terminal-hearing-shell-case')
 
 await fs.rm(userData, { recursive: true, force: true })
+await fs.mkdir(userData, { recursive: true })
+const launcher = path.join(userData, 'main.cjs')
+await fs.writeFile(launcher, `
+  require('node:os').homedir = () => ${JSON.stringify(path.join(userData, 'home'))}
+  require('electron').app.setPath('userData', ${JSON.stringify(userData)})
+  require(${JSON.stringify(path.join(repo, 'out/main/index.js'))})
+`)
 const env = { ...process.env }
 delete env.ELECTRON_RUN_AS_NODE
 const app = await _electron.launch({
   executablePath: path.join(repo, 'node_modules/electron/dist/Electron.app/Contents/MacOS/Electron'),
-  args: [`--user-data-dir=${userData}`, repo],
+  args: [`--user-data-dir=${userData}`, launcher],
   env
 })
 
