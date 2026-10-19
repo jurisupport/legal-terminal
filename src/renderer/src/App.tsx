@@ -1609,6 +1609,8 @@ export default function App(): JSX.Element {
   const docOnly = window.location.hash.includes('docOnly')
   const termOnly = window.location.hash.includes('termOnly')
   const [mode, setMode] = useState<Mode>('explorer')
+  const modeRef = useRef(mode)
+  modeRef.current = mode
   const [caseDashboardView, setCaseDashboardView] = useState<'cases' | 'projects'>('cases')
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null)
   const projectOpeningRef = useRef(new Map<string, Promise<void>>())
@@ -1706,7 +1708,7 @@ export default function App(): JSX.Element {
   const termTabsRef = useRef<TermTab[]>([])
   const caseTabsRef = useRef<CaseWorkspaceTab[]>([])
   const autoRestoreWorkspaceRef = useRef<(source: CurrentCase) => Promise<void>>(async () => {})
-  const autoRestoreInFlightRef = useRef<Map<string, Promise<boolean>>>(new Map())
+  const autoRestoreInFlightRef = useRef<Map<string, { promise: Promise<boolean>; activate: boolean }>>(new Map())
   const autoRestoreDoneRef = useRef<Set<string>>(new Set())
   const autoSaveEligibleRef = useRef<Set<string>>(new Set())
   const unloadedSharedCasesRef = useRef<Set<string>>(new Set())
@@ -5288,7 +5290,7 @@ export default function App(): JSX.Element {
     // Merely displaying a shared case must not load its agents or publish an empty workspace.
     if (unloadedSharedCasesRef.current.has(tab.id) && !pendingWorkspaceReopensRef.current.has(key)) return
     if (waitForSync && autoRestoreInFlightRef.current.has(key)) return
-    if (waitForSync && !autoRestoreDoneRef.current.has(key) && !(await restoreAutomaticWorkspace(source))) {
+    if (waitForSync && !autoRestoreDoneRef.current.has(key) && !(await restoreAutomaticWorkspace(source, false, false))) {
       throw new Error('사건 작업환경을 복원하지 못해 자동 저장을 보류했습니다.')
     }
     const reopen = pendingWorkspaceReopensRef.current.get(key)
@@ -5326,13 +5328,16 @@ export default function App(): JSX.Element {
   }
   saveAllCaseWorkspacesRef.current = saveAllCaseWorkspaces
 
-  const restoreAutomaticWorkspace = async (source: CurrentCase, refresh = false): Promise<boolean> => {
+  const restoreAutomaticWorkspace = async (source: CurrentCase, refresh = false, activate = !refresh): Promise<boolean> => {
     if (docOnly || termOnly) return true
     const id = resolveCaseTabId(source)
     const key = workspaceLocationKey(source)
     if (!refresh && autoRestoreDoneRef.current.has(key)) return true
     const existing = autoRestoreInFlightRef.current.get(key)
-    if (existing) return existing
+    if (existing) {
+      existing.activate ||= activate
+      return existing.promise
+    }
     const account = todoAccountGeneration.current
     const run = async (): Promise<boolean> => {
       try {
@@ -5379,7 +5384,8 @@ export default function App(): JSX.Element {
           if (added.length) {
             restoreWorkspaceSnapshot(
               { ...selected, terminals: added, activeTerm: merged.activeTerm },
-              activeCaseTabIdRef.current === id && !termTabsRef.current.some((term) => caseIdForTerm(term) === id)
+              request.activate && modeRef.current === 'explorer' && activeCaseTabIdRef.current === id &&
+                !termTabsRef.current.some((term) => caseIdForTerm(term) === id)
             )
             autoSaveEligibleRef.current.add(id)
           }
@@ -5396,11 +5402,14 @@ export default function App(): JSX.Element {
         return false
       }
     }
-    const request = run().finally(() => {
-      if (autoRestoreInFlightRef.current.get(key) === request) autoRestoreInFlightRef.current.delete(key)
-    })
+    const request: { promise: Promise<boolean>; activate: boolean } = {
+      activate,
+      promise: run().finally(() => {
+        if (autoRestoreInFlightRef.current.get(key) === request) autoRestoreInFlightRef.current.delete(key)
+      })
+    }
     autoRestoreInFlightRef.current.set(key, request)
-    return request
+    return request.promise
   }
   autoRestoreWorkspaceRef.current = async (source) => {
     if (!(await restoreAutomaticWorkspace(source))) throw new Error('사건 작업환경을 복원하지 못했습니다.')
@@ -7292,6 +7301,7 @@ export default function App(): JSX.Element {
 
     if (activeCaseTabIdRef.current !== tabId) return
     setDocTabs((tabs) => tabs.filter((doc) => doc.kind !== 'welcome'))
+    activeCaseTabIdRef.current = ''
     setActiveCaseTabId('')
     setCurrentCase(null)
     setActiveDoc('')
@@ -7299,8 +7309,11 @@ export default function App(): JSX.Element {
     setActiveWork({ left: '', right: '' })
     setFolderRecord(null)
     setPdfRecord(null)
-    setMode('explorer')
-    if (nextCaseTab) openCaseTab(nextCaseTab)
+    // A remote close updates the workbench without navigating away from an open form or picker.
+    if (!fromSync) {
+      setMode('explorer')
+      if (nextCaseTab) openCaseTab(nextCaseTab)
+    }
   }
   closeActiveCaseTabRef.current = (): void => {
     const tabId = activeCaseTabId || caseTabRows.find((row) => row.active)?.tab.id

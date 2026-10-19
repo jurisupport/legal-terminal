@@ -271,6 +271,7 @@ try {
   const context = {
     isGeneralChatDirectory,
     docOnly: false, termOnly: false,
+    modeRef: { current: 'explorer' },
     resolveCaseTabId: () => 'case', workspaceLocationKey: () => 'key', workspaceLocation: () => location,
     autoRestoreDoneRef: { current: new Set() }, autoRestoreInFlightRef: { current: new Map() },
     autoSaveEligibleRef: { current: new Set() }, todoAccountGeneration: { current: 0 }, caseTabsRef: { current: [{ id: 'case' }] },
@@ -351,6 +352,43 @@ try {
   await run({})
   assert.equal(restored, undefined,
     'retrying restoration after navigation must not reopen a locally closed conversation from an old backup')
+
+  for (const refresh of [false, true]) {
+    context.autoRestoreDoneRef.current.clear()
+    context.termTabsRef.current = []
+    context.pendingAgentClosesRef.current.clear()
+    context.modeRef.current = 'explorer'
+    context.window.lt.workspace.autoLoad = () => new Promise((resolve) => { finishRead = resolve })
+    const pendingRestore = run({}, refresh)
+    context.modeRef.current = 'cases'
+    finishRead({ ok: true, remote: { snapshot: snapshot([phone]) } })
+    await pendingRestore
+    assert.deepEqual(Array.from(restored.s.terminals, (tab) => tab.id), ['mobile'])
+    assert.equal(restored.activate, false, 'late restoration must preserve the current project form, even if it started in the workbench')
+  }
+  context.modeRef.current = 'explorer'
+  for (const [refresh, activate, expected] of [[false, false, false], [true, undefined, false], [false, undefined, true]]) {
+    context.autoRestoreDoneRef.current.clear()
+    context.window.lt.workspace.autoLoad = async () => ({ ok: true, remote: { snapshot: snapshot([phone]) } })
+    await run({}, refresh, activate)
+    assert.equal(restored.activate, expected, 'only a foreground restore may select its first conversation')
+  }
+  for (const [firstActivate, nextActivate, mode, expected] of [
+    [false, true, 'explorer', true], [true, false, 'explorer', true], [false, true, 'cases', false]
+  ]) {
+    context.autoRestoreDoneRef.current.clear()
+    context.modeRef.current = 'explorer'
+    let reads = 0
+    context.window.lt.workspace.autoLoad = () => { reads++; return new Promise((resolve) => { finishRead = resolve }) }
+    const first = run({}, false, firstActivate)
+    const next = run({}, false, nextActivate)
+    context.modeRef.current = mode
+    finishRead({ ok: true, remote: { snapshot: snapshot([phone]) } })
+    await Promise.all([first, next])
+    assert.equal(reads, 1, 'joining a restore reuses the existing request')
+    assert.equal(restored.activate, expected, 'explicit navigation can promote a pending restore, but cannot leave the current project screen')
+    assert.equal(context.autoRestoreInFlightRef.current.size, 0)
+  }
 
   const service = await readFile(new URL('../src/main/agent/agent-service.ts', import.meta.url), 'utf8')
   const serviceTree = ts.createSourceFile('agent-service.ts', service, ts.ScriptTarget.Latest, true)
