@@ -7309,8 +7309,8 @@ export default function App(): JSX.Element {
     setActiveWork({ left: '', right: '' })
     setFolderRecord(null)
     setPdfRecord(null)
-    // A remote close updates the workbench without navigating away from an open form or picker.
-    if (!fromSync) {
+    // A remote close must not navigate away from a dashboard form or folder picker.
+    if (!fromSync || modeRef.current === 'explorer' || modeRef.current === 'viewer') {
       setMode('explorer')
       if (nextCaseTab) openCaseTab(nextCaseTab)
     }

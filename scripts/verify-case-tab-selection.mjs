@@ -244,7 +244,7 @@ closeTab(
 assert.equal(active, last.id, 'closing an agent must still activate its same-case neighbor')
 
 for (const scenario of ['active', 'active-middle', 'active-end', 'empty-neighbor', 'last', 'background', 'cancel-dirty', 'cancel-working', 'switch-during-save', 'remove-neighbor-during-save',
-  'remote-idle', 'remote-dirty', 'remote-working', 'remote-question', 'remote-draft', 'remote-attachment', 'remote-inline']) {
+  'remote-idle', 'remote-project', 'remote-todo', 'remote-dirty', 'remote-working', 'remote-question', 'remote-draft', 'remote-attachment', 'remote-inline']) {
   const fromSync = scenario.startsWith('remote-')
   const closing = { id: 'closing', drafts: '/closing', name: '닫을 사건' }
   const other = { id: 'other', drafts: '/other', name: '다른 사건', activeDocId: 'other-draft', activeTermId: 'other-agent', activeWork: { left: 'doc:other-draft', right: 'terminal:other-agent' } }
@@ -266,7 +266,7 @@ for (const scenario of ['active', 'active-middle', 'active-end', 'empty-neighbor
     activeCaseTabId: scenario === 'background' ? other.id : closing.id,
     activeDoc: 'draft', activeTerm: 'agent', activeWork: { left: 'doc:draft', right: 'terminal:agent' },
     currentCase: closing, folderRecord: {}, pdfRecord: {},
-    newCaseOpen: false, mode: 'viewer',
+    newCaseOpen: false, mode: scenario === 'remote-project' ? 'cases' : scenario === 'remote-todo' ? 'todos' : 'viewer',
     pdfStatus: {}, agentAttachmentRequests: {}, agentDrafts: {}, agentDraftClearNonce: {},
     termAttention: new Set(), termBracketedPasteMode: {}, caseTabContextMenu: {}, termFocusNonce: {}
   }
@@ -327,7 +327,7 @@ for (const scenario of ['active', 'active-middle', 'active-end', 'empty-neighbor
   ], context)
   await closingHandlers.closeCaseTab(closing.id, fromSync)
   await context.autoWorkspaceSaveChainRef.current
-  const cancelled = scenario.startsWith('cancel-') || (fromSync && scenario !== 'remote-idle')
+  const cancelled = scenario.startsWith('cancel-') || (fromSync && !['remote-idle', 'remote-project', 'remote-todo'].includes(scenario))
   assert.equal(savedSnapshots.length, fromSync || cancelled ? 0 : 1,
     `${scenario}: applying a remote close must not publish a fresh local close`)
   const closesActiveCase = !cancelled && scenario !== 'background' && scenario !== 'switch-during-save'
@@ -348,9 +348,10 @@ for (const scenario of ['active', 'active-middle', 'active-end', 'empty-neighbor
     }
   }
   if (closesActiveCase) {
-    const hasNeighbor = scenario !== 'last'
+    const preservedDashboard = ['remote-project', 'remote-todo'].includes(scenario)
+    const hasNeighbor = scenario !== 'last' && !preservedDashboard
     const hasWork = hasNeighbor && scenario !== 'empty-neighbor'
-    assert.equal(state.activeCaseTabId, hasNeighbor ? other.id : '', `${scenario}: activate the surviving neighbor`)
+    assert.equal(state.activeCaseTabId, hasNeighbor ? other.id : '', `${scenario}: only workbench closure selects the surviving neighbor`)
     assert.equal(state.currentCase?.drafts ?? null, hasNeighbor ? other.drafts : null)
     assert.equal(activeLeftKey, hasWork ? 'doc:other-draft' : '')
     assert.equal(state.activeDoc, hasWork ? 'other-draft' : '')
@@ -358,7 +359,7 @@ for (const scenario of ['active', 'active-middle', 'active-end', 'empty-neighbor
     assert.equal(state.activeWork.right, hasWork ? 'terminal:other-agent' : '')
     assert.equal(state.folderRecord, null)
     assert.equal(state.pdfRecord, null)
-    assert.equal(state.mode, 'explorer')
+    assert.equal(state.mode, preservedDashboard ? scenario === 'remote-project' ? 'cases' : 'todos' : 'explorer')
     assert.equal(closingHandlers.visibleInActiveCase(other.id), hasNeighbor)
     assert.equal(closingHandlers.visibleInActiveCase(undefined), !hasNeighbor)
   } else {
