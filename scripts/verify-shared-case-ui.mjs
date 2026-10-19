@@ -122,6 +122,25 @@ await alias.run()
 assert.equal(alias.state.cases.length, 1, 'profile aliases for the same endpoint do not duplicate a case')
 assert.equal(alias.state.cases[0].profileId, 'another-name')
 
+// An old phone folder-close and a newer registered case coexist on the server.
+// Folder equality cannot authorize closing the registered case.
+for (const reversed of [false, true]) {
+  const legacy = snapshot('/cases/same-folder', false)
+  const registered = { ...snapshot('/cases/same-folder'),
+    currentCase: { drafts: '/cases/same-folder', name: 'Registered case', meta: { jsId: 'registered-case' } } }
+  const scoped = harness(reversed ? [registered, legacy] : [legacy, registered])
+  const live = scoped.actual.caseTabFromCurrentCase({ ...registered.currentCase,
+    drafts: 'ssh://another-name/cases/same-folder', remotePath: '/cases/same-folder', profileId: 'another-name', ssh: profile })
+  scoped.context.setCaseTabs([live])
+  await scoped.run()
+  assert.deepEqual(scoped.state.closes, [], 'legacy folder close must not close an open registered case or select its neighbor')
+  assert.equal(scoped.state.cases.length, 1)
+  assert.equal(scoped.state.cases[0].id, live.id, 'keep the live case identity across refresh order and SSH profile aliases')
+  registered.workspaceOpen = false
+  await scoped.run()
+  assert.deepEqual(scoped.state.closes, [live.id], 'a close bearing the same registered case ID still applies')
+}
+
 const changing = [snapshot('/cases/stale')]
 const race = harness(changing)
 race.state.onList = async () => {

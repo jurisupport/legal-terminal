@@ -99,7 +99,8 @@ function runApp({ root, temp, screenshot }) {
     }
     if (channel === 'workspace:autoLoad') return { ok: true, remote: { ok: true, snapshot: args[0].ssh
       ? args[0].cwd === '/cases/phone-only' ? phoneSnapshot : remoteSnapshot
-      : snapshots.find((s) => s.currentCase.drafts === args[0].cwd) } }
+      : snapshots.find((s) => s.currentCase.drafts === args[0].cwd &&
+        (!args[0].caseId || s.currentCase.meta?.jsId === args[0].caseId)) } }
     if (channel === 'workspace:autoSave') return { ok: true }
     if (channel === 'workspace:list') return { ok: true, entries: [{ id: 'legacy', label: history[1].name, cwd: history[1].drafts, caseNumber: '2025가단54321', caseName: '임대차보증금', client: '이서연', savedAt: new Date().toISOString() }] }
     if (channel === 'workspace:autoObserve') return
@@ -372,6 +373,36 @@ function runApp({ root, temp, screenshot }) {
       await evaluate('new Promise(resolve => setTimeout(resolve, 150))')
       assert.equal(await evaluate(`document.querySelectorAll('.case-card').length === 1 && document.querySelector('.case-card').textContent.includes('제55민사단독')`), true, 'a delayed older query cannot replace the latest results')
       await require('node:fs/promises').writeFile(screenshot.replace('.png', '-dashboard-search.png'), (await win.webContents.capturePage()).toPNG())
+      const registered = { version: 1, savedAt: new Date().toISOString(), workspaceOpen: true,
+        currentCase: { drafts: '/cases/shared-folder', name: '등록 사건 유지', meta: { jsId: 'registered-case' } },
+        docs: [], activeTerm: 'registered-agent', terminals: [{ id: 'registered-agent', title: '등록 사건 유지',
+          kind: 'agent', agentProvider: 'claude', cwd: '/cases/shared-folder', jsId: 'registered-case' }] }
+      snapshots.push(registered)
+      await evaluate(`document.querySelector('.case-sidebar-trigger').click(); window.dispatchEvent(new Event('online'))`)
+      await searchCases('등록 사건 유지')
+      await wait(() => evaluate(`!!${group('등록 사건 유지')}`))
+      await evaluate(`${group('등록 사건 유지')}.querySelector('.case-sidebar-case').click()`)
+      await wait(() => evaluate(`document.querySelector('[data-term-id="registered-agent"]')?.getClientRects().length > 0`))
+      const registeredId = await evaluate(`${group('등록 사건 유지')}.dataset.caseId`)
+      await evaluate(`[...document.querySelectorAll('.side-view-switch button')].find(el => el.textContent.includes('파일')).click()`)
+      await wait(() => evaluate(`!!document.querySelector('.tree')`))
+      const previousCloses = calls.filter(call => call.channel === 'agent:close').length
+      // The server still has an older phone folder-close alongside the open registered case.
+      snapshots.unshift({ ...registered, savedAt: new Date(now - day).toISOString(), workspaceOpen: false,
+        currentCase: { drafts: registered.currentCase.drafts, name: registered.currentCase.name }, terminals: [] })
+      for (let refresh = 0; refresh < 2; refresh++) {
+        const reads = calls.filter(call => call.channel === 'workspace:autoList').length
+        await evaluate(`window.dispatchEvent(new Event('online'))`)
+        await wait(() => calls.filter(call => call.channel === 'workspace:autoList').length > reads)
+        await evaluate('new Promise(resolve => setTimeout(resolve, 250))')
+        assert.equal(await evaluate(`document.querySelector('[data-term-id="registered-agent"]')?.getClientRects().length > 0`), true,
+          'legacy folder closure must not close the selected registered case while viewing files')
+        assert.equal(calls.filter(call => call.channel === 'agent:close').length, previousCloses)
+      }
+      await evaluate(`document.querySelector('.case-sidebar-trigger').click()`)
+      await searchCases('등록 사건 유지')
+      assert.equal(await evaluate(`document.querySelector('.case-sidebar-group.active')?.dataset.caseId`), registeredId,
+        'returning from files keeps the original case selected through repeated shared refreshes')
       assert.deepEqual(errors, [])
       console.log('case sidebar UI: case/party/folder search, hidden history search, attention filter, IME/Escape, lazy startup, pagination, retry and SSH resume isolation OK')
       console.log(`Screenshot: ${screenshot}`)

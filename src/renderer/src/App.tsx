@@ -5529,7 +5529,8 @@ export default function App(): JSX.Element {
           setDiscoveredCaseTabs((tabs) => upsertCaseTab(tabs, discovered))
           if (snapshot.workspaceOpen === true) closedAutomaticCasesRef.current.delete(key)
           if (snapshot.workspaceOpen === false && !pendingWorkspaceReopensRef.current.has(key)) {
-            if (existing) await closeCaseTab(existing.id, true)
+            // A legacy folder's close does not own a registered case at the same path.
+            if (existing && existing.meta?.jsId === stored.meta?.jsId) await closeCaseTab(existing.id, true)
             expectedTerms = termTabsRef.current
             expectedCases = caseTabsRef.current
             continue
