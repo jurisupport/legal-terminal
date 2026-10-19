@@ -264,6 +264,16 @@ function runApp({ root, temp, screenshot }) {
       await wait(() => [...agents.values()].some((agent) => agent.cwd === '/cases/lee' && agent.id !== 'agent-1'))
       assert.equal(calls.some((call) => call.channel === 'agent:send'), false, 'navigation does not submit prompts')
       await evaluate(`[...document.querySelectorAll('.side-view-switch button')].find(el => el.textContent.includes('파일')).click()`)
+      await wait(() => evaluate(`!!document.querySelector('.tree')`))
+      const selectedTask = await evaluate(`[...document.querySelectorAll('.term-pane')].find(el => el.getClientRects().length)?.dataset.termId`)
+      assert.ok(selectedTask && agents.get(selectedTask)?.cwd === '/cases/lee')
+      // Deliver the old pane's queued focus after switching to the files sidebar.
+      await evaluate(`document.querySelector('[data-term-id="agent-0"]').dispatchEvent(new FocusEvent('focusin', { bubbles: true }))`)
+      await evaluate('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))')
+      assert.equal(await evaluate(`[...document.querySelectorAll('.term-pane')].find(el => el.getClientRects().length)?.dataset.termId`), selectedTask,
+        'switching to files must not reactivate a background case through a delayed focus event')
+      assert.equal(calls.filter((call) => call.channel === 'fs:list').at(-1)?.args[0], '/cases/lee',
+        'the files sidebar must retain the selected case folder')
       await wait(() => evaluate(`!!document.querySelector('.side-col > .sidebar')`))
       await evaluate(`document.querySelector('.case-sidebar-trigger').click()`)
       await wait(() => evaluate(`!!document.querySelector('.case-sidebar')`))

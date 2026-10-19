@@ -4012,16 +4012,17 @@ export default function App(): JSX.Element {
   // 터미널 선택 → 활성화 + 완료(주목) 표시 해제
   const selectTerm = (id: string, reopen = true): void => {
     const tab = termTabs.find((t) => t.id === id)
+    if (!tab) return
+    // A queued focus event from a hidden pane must not undo the user's case/file selection.
+    if (!reopen && !docOnly && !termOnly && caseIdForTerm(tab) !== activeCaseTabIdRef.current) return
     activateTermTab(id)
-    if (tab) {
-      const nextCase = currentCaseFromTerm(tab)
-      setCurrentCase(nextCase)
-      registerCaseTabFromTerm(tab, reopen)
-      updateCaseTabActivity(caseIdForTerm(tab), {
-        activeTermId: tab.id,
-        activeWork: { ...activeWork, [termSide(tab)]: termKeyOf(tab.id) }
-      })
-    }
+    const nextCase = currentCaseFromTerm(tab)
+    setCurrentCase(nextCase)
+    registerCaseTabFromTerm(tab, reopen)
+    updateCaseTabActivity(caseIdForTerm(tab), {
+      activeTermId: tab.id,
+      activeWork: { ...activeWork, [termSide(tab)]: termKeyOf(tab.id) }
+    })
     setTermAttention((s) => {
       if (!s.has(id)) return s
       const n = new Set(s)

@@ -129,6 +129,36 @@ assert.equal(actual.upsertCaseTab([{ ...linkedTab, id: folderTab.id, drafts: '/m
   2, 'restore-generated IDs must not overwrite a moved case either')
 
 const noop = () => {}
+// A file click can be followed by a queued focus event from the previous case.
+for (const scenario of ['background-focus', 'current-focus', 'explicit-selection', 'missing', 'detached-focus']) {
+  const previous = { id: 'previous-agent', caseTabId: 'previous-case', side: 'right' }
+  const current = { id: 'current-agent', caseTabId: 'current-case', side: 'right' }
+  const state = { activeCase: 'current-case', activeTerm: current.id, calls: [] }
+  const selection = loadHandlers(['selectTerm'], {
+    termTabs: [previous, current], activeWork: { left: 'doc:current-file', right: 'terminal:current-agent' },
+    activeCaseTabIdRef: { current: state.activeCase }, docOnly: false, termOnly: scenario === 'detached-focus',
+    caseIdForTerm: (term) => term.caseTabId,
+    activateTermTab: (id) => { state.activeTerm = id; state.calls.push('activate') },
+    currentCaseFromTerm: (term) => ({ id: term.caseTabId }),
+    setCurrentCase: (source) => { state.activeCase = source.id },
+    registerCaseTabFromTerm: () => state.calls.push('register'),
+    updateCaseTabActivity: () => state.calls.push('activity'),
+    termSide: (term) => term.side, termKeyOf: (id) => `terminal:${id}`,
+    setTermAttention: () => state.calls.push('attention'),
+    dismissToastForTerm: () => state.calls.push('toast'),
+    window: { lt: { app: { dismissNotify: () => state.calls.push('notify') } } }
+  })
+  selection.selectTerm(scenario === 'missing' ? 'closed-agent'
+    : scenario === 'current-focus' ? current.id : previous.id, scenario === 'explicit-selection')
+  if (scenario === 'background-focus' || scenario === 'missing') {
+    assert.equal(state.activeCase, 'current-case', `${scenario} must preserve the selected file's case`)
+    assert.equal(state.activeTerm, current.id)
+    assert.deepEqual(state.calls, [], 'ignored focus must not clear other-case notifications or register it again')
+  } else {
+    assert.equal(state.activeCase, scenario === 'current-focus' ? 'current-case' : 'previous-case')
+    assert.equal(state.calls.includes('activate'), true, 'visible focus and explicit navigation still activate the task')
+  }
+}
 const movedSource = { ...linkedCase, drafts: '/moved-case' }
 const movedTab = { ...linkedTab, id: folderTab.id, drafts: movedSource.drafts }
 for (const [existingTab, savedCaseTabs, savedSource, canonicalId, caseCount] of [
