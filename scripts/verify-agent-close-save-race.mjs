@@ -11,13 +11,13 @@ const app = await readFile(new URL('../src/renderer/src/App.tsx', import.meta.ur
 const parsed = ts.createSourceFile('App.tsx', app, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX)
 const handlers = new Map()
 const visit = (node) => {
-  if (ts.isVariableDeclaration(node) && ['saveCaseWorkspace', 'markWorkspaceReopened'].includes(node.name.getText(parsed))) {
+  if (ts.isVariableDeclaration(node) && ['saveCaseWorkspace', 'markWorkspaceReopened', 'sameWorkspaceLocation', 'normalizedCasePathKey', 'sessionListKey'].includes(node.name.getText(parsed))) {
     handlers.set(node.name.getText(parsed), node.initializer.getText(parsed))
   }
   ts.forEachChild(node, visit)
 }
 visit(parsed)
-assert.equal(handlers.size, 2)
+assert.equal(handlers.size, 5)
 const sharedModule = { exports: {} }
 vm.runInNewContext(compile(await readFile(new URL('../src/shared/workspaceAgentTabs.ts', import.meta.url), 'utf8')),
   { module: sharedModule, exports: sharedModule.exports })
@@ -44,6 +44,7 @@ const harness = () => {
   }
   const sandbox = vm.createContext(context)
   const run = (name) => vm.runInContext(compile(`(${handlers.get(name)})`), sandbox)
+  for (const name of ['normalizedCasePathKey', 'sessionListKey', 'sameWorkspaceLocation']) context[name] = run(name)
   return { context, saved, save: run('saveCaseWorkspace'), reopen: run('markWorkspaceReopened') }
 }
 
