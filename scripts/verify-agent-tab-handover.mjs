@@ -258,7 +258,7 @@ try {
   const parsed = ts.createSourceFile('App.tsx', app, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX)
   let handler
   const identityHelpers = []
-  const helperNames = ['remoteUri', 'isRemotePath', 'parseRemoteUri', 'normalizedCasePathKey', 'caseProfileKey', 'caseIdentityKey', 'remoteWorkspacePath', 'rebaseRemoteWorkspace']
+  const helperNames = ['remoteUri', 'isRemotePath', 'parseRemoteUri', 'normalizedCasePathKey', 'caseProfileKey', 'caseIdentityKey', 'currentCaseFromCaseTab', 'workspaceLocation', 'workspaceLocationKey', 'sessionListKey', 'sameWorkspaceLocation', 'remoteWorkspacePath', 'rebaseRemoteWorkspace']
   const visit = (node) => {
     if (ts.isVariableDeclaration(node) && node.name.getText(parsed) === 'restoreAutomaticWorkspace') handler = node.initializer.getText(parsed)
     if (ts.isVariableDeclaration(node) && helperNames.includes(node.name.getText(parsed))) identityHelpers.push(`const ${node.getText(parsed)};`)
@@ -291,11 +291,14 @@ try {
   const run = vm.runInNewContext(ts.transpileModule(`(${handler})`, {
     compilerOptions: { target: ts.ScriptTarget.ES2022 }
   }).outputText, context)
-  const identity = vm.runInNewContext(ts.transpileModule(`${identityHelpers.join('\n')}\n({caseIdentityKey, normalizedCasePathKey, rebaseRemoteWorkspace})`, {
+  const identity = vm.runInNewContext(ts.transpileModule(`${identityHelpers.join('\n')}\n({caseIdentityKey, normalizedCasePathKey, currentCaseFromCaseTab, workspaceLocation, workspaceLocationKey, sessionListKey, sameWorkspaceLocation: typeof sameWorkspaceLocation === 'function' ? sameWorkspaceLocation : undefined, rebaseRemoteWorkspace})`, {
     compilerOptions: { target: ts.ScriptTarget.ES2022 }
   }).outputText, { isGeneralChatDirectory })
   context.caseIdentityKey = identity.caseIdentityKey
   context.normalizedCasePathKey = identity.normalizedCasePathKey
+  context.currentCaseFromCaseTab = identity.currentCaseFromCaseTab
+  context.sessionListKey = identity.sessionListKey
+  context.sameWorkspaceLocation = identity.sameWorkspaceLocation
   for (const mode of ['docOnly', 'termOnly']) {
     context[mode] = true
     await run({})
@@ -437,6 +440,67 @@ try {
             assert.equal(observed.length, observationsBefore, 'an unrelated close is never acknowledged')
           }
         }
+      }
+    }
+  }
+
+  // A case keeps its tab ID when its folder or linked case changes.
+  // Older automatic reads must not close that tab or import its former agents.
+  for (const ssh of [undefined, location.ssh]) {
+    for (const change of ['folder', 'case-id', 'project-folder', ...(ssh ? ['ssh-host'] : [])]) {
+      for (const timing of ['before-read', 'during-closed-read', 'during-open-read']) {
+        const oldPath = '/cases/previous-folder'
+        const source = { name: 'Registered case', drafts: ssh ? `ssh://desktop-profile${oldPath}` : oldPath,
+          meta: change === 'project-folder'
+            ? { contextKind: 'project', projectId: 'project-original' }
+            : { jsId: 'case-original' },
+          ...(ssh ? { ssh, profileId: 'desktop-profile', remotePath: oldPath } : {}) }
+        const live = change === 'folder' || change === 'project-folder'
+          ? { ...source, drafts: ssh ? 'ssh://desktop-profile/cases/current-folder' : '/cases/current-folder',
+              ...(ssh ? { remotePath: '/cases/current-folder' } : {}), id: 'case' }
+          : change === 'ssh-host'
+            ? { ...source, ssh: { ...ssh, host: 'replacement.invalid' }, id: 'case' }
+            : { ...source, meta: { jsId: 'case-relinked' }, id: 'case' }
+        const incoming = { ...snapshot([{ ...term('former-agent'), cwd: oldPath, ...source.meta }]),
+          workspaceOpen: timing === 'during-open-read',
+          currentCase: { name: source.name, drafts: oldPath, meta: source.meta } }
+        const closed = [], imported = [], acknowledgements = []
+        let reads = 0, release
+        const isolated = { ...context,
+          workspaceLocation: identity.workspaceLocation, workspaceLocationKey: identity.workspaceLocationKey,
+          autoRestoreDoneRef: { current: new Set() }, autoRestoreInFlightRef: { current: new Map() },
+          autoSaveEligibleRef: { current: new Set() },
+          caseTabsRef: { current: [timing === 'before-read' ? live : { ...source, id: 'case' }] },
+          termTabsRef: { current: [] }, pendingAgentClosesRef: { current: new Map() },
+          pendingWorkspaceReopensRef: { current: new Map() },
+          closeCaseTab: async id => { closed.push(id) },
+          restoreWorkspaceSnapshot: value => { imported.push(value) },
+          setWorkspaceSyncError: error => assert.fail(error),
+          window: { lt: { workspace: {
+            autoLoad: async () => {
+              reads++
+              if (timing === 'before-read') return { ok: true, remote: { snapshot: incoming } }
+              return new Promise(resolve => { release = resolve })
+            },
+            autoObserve: async (_location, value) => { acknowledgements.push(value) }
+          }, dialog: { alert: async error => assert.fail(error) } } }
+        }
+        const restore = vm.runInNewContext(ts.transpileModule(`(${handler})`, {
+          compilerOptions: { target: ts.ScriptTarget.ES2022 }
+        }).outputText, isolated)
+        const pending = restore(source, true)
+        if (timing !== 'before-read') {
+          assert.equal(reads, 1, 'the original workspace is read before the local change')
+          isolated.caseTabsRef.current = [live]
+          release({ ok: true, remote: { snapshot: incoming } })
+        }
+        const label = `${ssh ? 'SSH' : 'local'} ${change} ${timing}`
+        assert.equal(await pending, true, `${label}: an obsolete request is safely ignored`)
+        assert.equal(reads, timing === 'before-read' ? 0 : 1, `${label}: a known obsolete location must not be read`)
+        assert.deepEqual(closed, [], `${label}: the current workspace must not be closed`)
+        assert.deepEqual(imported, [], `${label}: former-workspace agents must not be restored`)
+        assert.deepEqual(acknowledgements, [], `${label}: discarded work must not be acknowledged`)
+        assert.equal(isolated.autoRestoreDoneRef.current.size, 0, `${label}: current restoration remains retryable`)
       }
     }
   }

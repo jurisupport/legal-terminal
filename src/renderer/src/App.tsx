@@ -5238,6 +5238,11 @@ export default function App(): JSX.Element {
     return `${location.profileId ?? 'local'}\0${normalizedCasePathKey(location.cwd)}\0${location.caseId ?? ''}`
   }
 
+  const sameWorkspaceLocation = (left: CurrentCase, right: CurrentCase): boolean =>
+    workspaceLocationKey(left) === workspaceLocationKey(right) &&
+    normalizedCasePathKey(workspaceLocation(left).cwd) === normalizedCasePathKey(workspaceLocation(right).cwd) &&
+    sessionListKey('', left.ssh) === sessionListKey('', right.ssh)
+
   const remoteWorkspacePath = (value: string | undefined, profileId: string): string | undefined => {
     if (!value) return undefined
     return remoteUri(profileId, parseRemoteUri(value)?.path ?? value)
@@ -5331,7 +5336,8 @@ export default function App(): JSX.Element {
       const live = snapshot.terminals.find((item) => item.id === term.id)
       return live ? [live] : []
     })
-    if (!caseTabsRef.current.some((item) => item.id === caseTabIdValue)) return
+    const liveTab = caseTabsRef.current.find((item) => item.id === caseTabIdValue)
+    if (!liveTab || !sameWorkspaceLocation(liveTab, source)) return
     const saving = window.lt.workspace.autoSave(snapshot, workspaceLocation(source)).then((result) => {
       if (!result.ok || result.remoteError) throw new Error(result.remoteError || result.error || '사건탭 저장 실패')
       if (pendingWorkspaceReopensRef.current.get(key) === reopen) pendingWorkspaceReopensRef.current.delete(key)
@@ -5356,6 +5362,11 @@ export default function App(): JSX.Element {
     if (docOnly || termOnly) return true
     const id = resolveCaseTabId(source)
     const key = workspaceLocationKey(source)
+    const isCurrentLocation = (): boolean => {
+      const liveTab = caseTabsRef.current.find((tab) => tab.id === id)
+      return !liveTab || sameWorkspaceLocation(liveTab, source)
+    }
+    if (!isCurrentLocation()) return true
     if (!refresh && autoRestoreDoneRef.current.has(key)) return true
     const existing = autoRestoreInFlightRef.current.get(key)
     if (existing) {
@@ -5368,9 +5379,7 @@ export default function App(): JSX.Element {
         const termsBeforeLoad = termTabsRef.current
         const result = await window.lt.workspace.autoLoad(workspaceLocation(source), !refresh)
         if (account !== todoAccountGeneration.current) return true
-        const liveProject = source.meta?.contextKind === 'project' ? caseTabsRef.current.find((tab) => tab.id === id) : undefined
-        if (liveProject && normalizedCasePathKey(liveProject.remotePath ?? liveProject.drafts) !==
-          normalizedCasePathKey(source.remotePath ?? source.drafts)) return true
+        if (!isCurrentLocation()) return true
         // A background response must not undo a tab closed while the read was in flight.
         if (refresh && termsBeforeLoad !== termTabsRef.current) return true
         const cachedSource = result.local?.snapshot?.currentCase as CurrentCase | undefined
@@ -5523,6 +5532,8 @@ export default function App(): JSX.Element {
           const key = workspaceLocationKey(source)
           if (pendingCaseClosesRef.current.has(key)) continue
           const existing = findCaseTab(caseTabsRef.current, source)
+          // Logical case IDs survive folder changes; old workspace records do not own the new location.
+          if (existing && !sameWorkspaceLocation(existing, source)) continue
           const workspaceOpenedAt = snapshot.workspaceOpenedAt ?? snapshot.savedAt
           const discovered = { ...caseTabFromCurrentCase(source), workspaceOpenedAt,
             updatedAt: Date.parse(snapshot.savedAt) || 0 }

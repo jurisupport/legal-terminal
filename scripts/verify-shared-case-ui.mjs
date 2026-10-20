@@ -17,7 +17,7 @@ visit(parsed)
 assert.ok(refresh)
 const helpers = ['safeHash', 'normalizedCasePathKey', 'caseProfileKey', 'caseIdentityKey', 'caseTabId',
   'findCaseTab', 'caseTabFromCurrentCase', 'currentCaseFromCaseTab', 'upsertCaseTab', 'compareCaseTabOrder',
-  'markWorkspaceReopened', 'saveCaseWorkspace']
+  'markWorkspaceReopened', 'saveCaseWorkspace', 'sameWorkspaceLocation']
 const code = ts.transpileModule(helpers.map(name => `const ${name} = ${declarations.get(name)};`).join('\n') +
   `\nrefreshAutomaticCasesRef.current = ${refresh};\n({ ${helpers.join(', ')} })`, {
   compilerOptions: { target: ts.ScriptTarget.ES2022 }
@@ -41,6 +41,7 @@ function harness(snapshots) {
     remoteUri: (id, path) => `ssh://${id}${path}`,
     sessionListKey: (_, ssh) => ssh ? `${ssh.user}@${ssh.host}:${ssh.port ?? 22}` : 'local',
     workspaceLocationKey: s => s.drafts,
+    workspaceLocation: s => ({ cwd: s.remotePath ?? s.drafts, ssh: s.ssh }),
     pendingCaseClosesRef: { current: new Map() }, pendingWorkspaceReopensRef: { current: new Map() },
     closedAutomaticCasesRef: { current: new Set() }, unloadedSharedCasesRef: { current: new Set() },
     setDiscoveredCaseTabs: update => { state.history = update(state.history) },
@@ -141,6 +142,28 @@ for (const reversed of [false, true]) {
   assert.deepEqual(scoped.state.closes, [live.id], 'a close bearing the same registered case ID still applies')
 }
 
+// One registered case can have old snapshots for folders it has moved away from.
+for (const reversed of [false, true]) {
+  const current = { ...snapshot('/cases/current'), currentCase: {
+    drafts: '/cases/current', name: 'Current case', meta: { jsId: 'same-case' }
+  } }
+  const oldClosed = { ...current, workspaceOpen: false, currentCase: { ...current.currentCase, drafts: '/' } }
+  const oldOpen = { ...current, currentCase: { ...current.currentCase, drafts: '/cases/old' } }
+  const sameCase = harness(reversed ? [current, oldOpen, oldClosed] : [oldClosed, oldOpen, current])
+  const live = sameCase.actual.caseTabFromCurrentCase({ ...current.currentCase,
+    drafts: 'ssh://office/cases/current', remotePath: '/cases/current', profileId: 'office', ssh: profile })
+  sameCase.context.setCaseTabs([live])
+  await sameCase.run()
+  assert.deepEqual(sameCase.state.closes, [], 'a close for an old folder must not close the same case in its current folder')
+  assert.deepEqual(sameCase.state.loads.map(source => source.remotePath), ['/cases/current'],
+    'an open snapshot for an old folder must not restore its conversations into the current folder')
+  assert.equal(sameCase.state.cases[0].remotePath, '/cases/current')
+  assert.equal(sameCase.state.history.length, 1, 'old locations must not replace the current case metadata')
+  current.workspaceOpen = false
+  await sameCase.run()
+  assert.deepEqual(sameCase.state.closes, [live.id], 'the same case and current folder can still be closed remotely')
+}
+
 const changing = [snapshot('/cases/stale')]
 const race = harness(changing)
 race.state.onList = async () => {
@@ -214,4 +237,20 @@ await newTask.actual.saveCaseWorkspace(taskCase.id)
 assert.equal(saved.length, 2, 'creating work directly from a shared shell keeps later automatic saves enabled')
 assert.equal(saved[1].terminals[0].resumeSessionId, 'new-session', 'the first resumable conversation ID is shared after initial save')
 assert.equal(newTask.context.unloadedSharedCasesRef.current.has(taskCase.id), false)
+
+const moving = harness([])
+const movingCase = moving.actual.caseTabFromCurrentCase({ name: 'Moving case', drafts: 'ssh://office/cases/before',
+  remotePath: '/cases/before', profileId: 'office', ssh: profile, meta: { jsId: 'moving-case' } })
+moving.context.setCaseTabs([movingCase])
+let staleSaves = 0
+Object.assign(moving.context, {
+  autoRestoreInFlightRef: { current: new Map() }, autoRestoreDoneRef: { current: new Set([movingCase.drafts]) },
+  buildWorkspaceSnapshot: async () => {
+    moving.context.setCaseTabs([{ ...movingCase, drafts: 'ssh://office/cases/after', remotePath: '/cases/after' }])
+    return { version: 1, savedAt: new Date().toISOString(), terminals: [] }
+  }
+})
+moving.context.window.lt.workspace.autoSave = async () => { staleSaves++; return { ok: true } }
+await moving.actual.saveCaseWorkspace(movingCase.id)
+assert.equal(staleSaves, 0, 'a snapshot built after a folder change must not be published under the old location')
 console.log('shared case UI: open/close/reopen, lazy agents, stable order, aliases, offline and in-flight protection OK')

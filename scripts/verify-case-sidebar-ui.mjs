@@ -384,19 +384,28 @@ function runApp({ root, temp, screenshot }) {
       await evaluate(`${group('등록 사건 유지')}.querySelector('.case-sidebar-case').click()`)
       await wait(() => evaluate(`document.querySelector('[data-term-id="registered-agent"]')?.getClientRects().length > 0`))
       const registeredId = await evaluate(`${group('등록 사건 유지')}.dataset.caseId`)
-      await evaluate(`[...document.querySelectorAll('.side-view-switch button')].find(el => el.textContent.includes('파일')).click()`)
+      const filesButton = await evaluate(`(() => {
+        const rect = [...document.querySelectorAll('.side-view-switch button')].find(el => el.textContent.includes('파일')).getBoundingClientRect();
+        return { x: Math.round(rect.left + rect.width / 2), y: Math.round(rect.top + rect.height / 2) };
+      })()`)
+      win.webContents.sendInputEvent({ type: 'mouseMove', ...filesButton })
+      for (const type of ['mouseDown', 'mouseUp']) win.webContents.sendInputEvent({ type, button: 'left', clickCount: 1, ...filesButton })
       await wait(() => evaluate(`!!document.querySelector('.tree')`))
       const previousCloses = calls.filter(call => call.channel === 'agent:close').length
       // The server still has an older phone folder-close alongside the open registered case.
       snapshots.unshift({ ...registered, savedAt: new Date(now - day).toISOString(), workspaceOpen: false,
         currentCase: { drafts: registered.currentCase.drafts, name: registered.currentCase.name }, terminals: [] })
+      snapshots.unshift({ ...registered, savedAt: new Date(now - day).toISOString(), workspaceOpen: false,
+        currentCase: { ...registered.currentCase, drafts: '/' }, terminals: [] })
+      snapshots.unshift({ ...registered, savedAt: new Date(now - day).toISOString(),
+        currentCase: { ...registered.currentCase, drafts: '/cases/old-folder' }, terminals: [] })
       for (let refresh = 0; refresh < 2; refresh++) {
         const reads = calls.filter(call => call.channel === 'workspace:autoList').length
         await evaluate(`window.dispatchEvent(new Event('online'))`)
         await wait(() => calls.filter(call => call.channel === 'workspace:autoList').length > reads)
         await evaluate('new Promise(resolve => setTimeout(resolve, 250))')
         assert.equal(await evaluate(`document.querySelector('[data-term-id="registered-agent"]')?.getClientRects().length > 0`), true,
-          'legacy folder closure must not close the selected registered case while viewing files')
+          'legacy or previous-location closure must not close the selected registered case while viewing files')
         assert.equal(calls.filter(call => call.channel === 'agent:close').length, previousCloses)
       }
       await evaluate(`document.querySelector('.case-sidebar-trigger').click()`)
