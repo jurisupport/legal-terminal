@@ -5,6 +5,7 @@ import { randomUUID } from 'crypto'
 import { emptyCaseManagementUi, type CaseManagementUi, type CaseManagementState, type CaseManagementPatch } from '../shared/caseManagement'
 import { kstDateKey } from '../shared/todoSummary'
 import type { AgentPermissionMode, AgentProvider } from './agent/agent-types'
+import type { RemoteControlConnection } from '../shared/claudeRemoteControl'
 
 /** SSH 접속 프로필 — 원격 서버에서 사건 작업(claude 실행 등)을 위한 저장된 연결. */
 export interface SshProfile {
@@ -47,6 +48,7 @@ export interface OfficeProfileSettings {
 
 /** 앱 전역 설정 (userData/config.json에 영구 저장) */
 export interface Settings {
+  claudeRemoteConnections?: RemoteControlConnection[]
   /** Personal ID references; updated only through the revision-checked case-management API. */
   caseManagementState?: CaseManagementState
   /** 서면 푸터 사무실 정보 (직접 입력) */

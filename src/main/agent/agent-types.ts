@@ -74,6 +74,7 @@ export interface AgentSessionSnapshot {
   id: string
   cwd: string
   title?: string
+  sessionTitle?: string
   provider: AgentProvider
   source: AgentSource
   resumeSessionId?: string

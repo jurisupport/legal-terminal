@@ -17,6 +17,7 @@ export interface MediaOpenInput {
   requestId: string
   force?: boolean
   versionId?: string
+  maxBytes?: number
 }
 
 export interface MediaProgress {
@@ -78,6 +79,11 @@ const MEDIA_TYPES: Record<string, string> = {
 
 export function mediaMimeType(path: string): string | undefined {
   return MEDIA_TYPES[path.slice(path.lastIndexOf('.') + 1).toLowerCase()]
+}
+
+export function imageMimeType(path: string): string | undefined {
+  const types: Record<string, string> = { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp', bmp: 'image/bmp', svg: 'image/svg+xml', ico: 'image/x-icon', tif: 'image/tiff', tiff: 'image/tiff', avif: 'image/avif' }
+  return types[path.slice(path.lastIndexOf('.') + 1).toLowerCase()]
 }
 
 export function normalizeMediaSelection(value: unknown): MediaSelection | undefined {

@@ -380,14 +380,6 @@ export default function FileTree({
     setRootDropLabel('')
   }
 
-  const isLeavingRootDropTarget = (e: React.DragEvent<HTMLUListElement>): boolean => {
-    const relatedTarget = e.relatedTarget
-    if (relatedTarget instanceof Node && e.currentTarget.contains(relatedTarget)) return false
-
-    const targetAtPoint = document.elementFromPoint(e.clientX, e.clientY)
-    return !targetAtPoint || !e.currentTarget.contains(targetAtPoint)
-  }
-
   const deleteEntries = async (targets: Entry[]): Promise<void> => {
     if (!onDelete || !targets.length) return
     const unique = uniqueStrings(targets.map((entry) => entry.path))
@@ -618,7 +610,7 @@ export default function FileTree({
     }
   }, [root, refreshNonce, query])
 
-  // 트리 빈 영역/루트로 드롭 → root 폴더로 이동(내부) 또는 복사(외부)
+  // 메인 폴더 행에 명시적으로 놓은 경우에만 루트로 이동/복사한다.
   const rootDrop = (e: React.DragEvent): void => {
     e.preventDefault()
     e.stopPropagation()
@@ -637,8 +629,7 @@ export default function FileTree({
   return (
     <ul
       ref={treeRef}
-      className={`tree ${rootOver ? 'drop-target-root' : ''} ${selectRect ? 'selection-dragging' : ''}`}
-      data-drop-label={rootDropLabel}
+      className={`tree ${selectRect ? 'selection-dragging' : ''}`}
       onContextMenu={onRootContext}
       onPointerDown={startMarqueeSelection}
       onMouseDownCapture={(event) => {
@@ -649,27 +640,49 @@ export default function FileTree({
       }}
       onKeyDown={handleTreeKeyDown}
       onDragOver={(e) => {
-        // 내부 경로 또는 외부 파일일 때만 드롭 허용
-        if (
-          !e.dataTransfer.types.includes(LT_PATH) &&
-          !e.dataTransfer.types.includes(LT_PATHS) &&
-          !e.dataTransfer.types.includes('Files')
-        )
-          return
+        // 파일 행과 빈 영역의 드롭이 상위 사이드바로 전파되지 않게 한다.
         e.preventDefault()
-        const internal =
-          e.dataTransfer.types.includes(LT_PATH) || e.dataTransfer.types.includes(LT_PATHS)
-        e.dataTransfer.dropEffect = internal ? 'move' : 'copy'
-        setRootDropLabel(internal ? '작성서류 루트로 이동' : '작성서류 루트에 놓기')
-        setRootOver(true)
+        e.stopPropagation()
+        e.dataTransfer.dropEffect = 'none'
+        clearRootDropState()
       }}
-      onDragLeave={(e) => {
-        // 자식/손자 행에서 빠져나가는 dragleave도 버블링되므로,
-        // 실제 포인터가 루트 트리 밖으로 나간 경우에만 라벨을 지운다.
-        if (isLeavingRootDropTarget(e)) clearRootDropState()
+      onDrop={(e) => {
+        e.preventDefault()
+        e.stopPropagation()
+        clearRootDropState()
       }}
-      onDrop={rootDrop}
     >
+      {(onMove || onDropTo) && (
+        <li>
+          <div
+            className={`tree-row tree-root-drop ${rootOver ? 'drop-target' : ''}`}
+            data-drop-label={rootDropLabel}
+            title={root}
+            onDragOver={(e) => {
+              if (
+                !e.dataTransfer.types.includes(LT_PATH) &&
+                !e.dataTransfer.types.includes(LT_PATHS) &&
+                !e.dataTransfer.types.includes('Files')
+              ) return
+              e.preventDefault()
+              e.stopPropagation()
+              const internal =
+                e.dataTransfer.types.includes(LT_PATH) || e.dataTransfer.types.includes(LT_PATHS)
+              e.dataTransfer.dropEffect = internal ? 'move' : 'copy'
+              setRootDropLabel(internal ? '메인 폴더로 이동' : '메인 폴더에 놓기')
+              setRootOver(true)
+            }}
+            onDragLeave={(e) => {
+              if (e.relatedTarget instanceof Node && e.currentTarget.contains(e.relatedTarget)) return
+              clearRootDropState()
+            }}
+            onDrop={rootDrop}
+          >
+            <span className="tree-icon">📁</span>
+            <span className="tree-name">메인 폴더</span>
+          </div>
+        </li>
+      )}
       {selectRect && (
         <div
           className="tree-select-marquee"
@@ -1075,7 +1088,7 @@ function TreeNode({
         onDragLeave={(e) => {
           // 자식 요소(아이콘/이름)로 옮겨갈 때 발생하는 dragleave는 무시,
           // 실제로 행 밖으로 나갔을 때만 해제 (spring-load 타이머 유지)
-          if (e.currentTarget.contains(e.relatedTarget as Node)) return
+          if (e.relatedTarget instanceof Node && e.currentTarget.contains(e.relatedTarget)) return
           setOver(false)
           setDropLabel('')
           clearSpring()

@@ -4,6 +4,7 @@ import { createRequire } from 'node:module'
 import { runInNewContext } from 'node:vm'
 import { EventEmitter } from 'node:events'
 import ts from 'typescript'
+import * as browserBridge from '../src/main/browserAgentBridge.ts'
 import { codexTurnRunStatus, codexWorkStepStatus } from '../src/main/agent/agentProgress.ts'
 import * as executionLock from '../src/main/agent/agentExecutionLock.ts'
 import { activeSubAgentCount, isSubAgentStep } from '../src/renderer/src/agent/subAgentStatus.ts'
@@ -88,6 +89,7 @@ runInNewContext(ts.transpileModule(`${serviceSource}\nexport const progressCheck
     } }
     if (name === './agentPrompt') return { prependAgentContext: (_context, prompt) => prompt }
     if (name === '../jurisupport') return { onAgentMcpAccountChange: () => {} }
+    if (name === '../browserAgentBridge') return browserBridge
     if (name === './agentMcp') return { managedToolName: () => undefined }
     if (name === './agentProgress') return { codexTurnRunStatus, codexWorkStepStatus }
     if (name === './agentExecutionLock') return executionLock

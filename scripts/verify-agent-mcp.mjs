@@ -4,6 +4,7 @@ import { createRequire } from 'node:module'
 import { EventEmitter } from 'node:events'
 import vm from 'node:vm'
 import ts from 'typescript'
+import * as browserBridge from '../src/main/browserAgentBridge.ts'
 import * as mcp from '../src/main/agent/agentMcp.ts'
 import * as projectMcp from '../src/main/agent/projectMcpConfig.ts'
 import * as executionLock from '../src/main/agent/agentExecutionLock.ts'
@@ -50,6 +51,7 @@ const ctx={exports:serviceExports,console,process,Buffer,AbortController,URL,URL
   require(name){
     if(name==='@anthropic-ai/claude-agent-sdk')return{query}
     if(name==='../jurisupport')return{getAgentMcpConnection:async()=>({...connection,epoch}),agentMcpAccountEpoch:()=>epoch,onAgentMcpAccountChange:fn=>{accountChanged=fn},listTodos:async()=>[]}
+    if (name === '../browserAgentBridge') return browserBridge
     if(name==='./agentMcp')return mcp
     if(name==='./projectMcpConfig')return projectMcp
     if(name==='../projectAgent')return{releaseProjectMcp:()=>{},disposeProjectMcp:()=>{}}

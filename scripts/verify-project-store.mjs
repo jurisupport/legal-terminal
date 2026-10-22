@@ -38,6 +38,27 @@ try {
   assert.deepEqual(await store.list(), [created], 'older stored projects gain an empty folder list on read')
   assert.equal(await readFile(file, 'utf8'), legacyText, 'reading a legacy project does not rewrite its file')
 
+  for (const [workspacePath, expectedPath, expectedProfile] of [
+    ['/projects/parent/../case/', '/projects/case', undefined],
+    ['ssh://office/projects/parent/../case/', 'ssh://office/projects/case', 'office'],
+    ['C:/Projects/parent/../case/', String.raw`C:\Projects\case`, undefined]
+  ]) {
+    const previewText = JSON.stringify({ version: 1, projects: [{ ...created, workspacePath }] })
+    await writeFile(file, previewText)
+    const [migrated] = await store.list()
+    assert.equal(migrated.workingFolder.path, expectedPath, 'preview workspaces migrate into the released working-folder field')
+    assert.equal(migrated.executionProfileId, expectedProfile)
+    assert.equal(migrated.id, created.id, 'migration preserves project identity and history')
+    assert.equal(migrated.notes, created.notes)
+    assert.equal('workspacePath' in migrated, false, 'only one workspace model is exposed to callers')
+    assert.equal(await readFile(file, 'utf8'), previewText, 'reading a preview project never rewrites storage')
+    const persisted = await store.save({ ...migrated, expectedUpdatedAt: migrated.updatedAt })
+    assert.equal(persisted.workingFolder.path, expectedPath)
+    assert.equal(persisted.executionProfileId, expectedProfile)
+    assert.equal((await new ProjectStore(file).list())[0].workingFolder.path, expectedPath)
+  }
+  await writeFile(file, legacyText)
+
   const updated = await store.save({ ...created, expectedUpdatedAt: created.updatedAt, status: 'completed', cases: [], executionProfileId: '  office  ' })
   assert.equal(updated.executionProfileId, 'office', 'saved execution profile is trimmed')
   assert.equal((await new ProjectStore(file).list())[0].executionProfileId, 'office', 'execution location survives reopening')
@@ -84,6 +105,7 @@ try {
     { ...input, cases: [{ key: 'case', name: '사건', profileId: 'office' }] },
     { ...input, cases: [{ key: 'case', name: '사건', remotePath: '/cases/집행' }] },
     { ...input, folders: null },
+    ...['', '  ', 'relative/path', '~/folder', 'C:relative', '\\relative', 'ssh://', 'ssh://office', 'ssh:///folder', 'ssh://bad profile/folder', 'ssh://office\\folder/path', 'ssh://user@office/folder', 'ssh://office:22/folder', 'ssh://office?query/folder', 'ssh://office#fragment/folder', 'ssh://office%20name/folder', 'sftp://office/folder', 'SSH://office/folder', 'https://example.com/folder', 'file:///folder', '/folder\0file', 'ssh://office/folder\0file', '/'.repeat(4097), 123, {}].map((workspacePath) => ({ ...input, workspacePath })),
     { ...input, folders: [{ name: '', path: '/valid' }] },
     { ...input, folders: [{ name: '가'.repeat(4097), path: '/valid' }] },
     { ...input, folders: [{ name: '폴더', path: '/'.repeat(4097) }] },
@@ -183,7 +205,8 @@ try {
   for (const corrupt of ['{broken', '', '{"version":2,"projects":[]}', '{"version":1,"projects":[{}]}',
     JSON.stringify({ version: 1, projects: [created, created] }),
     JSON.stringify({ version: 1, projects: [{ ...created, cases: [{ key: 'case', name: '사건' }] }] }),
-    JSON.stringify({ version: 1, projects: [{ ...created, folders: [{ name: '폴더', path: 'relative' }] }] })]) {
+    JSON.stringify({ version: 1, projects: [{ ...created, folders: [{ name: '폴더', path: 'relative' }] }] }),
+    JSON.stringify({ version: 1, projects: [{ ...created, workspacePath: 'ssh://office' }] })]) {
     await writeFile(file, corrupt)
     await assert.rejects(store.list(), /손상되었거나/)
     await assert.rejects(store.save(input), /손상되었거나/)

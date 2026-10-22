@@ -12,18 +12,20 @@ const temp = await fs.mkdtemp(path.join(os.tmpdir(), 'filetree-state-'))
 const source = `
 import React, { useState } from 'react'
 import { createRoot } from 'react-dom/client'
-import FileTree from './src/renderer/src/filetree/FileTree'
+import FileTree, { LT_PATH, LT_PATHS } from './src/renderer/src/filetree/FileTree'
 const folder = path => ({path, name:path.split('/').pop(), isDir:true})
 const file = path => ({...folder(path), isDir:false})
 const roots = ['/cases/a', '/cases/b', 'ssh://office/cases/a']
 const directories = Object.fromEntries(roots.flatMap(root => [
   [root, [folder(root+'/evidence')]],
-  [root+'/evidence', [folder(root+'/evidence/nested')]],
-  [root+'/evidence/nested', [file(root+'/evidence/nested/brief.md')]]
+  [root+'/evidence', [folder(root+'/evidence/nested'), folder(root+'/evidence/empty')]],
+  [root+'/evidence/nested', [file(root+'/evidence/nested/brief.md'), file(root+'/evidence/nested/other.md')]]
 ]))
 let failPath = '', deferredPath = '', pending = []
+const drops = []
 window.lt = {fs:{
   onDragError:()=>()=>{},
+  dragPathsForFiles:files=>files.some(file=>file.name==='staged.md') ? [roots[0]+'/evidence/nested/brief.md'] : [],
   list:async path => {
     if (path === failPath) throw Error('temporary connection failure')
     if (path === deferredPath) return new Promise((resolve,reject)=>pending.push({resolve,reject}))
@@ -36,7 +38,12 @@ function Harness() {
   const [filter,setFilter] = useState('')
   const [nonce,setNonce] = useState(0)
   window.change = {setRoot,setVisible,setFilter,refresh:()=>setNonce(n=>n+1)}
-  return visible && <FileTree root={root} filter={filter} refreshNonce={nonce} onOpenFile={()=>{}} />
+  return visible && <div onDragOver={event=>{event.preventDefault();event.dataTransfer.dropEffect='copy'}}
+    onDrop={()=>drops.push(['sidebar'])}>
+    <FileTree root={root} filter={filter} refreshNonce={nonce} onOpenFile={()=>{}}
+      onMove={(src,dest)=>drops.push(['move',src,dest])}
+      onDropTo={(dest,files)=>drops.push(['copy',dest,...Array.from(files,file=>file.name)])} />
+  </div>
 }
 createRoot(document.getElementById('root')).render(<Harness />)
 window.uiCheck = async (only = '') => {
@@ -49,6 +56,59 @@ window.uiCheck = async (only = '') => {
   const click = async path => {await wait(()=>row(path),path);await change(()=>row(path).click())}
   const a=roots[0], evidence=a+'/evidence', nested=evidence+'/nested', brief=nested+'/brief.md'
   await click(evidence);await click(nested);await wait(()=>row(brief),'initial expanded folders')
+  if (!only || only==='drop') {
+    await click(evidence+'/empty')
+    const tree = document.querySelector('ul.tree')
+    const transfer = kind => {
+      const data = new DataTransfer()
+      data.effectAllowed='copyMove'
+      if (kind==='internal') data.setData(LT_PATH,brief)
+      else if (kind==='multiple') data.setData(LT_PATHS,JSON.stringify([brief,nested+'/other.md']))
+      else data.items.add(new File(['content'],kind==='native' ? 'staged.md' : 'external.md'))
+      return data
+    }
+    const drop = async (target,kind) => {
+      drops.length=0
+      const dataTransfer=transfer(kind)
+      await change(()=>target.dispatchEvent(new DragEvent('dragover',{bubbles:true,cancelable:true,dataTransfer})))
+      const effect=dataTransfer.dropEffect
+      await change(()=>target.dispatchEvent(new DragEvent('drop',{bubbles:true,cancelable:true,dataTransfer})))
+      return effect
+    }
+    for (const kind of ['internal','multiple','native','external']) {
+      for (const [label,target] of [
+        ['tree background',tree],
+        ['source file name',row(brief).querySelector('.tree-name')],
+        ['another file icon',row(nested+'/other.md').querySelector('.tree-icon')],
+        ['nested list background',row(nested).nextElementSibling],
+        ['empty child folder message',row(evidence+'/empty').nextElementSibling.querySelector('li')]
+      ]) {
+        const effect=await drop(target,kind)
+        check(drops.length===0,kind+' dropped on '+label+' must not move or copy files')
+        check(effect==='none',kind+' over '+label+' must show a rejected drop')
+      }
+      for (const [dest,target] of [[a,document.querySelector('.tree-root-drop')],[evidence,row(evidence).querySelector('.tree-name')]]) {
+        check(!!target,'An explicit destination must be available')
+        await drop(target,kind)
+        const expected=kind==='external' ? [['copy',dest,'external.md']] :
+          (kind==='multiple' ? [brief,nested+'/other.md'] : [brief]).map(src=>['move',src,dest])
+        check(JSON.stringify(drops)===JSON.stringify(expected),kind+' on an explicit folder must reach that folder exactly once')
+      }
+    }
+    const rootTarget=document.querySelector('.tree-root-drop')
+    await change(()=>rootTarget.dispatchEvent(new DragEvent('dragover',{bubbles:true,cancelable:true,dataTransfer:transfer('internal')})))
+    check(rootTarget.classList.contains('drop-target'),'Only the explicit root row highlights')
+    await drop(row(brief),'internal')
+    check(!rootTarget.classList.contains('drop-target'),'Leaving the root row clears its highlight')
+    await change(()=>window.change.setFilter('brief'))
+    await wait(()=>document.querySelector('.tree-search-row'),'search drop target')
+    await drop(document.querySelector('.tree-search-row .tree-name'),'native')
+    check(drops.length===0,'A native drop on a search result must not move the source to root')
+    await drop(document.querySelector('.tree-root-drop .tree-name'),'internal')
+    check(JSON.stringify(drops)===JSON.stringify([['move',brief,a]]),'Explicit root drop still works while searching')
+    await change(()=>window.change.setFilter(''))
+    await wait(()=>row(brief),'tree restored after drop checks')
+  }
   if (!only || only==='refresh') {
     failPath=evidence
     await change(()=>window.change.refresh())

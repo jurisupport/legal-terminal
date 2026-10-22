@@ -735,15 +735,10 @@ body {
   padding: 0;
   position: relative;
 }
-/* 최상위 트리: 빈 영역에도 드롭(루트로 이동)할 수 있게 높이 확보 */
+/* 최상위 트리: 빈 영역의 선택과 잘못된 드롭 차단을 위해 높이 확보 */
 .sidebar-body > .tree {
   min-height: 100%;
 }
-.tree.drop-target-root {
-  background: rgba(14, 99, 156, 0.12);
-  box-shadow: inset 0 0 0 1px var(--accent);
-}
-.tree.drop-target-root::after,
 .tree-row.drop-target::after {
   content: attr(data-drop-label);
   position: absolute;
@@ -763,9 +758,6 @@ body {
   line-height: 1.25;
   pointer-events: none;
   box-shadow: 0 6px 16px rgba(0, 0, 0, 0.35);
-}
-.tree.drop-target-root::after {
-  top: 8px;
 }
 .tree-row {
   display: flex;
@@ -2875,6 +2867,9 @@ body {
   box-shadow:
     inset 0 0 0 2px var(--accent),
     inset 0 0 46px color-mix(in srgb, var(--accent) 16%, transparent);
+}
+.agent-panel:has(> .agent-document-link) {
+  grid-template-rows: auto auto minmax(0, 1fr) auto auto;
 }
 .agent-drop-guide {
   left: 50%;

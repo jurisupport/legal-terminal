@@ -91,6 +91,9 @@ jobs:
       - name: Verify projects and unreleased desktop additions
         run: npm run verify:release-additions
 
+      - name: Verify browser tabs, inline media, and current workspace additions
+        run: npm run verify:release-new-ui
+
       - name: Verify cross-computer handover
         run: |
           npm run verify:workspace-sessions
@@ -128,6 +131,8 @@ jobs:
             .omx/state/general-chat-preview/**
             output/playwright/html-quote/**
             output/playwright/document-agent-memory/**
+            output/playwright/browser/**
+            output/playwright/agent-media/**
           if-no-files-found: warn
 
       - name: Package macOS
@@ -187,6 +192,9 @@ jobs:
       - name: Verify projects and unreleased desktop additions
         run: npm run verify:release-additions
 
+      - name: Verify browser tabs, inline media, and current workspace additions
+        run: npm run verify:release-new-ui
+
       - name: Verify restored Agent history
         run: npm run verify:agent-restored-history && npm run verify:agent-response-text
 
@@ -220,6 +228,8 @@ jobs:
             .omx/state/general-chat-preview/**
             output/playwright/html-quote/**
             output/playwright/document-agent-memory/**
+            output/playwright/browser/**
+            output/playwright/agent-media/**
           if-no-files-found: warn
 
       - name: Upload Windows

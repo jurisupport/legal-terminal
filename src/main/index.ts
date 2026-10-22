@@ -1,5 +1,7 @@
 import { openRemotionPreview, closeRemotionPreview, disposeRemotionPreviews } from './remotionPreview'
 import { registerFileDragIpc } from './fileDrag'
+import { registerBrowserIpc, disposeBrowsers } from './browser'
+import { registerClaudeRemoteControlIpc, disposeClaudeRemoteControls } from './claudeRemoteControl'
 import type { RemotionPreviewOptions } from '../shared/remotionPreview'
 import type { SendClaudeOptions } from '../shared/claudeAsk'
 import { GENERAL_CHAT_FOLDER } from '../shared/generalChat'
@@ -456,8 +458,12 @@ const recordTabTransfer = (payload: TabPayload, target: BrowserWindow): void => 
   }
 }
 
+const isBrowserTabPayload = (payload: TabPayload): boolean =>
+  payload.kind === 'doc' && (payload.tab as { kind?: unknown } | undefined)?.kind === 'browser'
+
 // 새 창 (새 작업환경)
 ipcMain.handle('window:new', (_e, opts?: NewWindowOptions) => {
+  if (opts?.tabs?.some(isBrowserTabPayload)) return
   const win = createWindow(false)
   const tabs = Array.isArray(opts?.tabs) ? opts.tabs.filter(Boolean) : []
   if (tabs.length) pendingReceive.set(win.webContents.id, tabs)
@@ -590,6 +596,7 @@ ipcMain.handle('tabs:dropOnTabBar', (e, target: TabDropTarget): TabMoveResult =>
     drag.completed = { action: 'moved', removeSource: false }
     return drag.completed
   }
+  if (isBrowserTabPayload(payload)) return { action: 'none' }
   recordTabTransfer(payload, targetWindow)
   targetWindow.webContents.send('tabs:receive', payload)
   targetWindow.focus()
@@ -685,6 +692,7 @@ ipcMain.handle('tabs:endDrag', async (): Promise<TabMoveResult> => {
         return { action: 'moved', removeSource: false }
       }
       // 다른 창 탭바 = 그 창으로 이동(merge)
+      if (isBrowserTabPayload(payload)) return { action: 'none' }
       recordTabTransfer(payload, w)
       w.webContents.send('tabs:receive', payload)
       w.focus()
@@ -692,6 +700,7 @@ ipcMain.handle('tabs:endDrag', async (): Promise<TabMoveResult> => {
     }
   }
   // 2) 탭바 밖(본문/창 밖 등)에서 놓임 → 새 전용 창으로 찢기
+  if (isBrowserTabPayload(drag.payload)) return { action: 'none' }
   const win = createWindow(false, kind === 'terminal' ? { termOnly: true } : { docOnly: true })
   recordTabTransfer(drag.payload, win)
   pendingReceive.set(win.webContents.id, [drag.payload])
@@ -1147,6 +1156,11 @@ ipcMain.handle('projects:setWorkingFolder', async (_event, id: string, folder: P
   return workspace
 })
 ipcMain.handle('projects:save', async (_event, input: ProjectInput) => {
+  const previous = input?.id ? (await projectStore.list()).find(project => project.id === input.id) : undefined
+  if (previous && (input.executionProfileId ?? '') === (previous.executionProfileId ?? '') &&
+      JSON.stringify(input.workingFolder ?? null) !== JSON.stringify(previous.workingFolder ?? null)) {
+    throw new Error('기존 프로젝트의 작업 폴더는 작업 폴더 변경 메뉴에서 지정해 주세요.')
+  }
   const project = await projectStore.save(input)
   notifyProjectsChanged()
   return project
@@ -3019,6 +3033,8 @@ ipcMain.handle('fs:readText', async (event, filePath: string) => {
 
 // ── PTY (터미널) IPC ──
 registerAgentIpc(ipcMain)
+registerBrowserIpc(ipcMain)
+registerClaudeRemoteControlIpc(ipcMain)
 
 ipcMain.handle('pty:create', (e, opts: CreatePtyOptions) => {
   createPty(opts, e.sender)
@@ -3031,6 +3047,8 @@ ipcMain.on('pty:detach', (e, { id }: { id: string }) => detachPty(id, e.sender))
 ipcMain.on('pty:kill', (_e, { id }: { id: string }) => killPty(id))
 
 app.on('before-quit', () => {
+  disposeClaudeRemoteControls()
+  disposeBrowsers()
   void disposeProjectMcp()
   disposeRemotionPreviews()
   disposeAgentSessions()

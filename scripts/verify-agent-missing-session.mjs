@@ -4,6 +4,7 @@ import { readFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { runInNewContext } from 'node:vm'
 import ts from 'typescript'
+import * as browserBridge from '../src/main/browserAgentBridge.ts'
 import * as execution from '../src/main/agent/agentExecutionLock.ts'
 import * as progress from '../src/main/agent/agentProgress.ts'
 import * as mcp from '../src/main/agent/agentMcp.ts'
@@ -81,6 +82,7 @@ function freshApp(scenarios, restoreInfo) {
       if (name === './remoteAgentTransport') return { RemoteAgentTransport: TestTransport, probeRemoteAgentRun: async () => restoreInfo }
       if (name === './agentExecutionLock') return execution
       if (name === './agentProgress') return progress
+      if (name === '../browserAgentBridge') return browserBridge
       if (name === './agentMcp') return mcp
       if (name === './projectMcpConfig') return projectMcp
       if (name === '../projectAgent') return { releaseProjectMcp: () => {}, disposeProjectMcp: () => {} }

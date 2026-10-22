@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { mkdtemp, mkdir, symlink, stat, writeFile, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { mediaSelectionKey, normalizeMediaSelection, mediaSelectionText, mediaMimeType, formatMediaTime } from '../src/shared/media.ts'
+import { imageMimeType, mediaSelectionKey, normalizeMediaSelection, mediaSelectionText, mediaMimeType, formatMediaTime } from '../src/shared/media.ts'
 import { publishMedia } from './publish-media.mjs'
 
 const selection = { sourcePath: 'ssh://sample/shorts/clip.mp4', versionId: 'first', time: 12.5, start: 12.3, end: 15.8 }
@@ -20,6 +20,11 @@ assert.match(mediaSelectionText(selection), /고유한 새 파일명/)
 assert.match(mediaSelectionText(selection), /\.legal-terminal\/media\.json/)
 assert.equal(mediaMimeType('/test/쇼츠.MP4'), 'video/mp4')
 assert.equal(mediaMimeType('/test/readme.md'), undefined)
+assert.equal(mediaMimeType('/test/image.png'), undefined, 'images still use the existing image document viewer')
+assert.equal(imageMimeType('ssh://host/test/그림.PNG'), 'image/png')
+assert.equal(imageMimeType('/test/photo.JPEG'), 'image/jpeg')
+assert.equal(imageMimeType('/test/vector.svg'), 'image/svg+xml')
+assert.equal(imageMimeType('/test/readme.html'), undefined)
 assert.equal(formatMediaTime(59.9996), '1:00.000')
 
 const root = await mkdtemp(join(tmpdir(), 'lt-media-publish-'))

@@ -28,7 +28,8 @@ async function electronCheck({ root, temp, output }) {
   // No provider process or model request is created by the UI fixture.
   ipcMain.removeHandler('agent:create')
   let agentCreated = false
-  ipcMain.handle('agent:create', () => { agentCreated = true; return { ok: true } })
+  let agentSessionId
+  ipcMain.handle('agent:create', (_event, options) => { agentCreated = true; agentSessionId = options.id; return { ok: true } })
   await app.whenReady()
   const pause = ms => new Promise(resolve => setTimeout(resolve, ms))
   let win
@@ -99,6 +100,28 @@ async function electronCheck({ root, temp, output }) {
     assert.equal(capture[0], 255)
     assert.equal(capture[1], 216)
     checks.push('Canvas capture with real protocol CORS and saved JPEG attachment in Agent input')
+
+    await wait("document.querySelector('.agent-attachments.pending .agent-media-preview img')?.naturalWidth>0", 'Captured frame appears directly in Agent input')
+    assert.equal(await run("return document.querySelectorAll('.agent-attachments.pending .agent-media-preview video').length"), 0, 'Quoting a movie does not auto-load its full file')
+    await run(`const card=[...document.querySelectorAll('.agent-attachments.pending .agent-media-preview')].find(item=>item.dataset.mediaPath===${JSON.stringify(sample)});[...card.querySelectorAll('button')].find(button=>button.textContent==='미리보기 불러오기').click();`)
+    await wait("document.querySelector('.agent-attachments.pending .agent-media-preview video')?.readyState>=3 && !document.querySelector('.agent-attachments.pending .agent-media-preview video')?.seeking", 'Quoted video plays inside Agent input')
+    const inline = await run("const video=document.querySelector('.agent-attachments.pending .agent-media-preview video'); return {time:video.currentTime,paused:video.paused,url:video.src}")
+    assert.ok(Math.abs(inline.time - .9) < .02, 'inline quote preserves the selected timestamp')
+    assert.equal(inline.paused, true, 'inline quoted media does not autoplay')
+    assert.match(inline.url, /^lt-media:\/\/snapshot\//)
+    checks.push('Inline image decoding, explicit video loading, immutable quoted time and no autoplay')
+
+    const imagePath = path.join(path.dirname(sample), '.legal-terminal/media-context', captures[0])
+    const answerId = 'inline-media-answer'
+    win.webContents.send('agent:event', { type: 'message:assistant_delta', sessionId: agentSessionId, messageId: answerId,
+      text: `확인할 파일입니다.\n\n![선택한 장면](<${imagePath}>)\n\n[인용 영상](<${sample}>)` })
+    win.webContents.send('agent:event', { type: 'message:assistant_done', sessionId: agentSessionId, messageId: answerId })
+    await wait("document.querySelectorAll('.agent-msg.assistant .agent-media-preview').length===2", 'Assistant media references become inline cards')
+    await run("document.querySelector('.agent-msg.assistant .agent-media-preview')?.scrollIntoView({block:'center'})")
+    await wait("document.querySelector('.agent-msg.assistant .agent-media-preview img')?.naturalWidth>0", 'Assistant image link resolves through actual media protocol')
+    assert.equal(await run("return document.querySelectorAll('.agent-msg.assistant video').length"), 0, 'Assistant movie reference waits for activation')
+    await screenshot('agent-inline-media')
+    checks.push('Assistant Markdown image and video links display in the conversation')
 
     win.unmaximize()
     win.setSize(1280, 800)

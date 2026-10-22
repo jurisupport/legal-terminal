@@ -24,6 +24,9 @@ import AgentPanel, {
 } from './agent/AgentPanel'
 import InlineSelectionCommand from './agent/InlineSelectionCommand'
 import { preloadSessionTranscripts } from './agent/transcriptCache'
+import { BrowserPanel } from './agent/BrowserPanel'
+import { ClaudeRemoteControlPanel } from './agent/ClaudeRemoteControlPanel'
+import type { RemoteControlConnection } from '../../shared/claudeRemoteControl'
 import {
   expandSessionSearchLimit,
   matchesSearch,
@@ -323,7 +326,9 @@ const sshConnFromProfile = (profile: SshProfile): SshConn => ({
 })
 
 interface DocTab {
+  remoteControlConnection?: RemoteControlConnection
   mediaState?: MediaViewState
+  browserAgentId?: string
   id: string
   title: string
   kind:
@@ -334,6 +339,8 @@ interface DocTab {
     | 'pdf'
     | 'image'
     | 'media'
+    | 'browser'
+    | 'remote-control'
     | 'hwp'
     | 'docx'
     | 'csv'
@@ -711,6 +718,8 @@ const docKindStatus = (kind: DocTab['kind']): string | undefined => {
       return 'PDF'
     case 'image':
       return '이미지'
+    case 'browser':
+      return '브라우저'
     case 'hwp':
       return 'HWP'
     case 'docx':
@@ -1226,6 +1235,9 @@ const toDocTab = (tab: WorkspaceDocTabPayload): DocTab | null => {
 }
 
 const docTabDragPayload = (tab: DocTab, side: DockSide = docSide(tab)): TabPayload | undefined => {
+  if (tab.kind === 'browser' && tab.browserAgentId) return {
+    kind: 'doc', side, tab: { id: tab.id, title: tab.title, kind: 'browser', browserAgentId: tab.browserAgentId, caseTabId: tab.caseTabId, side }
+  }
   if (!tab.path || !RESTORABLE_DOC_KINDS.has(tab.kind) || tab.kind === 'settings') return undefined
   const doc: DocumentTabPayload = {
     id: tab.id,
@@ -2101,6 +2113,27 @@ export default function App(): JSX.Element {
       activeWork: { ...activeWork, [side]: key }
     })
   }
+  const openAgentBrowser = (agent: TermTab): void => {
+    const existing = docTabsRef.current.find(tab => tab.kind === 'browser' && tab.browserAgentId === agent.id)
+    const side = existing ? docSide(existing) : otherSide(termSide(agent))
+    const id = existing?.id ?? `browser-${agent.id}`
+    if (!existing) setDocTabs(tabs => tabs.some(tab => tab.id === id) ? tabs : [...tabs, { id, title: `브라우저 · ${agent.title}`, kind: 'browser', browserAgentId: agent.id, caseTabId: agent.caseTabId, side }])
+    if (agent.caseTabId) setActiveCaseTabId(agent.caseTabId)
+    setMode('explorer')
+    if (termOnly) setExplorerVisible(false)
+    setActiveDoc(id)
+    setWorkActive(side, docKey(id))
+  }
+  const openClaudeRemoteControl = (connection?: RemoteControlConnection): void => {
+    const id = connection ? `claude-remote-${connection.id}` : 'claude-remote-connections'
+    const existing = docTabsRef.current.find(tab => tab.id === id)
+    const side = existing ? docSide(existing) : 'left'
+    const tab: DocTab = { id, title: connection?.label ?? '원격 제어', kind: 'remote-control', remoteControlConnection: connection, side }
+    setDocTabs(tabs => existing ? tabs.map(item => item.id === id ? tab : item) : [...tabs, tab])
+    setMode('explorer')
+    setActiveDoc(id)
+    setWorkActive(side, docKey(id))
+  }
   const moveDocToSide = (id: string, side: DockSide): void => {
     setDocTabs((tabs) => tabs.map((t) => (t.id === id ? { ...t, side } : t)))
     setActiveDoc(id)
@@ -2661,7 +2694,7 @@ export default function App(): JSX.Element {
       records: t.recordsFolder,
       suggestedRecords: t.suggestedRecords,
       suggestedRecordOptions: t.suggestedRecordOptions,
-      name: t.title,
+      name: caseTabsRef.current.find((tab) => tab.id === t.caseTabId)?.name ?? t.title,
       meta: {
         contextKind: t.contextKind,
         projectId: t.projectId,
@@ -2739,7 +2772,7 @@ export default function App(): JSX.Element {
     source?.caseTabId || activeCaseTabId || (currentCase ? resolveCaseTabId(currentCase) : undefined)
   const visibleInActiveCase = (caseTabIdValue?: string): boolean =>
     docOnly || termOnly || (caseTabIdValue ?? '') === activeCaseTabId
-  const isSharedDocTab = (tab: DocTab): boolean => tab.kind === 'settings'
+  const isSharedDocTab = (tab: DocTab): boolean => tab.kind === 'settings' || tab.kind === 'remote-control'
   const isDocVisibleInActiveCase = (tab: DocTab): boolean =>
     isSharedDocTab(tab) || visibleInActiveCase(caseIdForDoc(tab))
   const updateCaseTabActivity = (
@@ -2813,6 +2846,12 @@ export default function App(): JSX.Element {
       return
     }
     const payload = p.tab
+    if (payload?.kind === 'browser') {
+      // Browser views share the linked agent's ownership; only move an existing tab in this window.
+      const existing = docTabsRef.current.find(tab => tab.id === payload.id && tab.kind === 'browser' && tab.browserAgentId === payload.browserAgentId)
+      if (existing && termTabsRef.current.some(term => term.id === existing.browserAgentId && isAgentTab(term))) moveDocToSide(existing.id, payload.side ?? p.side ?? docSide(existing))
+      return
+    }
     const path = payload?.path ?? p.path
     const side = payload?.side ?? p.side ?? 'left'
     const rawKind = isRestorableDocKind(payload?.kind)
@@ -2892,27 +2931,33 @@ export default function App(): JSX.Element {
     void window.lt.sessions.remember(sessionRememberInput(term, sessionId, title, mtime)).catch(() => {})
   }
 
-  // claude 세션 제목(ai-title)을 주기적으로 읽어 탭 이름에 반영 (수동 변경한 탭 제외)
-  const termKey = termTabs.map((t) => t.id + ':' + t.cwd).join('|')
+  // Agent 제목은 각 세션에서 읽고, 일반 터미널만 transcript를 조회한다.
+  const termKey = termTabs.map((t) => [t.id, t.cwd, t.kind, t.agentProvider].join(':')).join('|')
   useEffect(() => {
     if (termTabs.length === 0) return
     let alive = true
     const tick = (): void => {
-      termTabs.forEach((t) => {
-        if (t.renamed || t.ssh) return // 원격 transcript 조회는 세션 목록을 열 때만 수행
-        // 이 터미널이 시작된 이후의 세션만 매칭 (과거 세션 제목 방지)
-        window.lt.sessions.current(t.cwd, (t.createdAt ?? 0) - 3000, t.ssh).then((r) => {
+      termTabsRef.current.forEach((t) => {
+        if (t.renamed || (!isAgentTab(t) && t.ssh)) return
+        const current = isAgentTab(t)
+          ? window.lt.agent.snapshot(t.id).then((result) => result.ok && result.session
+            ? { sessionId: result.session.resumeSessionId, title: result.session.sessionTitle }
+            : null)
+          : window.lt.sessions.current(t.cwd, (t.createdAt ?? 0) - 3000, t.ssh)
+        current.then((r) => {
           if (!alive || !r) return
-          rememberSessionForTerm(t, r.sessionId, r.title)
+          if (r.sessionId) rememberSessionForTerm(t, r.sessionId, r.title)
           if (!r.title) return
           setTermTabs((tabs) =>
             tabs.map((x) =>
-              x.id === t.id && !x.renamed && x.sessionTitle !== r.title
+              x.id === t.id && !x.renamed && x.kind === t.kind &&
+                x.agentProvider === t.agentProvider && x.resumeSessionId === t.resumeSessionId &&
+                x.sessionTitle !== r.title
                 ? { ...x, sessionTitle: r.title }
                 : x
             )
           )
-        })
+        }).catch(() => {})
       })
     }
     tick()
@@ -3679,10 +3724,9 @@ export default function App(): JSX.Element {
       openGeneralChat()
       return undefined
     }
-    const title = cur?.title ?? currentCase?.name ?? cwd.split(/[\\/]/).pop() ?? '세션'
     const tab: TermTab = {
       id: newId(),
-      title,
+      title: '새 대화',
       kind: 'agent',
       caseTabId: cur?.caseTabId ?? currentCaseTabIdForNewTab(cur),
       cwd,
@@ -3939,7 +3983,8 @@ export default function App(): JSX.Element {
       docOnly || termOnly || (caseId ?? '') === activeCaseTabIdRef.current
     const visibleTerms = termTabsRef.current.filter((term) => inActiveCase(caseIdForTerm(term)))
     const visibleDocs = docTabsRef.current.filter((doc) => isSharedDocTab(doc) || inActiveCase(caseIdForDoc(doc)))
-    const closingKeys = new Set([...ids].map(termKeyOf))
+    const linkedBrowserIds = new Set(docTabsRef.current.filter(doc => doc.kind === 'browser' && doc.browserAgentId && ids.has(doc.browserAgentId)).map(doc => doc.id))
+    const closingKeys = new Set<WorkTabKey>([...[...ids].map(termKeyOf), ...[...linkedBrowserIds].map(docKey)])
     const nextWork: Partial<Record<DockSide, WorkTabKey | ''>> = {}
     for (const side of ['left', 'right'] as const) {
       const sideKeys = workKeysForSide(visibleDocs, visibleTerms, side)
@@ -3957,6 +4002,7 @@ export default function App(): JSX.Element {
     })
     termTabsRef.current = termTabsRef.current.filter((term) => !ids.has(term.id))
     setTermTabs((tabs) => tabs.filter((tab) => !ids.has(tab.id)))
+    if (linkedBrowserIds.size) setDocTabs(tabs => closeTabs(tabs, linkedBrowserIds, activeDoc, setActiveDoc, visibleDocs))
     setDocumentAgentTabs((links) => Object.fromEntries(Object.entries(links).filter(([, agentId]) => !ids.has(agentId))))
     setTermBracketedPasteMode((m) => {
       const n = { ...m }
@@ -4475,7 +4521,7 @@ export default function App(): JSX.Element {
     doc && visibleTermTabs.find((term): term is TermTab & { kind: 'agent' } =>
       term.id === documentAgentTabs[documentAgentKey(doc)] && isAgentTab(term))
   const documentLinkForAgent = (term: TermTab) =>
-    activeDocTab && !['welcome', 'settings', 'diff'].includes(activeDocTab.kind)
+    activeDocTab && !['welcome', 'settings', 'diff', 'browser', 'remote-control'].includes(activeDocTab.kind)
       ? {
           title: activeDocTab.title,
           checked: documentAgentTabs[documentAgentKey(activeDocTab)] === term.id,
@@ -8179,6 +8225,21 @@ export default function App(): JSX.Element {
     <>
       {!tab && <Empty label="열린 문서가 없습니다" actionLabel="새 문서" onAction={() => addDoc('left')} />}
       {tab?.kind === 'welcome' && <Welcome recent={recent} onOpen={openRecent} summary={todoSummary} />}
+      {tab?.kind === 'remote-control' && <ClaudeRemoteControlPanel
+        key={tab.id}
+        connection={tab.remoteControlConnection}
+        visible={visibleDocTabs.some(doc => doc.id === tab.id) && activeWorkKeyForSide(docSide(tab)) === docKey(tab.id) && (!projectManagementVisible || projectAgentVisible)}
+        onOpen={openClaudeRemoteControl}
+        onRemove={(id) => { void closeDoc(`claude-remote-${id}`) }}
+      />}
+      {tab?.kind === 'browser' && (() => {
+        const agent = termTabs.find(term => term.id === tab.browserAgentId && isAgentTab(term))
+        return agent ? <div className="browser-workspace" data-browser-agent-id={agent.id}>
+          <BrowserPanel agentSessionId={agent.id} profileId={agent.profileId} ssh={agent.ssh}
+            visible={visibleDocTabs.some(doc => doc.id === tab.id) && activeWorkKeyForSide(docSide(tab)) === docKey(tab.id) && (!projectManagementVisible || projectAgentVisible)}
+            onClose={() => { void closeDoc(tab.id) }} />
+        </div> : <Empty label="연결된 대화가 닫혔습니다" actionLabel="브라우저 탭 닫기" onAction={() => { void closeDoc(tab.id) }} />
+      })()}
       {tab?.kind === 'file' && tab.path && (
         isHtmlPath(tab.path) ? (
           <HtmlView key={tab.path} path={tab.path} onAsk={askClaude}
@@ -8588,6 +8649,7 @@ export default function App(): JSX.Element {
                 onOpenTerminal={() => addTermSame(termSide(t), t.id, { reuseAgentTab: true })}
                 onOpenDiff={(request) => openAgentDiff(request, caseIdForTerm(t))}
                 onOpenFile={(path, title) => openFile(path, title ?? fileNameFromPath(path), 'left', t.caseTabId)}
+                onOpenBrowser={() => openAgentBrowser(t)}
                 onOpenAttachmentSource={openAgentAttachmentSource}
                 onPrepareAttachment={prepareAgentAttachmentForSend}
               />
@@ -8705,7 +8767,7 @@ export default function App(): JSX.Element {
       ...docs.map((t) => ({
         id: docKey(t.id),
         title: t.title,
-        tooltip: t.path,
+        tooltip: t.kind === 'browser' ? '연결된 대화의 브라우저 · 이 창 안에서 좌우로 이동할 수 있습니다.' : t.path,
         path: t.path,
         dirty: dirtyDocs.has(t.id),
         renamable: t.kind === 'mdview' || t.kind === 'markdown',
@@ -8743,13 +8805,15 @@ export default function App(): JSX.Element {
     const activeDocForPane =
       activeParsed?.kind === 'doc' ? docs.find((t) => t.id === activeParsed.id) : undefined
     const mountedDocs = [...docs, ...docTabs.filter((tab) =>
-      tab.kind === 'media' && docSide(tab) === side && !docs.some((item) => item.id === tab.id)
+      (tab.kind === 'media' || tab.kind === 'browser' || tab.kind === 'remote-control') && docSide(tab) === side && !docs.some((item) => item.id === tab.id)
     )].filter(
       (t) =>
         t.id === activeDocForPane?.id ||
         t.kind === 'mdview' ||
         t.kind === 'markdown' ||
         t.kind === 'media' ||
+        t.kind === 'browser' ||
+        t.kind === 'remote-control' ||
         t.kind === 'hearing'
     )
     const visibleTermId = activeParsed?.kind === 'terminal' ? activeParsed.id : ''
@@ -9001,6 +9065,7 @@ export default function App(): JSX.Element {
                   onOpenTerminal={() => addTermSame(side, t.id, { reuseAgentTab: true })}
                   onOpenDiff={(request) => openAgentDiff(request, caseIdForTerm(t))}
                   onOpenFile={(path, title) => openFile(path, title ?? fileNameFromPath(path), 'left', t.caseTabId)}
+                  onOpenBrowser={() => openAgentBrowser(t)}
                   onOpenAttachmentSource={openAgentAttachmentSource}
                   onPrepareAttachment={prepareAgentAttachmentForSend}
                 />
@@ -9310,7 +9375,7 @@ export default function App(): JSX.Element {
     )
   }
 
-  if (termOnly) {
+  if (termOnly && !docTabs.some(tab => tab.kind === 'browser' || tab.kind === 'remote-control')) {
     return (
       <div className="shell-terminalonly" {...shellDragProps}>
         {terminalPanel}
@@ -9487,6 +9552,9 @@ export default function App(): JSX.Element {
           </button>
           <button className="general-chat-button" type="button" disabled={!generalChatDirectory && !generalChatError} title={generalChatError || undefined} onClick={openGeneralChat}>
             일반 질문
+          </button>
+          <button className="general-chat-button" type="button" onClick={() => openClaudeRemoteControl()}>
+            원격 제어
           </button>
           {sidebarView === 'cases' ? (
             <CaseSidebar
@@ -14156,7 +14224,7 @@ function RemoteFolderPicker({
   const canUsePathInput = pathInput.trim().length > 0
   const syncPath = (pathInput.trim() || cwd).trim()
   const canSyncOneDrive = looksLikeOneDrivePath(syncPath)
-  const syncFolderLabel = title.includes('소송기록') ? '소송기록 폴더' : '사건폴더'
+  const syncFolderLabel = title.includes('소송기록') ? '소송기록 폴더' : title.includes('참고') ? '참고 자료 폴더' : '사건폴더'
   const quickStartPoints = profileRemoteStartPoints({ ...profile, quickStartPaths })
   const currentQuickStartSaved = quickStartPaths.some(
     (path) => remoteStartPointKey(path) === remoteStartPointKey(cwd)

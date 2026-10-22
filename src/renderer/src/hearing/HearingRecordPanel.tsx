@@ -913,6 +913,8 @@ export default function HearingRecordPanel({
       const selection = dictationSelectionRef.current
       const session = recordingSessionRef.current
       const currentRecord = latestRecordRef.current
+      // Keep cancellation marks even if the user switches records while this request is queued.
+      const deletedEntryIds = deletedEntryIdsRef.current
       const entry: HearingEntry = {
         id: newId('entry'),
         speakerId: currentRecord.activeSpeakerId,
@@ -948,7 +950,8 @@ export default function HearingRecordPanel({
         }))
         try {
           if (session.diarize) await previousDiarization
-          if (!latestRecordRef.current.entries.some((item) => item.id === entry.id)) return
+          // React may not have committed the new row yet; only an explicit deletion cancels it.
+          if (deletedEntryIds.has(entry.id)) return
           const audio = new Uint8Array(await new Blob(chunks, { type: mimeType }).arrayBuffer())
           if (audio.byteLength === 0) throw new Error('녹음된 음성이 없습니다.')
           const speaker = currentRecord.speakers.find(
@@ -1234,7 +1237,7 @@ export default function HearingRecordPanel({
       const previousPath = loadedPathRef.current
       const keepPending = shouldKeepPendingRecord(previousPath, path)
       if (!keepPending) {
-        deletedEntryIdsRef.current.clear()
+        deletedEntryIdsRef.current = new Set()
         removedSpeakerIdsRef.current.clear()
         renamedSpeakerLabelsRef.current.clear()
         speakerReferencesRef.current.clear()
@@ -1392,7 +1395,7 @@ export default function HearingRecordPanel({
         nextPath = pathJoin(dir, `${date}-${seq}_${caseNo}.hearing.json`)
       }
     }
-    deletedEntryIdsRef.current.clear()
+    deletedEntryIdsRef.current = new Set()
     removedSpeakerIdsRef.current.clear()
     renamedSpeakerLabelsRef.current.clear()
     speakerReferencesRef.current.clear()

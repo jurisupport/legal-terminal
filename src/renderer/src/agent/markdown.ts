@@ -1,6 +1,6 @@
 // Agent 응답 마크다운 렌더링·복사 파이프라인. highlight.js는 core+주요 언어만 등록해 번들을 줄인다.
 import DOMPurify from 'dompurify'
-import { marked } from 'marked'
+import { marked, type Renderer } from 'marked'
 import hljs from 'highlight.js/lib/core'
 import bash from 'highlight.js/lib/languages/bash'
 import css from 'highlight.js/lib/languages/css'
@@ -42,8 +42,8 @@ export type AgentCopyMode = 'rich' | 'markdown' | 'text'
 
 const HIGHLIGHT_CODE_LIMIT = 20_000
 
-export function renderMarkdown(text: string): string {
-  const html = marked.parse(text, { gfm: true, breaks: true }) as string
+export function renderMarkdown(text: string, renderer?: Renderer): string {
+  const html = marked.parse(text, { gfm: true, breaks: true, renderer }) as string
   return DOMPurify.sanitize(html, {
     USE_PROFILES: { html: true },
     ADD_ATTR: ['target', 'rel']
@@ -72,9 +72,9 @@ function highlightCodeElement(code: HTMLElement, language: string | undefined): 
   }
 }
 
-export function renderMarkdownForDisplay(text: string): string {
+export function renderMarkdownForDisplay(text: string, renderer?: Renderer): string {
   const host = document.createElement('div')
-  host.innerHTML = renderMarkdown(text)
+  host.innerHTML = renderMarkdown(text, renderer)
   const codeBlocks = Array.from(host.querySelectorAll('pre'))
   codeBlocks.forEach((pre, index) => {
     if (!(pre instanceof HTMLPreElement) || pre.closest('.agent-code-block')) return

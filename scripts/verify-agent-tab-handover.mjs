@@ -518,8 +518,9 @@ try {
   const codexCalls = []
   const codex = vm.createContext({
     opts: { id: 'codex-tab', cwd, resumeSessionId: 'existing-thread' }, provider: 'codex', source: 'ssh',
+    clipForTitlePrompt: (value = '', limit) => value.slice(0, limit),
     emptyTokenUsage: () => ({}), assertManagedAccount: () => {}, startCodexProcess: () => {},
-    ensureCodexInitialized: async () => {}, codexMaybeModel: () => ({}),
+    ensureCodexInitialized: async () => {}, codexMaybeModel: () => ({}), codexSessionConfig: () => undefined,
     codexApprovalPolicy: () => 'on-request', codexSandboxMode: () => 'workspace-write', emit: () => {},
     asRecord: (value) => value, stringValue: (value) => typeof value === 'string' ? value : undefined,
     codexRequest: async (_session, method, payload) => { codexCalls.push({ method, payload }); return { thread: { id: 'existing-thread' } } }

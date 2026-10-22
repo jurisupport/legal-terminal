@@ -10,7 +10,7 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const temp = await fs.mkdtemp(path.join(os.tmpdir(), 'project-ui-'))
 const screenshotDir = path.join(os.tmpdir(), 'legal-terminal-project-preview')
 const claudeAuthSmoke = process.argv.includes('--claude-auth')
-const remoteAgentSmoke = process.argv.includes('--remote-agent')
+const remoteAgentSmoke = process.argv.includes('--remote-agent') || process.argv.includes('--remote')
 const projectFolderRaces = process.argv.includes('--project-folder-races')
 const projectFolderIdentity = process.argv.includes('--project-folder-identity') || projectFolderRaces
 const folderFocus = process.argv.find(arg => arg.startsWith('--folder-focus='))?.split('=')[1] ?? ''
@@ -24,6 +24,12 @@ function runApp({ root, temp, screenshotDir, agentSmoke, claudeAuthSmoke, remote
   const { app, BrowserWindow, ipcMain, session } = require('electron')
   const fs = require('node:fs'), path = require('node:path'), assert = require('node:assert/strict')
   const calls = [], errors = []
+  const storeModule = { exports: {} }
+  const ts = require(path.join(root, 'node_modules/typescript'))
+  require('node:vm').runInNewContext(ts.transpileModule(fs.readFileSync(path.join(root, 'src/main/projectStore.ts'), 'utf8'), {
+    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 }
+  }).outputText, { exports: storeModule.exports, require })
+  const remoteProjectStore = new storeModule.exports.ProjectStore(path.join(temp, 'profile', 'projects.json'))
   const agentProvider = claudeAuthSmoke ? 'claude' : 'codex'
   const agents = new Map(), workspaces = new Map()
   const caseDir = path.join(temp, 'case-a')
@@ -75,9 +81,14 @@ function runApp({ root, temp, screenshotDir, agentSmoke, claudeAuthSmoke, remote
       let result
       if (remoteIdentity) {
         const [id, folder, expectedUpdatedAt] = args
-        const current = JSON.parse(fs.readFileSync(path.join(temp, 'profile', 'projects.json'), 'utf8')).projects.find(project => project.id === id)
-        const project = await handlers.get('projects:save')(event, { ...current, expectedUpdatedAt, workingFolder: folder })
+        const current = (await remoteProjectStore.list()).find(project => project.id === id)
+        assert.ok(current, 'remote fixture targets an existing project')
+        assert.equal(current.executionProfileId, sharedProfile.id)
+        assert.ok(folder.path.startsWith(`ssh://${sharedProfile.id}/`), 'remote fixture preserves the selected execution server')
+        // Keep remote I/O synthetic while exercising the real store's CAS and atomic save.
+        const project = await remoteProjectStore.save({ ...current, expectedUpdatedAt, workingFolder: folder })
         result = { project, cwd: folder.path.replace(/^ssh:\/\/[^/]+/, ''), profileId: sharedProfile.id, ssh: { host: sharedProfile.host, user: sharedProfile.user } }
+        for (const window of BrowserWindow.getAllWindows()) window.webContents.send('projects:changed')
       } else result = await handler(event, ...args)
       for (const [id, agent] of agents) if (agent.workspaceContext?.projectId === result.project.id) agents.set(id, { ...agent, cwd: result.cwd })
       if (holdWorkingFolder) {
@@ -218,7 +229,7 @@ function runApp({ root, temp, screenshotDir, agentSmoke, claudeAuthSmoke, remote
         await fill('notes', '프로젝트의 작업 위치는 그대로 유지')
         if (remoteIdentity) await fill('executionProfileId', sharedProfile.id)
         await evaluate(`void (window.identityProjectEditor = document.querySelector('.project-editor'))`)
-        await click('폴더 추가')
+        await click('자료 폴더 연결')
         if (remoteIdentity) await selectRemoteReference()
         await wait(() => evaluate(`document.querySelectorAll('.project-folder-option').length === 1`), 'existing case linked from project settings')
         assert.equal(await evaluate(`document.querySelector('.project-editor') === window.identityProjectEditor`), true, 'choosing a known case folder keeps the same project form')
@@ -231,6 +242,11 @@ function runApp({ root, temp, screenshotDir, agentSmoke, claudeAuthSmoke, remote
         await click('프로젝트 만들기')
         await wait(() => evaluate(`!!document.querySelector('.project-detail')`), 'identity project saved')
         const project = (await evaluate('window.lt.projects.list()'))[0]
+        await assert.rejects(handlers.get('projects:save')({ sender: win.webContents }, {
+          ...project, expectedUpdatedAt: project.updatedAt,
+          workingFolder: { name: '우회 변경', path: referencePath }
+        }), /작업 폴더 변경 메뉴/, 'ordinary project edits cannot bypass the dedicated working-folder mutation')
+        assert.deepEqual((await evaluate('window.lt.projects.list()'))[0], project, 'rejected general saves preserve project data')
         const caseKey = workspaceKey({ cwd: expectedCwd, ...(remoteIdentity ? { profileId: sharedProfile.id, ssh: { host: sharedProfile.host, user: sharedProfile.user } } : {}) })
         const existingCase = { version: 1, savedAt: new Date().toISOString(), mode: 'explorer', workspaceOpen: true,
           currentCase: { drafts: expectedCwd, name: 'A사 거래대금 청구' }, docs: [],
@@ -400,7 +416,7 @@ function runApp({ root, temp, screenshotDir, agentSmoke, claudeAuthSmoke, remote
         await fill('notes', '저장하지 않은 프로젝트 설명 유지')
         await evaluate(`void (window.projectEditorBeforePick = document.querySelector('.project-editor'))`)
         if (!remote) holdFolder = true
-        await click('폴더 추가')
+        await click('자료 폴더 연결')
         await wait(() => evaluate(`!!document.querySelector('.conn-menu')`), 'reference folder source chooser')
         if (remote) {
           await evaluate(`document.querySelectorAll('.conn-menu .conn-row')[1].click()`)
@@ -460,13 +476,13 @@ function runApp({ root, temp, screenshotDir, agentSmoke, claudeAuthSmoke, remote
       await fill('notes', '계약서와 거래명세를 기준으로 공통 사실관계를 정리합니다.')
       await evaluate(`document.querySelectorAll('.project-case-option input[type="checkbox"]').forEach(el => el.click())`)
       cancelFolder = true
-      await click('폴더 추가')
+      await click('자료 폴더 연결')
       await evaluate('new Promise(resolve => setTimeout(resolve, 100))')
       assert.equal(await evaluate(`document.querySelectorAll('.project-folder-option').length`), 0, 'cancelling folder picker leaves context unchanged')
       cancelFolder = false
-      await click('폴더 추가')
+      await click('자료 폴더 연결')
       await wait(() => evaluate(`document.querySelectorAll('.project-folder-option').length === 1`), 'folder context added')
-      await click('폴더 추가')
+      await click('자료 폴더 연결')
       await evaluate('new Promise(resolve => setTimeout(resolve, 100))')
       assert.equal(await evaluate(`document.querySelectorAll('.project-folder-option').length`), 1, 'duplicate folder context deduplicated')
       await evaluate(`document.querySelector('.case-management-nav button').click()`)
@@ -643,6 +659,29 @@ function runApp({ root, temp, screenshotDir, agentSmoke, claudeAuthSmoke, remote
         app.exit(0)
         return
       }
+      for (const [field, label] of [['goal', '공통 목표'], ['nextAction', '다음 행동'], ['notes', '공통 메모']]) {
+        const before = (await evaluate('window.lt.projects.list()'))[0]
+        await evaluate(`document.querySelector('[aria-label="${label} 수정"]').click()`)
+        await wait(() => evaluate(`!!document.querySelector('.project-inline-editor [name="${field}"]')`), 'inline field editor')
+        const revised = `${before[field]} (직접 수정)`
+        await fill(field, revised)
+        if (field === 'notes') {
+          failSave = true
+          await click('저장')
+          await wait(() => evaluate(`document.querySelector('.project-inline-editor')?.textContent.includes('검증용 저장 실패')`), 'inline save error')
+          assert.equal(await evaluate(`document.querySelector('.project-inline-editor [name="${field}"]').value`), revised, 'failed inline save preserves the draft')
+          failSave = false
+        }
+        await click('저장')
+        await wait(() => evaluate(`!document.querySelector('.project-inline-editor')`), 'inline edit saved')
+        const after = (await evaluate('window.lt.projects.list()'))[0]
+        assert.equal(after[field], revised)
+        assert.equal(after.id, before.id)
+        assert.deepEqual(after.cases, before.cases, 'inline editing preserves case links')
+        assert.deepEqual(after.folders, before.folders, 'inline editing preserves reference folders')
+        assert.equal(after.executionProfileId, before.executionProfileId)
+        assert.deepEqual(after.workingFolder, before.workingFolder)
+      }
       await capture('project-detail')
       await evaluate(`document.querySelector('.project-folder').scrollIntoView({ block: 'center' })`)
       await capture('project-context-folders')
@@ -702,7 +741,7 @@ function runApp({ root, temp, screenshotDir, agentSmoke, claudeAuthSmoke, remote
       assert.equal(fs.readFileSync(path.join(contextDir, 'contract.txt'), 'utf8'), 'keep this context')
       await click('+ 새 프로젝트')
       await fill('name', '판례 리서치 자료')
-      await click('폴더 추가')
+      await click('자료 폴더 연결')
       await wait(() => evaluate(`document.querySelectorAll('.project-folder-option').length === 1`), 'folder-only project context')
       await click('프로젝트 만들기')
       await wait(() => evaluate(`!!document.querySelector('.project-detail')`), 'folder-only project saved')
@@ -717,7 +756,7 @@ function runApp({ root, temp, screenshotDir, agentSmoke, claudeAuthSmoke, remote
       assert.equal(fs.readFileSync(path.join(contextDir, 'contract.txt'), 'utf8'), 'keep this context')
       pickedFolder = { path: caseDir, name: '사건 폴더 참조' }
       await click('프로젝트 수정')
-      await click('폴더 추가')
+      await click('자료 폴더 연결')
       await wait(() => evaluate(`document.querySelectorAll('.project-folder-option').length === 1`), 'existing case folder as reference')
       await click('변경사항 저장')
       await wait(() => evaluate(`!!document.querySelector('.project-folder')`), 'existing folder reference saved')
@@ -729,7 +768,7 @@ function runApp({ root, temp, screenshotDir, agentSmoke, claudeAuthSmoke, remote
       assert.equal(await evaluate(`[...document.querySelectorAll('.project-case-option strong')].some(el => el.textContent === 'A사 거래대금 청구')`), true, 'opening case as reference preserves its case identity')
       await evaluate(`document.querySelector('.project-folder-option button').click()`)
       profiles = [{ id: 'office', label: '사무실 서버', host: 'example.invalid', user: 'lawyer' }]
-      await click('폴더 추가')
+      await click('자료 폴더 연결')
       await wait(() => evaluate(`!!document.querySelector('.conn-menu')`), 'folder source chooser')
       await evaluate(`document.querySelectorAll('.conn-menu .conn-row')[1].click()`)
       await wait(() => evaluate(`document.querySelector('.remote-cwd')?.textContent === '/home/lawyer'`), 'remote folder browser')

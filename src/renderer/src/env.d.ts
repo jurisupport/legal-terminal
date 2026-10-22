@@ -1,4 +1,6 @@
 /// <reference types="vite/client" />
+import type { BrowserApi } from '../../shared/browser'
+import type { ClaudeRemoteControlApi, RemoteControlConnection } from '../../shared/claudeRemoteControl'
 import type { CaseManagementState, CaseManagementPatch } from '../../shared/caseManagement'
 import type { RemotionPreviewOptions, RemotionPreviewSelection, RemotionPreviewResult } from '../../shared/remotionPreview'
 import type { MediaApi, MediaSelection, MediaViewState } from '../../shared/media'
@@ -147,7 +149,8 @@ export interface TerminalTabPayload {
 export interface DocumentTabPayload {
   id?: string
   title: string
-  kind?: 'markdown' | 'mdview' | 'file' | 'pdf' | 'image' | 'hwp' | 'docx' | 'csv' | 'settings' | 'hearing' | 'media'
+  kind?: 'markdown' | 'mdview' | 'file' | 'pdf' | 'image' | 'hwp' | 'docx' | 'csv' | 'settings' | 'hearing' | 'media' | 'browser'
+  browserAgentId?: string
   caseTabId?: string
   path?: string
   side?: 'left' | 'right'
@@ -489,6 +492,7 @@ export interface OfficeProfileSettings {
 }
 
 export interface AppSettings {
+  claudeRemoteConnections?: RemoteControlConnection[]
   officeProfile?: OfficeProfileSettings
   draftsRoot?: string
   recordsRoot?: string
@@ -573,6 +577,7 @@ export interface AgentSessionSnapshot {
   id: string
   cwd: string
   title?: string
+  sessionTitle?: string
   provider: AgentProvider
   source: 'local' | 'ssh'
   resumeSessionId?: string
@@ -826,6 +831,8 @@ export interface TodoTerminalResult {
 }
 
 export interface LtApi {
+  claudeRemoteControl: ClaudeRemoteControlApi
+  browser: BrowserApi
   remotion: {
     open(options: RemotionPreviewOptions): Promise<RemotionPreviewResult>
     close(sessionId: string): Promise<void>

@@ -5,6 +5,8 @@ import type { MediaApi, MediaSelection, MediaViewState } from '../shared/media'
 import type { AgentWorkspaceContext } from '../shared/agentWorkspaceContext'
 import type { SendClaudeOptions } from '../shared/claudeAsk'
 import type { Project, ProjectFolderLink, ProjectInput } from '../shared/project'
+import type { BrowserApi } from '../shared/browser'
+import type { ClaudeRemoteControlApi, RemoteControlConnection } from '../shared/claudeRemoteControl'
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import type { SetupStatus } from '../main/setupCheck'
 
@@ -126,7 +128,8 @@ interface TerminalTabPayload {
 interface DocumentTabPayload {
   id?: string
   title: string
-  kind?: 'markdown' | 'mdview' | 'file' | 'pdf' | 'image' | 'hwp' | 'docx' | 'csv' | 'settings' | 'hearing' | 'media'
+  kind?: 'markdown' | 'mdview' | 'file' | 'pdf' | 'image' | 'hwp' | 'docx' | 'csv' | 'settings' | 'hearing' | 'media' | 'browser'
+  browserAgentId?: string
   caseTabId?: string
   path?: string
   side?: 'left' | 'right'
@@ -453,6 +456,7 @@ interface OfficeProfileSettings {
 }
 
 interface AppSettings {
+  claudeRemoteConnections?: RemoteControlConnection[]
   officeProfile?: OfficeProfileSettings
   draftsRoot?: string
   recordsRoot?: string
@@ -678,6 +682,7 @@ interface AgentSessionSnapshot {
   id: string
   cwd: string
   title?: string
+  sessionTitle?: string
   provider: AgentProvider
   source: 'local' | 'ssh'
   resumeSessionId?: string
@@ -792,7 +797,22 @@ const media: MediaApi = {
   }
 }
 
+const browser: BrowserApi = {
+  open: (input) => ipcRenderer.invoke('browser:open', input),
+  state: (id) => ipcRenderer.invoke('browser:state', id),
+  command: (id, command) => ipcRenderer.invoke('browser:command', id, command),
+  frame: (id, quality, etag) => ipcRenderer.invoke('browser:frame', id, quality, etag),
+  bounds: (id, bounds) => ipcRenderer.invoke('browser:bounds', id, bounds),
+  close: (id) => ipcRenderer.invoke('browser:close', id)
+}
+
 const api = {
+  claudeRemoteControl: {
+    open: (input) => ipcRenderer.invoke('claudeRemoteControl:open', input),
+    bounds: (id, bounds) => ipcRenderer.invoke('claudeRemoteControl:bounds', id, bounds),
+    close: (id) => ipcRenderer.invoke('claudeRemoteControl:close', id)
+  } satisfies ClaudeRemoteControlApi,
+  browser,
   media,
   remotion: {
     open: (options: RemotionPreviewOptions): Promise<RemotionPreviewResult> => ipcRenderer.invoke('remotion:open', options),

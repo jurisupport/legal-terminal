@@ -6,6 +6,7 @@ import { join } from 'node:path'
 import { EventEmitter } from 'node:events'
 import { runInNewContext } from 'node:vm'
 import ts from 'typescript'
+import * as browserBridge from '../src/main/browserAgentBridge.ts'
 import { RemoteAgentTransport, probeRemoteAgentRun } from '../src/main/agent/remoteAgentTransport.ts'
 import * as execution from '../src/main/agent/agentExecutionLock.ts'
 import * as progress from '../src/main/agent/agentProgress.ts'
@@ -144,6 +145,7 @@ function freshApp(usageHydration) {
         probeRemoteAgentRun: (opts) => probeRemoteAgentRun({ ...opts, ...options(opts.identity) }) }
       if (name === './agentExecutionLock') return execution
       if (name === './agentProgress') return progress
+      if (name === '../browserAgentBridge') return browserBridge
       if (name === './agentMcp') return mcp
       if (name === './projectMcpConfig') return projectMcp
       if (name === '../projectAgent') return { releaseProjectMcp: () => {}, disposeProjectMcp: () => {} }

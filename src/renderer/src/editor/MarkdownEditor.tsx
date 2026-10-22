@@ -14,6 +14,7 @@ import { markdown } from '@codemirror/lang-markdown'
 import { GFM } from '@lezer/markdown'
 import { syntaxHighlighting, defaultHighlightStyle } from '@codemirror/language'
 import { livePreview } from './livePreview'
+import MarkdownOutline, { markdownHeadings, type MarkdownHeading } from './MarkdownOutline'
 import { mdToPrintHtml, type PrintLayoutProfile } from './mdExport'
 import { findTextChanges, mergeTextAgainstBase } from './threeWayMerge'
 import FindBar from '../search/FindBar'
@@ -589,6 +590,29 @@ export default function MarkdownEditor({
   const findIndexRef = useRef(-1)
   const applyFindRef = useRef<(query: string, requestedIndex: number, moveSelection?: boolean) => void>(() => {})
   const openFindRef = useRef<() => void>(() => {})
+  const headingsRef = useRef<MarkdownHeading[]>([])
+  const [headings, setHeadings] = useState<MarkdownHeading[]>([])
+  const [activeHeading, setActiveHeading] = useState<number | null>(null)
+  const refreshHeadings = (text: string): void => {
+    if (plainText) return
+    headingsRef.current = markdownHeadings(text)
+    setHeadings(headingsRef.current)
+  }
+  const measureActiveHeading = (view: EditorView): void => {
+    if (plainText) return
+    view.requestMeasure({
+      key: headingsRef,
+      read: () => view.lineBlockAtHeight(Math.max(0, view.scrollDOM.getBoundingClientRect().top - view.documentTop + 24)).from,
+      write: (from) => {
+        let active = headingsRef.current[0]?.from ?? null
+        for (const heading of headingsRef.current) {
+          if (heading.from > from) break
+          active = heading.from
+        }
+        setActiveHeading(active)
+      }
+    })
+  }
   const reportScrollPosition = (view = viewRef.current): void => {
     const key = scrollKeyRef.current
     if (!view || !key) return
@@ -1137,10 +1161,13 @@ export default function MarkdownEditor({
               },
               scroll(_event, view) {
                 reportScrollPosition(view)
+                measureActiveHeading(view)
                 return false
               }
             }),
             EditorView.updateListener.of((u) => {
+              if (u.docChanged) refreshHeadings(u.state.doc.toString())
+              if (u.docChanged || u.geometryChanged) measureActiveHeading(u.view)
               if (u.selectionSet || u.docChanged || u.viewportChanged) emitEditorSelectionOverlay(u.view, draftId)
               if (u.docChanged) {
                 if (applyingRemoteRef.current) {
@@ -1179,6 +1206,8 @@ export default function MarkdownEditor({
         setHasDraftHistory(hasRestorableDraft)
         setSavedState(!restoredDraft && !!pathRef.current)
         viewRef.current = new EditorView({ state, parent: hostRef.current })
+        refreshHeadings(docText)
+        measureActiveHeading(viewRef.current)
         const restoredScroll = initialScrollRef.current
         if (restoredScroll && restoredScroll.key === scrollKeyRef.current) {
           const { top, left } = restoredScroll
@@ -1653,10 +1682,27 @@ export default function MarkdownEditor({
           </div>
         </div>
       )}
-      <div
-        className={`cm-host ${preview ? 'preview' : 'source'} ${remoteApplied ? 'remote-applied' : ''}`}
-        ref={hostRef}
-      />
+      <div className="markdown-body">
+        {!plainText && (
+          <MarkdownOutline
+            headings={headings}
+            active={activeHeading}
+            onNavigate={(heading) => {
+              const view = viewRef.current
+              if (!view) return
+              view.dispatch({
+                selection: { anchor: heading.from },
+                effects: EditorView.scrollIntoView(heading.from, { y: 'start', yMargin: 12 })
+              })
+              view.focus()
+            }}
+          />
+        )}
+        <div
+          className={`cm-host ${preview ? 'preview' : 'source'} ${remoteApplied ? 'remote-applied' : ''}`}
+          ref={hostRef}
+        />
+      </div>
     </div>
   )
 }

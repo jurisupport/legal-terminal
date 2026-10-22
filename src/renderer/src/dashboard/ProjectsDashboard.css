@@ -73,6 +73,13 @@
 .project-section-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .project-section-heading h2 { font-size: 21px; margin: 7px 0; }
 .project-section-heading h3, .project-notes h3 { margin: 0; font-size: 14px; }
+.project-focus > .project-section-heading { margin: 10px 0; }
+.project-notes > .project-section-heading { margin-bottom: 13px; }
+.project-notes > .project-section-heading h3 { margin: 0; }
+.project-inline-editor { scroll-margin-block: 16px; }
+.project-inline-editor .project-field { margin-bottom: 12px; }
+.project-inline-editor textarea { width: 100%; box-sizing: border-box; }
+.project-inline-editor .project-inline-error { margin-bottom: 12px; }
 .project-heading-with-count { display: flex; align-items: center; gap: 8px; }
 .project-count { color: var(--fg-muted); background: var(--bg-alt); border: 1px solid var(--border); padding: 3px 7px; border-radius: 5px; font-size: 11px; }
 .project-members-section > .project-muted { margin: 8px 0 16px; font-size: 12px; }
@@ -81,11 +88,21 @@
 .project-member + .project-member { border-top: 1px solid var(--border); }
 .project-folder, .project-folder-option { display: flex; align-items: center; gap: 14px; padding: 15px 17px; }
 .project-folder + .project-folder, .project-folder-option + .project-folder-option { border-top: 1px solid var(--border); }
+.project-folder { flex-wrap: wrap; }
+.project-folder > .dash-btn { margin-left: auto; }
 .project-folder-path { overflow-wrap: anywhere; user-select: text; }
-.project-folder-picker { margin-bottom: 25px; }
+.project-folder-picker { margin-bottom: 25px; scroll-margin-top: 12px; }
+.project-folder-picker > .project-section-heading { flex-wrap: wrap; }
 .project-folder-picker > .project-muted { font-size: 11px; margin: 8px 0 14px; }
 .project-folder-option { padding: 12px; background: var(--bg); }
 .project-folder-empty { padding: 16px; border: 1px dashed var(--border); border-radius: 6px; color: var(--fg-muted); font-size: 12px; }
+.project-workspace-section, .project-workspace-picker { margin: 0 0 24px; padding: 18px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-alt); scroll-margin-top: 12px; }
+.project-workspace-picker { border-color: color-mix(in srgb, var(--accent) 40%, var(--border)); }
+.project-workspace-section .project-section-heading, .project-workspace-picker .project-section-heading { flex-wrap: wrap; }
+.project-workspace-section > .project-muted, .project-workspace-picker > .project-muted { font-size: 12px; margin: 12px 0; }
+.project-workspace-section > .project-folder-path, .project-workspace-picker > .project-folder-path { padding: 12px; border-radius: 6px; background: var(--bg); font-size: 12px; line-height: 1.7; }
+.project-workspace-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin-top: 12px; }
+.project-workspace-notice { font-size: 11px; line-height: 1.7; color: var(--fg-muted); margin: 14px 0 0; }
 .project-member-icon { width: 32px; height: 34px; border: 1px solid var(--border); border-radius: 6px; color: var(--link); display: grid; place-items: center; flex-shrink: 0; }
 .project-member-info { display: flex; flex: 1; min-width: 0; flex-direction: column; gap: 5px; }
 .project-member-info strong { font-size: 13px; overflow-wrap: anywhere; }
@@ -112,7 +129,7 @@
 .project-field textarea { resize: vertical; }
 .project-field input::placeholder, .project-field textarea::placeholder { color: var(--fg-muted); }
 .project-field select { height: 42px; }
-.project-case-picker { padding-top: 2px; margin-bottom: 25px; }
+.project-case-picker { padding-top: 2px; margin-bottom: 25px; scroll-margin-top: 12px; }
 .project-case-picker > .project-muted { font-size: 11px; margin: 8px 0 14px; }
 .project-case-picker > .dash-search { width: 100%; box-sizing: border-box; padding: 10px; margin-bottom: 10px; }
 .project-case-options { max-height: 310px; overflow-y: auto; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); }
@@ -127,7 +144,9 @@
 .project-picker-empty, .project-case-options > .project-muted { padding: 12px; margin: 0; line-height: 1.6; color: var(--fg-muted); font-size: 12px; }
 .project-load-more { display: block; margin: 10px auto 0; }
 .project-connection-note { margin-bottom: 0 !important; }
-.project-form-footer { border-top: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center; padding-top: 20px; gap: 15px; }
+.project-form-footer { position: sticky; bottom: 0; z-index: 1; border-top: 1px solid var(--border); background: var(--bg-alt); padding: 14px 0; }
+.project-form-actions { display: flex; justify-content: space-between; align-items: center; gap: 15px; }
+.project-form-footer > .project-inline-error { margin: 0 0 12px; }
 .project-form-footer .project-muted { font-size: 11px; }
 @container (max-width: 650px) {
   .project-content { padding: 20px 16px 28px; }

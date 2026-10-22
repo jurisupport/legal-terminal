@@ -7,7 +7,7 @@ import { Readable, Transform } from 'stream'
 import { pipeline } from 'stream/promises'
 import { getSettings } from './settings'
 import { isRemote, makeRemote, parseRemote, rfsDownloadToFile, rfsMkdir, rfsReadBytes, rfsRealpath, rfsStat, rfsWriteBytes } from './remoteFs'
-import { mediaMimeType, type MediaChange, type MediaOpenInput, type MediaSnapshot, type MediaVersion } from '../shared/media'
+import { imageMimeType, mediaMimeType, type MediaChange, type MediaOpenInput, type MediaSnapshot, type MediaVersion } from '../shared/media'
 
 export const MEDIA_SCHEME = {
   scheme: 'lt-media',
@@ -38,6 +38,7 @@ let metadataQueue: Promise<unknown> = Promise.resolve()
 let cleanupTimer: ReturnType<typeof setTimeout> | undefined
 const cacheRoot = (): string => join(app.getPath('userData'), 'media-review')
 const filesRoot = (): string => join(cacheRoot(), 'files')
+const snapshotMimeType = (path: string): string | undefined => mediaMimeType(path) ?? imageMimeType(path)
 const signature = (s: Signature): string => `${s.size}:${s.mtimeMs}`
 const recordKey = (path: string, version: string): string => `${path}\0${version}`
 const fileName = (path: string, version: string): string => createHash('sha256').update(recordKey(path, version)).digest('hex') + '.media'
@@ -85,7 +86,7 @@ function ensureLoaded(): Promise<void> {
     if (index?.version === 1 && Array.isArray(index.records)) {
       for (const value of index.records) {
         if (!value || typeof value.sourcePath !== 'string' || !/^[a-f0-9]{64}$/.test(value.versionId) ||
-          value.file !== fileName(value.sourcePath, value.versionId) || value.mimeType !== mediaMimeType(value.sourcePath) ||
+          value.file !== fileName(value.sourcePath, value.versionId) || value.mimeType !== snapshotMimeType(value.sourcePath) ||
           !Number.isSafeInteger(value.size) || value.size <= 0 || !Number.isFinite(value.createdAt) ||
           !Number.isFinite(value.mtimeMs) || typeof value.signature !== 'string' || value.ephemeral) continue
         const exists = await stat(filePath(value)).then((s) => s.isFile() && s.size === value.size).catch(() => false)
@@ -189,7 +190,7 @@ async function download(path: string, before: Signature, transfer: Transfer): Pr
     })
     transfer.controller.signal.throwIfAborted()
     const result = isRemote(path)
-      ? await rfsDownloadToFile(path, temporary, { signal: transfer.controller.signal, onProgress: (p) => reportProgress(transfer, p.downloadedBytes, p.totalBytes ?? before.size) })
+      ? await rfsDownloadToFile(path, temporary, { signal: transfer.controller.signal, maxBytes: before.size, onProgress: (p) => reportProgress(transfer, p.downloadedBytes, p.totalBytes ?? before.size) })
       : await localSnapshot(path, temporary, before, transfer)
     if (signature(result) !== signature(before)) throw new Error('전송 중 원본 미디어가 변경되었습니다. 다시 시도하세요.')
     transfer.controller.signal.throwIfAborted()
@@ -213,7 +214,7 @@ async function download(path: string, before: Signature, transfer: Transfer): Pr
         return existing
       }
       const record: Record = {
-        versionId: result.sha256, sourcePath: path, size: result.size, mimeType: mediaMimeType(path)!,
+        versionId: result.sha256, sourcePath: path, size: result.size, mimeType: snapshotMimeType(path)!,
         mtimeMs: result.mtimeMs, createdAt: Date.now(), accessedAt: Date.now(), observedAt, signature: signature(result),
         file: fileName(path, result.sha256), ephemeral: isRemote(path) && (await getSettings()).remoteFileCache !== true
       }
@@ -241,9 +242,14 @@ function pin(sender: WebContents, record: Record): MediaSnapshot {
 
 async function openMedia(sender: WebContents, input: MediaOpenInput): Promise<MediaSnapshot> {
   const path = sourcePath(input?.path)
-  if (!mediaMimeType(path)) throw new Error('지원하는 미디어 확장자가 아닙니다.')
+  if (!snapshotMimeType(path)) throw new Error('지원하는 미디어 확장자가 아닙니다.')
   if (typeof input.requestId !== 'string' || !input.requestId || input.requestId.length > 200) throw new Error('미디어 요청 ID가 올바르지 않습니다.')
   if (input.versionId !== undefined && !/^[a-f0-9]{64}$/.test(input.versionId)) throw new Error('미디어 버전이 올바르지 않습니다.')
+  if (input.maxBytes !== undefined && (!Number.isSafeInteger(input.maxBytes) || input.maxBytes <= 0 || input.maxBytes > MAX_CACHE_BYTES)) throw new Error('미디어 크기 제한이 올바르지 않습니다.')
+  const withinLimit = (size: number): void => {
+    if (input.maxBytes !== undefined && size > input.maxBytes) throw new Error('자동 미리보기 크기를 초과했습니다. 파일 크기를 확인한 뒤 직접 불러오세요.')
+  }
+  const pinWithinLimit = (record: Record): MediaSnapshot => { withinLimit(record.size); return pin(sender, record) }
   const requestKey = `${sender.id}:${input.requestId}`
   if (requests.has(requestKey)) throw new Error('동일한 미디어 요청이 이미 진행 중입니다.')
   const controller = new AbortController()
@@ -258,7 +264,7 @@ async function openMedia(sender: WebContents, input: MediaOpenInput): Promise<Me
         if (!record || !(await stat(filePath(record)).then((s) => s.size === record.size).catch(() => false))) {
           throw new Error('이 미디어 버전은 만료되었습니다. 현재 원본을 별도로 열어 주세요.')
         }
-        return pin(sender, record)
+        return pinWithinLimit(record)
       })
     }
     let before: Signature
@@ -268,15 +274,16 @@ async function openMedia(sender: WebContents, input: MediaOpenInput): Promise<Me
         controller.signal.throwIfAborted()
         const previous = [...records.values()].filter((r) => r.sourcePath === path).sort((a, b) => b.observedAt - a.observedAt)[0]
         if (!previous || !(await stat(filePath(previous)).then((s) => s.size === previous.size).catch(() => false))) throw error
-        return pin(sender, previous)
+        return pinWithinLimit(previous)
       })
     }
     controller.signal.throwIfAborted()
+    withinLimit(before.size)
     if (!input.force) {
       const cached = await serialized(async () => {
         controller.signal.throwIfAborted()
         const record = [...records.values()].filter((r) => r.sourcePath === path && r.signature === signature(before)).sort((a, b) => b.observedAt - a.observedAt)[0]
-        return record && await stat(filePath(record)).then((s) => s.size === record.size).catch(() => false) ? pin(sender, record) : undefined
+        return record && await stat(filePath(record)).then((s) => s.size === record.size).catch(() => false) ? pinWithinLimit(record) : undefined
       })
       if (cached) return cached
     }
@@ -306,7 +313,7 @@ async function openMedia(sender: WebContents, input: MediaOpenInput): Promise<Me
       void current.promise.then(async (record) => {
         if (controller.signal.aborted) return
         try {
-          const snapshot = await serialized(async () => { controller.signal.throwIfAborted(); return pin(sender, record) })
+          const snapshot = await serialized(async () => { controller.signal.throwIfAborted(); return pinWithinLimit(record) })
           leave()
           resolveOpen(snapshot)
         } catch (error) { leave(); rejectOpen(error) }

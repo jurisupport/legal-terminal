@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { mkdir, open, readFile, rename, rm } from 'node:fs/promises'
-import { dirname, win32 } from 'node:path'
+import { basename, dirname, posix, win32 } from 'node:path'
 import type { Project, ProjectCaseLink, ProjectFolderLink, ProjectInput } from '../shared/project'
 
 function object(value: unknown): Record<string, unknown> {
@@ -30,8 +30,33 @@ function folderKey(path: string): string {
   return `${remote ? `ssh://${remote[1]}` : ''}${key.length < root.length ? root : key}`
 }
 
+export function normalizeProjectWorkspacePath(value: unknown): string {
+  const path = text(value, '프로젝트 작업 폴더', true)
+  if (path.includes('\0')) throw new Error('프로젝트 작업 폴더 경로를 확인해 주세요.')
+  if (path.startsWith('ssh://')) {
+    const remote = /^ssh:\/\/([^/\\\s?#@:%]+)(\/.*)$/s.exec(path)
+    if (!remote) throw new Error('원격 작업 폴더의 서버와 절대 경로를 확인해 주세요.')
+    const normalized = posix.normalize(remote[2])
+    return `ssh://${remote[1]}${normalized === '/' ? '/' : normalized.replace(/\/+$/, '')}`
+  }
+  const windows = /^[a-z]:[\\/]/i.test(path) || /^\\\\[^\\/]+[\\/][^\\/]+(?:[\\/]|$)/.test(path)
+  if (!windows && !path.startsWith('/')) {
+    throw new Error('프로젝트 작업 폴더의 로컬 절대 경로 또는 ssh:// 원격 경로를 확인해 주세요.')
+  }
+  const paths = windows ? win32 : posix
+  const normalized = paths.normalize(path)
+  const root = paths.parse(normalized).root
+  return normalized.length > root.length ? normalized.replace(windows ? /[\\/]+$/ : /\/+$/, '') : normalized
+}
+
 function inputFields(value: unknown): ProjectInput & Pick<Project, 'folders'> {
-  const row = object(value)
+  let row = object(value)
+  // Migrate the preview's workspace field into the released project identity model.
+  if (row.workspacePath !== undefined && row.workingFolder === undefined) {
+    const path = row.workspacePath === null ? undefined : normalizeProjectWorkspacePath(row.workspacePath)
+    row = { ...row, ...(path ? { workingFolder: { name: basename(path.replace(/\\/g, '/')) || path, path },
+      executionProfileId: /^ssh:\/\/([^/]+)\//.exec(path)?.[1] } : {}) }
+  }
   if (row.status !== 'active' && row.status !== 'completed') {
     throw new Error('프로젝트 상태를 확인해 주세요.')
   }

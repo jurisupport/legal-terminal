@@ -47,7 +47,7 @@ try {
   await writeFile(join(data, 'scan.png'), 'image bytes')
   await writeFile(join(data, 'document.pdf'), pdf('BT /F1 12 Tf 20 100 Td (Project evidence) Tj ET'))
   await writeFile(join(data, 'scan.pdf'), pdf(''))
-  configureProjectAgent({
+  const agentDependencies = {
     store, workspaceRoot: join(root, 'app', 'project-workspaces'), changed: () => changed++,
     remoteWorkspace: async (profileId, projectId) => {
       const ssh = executionProfiles[profileId]
@@ -80,7 +80,8 @@ try {
       : path.startsWith('ssh://') ? path : realpath(path),
     readBytes: async (path) => { if (path.startsWith('ssh://')) { remoteReads++; return remoteFiles.get(path) } return readFile(path) },
     officeText: (path) => `${path.endsWith('.docx') ? 'DOCX' : 'HWP'} 채권 회수 자료`
-  })
+  }
+  configureProjectAgent(agentDependencies)
   let project = await store.save({ ...base, cases: [
     { key: 'linked-case', name: '본안', jsId: 'case-1' },
     { key: 'remote-case', name: '원격 본안', jsId: 'case-1', profileId: 'office', remotePath: '/evidence' },
@@ -101,6 +102,7 @@ try {
   const selectedWorkspace = await getProjectWorkspace(selectedProject.id)
   assert.equal(selectedWorkspace.cwd, await realpath(selectedDirectory), 'explicitly selected local directory is the project execution cwd')
   assert.equal(selectedWorkspace.project.id, selectedProject.id)
+  assert.match(await getProjectAgentContext(selectedProject.id), /기존 자료를 읽고 사용자 요청에 따라/, 'chosen working folders retain writable task context')
   assert.equal(selectedWorkspace.project.name, base.name, 'the selected folder cannot replace project identity with a case name')
   assert.equal((await getProjectWorkspace(selectedProject.id)).cwd, selectedWorkspace.cwd, 'reopening uses the durable working folder')
   assert.deepEqual(await readdir(selectedDirectory), originalFiles, 'resolving a project folder adds no files to the existing case')
@@ -155,6 +157,39 @@ try {
     const result = await request(target, 'tools/call', { name, arguments: args })
     return { ...JSON.parse(result.content[0].text), failed: result.isError === true }
   }
+  for (const pendingProjectId of [project.id, other.id]) {
+    let releaseLookup, lookupEntered
+    const lookupGate = new Promise((resolve) => { releaseLookup = resolve })
+    const lookupStarted = new Promise((resolve) => { lookupEntered = resolve })
+    let holdNextLookup = true, oldActive = true, replacementCanWrite = true
+    configureProjectAgent({ ...agentDependencies, store: {
+      list: async () => {
+        if (holdNextLookup) {
+          holdNextLookup = false
+          lookupEntered()
+          await lookupGate
+        }
+        return store.list()
+      },
+      save: (input) => store.save(input)
+    } })
+    const raceSessionId = `provider-replacement-${pendingProjectId}`
+    const pendingAcquire = acquireProjectMcp(raceSessionId, pendingProjectId, { isActive: () => oldActive, canWrite: () => false })
+    await lookupStarted
+    const replacementEndpoint = await acquireProjectMcp(raceSessionId, project.id, { isActive: () => true, canWrite: () => replacementCanWrite })
+    oldActive = false
+    releaseLookup()
+    await assert.rejects(pendingAcquire, /프로젝트 대화 연결이 종료되었습니다/, 'an outdated acquire fails after its suspended project lookup')
+    assert.equal((await request(replacementEndpoint, 'tools/list')).tools.some((tool) => tool.name === 'project_record_note'), true,
+      'the old acquire cannot overwrite the replacement write permission or rotate its token')
+    replacementCanWrite = false
+    assert.equal((await request(replacementEndpoint, 'tools/list')).tools.some((tool) => tool.name === 'project_record_note'), false,
+      'the replacement keeps its own dynamic canWrite callback')
+    assert.equal((await call('project_context', {}, replacementEndpoint)).projectId, project.id,
+      'the replacement endpoint remains authenticated for its own project')
+    releaseProjectMcp(raceSessionId)
+  }
+  configureProjectAgent(agentDependencies)
   assert.equal((await request(connection, 'initialize', { protocolVersion: '2025-03-26' })).protocolVersion, '2025-03-26')
   const tools = (await request(connection, 'tools/list')).tools
   assert.equal(tools.length, 6)

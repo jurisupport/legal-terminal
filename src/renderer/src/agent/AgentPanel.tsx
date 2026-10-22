@@ -48,6 +48,7 @@ import {
 } from './diff'
 import { DiffPreview } from './DiffPreview'
 import { MarkdownMessage } from './MarkdownMessage'
+import { AgentAttachmentMedia } from './AgentMediaPreview'
 import { htmlToPlainText } from '../markdownClipboard'
 import { ToolRow, toolDisplayName, toolStepDisplay, type ProcessStep } from './ToolRow'
 import { activeSubAgentCount } from './subAgentStatus'
@@ -156,6 +157,7 @@ interface AgentPanelProps {
   onHandoffConsumed?: () => void
   onWorktreeFork?: () => void
   onOpenTerminal?: () => void
+  onOpenBrowser?: () => void
   onOpenDiff?: (request: AgentDiffOpenRequest) => void
   onOpenFile?: (path: string, title?: string) => void
   onOpenAttachmentSource?: (attachment: AgentAttachment) => void
@@ -1936,6 +1938,7 @@ export default function AgentPanel({
   onHandoffConsumed,
   onWorktreeFork,
   onOpenTerminal,
+  onOpenBrowser,
   onOpenDiff,
   onOpenFile,
   onOpenAttachmentSource,
@@ -3801,6 +3804,12 @@ export default function AgentPanel({
           </span>
         </div>
         <div className="agent-head-actions">
+          {onOpenBrowser && <button
+            type="button"
+            className="agent-browser-toggle"
+            title="작업 영역에서 브라우저 열기"
+            onClick={onOpenBrowser}
+          >브라우저</button>}
           {onFork && (
             <button
               className="agent-icon-btn"
@@ -4010,6 +4019,7 @@ export default function AgentPanel({
                             </span>
                           )
                         })}
+                        <AgentAttachmentMedia attachments={item.attachments} context={{ cwd, remote: !!ssh, profileId }} active={visible} onOpenFile={onOpenFile} onOpenSource={onOpenAttachmentSource} />
                       </div>
                     )}
                   </div>
@@ -4036,6 +4046,9 @@ export default function AgentPanel({
                       text={item.text}
                       streaming={item.status === 'streaming'}
                       onCopyCode={copyCodeBlock}
+                      mediaContext={{ cwd, remote: !!ssh, profileId }}
+                      active={visible}
+                      onOpenFile={onOpenFile}
                     />
                   )}
                   {cancelled && <div className="agent-msg-cancelled">중지됨</div>}
@@ -4373,6 +4386,7 @@ export default function AgentPanel({
                       </span>
                     )
                   })}
+                  <AgentAttachmentMedia attachments={item.attachments} context={{ cwd, remote: !!ssh, profileId }} active={visible} onOpenFile={onOpenFile} onOpenSource={onOpenAttachmentSource} />
                 </div>
               )}
               {item.kind === 'auth' && item.urls && item.urls.length > 0 && (
@@ -4835,6 +4849,7 @@ export default function AgentPanel({
                 </button>
               </span>
             ))}
+            <AgentAttachmentMedia attachments={attachments} context={{ cwd, remote: !!ssh, profileId }} active={visible} onOpenFile={onOpenFile} onOpenSource={onOpenAttachmentSource} />
           </div>
         )}
         <div className="agent-composer-bar">

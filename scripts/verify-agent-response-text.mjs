@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { runInNewContext } from 'node:vm'
 import ts from 'typescript'
+import * as browserBridge from '../src/main/browserAgentBridge.ts'
 import * as values from '../src/renderer/src/agent/values.ts'
 
 // Exercise provider events through the real renderer reducer, without a model call.
@@ -16,6 +17,7 @@ runInNewContext(ts.transpileModule(`${source}\nexport const check = { handleSdkM
   require: (name) => {
     if (name === '@anthropic-ai/claude-agent-sdk') return {}
     if (name === '../jurisupport') return { onAgentMcpAccountChange: () => {} }
+    if (name === '../browserAgentBridge') return browserBridge
     if (name === './agentMcp') return { managedToolName: () => undefined }
     if (name.startsWith('.')) return {}
     return require(name)

@@ -1,5 +1,5 @@
 import { Client, type ClientChannel, type SFTPWrapper, type Stats, type TcpConnectionDetails, utils } from 'ssh2'
-import { connect as connectSocket, type Socket } from 'net'
+import { connect as connectSocket, createServer, type Socket } from 'net'
 import { createHash, randomUUID } from 'crypto'
 import { open, readFile, rm } from 'fs/promises'
 import { existsSync } from 'fs'
@@ -509,7 +509,8 @@ export async function rfsForwardLocal(profileId: string, localUrl: string, onDis
   if (!dispatcher) {
     const ports = new Map<number, ForwardHandler>()
     dispatcher = { ports, pending: 0, dispatch: (details, accept, reject) => {
-      const handle = details.destIP === '127.0.0.1' ? ports.get(details.destPort) : undefined
+      const handle = details.destIP === '127.0.0.1' && ['127.0.0.1', '::1'].includes(details.srcIP) &&
+        Number.isInteger(details.srcPort) && details.srcPort > 0 && details.srcPort <= 65535 ? ports.get(details.destPort) : undefined
       if (handle) handle(accept, reject)
       else reject()
     } }
@@ -582,6 +583,78 @@ export async function rfsForwardLocal(profileId: string, localUrl: string, onDis
       })
     } catch (error) { close(); settled = true; reject(error) }
   })
+}
+
+/** Browser traffic gets its own loopback forward, so its byte meter excludes file transfers. */
+export async function rfsForwardRemotePort(profileId: string, remotePort: number): Promise<{
+  port: number
+  isAlive: () => boolean
+  traffic: () => { receivedBytes: number; sentBytes: number }
+  close: () => void
+}> {
+  if (!Number.isInteger(remotePort) || remotePort < 1 || remotePort > 65535) throw new Error('원격 브라우저 포트가 올바르지 않습니다.')
+  const connection = await getConnection(profileId)
+  await verifyProjectConnection(profileId, projectSsh(await getProfile(profileId)), connection)
+  const { client } = connection
+  let closed = false
+  let receivedBytes = 0
+  let sentBytes = 0
+  const sockets = new Set<Socket>()
+  const channels = new Set<ClientChannel>()
+  const server = createServer(socket => {
+    if (closed || sockets.size >= 16) { socket.destroy(); return }
+    sockets.add(socket)
+    socket.on('error', () => socket.destroy())
+    socket.once('close', () => sockets.delete(socket))
+    client.forwardOut('127.0.0.1', 0, '127.0.0.1', remotePort, (error, channel) => {
+      if (error || closed || socket.destroyed) { channel?.destroy(); socket.destroy(); return }
+      channels.add(channel)
+      const closePair = (): void => { channels.delete(channel); channel.destroy(); socket.destroy() }
+      channel.on('error', closePair).once('close', closePair)
+      socket.once('close', closePair)
+      channel.on('data', (data: Buffer) => { receivedBytes += data.length })
+      socket.on('data', (data: Buffer) => { sentBytes += data.length })
+      socket.pipe(channel).pipe(socket)
+    })
+  })
+  const close = (): void => {
+    if (closed) return
+    closed = true
+    client.removeListener('close', close).removeListener('end', close).removeListener('error', close)
+    for (const socket of sockets) socket.destroy()
+    for (const channel of channels) channel.destroy()
+    server.close()
+  }
+  client.on('close', close).on('end', close).on('error', close)
+  try {
+    const port = await new Promise<number>((resolve, reject) => {
+      server.once('error', reject)
+      server.listen(0, '127.0.0.1', () => {
+        const address = server.address()
+        if (closed || !address || typeof address === 'string') { reject(new Error('브라우저 연결이 종료되었습니다.')); return }
+        resolve(address.port)
+      })
+    })
+    server.on('error', close)
+    return { port, close, isAlive: () => !closed, traffic: () => ({ receivedBytes, sentBytes }) }
+  } catch (error) { close(); throw error }
+}
+
+export async function rfsBrowserExec(profileId: string, command: string): Promise<string> {
+  const connection = await getConnection(profileId)
+  await verifyProjectConnection(profileId, projectSsh(await getProfile(profileId)), connection)
+  const result = await execRemoteCommand(profileId, command, { timeoutMs: 60_000, timeoutMessage: '원격 브라우저 준비 시간이 초과되었습니다.' })
+  if (result.code !== 0) throw new Error(result.stderr.toString('utf8').trim().slice(-2000) || '원격 브라우저를 준비할 수 없습니다.')
+  if (result.stdout.length > 128_000) throw new Error('원격 브라우저 응답이 너무 큽니다.')
+  return result.stdout.toString('utf8')
+}
+
+// Use the shared SSH dispatcher so browser and project forwards can coexist.
+export async function rfsForwardLocalPort(profileId: string, localPort: number): Promise<{ port: number; isAlive: () => boolean; close: () => void }> {
+  if (!Number.isInteger(localPort) || localPort < 1 || localPort > 65535) throw new Error('유효한 로컬 포트가 필요합니다.')
+  let alive = true
+  const forward = await rfsForwardLocal(profileId, `http://127.0.0.1:${localPort}/`, () => { alive = false })
+  return { port: Number(new URL(forward.url).port), isAlive: () => alive, close: () => { alive = false; forward.close() } }
 }
 
 async function execRemoteCommand(
@@ -960,7 +1033,7 @@ function statIsDir(sftp: SFTPWrapper, path: string): Promise<boolean> {
 export async function rfsDownloadToFile(
   uri: string,
   destination: string,
-  options: { signal: AbortSignal; onProgress?: (progress: RfsReadProgress) => void }
+  options: { signal: AbortSignal; onProgress?: (progress: RfsReadProgress) => void; maxBytes?: number }
 ): Promise<{ size: number; mtimeMs: number; sha256: string }> {
   const { profileId, path } = parseRemote(uri)
   options.signal.throwIfAborted()
@@ -971,6 +1044,7 @@ export async function rfsDownloadToFile(
   const actualPath = await resolveRemotePath(sftp, path)
   const before = await sftpStat(sftp, actualPath)
   if (!before.isFile() || before.size <= 0) throw new Error('재생할 수 있는 일반 미디어 파일이 아닙니다.')
+  if (options.maxBytes !== undefined && (!Number.isSafeInteger(options.maxBytes) || options.maxBytes < 1 || before.size > options.maxBytes)) throw new Error('미디어가 요청한 전송 크기를 초과했습니다.')
   options.signal.throwIfAborted()
   const output = await open(destination, 'wx', 0o600)
   const input = sftp.createReadStream(actualPath)

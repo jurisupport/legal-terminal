@@ -39,12 +39,33 @@ assert.notEqual(linkedGeneralA.id, generalId, 'general questions are not absorbe
 const folderCase = { drafts: '/drafts/홍길동', name: '홍길동' }
 const linkedCase = { ...folderCase, meta: { jsId: 'case-1', caseNumber: '2026가단1', court: '서울중앙지방법원', division: '제55민사단독' } }
 const globalCase = { ...folderCase, meta: { contextKind: 'global' } }
+const projectCase = { ...folderCase, meta: { contextKind: 'project', projectId: 'project-1' } }
+const previousProjectTab = { ...actual.caseTabFromCurrentCase(projectCase), id: 'legacy-project-tab', activeTermId: 'old-conversation' }
+assert.equal(actual.upsertCaseTab([previousProjectTab], actual.caseTabFromCurrentCase(projectCase))[0].id, 'legacy-project-tab', 'reopening the same project folder retains existing tab identity')
+const movedProjectTab = actual.caseTabFromCurrentCase({ ...projectCase, drafts: '/drafts/new-workspace' })
+// Published working-folder assignment relocates the same project/conversation; a path change is not a new project.
+const relocatedProjectTabs = actual.upsertCaseTab([previousProjectTab], movedProjectTab)
+assert.equal(relocatedProjectTabs.length, 1, 'changing the local project working folder keeps its logical workspace')
+assert.equal(relocatedProjectTabs[0].id, previousProjectTab.id, 'folder assignment preserves the existing project tab')
+assert.equal(relocatedProjectTabs[0].activeTermId, 'old-conversation', 'folder assignment preserves the project conversation')
+assert.equal(relocatedProjectTabs[0].drafts, '/drafts/new-workspace', 'the project now uses its assigned working folder')
+assert.equal(movedProjectTab.id, actual.caseTabFromCurrentCase(projectCase).id, 'local project identity survives working-folder changes')
+assert.equal(actual.upsertCaseTab([previousProjectTab], actual.caseTabFromCurrentCase({
+  ...projectCase, meta: { contextKind: 'project', projectId: 'project-2' }
+})).length, 2, 'different projects remain separate even when they use the same folder')
+const remoteProject = { ...projectCase, profileId: 'ssh-project', ssh: { host: 'first-host', user: 'lawyer' }, remotePath: projectCase.drafts }
+assert.equal(actual.upsertCaseTab([previousProjectTab], actual.caseTabFromCurrentCase(remoteProject)).length, 2,
+  'local and remote project execution stay separate')
+assert.equal(actual.upsertCaseTab([actual.caseTabFromCurrentCase(remoteProject)], actual.caseTabFromCurrentCase({
+  ...remoteProject, ssh: { ...remoteProject.ssh, host: 'second-host' }
+})).length, 2, 'different execution hosts remain separate even when their profile label and project match')
 assert.notEqual(actual.caseTabFromCurrentCase(globalCase).id, actual.caseTabFromCurrentCase(folderCase).id)
 assert.equal(actual.upsertCaseTab([actual.caseTabFromCurrentCase(globalCase)], actual.caseTabFromCurrentCase(folderCase)).length, 2,
   'global work and a folder case using the same cwd must remain separate')
 let resumed
 const resumeHandlers = loadHandlers(['currentCaseFromTerm', 'openPastSession'], {
   currentCase: linkedCase,
+  caseTabsRef: { current: [] },
   termTabs: [{ id: 'wrong-existing', kind: 'agent', cwd: folderCase.drafts, resumeSessionId: 'same-session', jsId: 'case-1', caseNumber: '2026가단1' }],
   resolveAgentContextKind,
   termSide: () => 'right', isAgentTab: (term) => term.kind === 'agent',
