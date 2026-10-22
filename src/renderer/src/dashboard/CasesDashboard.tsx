@@ -89,7 +89,8 @@ export default function CasesDashboard({
     cwd: string,
     title?: string,
     profileId?: string,
-    newTab?: boolean
+    newTab?: boolean,
+    originDevice?: CaseSessionSummary['originDevice']
   ) => void
   onChanged?: () => void
 }): JSX.Element {
@@ -115,6 +116,7 @@ export default function CasesDashboard({
   const [folders, setFolders] = useState<FolderActivity[]>([]) // 사건 미연결 폴더 작업
   const [historyOpen, setHistoryOpen] = useState<Record<string, boolean>>({}) // 펼친 작업 이력
   const searchTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const loadVersion = useRef(0)
   const defaultOpenProfile = defaultOpenProfileId
     ? sshProfiles.find((p) => p.id === defaultOpenProfileId)
     : undefined
@@ -133,6 +135,8 @@ export default function CasesDashboard({
   }
 
   const load = (q?: string, refresh = false, nextStatus = status): void => {
+    if (searchTimer.current) clearTimeout(searchTimer.current)
+    const version = ++loadVersion.current
     const params = caseListParams(q, refresh, nextStatus)
     const cached = refresh ? undefined : readCachedCaseList(params)
     if (cached) {
@@ -146,12 +150,13 @@ export default function CasesDashboard({
     setErr('')
     listCasesCached(params)
       .then((r) => {
+        if (version !== loadVersion.current) return
         if (r.ok) {
           setCases(r.cases ?? [])
           refreshActivity(r.cases ?? [])
         } else setErr(r.error ?? '불러오기 실패')
       })
-      .finally(() => setLoading(false))
+      .finally(() => { if (version === loadVersion.current) setLoading(false) })
   }
 
   useEffect(() => {
@@ -170,7 +175,11 @@ export default function CasesDashboard({
       void window.lt.js.tokenStatus().then((st) => applyTokenStatus(st, true))
     }
     window.addEventListener(JS_TOKEN_UPDATED_EVENT, onTokenUpdated)
-    return () => window.removeEventListener(JS_TOKEN_UPDATED_EVENT, onTokenUpdated)
+    return () => {
+      if (searchTimer.current) clearTimeout(searchTimer.current)
+      loadVersion.current += 1
+      window.removeEventListener(JS_TOKEN_UPDATED_EVENT, onTokenUpdated)
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
@@ -198,6 +207,7 @@ export default function CasesDashboard({
 
   const onSearchChange = (v: string): void => {
     setSearch(v)
+    loadVersion.current += 1
     if (searchTimer.current) clearTimeout(searchTimer.current)
     searchTimer.current = setTimeout(() => load(v.trim()), 350)
   }
@@ -243,6 +253,7 @@ export default function CasesDashboard({
         target,
         {
           sessionId: e.sessionId,
+          originDevice: e.originDevice,
           title: e.title,
           mtime: e.lastTs,
           cwd: e.cwd,
@@ -253,7 +264,7 @@ export default function CasesDashboard({
         options?.newTab
       )
     } else if (onResumePath && e.cwd)
-      onResumePath(e.sessionId, e.cwd, e.title, e.profileId, options?.newTab)
+      onResumePath(e.sessionId, e.cwd, e.title, e.profileId, options?.newTab, e.originDevice)
   }
 
   // ── 토큰 미설정: 연결 + 가입 유도 ──
@@ -295,7 +306,8 @@ export default function CasesDashboard({
       <div className="dash-bar">
         <input
           className="dash-search"
-          placeholder="사건번호·사건명·당사자 검색"
+          placeholder="사건번호·사건명·당사자·법원·재판부 검색"
+          aria-label="사건 검색"
           value={search}
           onChange={(e) => onSearchChange(e.target.value)}
         />
@@ -493,7 +505,7 @@ export default function CasesDashboard({
                     className={`ca-line${onResumePath && !f.profileId ? ' clickable' : ''}`}
                     title={onResumePath && !f.profileId ? '클릭 → 이 세션 이어서 열기' : s.title}
                     onClick={() => {
-                      if (onResumePath && !f.profileId) onResumePath(s.sessionId, s.cwd ?? f.cwd, s.title)
+                      if (onResumePath && !f.profileId) onResumePath(s.sessionId, s.cwd ?? f.cwd, s.title, undefined, undefined, s.originDevice)
                     }}
                   >
                     <span className="ca-time">{agoLabel(s.mtime)}</span> ·{' '}

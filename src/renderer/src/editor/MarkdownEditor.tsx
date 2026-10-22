@@ -14,8 +14,9 @@ import { markdown } from '@codemirror/lang-markdown'
 import { GFM } from '@lezer/markdown'
 import { syntaxHighlighting, defaultHighlightStyle } from '@codemirror/language'
 import { livePreview } from './livePreview'
+import MarkdownOutline, { markdownHeadings, type MarkdownHeading } from './MarkdownOutline'
 import { mdToPrintHtml, type PrintLayoutProfile } from './mdExport'
-import { mergeTextAgainstBase } from './threeWayMerge'
+import { findTextChanges, mergeTextAgainstBase } from './threeWayMerge'
 import FindBar from '../search/FindBar'
 import {
   IconAlignCenter,
@@ -62,12 +63,6 @@ export interface TextSelectionOverlayDetail {
   editorDraftId?: string
   range?: MarkdownSelectionRange
   count: number
-}
-
-interface TextReplacement {
-  from: number
-  to: number
-  insert: string
 }
 
 interface FileSignature {
@@ -227,26 +222,6 @@ function draftHistoryPreview(content: string): string {
     .map((part) => part.trim())
     .find(Boolean)
   return line || '(빈 문서)'
-}
-
-function findMinimalReplacement(current: string, next: string): TextReplacement | null {
-  if (current === next) return null
-  const limit = Math.min(current.length, next.length)
-  let prefix = 0
-  while (prefix < limit && current.charCodeAt(prefix) === next.charCodeAt(prefix)) prefix++
-
-  let currentSuffix = current.length
-  let nextSuffix = next.length
-  while (
-    currentSuffix > prefix &&
-    nextSuffix > prefix &&
-    current.charCodeAt(currentSuffix - 1) === next.charCodeAt(nextSuffix - 1)
-  ) {
-    currentSuffix--
-    nextSuffix--
-  }
-
-  return { from: prefix, to: currentSuffix, insert: next.slice(prefix, nextSuffix) }
 }
 
 function fileSignatureOf(value: { size: number; mtimeMs?: number }): FileSignature {
@@ -594,6 +569,29 @@ export default function MarkdownEditor({
   const findIndexRef = useRef(-1)
   const applyFindRef = useRef<(query: string, requestedIndex: number, moveSelection?: boolean) => void>(() => {})
   const openFindRef = useRef<() => void>(() => {})
+  const headingsRef = useRef<MarkdownHeading[]>([])
+  const [headings, setHeadings] = useState<MarkdownHeading[]>([])
+  const [activeHeading, setActiveHeading] = useState<number | null>(null)
+  const refreshHeadings = (text: string): void => {
+    if (plainText) return
+    headingsRef.current = markdownHeadings(text)
+    setHeadings(headingsRef.current)
+  }
+  const measureActiveHeading = (view: EditorView): void => {
+    if (plainText) return
+    view.requestMeasure({
+      key: headingsRef,
+      read: () => view.lineBlockAtHeight(Math.max(0, view.scrollDOM.getBoundingClientRect().top - view.documentTop + 24)).from,
+      write: (from) => {
+        let active = headingsRef.current[0]?.from ?? null
+        for (const heading of headingsRef.current) {
+          if (heading.from > from) break
+          active = heading.from
+        }
+        setActiveHeading(active)
+      }
+    })
+  }
   const reportScrollPosition = (view = viewRef.current): void => {
     const key = scrollKeyRef.current
     if (!view || !key) return
@@ -1032,8 +1030,8 @@ export default function MarkdownEditor({
     const v = viewRef.current
     if (!v) return
     const current = v.state.doc.toString()
-    const replacement = findMinimalReplacement(current, entry.content)
-    if (replacement) {
+    const replacement = findTextChanges(current, entry.content)
+    if (replacement.length) {
       const viewport = captureViewport(v)
       const selectionBookmark = bookmarkSelection(v.state)
       const previewTransaction = v.state.update({ changes: replacement })
@@ -1142,10 +1140,13 @@ export default function MarkdownEditor({
               },
               scroll(_event, view) {
                 reportScrollPosition(view)
+                measureActiveHeading(view)
                 return false
               }
             }),
             EditorView.updateListener.of((u) => {
+              if (u.docChanged) refreshHeadings(u.state.doc.toString())
+              if (u.docChanged || u.geometryChanged) measureActiveHeading(u.view)
               if (u.selectionSet || u.docChanged || u.viewportChanged) emitEditorSelectionOverlay(u.view, draftId)
               if (u.docChanged) {
                 if (applyingRemoteRef.current) {
@@ -1184,6 +1185,8 @@ export default function MarkdownEditor({
         setHasDraftHistory(hasRestorableDraft)
         setSavedState(!restoredDraft && !!pathRef.current)
         viewRef.current = new EditorView({ state, parent: hostRef.current })
+        refreshHeadings(docText)
+        measureActiveHeading(viewRef.current)
         const restoredScroll = initialScrollRef.current
         if (restoredScroll && restoredScroll.key === scrollKeyRef.current) {
           const { top, left } = restoredScroll
@@ -1269,8 +1272,8 @@ export default function MarkdownEditor({
                 setSavedState(mergedText === next && !!pathRef.current)
                 setDirtyState(mergedText !== next)
 
-                const replacement = findMinimalReplacement(current, mergedText)
-                if (replacement) {
+                const replacement = findTextChanges(current, mergedText)
+                if (replacement.length) {
                   const viewport = captureViewport(v)
                   const selectionBookmark = bookmarkSelection(v.state)
                   const previewTransaction = v.state.update({ changes: replacement })
@@ -1290,8 +1293,8 @@ export default function MarkdownEditor({
                 pulseRemoteApplied(merged.remoteHunkCount > 0 ? '외부 수정 병합됨' : '외부 수정 반영됨')
                 return
               }
-              const replacement = findMinimalReplacement(current, next)
-              if (!replacement) return
+              const replacement = findTextChanges(current, next)
+              if (!replacement.length) return
               const viewport = captureViewport(v)
               const selectionBookmark = bookmarkSelection(v.state)
               const previewTransaction = v.state.update({ changes: replacement })
@@ -1658,10 +1661,27 @@ export default function MarkdownEditor({
           </div>
         </div>
       )}
-      <div
-        className={`cm-host ${preview ? 'preview' : 'source'} ${remoteApplied ? 'remote-applied' : ''}`}
-        ref={hostRef}
-      />
+      <div className="markdown-body">
+        {!plainText && (
+          <MarkdownOutline
+            headings={headings}
+            active={activeHeading}
+            onNavigate={(heading) => {
+              const view = viewRef.current
+              if (!view) return
+              view.dispatch({
+                selection: { anchor: heading.from },
+                effects: EditorView.scrollIntoView(heading.from, { y: 'start', yMargin: 12 })
+              })
+              view.focus()
+            }}
+          />
+        )}
+        <div
+          className={`cm-host ${preview ? 'preview' : 'source'} ${remoteApplied ? 'remote-applied' : ''}`}
+          ref={hostRef}
+        />
+      </div>
     </div>
   )
 }

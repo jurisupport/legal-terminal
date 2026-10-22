@@ -64,6 +64,7 @@ interface TranscriptHead {
 }
 
 export interface SessionListEntry {
+  originDevice?: 'android' | 'desktop'
   sessionId: string
   title?: string
   transcriptTitle?: string
@@ -84,6 +85,7 @@ interface ParsedHead {
 }
 
 export interface SessionSearchContext {
+  projectId?: string
   query?: string
   displayTitle?: string
   caseNumber?: string
@@ -97,6 +99,7 @@ export interface SessionSearchContext {
 }
 
 export interface SessionMetaInput extends SessionSearchContext {
+  originDevice?: 'android' | 'desktop'
   sessionId: string
   cwd: string
   title?: string
@@ -115,6 +118,7 @@ export interface SessionTranscriptMessage {
   id: string
   role: 'user' | 'assistant'
   text: string
+  timestamp?: number
 }
 
 export interface SessionTranscript {
@@ -322,6 +326,7 @@ function buildSessionMeta(input: SessionMetaInput): SessionMeta {
   const key = sessionKey(input.sessionId, input.ssh)
   return {
     ...input,
+    originDevice: input.originDevice === 'android' || input.originDevice === 'desktop' ? input.originDevice : undefined,
     key,
     sourceKey: sourceKey(input.ssh),
     folderName,
@@ -348,6 +353,8 @@ export async function rememberSessionMeta(raw: SessionMetaInput): Promise<{ ok: 
         ? buildSessionMeta({
             ...previous,
             ...input,
+            originDevice: previous.originDevice === 'android' || previous.originDevice === 'desktop'
+              ? previous.originDevice : input.originDevice,
             displayTitle: input.displayTitle || previous.displayTitle,
             title: input.title || previous.title,
             transcriptTitle: input.transcriptTitle || previous.transcriptTitle,
@@ -377,6 +384,7 @@ function matchIndexedSession(
   cwdAliases = new Set([comparablePath(cwd)])
 ): boolean {
   if (pathMatchesAny(meta.cwd, cwdAliases)) return true
+  if (context?.projectId) return false
   const needles = [
     context?.query,
     context?.caseNumber,
@@ -408,6 +416,7 @@ function decorateSession(
   const title = displayTitle || meta?.title || transcriptTitle
   return {
     sessionId: session.sessionId,
+    originDevice: meta?.originDevice === 'android' || meta?.originDevice === 'desktop' ? meta.originDevice : undefined,
     title,
     transcriptTitle,
     mtime: session.mtime || meta?.mtime || 0,
@@ -493,6 +502,11 @@ for e in incoming:
         cur = merged.get(k)
         if (cur is None or cur == "") and v is not None:
             merged[k] = v
+    origin = next((v for v in (older.get("originDevice"), newer.get("originDevice")) if v in ("android", "desktop")), None)
+    if origin:
+        merged["originDevice"] = origin
+    else:
+        merged.pop("originDevice", None)
     by[e["key"]] = merged
 entries = sorted(by.values(), key=lambda x: x["updatedAt"], reverse=True)[:${MAX_SESSION_INDEX_ENTRIES}]
 tmp = path + "." + str(os.getpid()) + ".tmp"
@@ -982,10 +996,14 @@ function parseTranscriptMessages(
     const text = extractTranscriptText(message.content).trim()
     const visibleText = role === 'user' ? cleanUserInstruction(text, true) : text
     if (!visibleText) continue
+    const timestamp = typeof entry.timestamp === 'number'
+      ? entry.timestamp
+      : typeof entry.timestamp === 'string' ? Date.parse(entry.timestamp) : NaN
     messages.push({
       id: `${sessionId}-history-${lineIndex}`,
       role,
-      text: clipTranscriptText(visibleText)
+      text: clipTranscriptText(visibleText),
+      ...(Number.isFinite(timestamp) ? { timestamp } : {})
     })
   }
   return { messages: messages.slice(-MAX_SESSION_HISTORY_MESSAGES), model }

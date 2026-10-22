@@ -1,4 +1,10 @@
 import assert from 'node:assert/strict'
+import { readFileSync, mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { execFileSync } from 'node:child_process'
+import vm from 'node:vm'
+import ts from 'typescript'
 import {
   computeSearchText,
   fromRemoteLocalForm,
@@ -131,3 +137,60 @@ const meta = (over) => {
 }
 
 console.log('verify-session-sync: OK')
+
+{
+  const phone = meta({ updatedAt: iso(60_000), originDevice: 'android' })
+  const saved = meta({ updatedAt: iso(0), originDevice: 'desktop', workSummary: 'PC에서 이어서 검토' })
+  for (const merged of [mergeMetaPair(phone, saved), mergeMetaPair(saved, phone)]) {
+    assert.equal(merged.originDevice, 'android', 'the original creator survives later desktop edits')
+    assert.equal(merged.workSummary, saved.workSummary)
+  }
+  assert.equal(mergeMetaPair(phone, meta({ updatedAt: iso(0) })).originDevice, 'android')
+  assert.equal(mergeMetaPair(meta({ updatedAt: iso(60_000) }), saved).originDevice, 'desktop')
+  assert.equal(mergeMetaPair(meta({}), meta({ originDevice: 'unknown' })).originDevice, undefined)
+  assert.equal(toRemoteLocalForm(phone).originDevice, 'android')
+  assert.equal(fromRemoteLocalForm(toRemoteLocalForm(phone), {
+    sourceKey: 'ssh:u@mini:22', ssh: { host: 'mini', user: 'u' }
+  }).originDevice, 'android')
+}
+console.log('session creator preservation: OK')
+
+// Exercise the actual desktop remember/list mapping and host-side Python merge.
+{
+  const source = readFileSync(new URL('../src/main/sessions.ts', import.meta.url), 'utf8')
+  const parsed = ts.createSourceFile('sessions.ts', source, ts.ScriptTarget.Latest, true)
+  const names = ['shq', 'buildSessionMeta', 'rememberSessionMeta', 'decorateSession', 'remoteIndexMergeCommand']
+  const declarations = parsed.statements.filter((node) => ts.isFunctionDeclaration(node) && names.includes(node.name?.text))
+  assert.equal(declarations.length, names.length)
+  let entries = []
+  const api = vm.runInNewContext(ts.transpileModule(declarations.map((node) => node.getText(parsed)).join('\n') +
+    '\n({ rememberSessionMeta, decorateSession, remoteIndexMergeCommand })', {
+    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS }
+  }).outputText, {
+    exports: {}, computeSearchText, pathLeaf: (path) => path.split('/').at(-1),
+    sessionKey: (id) => `local:${id}`, sourceKey: () => 'local', sessionIndexPath: () => '',
+    mergeLegacyIndexOnce: async () => {}, withIndexLock: (fn) => fn(),
+    readIndexFile: async () => entries, writeSessionIndex: async (next) => { entries = next },
+    scheduleRemoteIndexPush: () => {}, MAX_SESSION_INDEX_ENTRIES: 600, SESSION_INDEX_VERSION: 1
+  })
+  assert.equal((await api.rememberSessionMeta({ sessionId: 'phone', cwd: '/cases/a', originDevice: 'android' })).ok, true)
+  await api.rememberSessionMeta({ sessionId: 'phone', cwd: '/cases/a', originDevice: 'desktop', title: 'PC에서 수정' })
+  assert.equal(entries[0].originDevice, 'android', 'remembering an existing session cannot replace its creator')
+  assert.equal(api.decorateSession({ sessionId: 'phone', mtime: 1 }, entries[0]).originDevice, 'android')
+  await api.rememberSessionMeta({ sessionId: 'legacy', cwd: '/cases/a' })
+  assert.equal(api.decorateSession({ sessionId: 'legacy', mtime: 1 }, entries[0]).originDevice, undefined)
+  const hostHome = mkdtempSync(join(tmpdir(), 'session-origin-'))
+  try {
+    const remoteMerge = (incoming) => JSON.parse(execFileSync('/bin/sh', ['-c', api.remoteIndexMergeCommand()], {
+      env: { ...process.env, HOME: hostHome }, input: JSON.stringify(incoming), encoding: 'utf8'
+    }))
+    const phone = meta({ updatedAt: iso(60_000), originDevice: 'android' })
+    const desktop = meta({ updatedAt: iso(0), originDevice: 'desktop', title: 'PC에서 수정' })
+    remoteMerge([phone])
+    assert.deepEqual(remoteMerge([desktop])[0], mergeMetaPair(phone, desktop),
+      'host Python and desktop TypeScript agree on immutable origin merge')
+  } finally {
+    rmSync(hostHome, { recursive: true, force: true })
+  }
+}
+console.log('desktop metadata and host creator merge: OK')

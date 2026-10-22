@@ -1,3 +1,6 @@
+import { normalizeMediaSelection, mediaSelectionKey } from '../../../shared/media'
+import type { AgentWorkspaceContext } from '../../../shared/agentWorkspaceContext'
+import { isAgentTaskMutation } from '../../../shared/agentTodo'
 import {
   startTransition,
   useCallback,
@@ -45,6 +48,8 @@ import {
 } from './diff'
 import { DiffPreview } from './DiffPreview'
 import { MarkdownMessage } from './MarkdownMessage'
+import { AgentAttachmentMedia } from './AgentMediaPreview'
+import { htmlToPlainText } from '../markdownClipboard'
 import { ToolRow, toolDisplayName, toolStepDisplay, type ProcessStep } from './ToolRow'
 import { activeSubAgentCount } from './subAgentStatus'
 import { quoteAgentRequest, restoreTextSelection, selectionTextOffsets } from './quote'
@@ -86,7 +91,7 @@ import type {
 export { DiffPreview } from './DiffPreview'
 export type { DiffView } from './diff'
 
-type AgentRunStatus = 'working' | 'done' | 'question'
+type AgentRunStatus = 'idle' | 'working' | 'done' | 'question'
 type AgentSendDelivery = 'normal' | 'queue' | 'steer'
 type AgentAuthStatus = 'checking' | 'authenticated' | 'unauthenticated' | 'unavailable' | 'error'
 type AgentPanelStatus = 'idle' | 'working' | 'waiting_permission' | 'waiting_user' | 'done' | 'error'
@@ -120,6 +125,7 @@ export interface AgentProviderHandoff {
 }
 
 interface AgentPanelProps {
+  documentLink?: { title: string; checked: boolean; onChange: (checked: boolean) => void }
   id: string
   cwd: string
   title: string
@@ -131,6 +137,8 @@ interface AgentPanelProps {
   profileId?: string
   caseTabId?: string
   caseContext?: string
+  workspaceContext?: AgentWorkspaceContext
+  onTasksChanged?: () => void
   visible: boolean
   focusNonce?: number
   initialDraft?: AgentDraftState
@@ -144,6 +152,7 @@ interface AgentPanelProps {
   onHandoffConsumed?: () => void
   onWorktreeFork?: () => void
   onOpenTerminal?: () => void
+  onOpenBrowser?: () => void
   onOpenDiff?: (request: AgentDiffOpenRequest) => void
   onOpenFile?: (path: string, title?: string) => void
   onOpenAttachmentSource?: (attachment: AgentAttachment) => void
@@ -153,7 +162,7 @@ interface AgentPanelProps {
 
 export interface AgentAttachmentRequest {
   id: string
-  attachment: AgentAttachment
+  attachment?: AgentAttachment
   focusPrompt?: boolean
   inputText?: string
 }
@@ -165,6 +174,7 @@ export interface AgentDraftState {
 
 interface TimelineItem {
   id: string
+  timestamp?: number
   kind:
     | 'user'
     | 'assistant'
@@ -293,6 +303,26 @@ const emptyStateSuggestions: { label: string; prompt: string }[] = [
     label: '다음 할 일',
     prompt: '사건 진행 상황을 검토하고 다음 기일까지 준비할 일 목록을 만들어줘.'
   }
+]
+
+const globalSuggestions = [
+  { label: '오래 열린 할일', prompt: '전체 열린 할일 중 기한 도과·기한 없음·장기 미갱신 항목을 구분해 정리해줘.' },
+  { label: '완료 근거 확인', prompt: '같은 사건의 자료로 완료를 확인할 수 있는 할일 후보와 근거를 보여줘. 상태는 바꾸지 말아줘.' },
+  { label: '앞으로 7일', prompt: '한국 시간 기준 오늘부터 앞으로 7일 안의 기일과 기한을 정리해줘.' }
+]
+const generalSuggestions = [
+  { label: '개념 설명', prompt: '궁금한 개념을 쉽게 이해하고 싶어. 주제를 물어봐 줘.' },
+  { label: '글 다듬기', prompt: '글을 자연스럽고 명확하게 다듬고 싶어. 원문을 요청해 줘.' },
+  { label: '아이디어 정리', prompt: '생각을 정리하고 싶어. 어떤 주제인지 먼저 물어봐 줘.' }
+]
+const folderSuggestions = [
+  { label: '폴더 내용 정리', prompt: '현재 폴더의 자료를 살펴보고 확인된 내용과 아직 확인할 내용을 정리해줘.' },
+  { label: '다음 작업', prompt: '현재 폴더에서 진행하던 작업과 다음 할 일을 정리해줘.' }
+]
+const projectSuggestions = [
+  { label: '프로젝트 현황', prompt: '프로젝트의 목표와 메모, 연결된 사건과 폴더를 검토해 현재 상황을 요약해줘. 확인한 근거는 출처별로 표시하고 접근하지 못한 자료도 알려줘.' },
+  { label: '자료 비교·모순 확인', prompt: '프로젝트에 연결된 사건과 폴더의 자료를 비교해 공통 사실, 서로 다른 주장과 모순을 정리해줘. 각 항목의 근거 출처를 구분하고 확인하지 못한 부분도 밝혀줘.' },
+  { label: '다음 행동 정리', prompt: '프로젝트의 목표와 진행 상황을 바탕으로 다음 행동과 우선순위를 정리해줘. 사건과 자료 사이의 관계, 먼저 확인해야 할 내용을 출처와 함께 알려줘.' }
 ]
 
 const isAgentPermissionMode = (value: unknown): value is AgentPermissionMode =>
@@ -797,6 +827,9 @@ function usageTitle(usage: AgentUsageView, provider: AgentProvider): string {
     lines.push(
       `컨텍스트: ${percentText(usage.context.percentage)} 사용, 잔여 ${exactTokenCount(usage.context.remainingTokens)} / ${exactTokenCount(usage.context.maxTokens)}`
     )
+    lines.push(`컨텍스트 갱신: ${new Date(usage.context.updatedAt).toLocaleString('ko-KR')}`)
+  } else {
+    lines.push('컨텍스트 잔여: 확인 불가')
   }
   const limits = usage.rateLimits?.length ? usage.rateLimits : usage.rateLimit ? [usage.rateLimit] : []
   if (limits.length > 0) {
@@ -820,7 +853,7 @@ const dialogQuestions = (value: unknown): AgentDialogQuestion[] =>
   })).filter((question) => question.question)
 
 const isAuthFailureText = (text: string | undefined): boolean =>
-  /failed to authenticate|invalid authentication credentials|api error:\s*401|401 unauthorized|refresh[_\s-]*token|sign in again|log out and sign in again/i.test(text ?? '')
+  /failed to authenticate|authentication_failed|oauth session expired|invalid authentication credentials|api error:\s*401|401 unauthorized|refresh[_\s-]*token|sign in again|log out and sign in again/i.test(text ?? '')
 
 const attachmentOrigin = (value: unknown): AgentAttachment['origin'] | undefined =>
   value === 'local' || value === 'remote' ? value : undefined
@@ -1156,6 +1189,7 @@ function dataTransferPaths(dataTransfer: DataTransfer): string[] {
 }
 
 function attachmentKindLabel(kind: AgentAttachment['kind']): string {
+  if (kind === 'media-range') return '미디어'
   if (kind === 'folder') return '폴더'
   if (kind === 'selection') return '선택'
   if (kind === 'pdf-page-range') return 'PDF'
@@ -1164,6 +1198,7 @@ function attachmentKindLabel(kind: AgentAttachment['kind']): string {
 }
 
 function attachmentIdentity(attachment: AgentAttachment): string {
+  if (attachment.kind === 'media-range' && attachment.media) return `media:${mediaSelectionKey(attachment.media)}`
   if (attachment.kind === 'selection') return `${attachment.kind}:${attachment.label}:${attachment.text ?? ''}`
   return `${attachment.kind}:${attachment.path ?? attachment.label}`
 }
@@ -1181,6 +1216,7 @@ function appendUniqueAttachments(current: AgentAttachment[], additions: AgentAtt
 }
 
 function attachmentReferenceText(attachment: AgentAttachment): string {
+  if (attachment.kind === 'media-range') return `「${attachment.label}」 구간에 대해 `
   if (attachment.kind === 'selection') return `「${attachment.label}」 선택 부분에 대해 `
   if (attachment.kind === 'folder') return `「${attachment.label}」 폴더에 대해 `
   if (attachment.kind === 'pdf-page-range') return `「${attachment.label}」 PDF 범위에 대해 `
@@ -1279,14 +1315,18 @@ function normalizeAgentAttachments(value: unknown): AgentAttachment[] {
           kind !== 'folder' &&
           kind !== 'selection' &&
           kind !== 'pdf-page-range' &&
-          kind !== 'terminal-snippet')
+          kind !== 'terminal-snippet' &&
+          kind !== 'media-range')
       )
         return []
       const range = asRecord(attachment.range)
+      const media = normalizeMediaSelection(attachment.media)
+      if (kind === 'media-range' && !media) return []
       return [
         {
           kind,
           label,
+          media,
           path: stringValue(attachment.path),
           origin: attachmentOrigin(attachment.origin),
           access: attachmentAccess(attachment.access),
@@ -1414,11 +1454,16 @@ function permissionDiffFromRequest(
 }
 
 function reduceTimeline(items: TimelineItem[], event: AgentEvent, agentLabel: string): TimelineItem[] {
+  if (event.type === 'session:restored') {
+    return historyBeforeRestoredTurn(items, numberValue(event.startedAt))
+  }
   if (event.type === 'message:user') {
+    const id = stringValue(event.messageId) ?? `user-${Date.now()}`
+    if (items.some((item) => item.id === id)) return items
     return [
       ...items,
       {
-        id: stringValue(event.messageId) ?? `user-${Date.now()}`,
+        id,
         kind: 'user',
         title: '나',
         text: stringValue(event.text) ?? '',
@@ -1622,11 +1667,13 @@ function reduceTimeline(items: TimelineItem[], event: AgentEvent, agentLabel: st
   }
   if (event.type === 'diff:proposed') {
     const proposal = asRecord(event.proposal)
-    const id = stringValue(proposal?.proposalId) ?? `diff-${Date.now()}`
+    const turnStart = items.map((item) => item.kind).lastIndexOf('user')
+    const id = `${items[turnStart]?.id ?? 'session'}:diff:${stringValue(proposal?.proposalId) ?? Date.now()}`
     const filePath = stringValue(proposal?.filePath)
     const oldString = stringValue(proposal?.oldString)
     const newString = stringValue(proposal?.newString)
     const diff = diffViewFromRecord(proposal)
+    const fallbackText = diffFallbackText(oldString, newString) ?? stringValue(asRecord(proposal?.gitDiff)?.diff)
     return upsertItem(
       items,
       id,
@@ -1635,28 +1682,30 @@ function reduceTimeline(items: TimelineItem[], event: AgentEvent, agentLabel: st
         kind: 'diff',
         title: diffTitle('변경 제안', filePath),
         filePath,
-        text: diff ? undefined : diffFallbackText(oldString, newString),
+        text: diff ? undefined : fallbackText,
         diff
       }),
       (item) => ({
         ...item,
         title: diffTitle('변경 제안', filePath),
         filePath: filePath ?? item.filePath,
-        text: diff ? undefined : diffFallbackText(oldString, newString) ?? item.text,
+        text: diff ? undefined : fallbackText ?? item.text,
         diff: diff ?? item.diff
       })
     )
   }
   if (event.type === 'diff:applied') {
-    const id = stringValue(event.proposalId)
-    if (!id) return items
+    const proposalId = stringValue(event.proposalId)
+    if (!proposalId) return items
+    const turnStart = items.map((item) => item.kind).lastIndexOf('user')
+    const id = `${items[turnStart]?.id ?? 'session'}:diff:${proposalId}`
     const filePath = stringValue(event.filePath)
     const oldString = stringValue(event.oldString)
     const newString = stringValue(event.newString)
     const diff = diffViewFromRecord(event)
-    const fallbackText = diffFallbackText(oldString, newString)
+    const fallbackText = diffFallbackText(oldString, newString) ?? stringValue(asRecord(event.gitDiff)?.diff)
     const appliedIndex = filePath
-      ? items.findIndex((item) => item.kind === 'diff' && item.status === 'applied' && item.filePath === filePath)
+      ? items.findIndex((item, index) => index > turnStart && item.kind === 'diff' && item.status === 'applied' && item.filePath === filePath)
       : -1
     const idIndex = items.findIndex((item) => item.id === id)
     const index = appliedIndex >= 0 ? appliedIndex : idIndex
@@ -1762,13 +1811,32 @@ function reduceTimeline(items: TimelineItem[], event: AgentEvent, agentLabel: st
   return items
 }
 
+function currentChangedDocuments(items: TimelineItem[]): TimelineItem[] {
+  const turnStart = items.map((item) => item.kind).lastIndexOf('user')
+  const documents = new Map<string, TimelineItem>()
+  for (const item of items.slice(turnStart + 1)) {
+    const path = item.filePath ?? item.diff?.filePath
+    if (item.kind === 'diff' && path && (item.status === 'applied' || item.status === 'reverted')) {
+      documents.set(path, item)
+    }
+  }
+  return [...documents.values()]
+}
+
 function transcriptToTimeline(transcript: SessionTranscript, agentLabel: string): TimelineItem[] {
   return transcript.messages.map((message, index) => ({
     id: `history-${message.id || `${transcript.sessionId}-${index}`}`,
     kind: message.role === 'assistant' ? 'assistant' : 'user',
     title: message.role === 'assistant' ? agentLabel : '나',
-    text: message.text
+    text: message.text,
+    timestamp: message.timestamp
   }))
+}
+
+function historyBeforeRestoredTurn(items: TimelineItem[], startedAt?: number): TimelineItem[] {
+  return startedAt === undefined ? items : items.filter((item) =>
+    !item.id.startsWith('history-') || item.timestamp === undefined || item.timestamp < startedAt
+  )
 }
 
 function forkTranscriptBody(transcript: SessionTranscript): string {
@@ -1839,6 +1907,7 @@ export default function AgentPanel({
   id,
   cwd,
   title,
+  documentLink,
   provider,
   resumeSessionId,
   forkFromSessionId,
@@ -1847,6 +1916,8 @@ export default function AgentPanel({
   profileId,
   caseTabId,
   caseContext,
+  workspaceContext,
+  onTasksChanged,
   visible,
   focusNonce = 0,
   initialDraft,
@@ -1860,14 +1931,20 @@ export default function AgentPanel({
   onHandoffConsumed,
   onWorktreeFork,
   onOpenTerminal,
+  onOpenBrowser,
   onOpenDiff,
   onOpenFile,
   onOpenAttachmentSource,
   onPrepareAttachment
 }: AgentPanelProps): JSX.Element {
+  const isGeneralChat = workspaceContext?.kind === 'global' && workspaceContext.todoManagement === undefined
   const usesClaudeRemoteAuth = Boolean(ssh) && provider === 'claude'
-  const usesAgentAuth = usesClaudeRemoteAuth || provider === 'codex'
+  const usesAgentAuth = provider === 'claude' || provider === 'codex'
   const [items, setItems] = useState<TimelineItem[]>([])
+  const taskChangesRef = useRef(onTasksChanged)
+  taskChangesRef.current = onTasksChanged
+  const changedTaskCalls = useRef(new Set<string>())
+  const taskTurnRunning = useRef(false)
   const [input, setInput] = useState(() => initialDraft?.input ?? '')
   const [quotedMessage, setQuotedMessage] = useState<PendingAgentQuote | null>(null)
   const [mode, setMode] = useState<AgentPermissionMode>(DEFAULT_AGENT_PERMISSION_MODE)
@@ -1929,6 +2006,10 @@ export default function AgentPanel({
   const openedAuthUrlsRef = useRef<Set<string>>(new Set())
   const copyFeedbackTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const loadedHistoryKeyRef = useRef<string | null>(null)
+  const historyLoadRef = useRef<Promise<void>>()
+  const pendingHistorySendRef = useRef<Promise<void>>()
+  const restoredTurnStartedAtRef = useRef<number>()
+  const hasLiveMessagesRef = useRef(false)
   const handledAttachmentRequestIdsRef = useRef<Set<string>>(new Set())
   const promptHistoryRef = useRef<string[]>([])
   const promptHistoryIndexRef = useRef<number | null>(null)
@@ -1971,6 +2052,9 @@ export default function AgentPanel({
     providerRef.current = provider
     createdRef.current = false
     loadedHistoryKeyRef.current = null
+    pendingHistorySendRef.current = undefined
+    restoredTurnStartedAtRef.current = undefined
+    hasLiveMessagesRef.current = false
     handledAttachmentRequestIdsRef.current.clear()
     setItems([])
     setRuntimeSlashCommands([])
@@ -1996,7 +2080,7 @@ export default function AgentPanel({
       const textarea = textareaRef.current
       if (!textarea) return
       const caret = Math.max(0, Math.min(position ?? textarea.value.length, textarea.value.length))
-      textarea.focus()
+      textarea.focus({ preventScroll: true })
       textarea.setSelectionRange(caret, caret)
     })
   }, [])
@@ -2013,6 +2097,7 @@ export default function AgentPanel({
           : undefined
       const target = selected ?? source
       if (!target) return
+      timelineUserScrollRef.current = false
       shouldFollowTimelineRef.current = false
       target.scrollIntoView({
         behavior: 'smooth',
@@ -2096,6 +2181,16 @@ export default function AgentPanel({
     [focusPrompt, input]
   )
 
+  const timelineTurns = useMemo(() => {
+    const turns: TimelineItem[][] = []
+    for (const item of items) {
+      if (item.kind === 'user' || turns.length === 0) turns.push([])
+      turns[turns.length - 1].push(item)
+    }
+    return turns
+  }, [items])
+  const changedDocuments = useMemo(() => currentChangedDocuments(items), [items])
+
   const latestOutputPreview = useMemo(
     () => (showNewOutputNotice ? latestGeneratedPreview(items) : ''),
     [items, showNewOutputNotice]
@@ -2136,6 +2231,7 @@ export default function AgentPanel({
     shouldFollowTimelineRef.current = true
     setNewOutputNotice(false)
     const scroll = (): void => {
+      if (!shouldFollowTimelineRef.current) return
       const timeline = scrollRef.current
       timeline?.scrollTo({ top: timeline.scrollHeight })
     }
@@ -2164,6 +2260,25 @@ export default function AgentPanel({
   useEffect(() => {
     const off = window.lt.agent.onEvent((event) => {
       if (eventSessionId(event) !== id) return
+      if (event.type === 'session:restored') {
+        restoredTurnStartedAtRef.current = numberValue(event.startedAt)
+      }
+      if (event.type === 'message:user') hasLiveMessagesRef.current = true
+      if (event.type === 'process:event' && isAgentTaskMutation(stringValue(event.toolName) ?? '') &&
+        ['done', 'completed', 'error', 'failed', 'denied'].includes(stringValue(event.status) ?? '')) {
+        const key = stringValue(event.processId)
+        if (key && !changedTaskCalls.current.has(key)) {
+          changedTaskCalls.current.add(key)
+          taskChangesRef.current?.()
+        }
+      }
+      if (event.type === 'status' && workspaceContext?.todoManagement) {
+        if (event.status === 'working') taskTurnRunning.current = true
+        else if (taskTurnRunning.current && ['done', 'error', 'idle'].includes(stringValue(event.status) ?? '')) {
+          taskTurnRunning.current = false
+          taskChangesRef.current?.()
+        }
+      }
       if (event.type === 'session:init' && event.slashCommands) {
         setRuntimeSlashCommands(runtimeSlashCommandsFromEvent(event.slashCommands))
       }
@@ -2178,7 +2293,7 @@ export default function AgentPanel({
         const hasRateLimits = Object.prototype.hasOwnProperty.call(event, 'rateLimits')
         setUsage((current) => ({
           tokens: tokens ?? current.tokens,
-          context: context ?? current.context,
+          context: Object.prototype.hasOwnProperty.call(event, 'context') ? context : current.context,
           rateLimit: rateLimit ?? rateLimits?.[0] ?? current.rateLimit,
           rateLimits: hasRateLimits ? (rateLimits ?? []) : current.rateLimits
         }))
@@ -2237,11 +2352,12 @@ export default function AgentPanel({
           else onStatus?.('question')
         } else if (next === 'idle') {
           setStatus('idle')
+          onStatus?.('idle')
         }
       }
     })
     return off
-  }, [agentLabel, cwd, id, onStatus, profileId, ssh])
+  }, [agentLabel, cwd, id, onStatus, profileId, ssh, workspaceContext?.todoManagement])
 
   useEffect(() => {
     if (!settingsLoaded) return
@@ -2258,7 +2374,8 @@ export default function AgentPanel({
         permissionMode: mode,
         source: ssh ? 'ssh' : 'local',
         ssh,
-        context: caseContext
+        context: caseContext,
+        workspaceContext
       })
       .then(async (result) => {
         if (!result.ok) setError(result.error ?? 'Agent 세션을 만들 수 없습니다.')
@@ -2266,6 +2383,7 @@ export default function AgentPanel({
         const transcript = await loadSessionTranscript(forkFromSessionId, ssh, { refresh: true }).catch(() => null)
         if (!transcript || transcript.messages.length === 0) return
         const sendResult = await window.lt.agent.send(id, {
+          workspaceContext,
           text: forkContextPrompt(transcript),
           displayText: `Fork 맥락 가져오기 · ${transcript.messages.length}개 메시지`
         })
@@ -2286,12 +2404,14 @@ export default function AgentPanel({
   useEffect(() => {
     if (provider !== 'claude') return
     if (!resumeSessionId) return
+    // A fresh session gets its saved ID after sending; its live turn is already displayed.
+    if (hasLiveMessagesRef.current && restoredTurnStartedAtRef.current === undefined) return
     const historyKey = `${transcriptSourceKey(ssh)}:${resumeSessionId}`
     if (loadedHistoryKeyRef.current === historyKey) return
     loadedHistoryKeyRef.current = historyKey
     setResumedModel(undefined)
     let alive = true
-    void loadSessionTranscript(resumeSessionId, ssh)
+    const historyLoad = loadSessionTranscript(resumeSessionId, ssh)
       .then((transcript) => {
         // 이어 열린 순간부터 대화가 늘어나므로, 프리로드본은 여기서 한 번 쓰고 버린다.
         invalidateSessionTranscript(resumeSessionId, ssh)
@@ -2306,7 +2426,8 @@ export default function AgentPanel({
         )
         setItems((current) => {
           const existing = new Set(current.map((item) => item.id))
-          const missing = historyItems.filter((item) => !existing.has(item.id))
+          const missing = historyBeforeRestoredTurn(historyItems, restoredTurnStartedAtRef.current)
+            .filter((item) => !existing.has(item.id))
           if (missing.length === 0) return current
           return [...missing, ...current]
         })
@@ -2315,8 +2436,11 @@ export default function AgentPanel({
         if (alive) setResumedModel(null)
         /* Resume context still works even when the transcript cannot be displayed. */
       })
+    historyLoadRef.current = historyLoad
     return () => {
       alive = false
+      if (historyLoadRef.current === historyLoad) historyLoadRef.current = undefined
+      if (pendingHistorySendRef.current === historyLoad) pendingHistorySendRef.current = undefined
     }
   }, [agentLabel, provider, rememberPrompts, resumeSessionId, ssh])
 
@@ -2455,7 +2579,9 @@ export default function AgentPanel({
   const authChecking = usesAgentAuth && authStatus === 'checking'
   const needsLogin = usesAgentAuth && authStatus !== 'authenticated' && (authStatus === 'unauthenticated' || needsAuth)
   const sendBlockedReason =
-    !settingsLoaded
+    workspaceContext?.todoManagement === false
+      ? '연결이 변경된 이전 할일 대화입니다. 할일 화면에서 새 대화를 열어주세요.'
+      : !settingsLoaded
       ? 'Agent 설정 로드 중'
       : authActive
         ? `${agentLabel} 로그인 진행 중`
@@ -2777,7 +2903,10 @@ export default function AgentPanel({
     if (pending.length === 0) return
 
     for (const request of pending) handledAttachmentRequestIdsRef.current.add(request.id)
-    setAttachments((current) => appendUniqueAttachments(current, pending.map((request) => request.attachment)))
+    const nextAttachments = pending.flatMap((request) => request.attachment ? [request.attachment] : [])
+    if (nextAttachments.length) {
+      setAttachments((current) => appendUniqueAttachments(current, nextAttachments))
+    }
 
     const inputText = pending
       .map((request) => request.inputText)
@@ -2792,13 +2921,13 @@ export default function AgentPanel({
       })
     }
 
-    const selectionCount = pending.filter((request) => request.attachment.kind === 'selection').length
-    const fileCount = pending.length - selectionCount
+    const selectionCount = nextAttachments.filter((attachment) => attachment.kind === 'selection').length
+    const fileCount = nextAttachments.length - selectionCount
     const parts = [
       selectionCount > 0 ? `선택 영역 ${selectionCount}개` : undefined,
       fileCount > 0 ? `첨부 ${fileCount}개` : undefined
     ].filter((part): part is string => Boolean(part))
-    showTransientFeedback(`${parts.join(', ')} 추가됨`)
+    if (parts.length) showTransientFeedback(`${parts.join(', ')} 추가됨`)
 
     if (pending.some((request) => request.focusPrompt)) {
       focusPrompt()
@@ -2916,6 +3045,7 @@ export default function AgentPanel({
       if (sendBlockedReason) setError(sendBlockedReason)
       return
     }
+    if (pendingHistorySendRef.current) return
     scrollTimelineToBottom()
     const nextMode = expanded.mode ?? mode
     if (expanded.mode) selectPermissionMode(expanded.mode, false)
@@ -2929,6 +3059,14 @@ export default function AgentPanel({
     const quote = quotedMessage
     const requestText = quote ? quoteAgentRequest(quote.text, text) : text
     const displayText = text || (quote ? '인용한 답변에 대해' : '')
+    // Finish the initial snapshot before a new turn can appear in that transcript.
+    const historyLoad = historyLoadRef.current
+    if (historyLoad) {
+      pendingHistorySendRef.current = historyLoad
+      await historyLoad
+      if (pendingHistorySendRef.current === historyLoad) pendingHistorySendRef.current = undefined
+      if (historyLoadRef.current !== historyLoad) return
+    }
     // 미저장 문서 첨부 등을 전송 시점 내용으로 치환한다.
     const outgoingAttachments = onPrepareAttachment
       ? await Promise.all(
@@ -2936,6 +3074,7 @@ export default function AgentPanel({
         )
       : sendAttachments
     const result = await window.lt.agent.send(id, {
+      workspaceContext,
       text: handoff ? `${handoff.preamble}\n${requestText}` : requestText,
       ...(handoff || quote ? { displayText } : {}),
       ...(quote
@@ -2998,12 +3137,24 @@ export default function AgentPanel({
     [cwd, onOpenFile, profileId, ssh]
   )
 
+  const reviewChangedDocument = (item: TimelineItem): void => {
+    if (item.diff && onOpenDiff) {
+      openDiffFromItem(item)
+      return
+    }
+    setExpandedProcessIds((current) => new Set(current).add(`diff:${item.id}`))
+    shouldFollowTimelineRef.current = false
+    window.requestAnimationFrame(() => {
+      document.getElementById(`agent-change-${id}-${item.id}`)?.scrollIntoView({ block: 'center' })
+    })
+  }
+
   const canRevertDiff = (diff: DiffView | undefined): boolean =>
     !!diff?.filePath && (diff.revertEdits?.length ?? 0) > 0
 
   const revertDiffItem = useCallback(
     async (item: TimelineItem): Promise<void> => {
-      if (!item.diff || !canRevertDiff(item.diff)) return
+      if (status === 'working' || !item.diff || !canRevertDiff(item.diff)) return
       const path = agentFilePathForApp(item.diff.filePath, cwd, profileId, ssh)
       const edits = item.diff.revertEdits ?? []
       if (!path || edits.length === 0) return
@@ -3023,6 +3174,9 @@ export default function AgentPanel({
           }
           const index = next.indexOf(edit.newString)
           if (index < 0) throw new Error('현재 파일에서 되돌릴 변경 내용을 찾지 못했습니다.')
+          if (next.indexOf(edit.newString, index + 1) >= 0) {
+            throw new Error('같은 내용이 여러 곳에 있어 자동으로 되돌릴 수 없습니다. 변경 비교에서 위치를 확인해 주세요.')
+          }
           next = `${next.slice(0, index)}${edit.oldString}${next.slice(index + edit.newString.length)}`
         }
         const result = await window.lt.fs.writeText(path, next)
@@ -3043,7 +3197,7 @@ export default function AgentPanel({
         })
       }
     },
-    [cwd, profileId, ssh]
+    [cwd, profileId, ssh, status]
   )
 
   const resolvePermission = useCallback(
@@ -3252,16 +3406,19 @@ export default function AgentPanel({
   }
 
   const chooseModel = async (model?: string, reasoningEffort?: string): Promise<void> => {
-    const sessionModel = !model && resumeSessionId
+    const sessionModel = !model && (resumeSessionId || provider === 'codex')
       ? (accountDefaultOption?.model ?? (provider === 'claude' ? 'default' : undefined))
       : model
-    const result = await window.lt.agent.setModel(id, sessionModel, reasoningEffort)
+    const sessionEffort = !model && provider === 'codex'
+      ? accountDefaultOption?.defaultReasoningEffort
+      : reasoningEffort
+    const result = await window.lt.agent.setModel(id, sessionModel, sessionEffort)
     if (!result.ok) {
       setError(result.error ?? `${agentLabel} 모델을 선택할 수 없습니다.`)
       return
     }
     setSelectedModel(sessionModel)
-    setSelectedReasoningEffort(reasoningEffort)
+    setSelectedReasoningEffort(sessionEffort)
     const nextDefaultModels = { ...defaultModels }
     if (model) nextDefaultModels[provider] = model
     else delete nextDefaultModels[provider]
@@ -3348,12 +3505,13 @@ export default function AgentPanel({
     if (!selection || selection.isCollapsed || !timeline || !selectionIntersectsElement(selection, timeline)) return
     const text = selection.toString()
     if (!text.trim()) return
+    const html = selectedHtml(selection)
     event.preventDefault()
     setSelectionMenu({
       x: Math.min(event.clientX, window.innerWidth - 240),
       y: Math.min(event.clientY, window.innerHeight - 132),
-      html: selectedHtml(selection),
-      text
+      html,
+      text: /<(?:ol|ul)\b/i.test(html) ? htmlToPlainText(html) : text
     })
   }
 
@@ -3499,7 +3657,7 @@ export default function AgentPanel({
   )
   const contextLabel = usage.context
     ? `컨텍스트 ${percentText(usage.context.percentage)} · 잔여 ${tokenCount(usage.context.remainingTokens)}`
-    : '컨텍스트 대기'
+    : '컨텍스트 확인 불가'
   const tokensKnown = usage.tokens.updatedAt > 0
   const cacheTokens = cacheTokenTotal(usage.tokens)
   const limitLabels = visibleRateLimits.map((limit) => ({ label: rateLimitLabel(limit), tone: rateLimitTone(limit) }))
@@ -3531,10 +3689,20 @@ export default function AgentPanel({
         <div className="agent-title">
           <span className="agent-title-main">{title}</span>
           <span className="agent-title-sub" title={cwd}>
-            {cwd}
+            {isGeneralChat
+              ? ssh
+                ? provider === 'claude' ? `폰과 이어쓰기 · 같은 서버 ${ssh.host}` : 'Codex 대화 · PC에서 이어쓰기'
+                : '이 컴퓨터에서 대화합니다'
+              : cwd}
           </span>
         </div>
         <div className="agent-head-actions">
+          {onOpenBrowser && <button
+            type="button"
+            className="agent-browser-toggle"
+            title="작업 영역에서 브라우저 열기"
+            onClick={onOpenBrowser}
+          >브라우저</button>}
           {onFork && (
             <button
               className="agent-icon-btn"
@@ -3573,7 +3741,52 @@ export default function AgentPanel({
         </div>
       </header>
 
+      {documentLink && (
+        <label className="agent-document-link" title={`「${documentLink.title}」로 돌아오면 이 에이전트 패널을 엽니다`}>
+          <input
+            type="checkbox"
+            aria-label="에이전트 패널 기억하기"
+            checked={documentLink.checked}
+            onChange={(event) => documentLink.onChange(event.target.checked)}
+          />
+          <span>에이전트 패널 기억하기</span>
+          <span className="agent-document-link-title">{documentLink.title}</span>
+        </label>
+      )}
+
       <div className="agent-timeline-wrap">
+        {changedDocuments.length > 0 && (
+          <details className="agent-changed-documents" key={timelineTurns.at(-1)?.[0].id} open>
+            <summary title="마지막 요청 이후 앱에서 확인한 변경입니다.">
+              이번 작업 변경 문서 <span>{changedDocuments.length}개</span>
+            </summary>
+            <ul>
+              {changedDocuments.map((item) => {
+                const path = item.filePath ?? item.diff?.filePath ?? ''
+                const reverting = revertingDiffIds.has(item.id)
+                return (
+                  <li key={path}>
+                    <button type="button" className="agent-changed-document-name" title={`${path}\n변경 비교 열기`}
+                      onClick={() => reviewChangedDocument(item)}>
+                      <strong>{fileNameFromPath(path)}</strong>
+                      <span>{path}</span>
+                    </button>
+                    <span className="agent-changed-document-status">{item.status === 'reverted' ? '되돌림' : '적용됨'}</span>
+                    <div className="agent-card-actions">
+                      {onOpenFile && <button type="button" onClick={() => openFileFromItem(item)}>문서 열기</button>}
+                      {item.status === 'applied' && canRevertDiff(item.diff) && (
+                        <button type="button" className="danger" disabled={reverting || status === 'working'}
+                          onClick={() => void revertDiffItem(item)}>
+                          {reverting ? '되돌리는 중' : '되돌리기'}
+                        </button>
+                      )}
+                    </div>
+                  </li>
+                )
+              })}
+            </ul>
+          </details>
+        )}
         <div
           className="agent-timeline"
           ref={scrollRef}
@@ -3590,14 +3803,22 @@ export default function AgentPanel({
               <div className="agent-empty-icon" aria-hidden="true">
                 <IconClaude size={30} />
               </div>
-              <div className="agent-empty-title">{agentLabel} Agent</div>
+              <div className="agent-empty-title">{isGeneralChat ? '무엇이 궁금하신가요?' : workspaceContext?.kind === 'project' ? '프로젝트 AI 작업' : `${agentLabel} Agent`}</div>
               <div className="agent-empty-sub">
                 {pendingHandoff
                   ? `이전 대화 ${pendingHandoff.count}개 메시지를 이어받았습니다. 하던 이야기를 그대로 이어서 지시하세요.`
-                  : '사건 폴더를 기반으로 검토·정리·초안 작업을 시킬 수 있습니다.'}
+                  : isGeneralChat
+                    ? '사건이나 폴더를 선택하지 않고 바로 질문하세요. 궁금한 점, 글쓰기, 아이디어 정리를 도와드립니다.'
+                  : workspaceContext?.kind === 'project'
+                    ? '목표·메모·연결된 사건과 폴더를 함께 참고합니다. 근거는 출처별로 구분하고 접근할 수 없는 자료는 따로 알려드립니다.'
+                  : workspaceContext?.kind === 'global'
+                    ? '사건을 선택하지 않고 전체 할일과 기일을 함께 정리할 수 있습니다.'
+                    : workspaceContext?.kind === 'folder'
+                      ? '현재 폴더의 자료를 바탕으로 검토·정리 작업을 시작할 수 있습니다.'
+                      : '사건 폴더를 기반으로 검토·정리·초안 작업을 시킬 수 있습니다.'}
               </div>
               <div className="agent-empty-suggestions">
-                {emptyStateSuggestions.map((suggestion) => (
+                {(isGeneralChat ? generalSuggestions : workspaceContext?.kind === 'project' ? projectSuggestions : workspaceContext?.kind === 'global' ? globalSuggestions : workspaceContext?.kind === 'folder' ? folderSuggestions : emptyStateSuggestions).map((suggestion) => (
                   <button
                     key={suggestion.label}
                     type="button"
@@ -3615,7 +3836,9 @@ export default function AgentPanel({
               </div>
             </div>
           )}
-          {items.map((item) => {
+          {timelineTurns.map((turn) => (
+            <div className="agent-turn" key={turn[0].id}>
+          {turn.map((item) => {
             if (item.kind === 'process') {
               const steps = item.processSteps ?? []
               return (
@@ -3689,6 +3912,7 @@ export default function AgentPanel({
                             </span>
                           )
                         })}
+                        <AgentAttachmentMedia attachments={item.attachments} context={{ cwd, remote: !!ssh, profileId }} active={visible} onOpenFile={onOpenFile} onOpenSource={onOpenAttachmentSource} />
                       </div>
                     )}
                   </div>
@@ -3715,6 +3939,9 @@ export default function AgentPanel({
                       text={item.text}
                       streaming={item.status === 'streaming'}
                       onCopyCode={copyCodeBlock}
+                      mediaContext={{ cwd, remote: !!ssh, profileId }}
+                      active={visible}
+                      onOpenFile={onOpenFile}
                     />
                   )}
                   {cancelled && <div className="agent-msg-cancelled">중지됨</div>}
@@ -3874,7 +4101,7 @@ export default function AgentPanel({
             const dotStatus =
               item.status === 'applied' ? 'done' : item.status === 'reverted' ? 'cancelled' : ''
             return (
-              <div key={item.id} className="agent-tools">
+              <div key={item.id} id={`agent-change-${id}-${item.id}`} className="agent-tools">
                 <div className={`agent-tool-row diff ${item.status ?? ''}`}>
                   <button
                     type="button"
@@ -3903,7 +4130,8 @@ export default function AgentPanel({
             )
           }
           return (
-            <section key={item.id} className={`agent-card ${item.kind} ${item.status ?? ''}`}>
+            <section key={item.id} id={item.kind === 'diff' ? `agent-change-${id}-${item.id}` : undefined}
+              className={`agent-card ${item.kind} ${item.status ?? ''}`}>
               <div className="agent-card-head">
                 {item.kind === 'diff' ? (
                   <button
@@ -3989,7 +4217,7 @@ export default function AgentPanel({
                     <button
                       type="button"
                       className="danger"
-                      disabled={revertingDiff}
+                      disabled={revertingDiff || status === 'working'}
                       title="이 변경을 적용 전 텍스트로 되돌리기"
                       onClick={() => void revertDiffItem(item)}
                     >
@@ -4051,6 +4279,7 @@ export default function AgentPanel({
                       </span>
                     )
                   })}
+                  <AgentAttachmentMedia attachments={item.attachments} context={{ cwd, remote: !!ssh, profileId }} active={visible} onOpenFile={onOpenFile} onOpenSource={onOpenAttachmentSource} />
                 </div>
               )}
               {item.kind === 'auth' && item.urls && item.urls.length > 0 && (
@@ -4103,6 +4332,8 @@ export default function AgentPanel({
             </section>
           )
         })}
+            </div>
+          ))}
         </div>
         {showNewOutputNotice && (
           <button
@@ -4125,7 +4356,9 @@ export default function AgentPanel({
           <span>
             {usesClaudeRemoteAuth
               ? '원격 서버에서 Claude Code CLI를 찾을 수 없습니다. 원격 터미널에서 설치한 뒤 Agent를 다시 여세요.'
-              : 'Codex CLI를 찾을 수 없습니다. Codex CLI를 설치한 뒤 Agent를 다시 여세요.'}
+              : provider === 'claude'
+                ? '이 PC에서 Claude Code를 실행할 수 없습니다. 앱을 다시 설치한 뒤 Agent를 여세요.'
+                : 'Codex CLI를 찾을 수 없습니다. Codex CLI를 설치한 뒤 Agent를 다시 여세요.'}
           </span>
           {onOpenTerminal && (
             <button onClick={onOpenTerminal}>
@@ -4137,7 +4370,7 @@ export default function AgentPanel({
       {!authCliUnavailable && (needsAuth || needsLogin || authChecking) && authStatus !== 'authenticated' && (
         <div className="agent-auth-banner">
           <span>
-            {authChecking ? `${agentLabel} 상태를 확인하고 있습니다.` : `${agentLabel} 로그인이 필요합니다.`}
+            {authChecking ? `${agentLabel} 상태를 확인하고 있습니다.` : `${ssh ? '원격' : '이 PC의'} ${agentLabel} 로그인이 필요합니다.`}
           </span>
           <button disabled={authButtonDisabled} onClick={() => void startAuthLogin()}>
             {authButtonLabel === '로그인' ? '로그인 시작' : authButtonLabel}
@@ -4167,7 +4400,7 @@ export default function AgentPanel({
                 <span>계정 기본값</span>
                 <small>{agentLabel} 계정이 지정한 기본 모델을 현재 및 새 세션에 적용</small>
               </button>
-              {modelOptions.filter((model) => !model.isDefault).map((model) => {
+              {modelOptions.filter((model) => provider === 'codex' || !model.isDefault).map((model) => {
                 const efforts = model.supportedReasoningEfforts ?? []
                 return (
                   <div
@@ -4234,6 +4467,7 @@ export default function AgentPanel({
         </div>
       )}
       {error && <div className="agent-error">{error}</div>}
+      {workspaceContext?.todoManagement === false && <div className="agent-error" role="status">{sendBlockedReason}</div>}
       {copyFeedback && <div className="agent-copy-feedback">{copyFeedback}</div>}
       {selectionMenu && (
         <div
@@ -4410,7 +4644,7 @@ export default function AgentPanel({
           <textarea
           ref={textareaRef}
           value={input}
-          placeholder={authActive ? `${agentLabel} 로그인 진행 중 · 입력은 미리 작성할 수 있습니다` : `${agentLabel}에게 요청 · @로 파일 첨부, /로 명령`}
+          placeholder={authActive ? `${agentLabel} 로그인 진행 중 · 입력은 미리 작성할 수 있습니다` : isGeneralChat ? '궁금한 점을 물어보세요' : `${agentLabel}에게 요청 · @로 파일 첨부, /로 명령`}
           onChange={(e) => {
             setInput(e.target.value)
             updateMentionFromTextarea(e.currentTarget)
@@ -4508,6 +4742,7 @@ export default function AgentPanel({
                 </button>
               </span>
             ))}
+            <AgentAttachmentMedia attachments={attachments} context={{ cwd, remote: !!ssh, profileId }} active={visible} onOpenFile={onOpenFile} onOpenSource={onOpenAttachmentSource} />
           </div>
         )}
         <div className="agent-composer-bar">

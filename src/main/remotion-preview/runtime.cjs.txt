@@ -1,0 +1,138 @@
+// Runs in a separate project process, never in Electron's privileged main process.
+const fs = require('node:fs');
+const fsp = require('node:fs/promises');
+const path = require('node:path');
+const http = require('node:http');
+const crypto = require('node:crypto');
+const {createRequire} = require('node:module');
+const readline = require('node:readline');
+const lines = readline.createInterface({input:process.stdin});
+let current;
+let work;
+let server;
+let stopped=false;
+let operation=Promise.resolve();
+let cleanupPromise;
+const responses=new Map();
+const ensureOpen=()=>{if(stopped)throw Error('미리보기가 취소되었습니다.')};
+const cleanup=(code=0)=>{
+  if(cleanupPromise)return cleanupPromise;
+  stopped=true;server?.close();
+  for(const response of responses.values()){response.writeHead(503);response.end('{"error":"미리보기를 닫았습니다."}')}
+  cleanupPromise=(async()=>{await operation.catch(()=>{});if(work)await fsp.rm(work,{recursive:true,force:true});process.exit(code)})();
+  return cleanupPromise;
+};
+lines.on('close',()=>cleanup());process.on('SIGTERM',()=>cleanup());process.on('SIGINT',()=>cleanup());process.on('SIGHUP',()=>cleanup());process.stdout.on('error',()=>cleanup());
+lines.once('line', raw => {
+  operation=Promise.resolve().then(()=>start(JSON.parse(raw)));
+  operation.catch(error=>{console.error(error.stack || error);cleanup(stopped?0:1)});
+});
+async function start(options) {
+  ensureOpen();
+  const project = await fsp.realpath(options.projectDir);
+  ensureOpen();
+  process.chdir(project);
+  const projectRequire = createRequire(path.join(project,'package.json'));
+  let bundle;
+  try {
+    bundle = projectRequire('@remotion/bundler').bundle;
+    for(const module of ['remotion','@remotion/player','react','react-dom/client']) projectRequire.resolve(module);
+  } catch {throw Error('이 프로젝트에 remotion, @remotion/player, @remotion/bundler, react, react-dom이 설치되어 있어야 합니다. 프로젝트의 Remotion 버전을 맞춰 설치하세요.')}
+  const bridgePath = path.resolve(project,options.entryPoint || '.legal-terminal/remotion.json');
+  const inside = (root,file) => file===root || file.startsWith(root+path.sep);
+  if(!inside(project,bridgePath)) throw Error('미리보기 설정은 프로젝트 폴더 안에 있어야 합니다.');
+  work = await fsp.mkdtemp(path.join(project,'.lt-remotion-preview-'));
+  ensureOpen();
+  let building;
+  const emit = data => process.stdout.write('LT_REMOTION '+JSON.stringify({...data,token:options.token})+'\n');
+  lines.on('line',line=>{try {const message=JSON.parse(line);const response=responses.get(message.requestId);if(message.type==='selection-result'&&response){responses.delete(message.requestId);response.writeHead(message.error?400:200,{'Content-Type':'application/json'});response.end(JSON.stringify(message.error?{error:message.error}:{ok:true}))}}catch{}});
+  async function build() {
+    ensureOpen();
+    let config;
+    try{config=JSON.parse(await fsp.readFile(bridgePath,'utf8'))}catch{throw Error('프로젝트에 .legal-terminal/remotion.json 설정이 필요합니다. component, exportName, compositionId, width, height, fps, durationInFrames를 지정하세요. docs/remotion-preview.md의 예제를 참고하세요.')}
+    if(!config || typeof config.component!=='string' || !config.component || typeof config.compositionId!=='string' || !/^[A-Za-z0-9_-]{1,128}$/.test(config.compositionId))throw Error('미리보기 component/compositionId 설정이 올바르지 않습니다.');
+    for(const key of ['width','height','durationInFrames'])if(!Number.isSafeInteger(config[key])||config[key]<=0||config[key]>(key==='durationInFrames'?10000000:16384))throw Error('미리보기 '+key+' 값이 올바르지 않습니다.');
+    if(!Number.isFinite(config.fps)||config.fps<=0||config.fps>240)throw Error('미리보기 fps는 0 초과 240 이하여야 합니다.');
+    if(config.exportName!==undefined&&(typeof config.exportName!=='string'||!/^[A-Za-z_$][\w$]*$/.test(config.exportName)))throw Error('컴포넌트 exportName이 올바르지 않습니다.');
+    if(config.props!==undefined&&(!config.props||typeof config.props!=='object'||Array.isArray(config.props)))throw Error('props는 JSON 객체여야 합니다.');
+    if(JSON.stringify(config).length>1024*1024)throw Error('미리보기 설정이 너무 큽니다.');
+    const component=await fsp.realpath(path.resolve(project,config.component));
+    if(!inside(project,component))throw Error('컴포넌트는 프로젝트 폴더 안에 있어야 합니다.');
+    ensureOpen();
+    const source=options.playerSource.replace('__COMPONENT__',()=>JSON.stringify(component.replace(/\\/g,'/'))).replace('__CONFIG__',()=>JSON.stringify(config));
+    const entry=path.join(work,'entry.tsx');
+    await fsp.writeFile(entry,source);
+    ensureOpen();
+    const outDir=path.join(work,crypto.randomUUID());
+    await bundle({entryPoint:entry,rootDir:project,outDir,ignoreRegisterRootWarning:true,publicPath:'./',webpackOverride:config=>({...config,entry,output:{...config.output,filename:'preview.js',publicPath:'./'}})});
+    ensureOpen();
+    const hash=crypto.createHash('sha256').update(JSON.stringify(config));
+    // ponytail: bundle JS + bridge identify code; mutable public/external assets are not a render snapshot.
+    async function hashCode(dir){for(const file of (await fsp.readdir(dir,{withFileTypes:true})).sort((a,b)=>a.name.localeCompare(b.name))){if(file.name==='public')continue;const name=path.join(dir,file.name);if(file.isDirectory())await hashCode(name);else if(file.isFile()&&/\.(js|css)$/.test(file.name)){hash.update(path.relative(outDir,name));hash.update(await fsp.readFile(name))}}}
+    await hashCode(outDir);
+    ensureOpen();
+    const previous=current;
+    current={config,outDir,version:hash.digest('hex'),component:path.relative(project,component).split(path.sep).join('/')};
+    if(previous)await fsp.rm(previous.outDir,{recursive:true,force:true});
+    ensureOpen();
+    emit({type:'built',...current,outDir:undefined});
+  }
+  await build();
+  ensureOpen();
+  const json=(res,status,value)=>{res.writeHead(status,{'Content-Type':'application/json','Cache-Control':'no-store'});res.end(JSON.stringify(value))};
+  server=http.createServer(async(req,res)=>{
+    try {
+      const url=new URL(req.url,'http://127.0.0.1');
+      const prefix='/'+options.token+'/';
+      const publicAsset=!url.pathname.startsWith(prefix);
+      if(publicAsset && (req.headers.cookie || '').split(';').every(cookie=>cookie.trim()!=='LTPreview='+options.token)){res.writeHead(404);res.end();return}
+      const relative=publicAsset ? 'public/'+decodeURIComponent(url.pathname.slice(1)) : decodeURIComponent(url.pathname.slice(prefix.length));
+      const port=server.address().port;
+      const origin='http://127.0.0.1:'+(options.localPort || port);
+      if(req.method==='POST'){
+        if(publicAsset){json(res,404,{error:'지원하지 않는 요청입니다.'});return}
+        if(req.headers.origin!==origin||req.headers['x-lt-preview']!==options.token){json(res,403,{error:'미리보기 요청 출처가 일치하지 않습니다.'});return}
+        if(relative==='rebuild'){
+          if(building){json(res,409,{error:'이미 소스를 불러오고 있습니다.'});return}
+          building=build();operation=building;try{await building;json(res,200,{ok:true})}finally{building=null}return;
+        }
+        if(relative==='selection'){
+          if(building){json(res,409,{error:'소스를 불러온 후 다시 선택하세요.'});return}
+          let body='';for await(const chunk of req){body+=chunk;if(body.length>8192){json(res,413,{error:'선택 정보가 너무 큽니다.'});return}}
+          const selection=JSON.parse(body);
+          const duration=current.config.durationInFrames;
+          for(const key of ['frame','startFrame'])if(!Number.isInteger(selection[key])||selection[key]<0||selection[key]>=duration)throw Error('선택 프레임이 올바르지 않습니다.');
+          if(selection.endFrame!==undefined&&(!Number.isInteger(selection.endFrame)||selection.endFrame<=selection.startFrame||selection.endFrame>duration))throw Error('선택 구간이 올바르지 않습니다.');
+          if(!selection.rect||['x','y','width','height'].some(key=>!Number.isFinite(selection.rect[key])||selection.rect[key]<0)||selection.rect.width<1||selection.rect.height<1)throw Error('캡처 영역이 올바르지 않습니다.');
+          const requestId=crypto.randomUUID();responses.set(requestId,res);
+          const timeout=setTimeout(()=>{if(responses.delete(requestId))json(res,504,{error:'화면 첨부 시간이 초과되었습니다.'})},15000);res.once('close',()=>{clearTimeout(timeout);responses.delete(requestId)});
+          emit({type:'selection',requestId,selection,config:current.config,component:current.component,version:current.version});return;
+        }
+        json(res,404,{error:'지원하지 않는 요청입니다.'});return;
+      }
+      if(req.method!=='GET'&&req.method!=='HEAD'){res.writeHead(405);res.end();return}
+      if(relative===''){
+        const queryFrame=Number(url.searchParams.get('frame'));
+        const bootstrap={base:prefix,token:options.token,frame:url.searchParams.has('frame')&&Number.isSafeInteger(queryFrame)&&queryFrame>=0 ? Math.min(queryFrame,current.config.durationInFrames-1) : options.frame || 0};
+        res.writeHead(200,{'Content-Type':'text/html; charset=utf-8','Cache-Control':'no-store','X-Frame-Options':'DENY','Set-Cookie':'LTPreview='+options.token+'; Path=/; HttpOnly; SameSite=Strict','Content-Security-Policy':"default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; media-src 'self' data: blob: https:; font-src 'self' data: https:; connect-src 'self' https:; worker-src 'self' blob:; object-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'none'"});
+        res.end('<!doctype html><html lang="ko"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Remotion 미리보기</title><style>*{box-sizing:border-box}body{margin:0;background:#14171d;color:#e9ecf2;font:14px system-ui,sans-serif}main{padding:16px;max-width:1100px;margin:auto}header,.row{display:flex;gap:12px;align-items:center;flex-wrap:wrap}header{margin-bottom:12px}header span{color:#aaa;flex:1}.stage{margin:auto;overflow:hidden;background:#000;width:min(100%,calc(58vh * '+current.config.width/current.config.height+'))}fieldset{border:0;padding:12px 0 0;margin:0}button,select,input{font:inherit}button,select{color:inherit;background:#272d39;border:1px solid #444d5f;border-radius:5px;padding:7px 10px}button:disabled{opacity:.45}button:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid #9bc4ff;outline-offset:2px}.ask{background:#244c82;margin-left:auto}.row{margin:8px 0}input[type=number]{width:90px}.timeline{width:100%}label{display:inline-flex;gap:6px;align-items:center}footer{color:#aaa;font-size:12px}p[role=status]{min-height:20px}</style><div id="root"></div><script>window.__LT_PREVIEW__='+JSON.stringify(bootstrap).replace(/</g,'\\u003c')+'</script><script src="preview.js"></script></html>');return;
+      }
+      const candidate=path.resolve(current.outDir,relative);
+      if(!inside(current.outDir,candidate)){res.writeHead(403);res.end();return}
+      const file=await fsp.realpath(candidate);
+      // Bundler may symlink public assets; only the explicitly public project tree is also allowed.
+      const publicRoot=path.join(project,'public');
+      if(!inside(current.outDir,file)&&!inside(publicRoot,file)){res.writeHead(403);res.end();return}
+      const stat=await fsp.stat(file);if(!stat.isFile()){res.writeHead(404);res.end();return}
+      const mime={'.js':'text/javascript','.css':'text/css','.mp4':'video/mp4','.webm':'video/webm','.mp3':'audio/mpeg','.wav':'audio/wav','.png':'image/png','.jpg':'image/jpeg','.jpeg':'image/jpeg','.svg':'image/svg+xml','.woff':'font/woff','.woff2':'font/woff2','.ttf':'font/ttf','.json':'application/json'}[path.extname(file).toLowerCase()]||'application/octet-stream';
+      let start=0,end=stat.size-1,status=200;
+      if(req.headers.range){const match=/^bytes=(\d*)-(\d*)$/.exec(req.headers.range);if(!match||(!match[1]&&!match[2])){res.writeHead(416,{'Content-Range':'bytes */'+stat.size});res.end();return}if(!match[1])start=Math.max(0,stat.size-Number(match[2]));else {start=Number(match[1]);if(match[2])end=Math.min(end,Number(match[2]))}if(!Number.isSafeInteger(start)||!Number.isSafeInteger(end)||start>end||start>=stat.size){res.writeHead(416,{'Content-Range':'bytes */'+stat.size});res.end();return}status=206}
+      res.writeHead(status,{'Content-Type':mime,'Content-Length':Math.max(0,end-start+1),'Cache-Control':'no-store','Accept-Ranges':'bytes',...(status===206?{'Content-Range':`bytes ${start}-${end}/${stat.size}`}:{})});
+      if(req.method==='HEAD'||!stat.size){res.end();return}
+      const stream=fs.createReadStream(file,{start,end});stream.on('error',()=>res.destroy());res.on('close',()=>stream.destroy());stream.pipe(res);
+    }catch(error){if(!res.headersSent)json(res,error.code==='ENOENT'?404:400,{error:error.message});else res.destroy()}
+  });
+  server.on('error',error=>{console.error(error);cleanup()});
+  ensureOpen();
+  server.listen(0,'127.0.0.1',()=>emit({type:'ready',port:server.address().port,config:current.config,component:current.component,version:current.version}));
+}

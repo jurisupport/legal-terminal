@@ -9,6 +9,7 @@ export interface SessionMetaRecord {
   key: string
   sourceKey: string
   sessionId: string
+  originDevice?: 'android' | 'desktop'
   cwd: string
   updatedAt: string
   searchText: string
@@ -70,6 +71,12 @@ export function mergeMetaPair(a: SessionMetaRecord, b: SessionMetaRecord): Sessi
   for (const [field, value] of Object.entries(older)) {
     if (emptyish(merged[field]) && !emptyish(value)) merged[field] = value
   }
+  // The creator stays stable when another device updates the session.
+  const originDevice = [older.originDevice, newer.originDevice].find(
+    (origin) => origin === 'android' || origin === 'desktop'
+  )
+  if (originDevice) merged.originDevice = originDevice
+  else delete merged.originDevice
   return merged
 }
 

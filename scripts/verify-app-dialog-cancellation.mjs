@@ -5,7 +5,7 @@ import ts from 'typescript'
 
 const source = await readFile(new URL('../src/renderer/src/App.tsx', import.meta.url), 'utf8')
 const parsed = ts.createSourceFile('App.tsx', source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX)
-const names = ['confirmCloseDirtyDocs', 'closeDoc', 'closeTermWithConfirm', 'closeDetachedDoc', 'closeDetachedTerm', 'deleteJsToken', 'deleteDictationKey']
+const names = ['confirmCloseDirtyDocs', 'closeDoc', 'closeTermWithConfirm', 'closeDetachedDoc', 'closeDetachedTerm', 'deleteJsToken', 'deleteDictationKey', 'forceCloseWindow']
 const handlers = new Map()
 function visit(node) {
   if (ts.isVariableDeclaration(node) && names.includes(node.name.getText(parsed))) {
@@ -20,6 +20,51 @@ const code = ts.transpileModule(
   { compilerOptions: { target: ts.ScriptTarget.ES2022 } }
 ).outputText
 const noop = () => {}
+
+for (const mode of ['docOnly', 'termOnly']) {
+  for (const blocked of ['queue', 'save']) {
+    const pending = new Promise(() => {})
+    const calls = []
+    const forceWindowCloseRef = { current: false }
+    const actual = vm.runInNewContext(code, {
+      docOnly: mode === 'docOnly', termOnly: mode === 'termOnly',
+      autoWorkspaceSaveChainRef: { current: blocked === 'queue' ? pending : Promise.resolve() },
+      saveAllCaseWorkspacesRef: { current: () => { calls.push('save'); return pending } },
+      caseTabsRef: { current: [{ id: 'case' }] },
+      saveCaseWorkspace: async (id, waitForSync) => {
+        assert.equal(id, 'case')
+        assert.equal(waitForSync, false, 'dispatch the final snapshot without awaiting shared storage')
+        calls.push('dispatch')
+      },
+      forceWindowCloseRef, setCloseWindowPrompt: noop,
+      window: { lt: { app: { forceCloseWindow: () => calls.push('close') } } }
+    })
+    void actual.forceCloseWindow()
+    await new Promise(setImmediate)
+    assert.deepEqual(calls, ['dispatch', 'close'], `${mode}: close does not wait for a blocked workspace ${blocked}`)
+    assert.equal(forceWindowCloseRef.current, true)
+  }
+}
+
+{
+  let finishQueue, finishSave
+  const calls = []
+  const actual = vm.runInNewContext(code, {
+    docOnly: false, termOnly: false,
+    autoWorkspaceSaveChainRef: { current: new Promise((resolve) => { finishQueue = resolve }) },
+    saveAllCaseWorkspacesRef: { current: () => { calls.push('save'); return new Promise((resolve) => { finishSave = resolve }) } },
+    forceWindowCloseRef: { current: false }, setCloseWindowPrompt: noop,
+    window: { lt: { app: { forceCloseWindow: () => calls.push('close') } } }
+  })
+  const closing = actual.forceCloseWindow()
+  assert.deepEqual(calls, [], 'a full workspace still flushes its pending saves before closing')
+  finishQueue()
+  await new Promise(setImmediate)
+  assert.deepEqual(calls, ['save'])
+  finishSave()
+  await closing
+  assert.deepEqual(calls, ['save', 'close'])
+}
 
 for (const kind of ['doc', 'term']) {
   for (const scenario of ['cancel', 'approve', 'gone', 'added']) {

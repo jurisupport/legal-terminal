@@ -1,8 +1,17 @@
-import { app, BrowserWindow, shell, ipcMain, dialog, screen, session, Menu, clipboard, Notification, type WebContents } from 'electron'
+import { openRemotionPreview, closeRemotionPreview, disposeRemotionPreviews } from './remotionPreview'
+import { registerFileDragIpc } from './fileDrag'
+import { registerBrowserIpc, disposeBrowsers } from './browser'
+import { registerClaudeRemoteControlIpc, disposeClaudeRemoteControls } from './claudeRemoteControl'
+import type { RemotionPreviewOptions } from '../shared/remotionPreview'
+import type { SendClaudeOptions } from '../shared/claudeAsk'
+import { GENERAL_CHAT_FOLDER } from '../shared/generalChat'
+import { MEDIA_SCHEME, copyCachedMedia, registerMediaIpc, registerMediaProtocol } from './media'
+import { normalizeMediaSelection, type MediaAskRequest } from '../shared/media'
+import { app, protocol, BrowserWindow, shell, ipcMain, dialog, screen, session, Menu, clipboard, Notification, powerMonitor, type WebContents } from 'electron'
 import { spawn } from 'child_process'
 import { createHash } from 'crypto'
 import { join, basename, dirname, extname, isAbsolute, resolve, sep, posix } from 'path'
-import { readdir, readFile, stat, writeFile, copyFile, rm, mkdir, rename, cp } from 'fs/promises'
+import { readdir, readFile, realpath, stat, writeFile, copyFile, rm, mkdir, rename, cp } from 'fs/promises'
 import { existsSync, watch, type Dirent, type FSWatcher } from 'fs'
 import { fileURLToPath } from 'url'
 import { inflateRawSync } from 'zlib'
@@ -17,9 +26,14 @@ import {
   listHistory,
   addHistory,
   getJsPairing,
+  allJsPairings,
   setJsPairing
 } from './caseStore'
+import { ProjectStore } from './projectStore'
+import { configureProjectAgent, getProjectWorkspace, validateProjectWorkspacePath, disposeProjectMcp } from './projectAgent'
+import type { ProjectInput } from '../shared/project'
 import * as js from './jurisupport'
+import { pairedFileEvidence, containsCaseNumber, FILE_EVIDENCE_ENTRY_LIMIT } from './todoFileEvidence'
 import {
   clearRemoteDirCache as clearRemotePickerDirCache,
   invalidateRemoteDirCacheForProfile,
@@ -37,12 +51,15 @@ import {
   rfsListPdfs,
   rfsReadBytes,
   rfsWriteText,
+  RemoteFileConflict,
   rfsWriteBytes,
   rfsMkdir,
   rfsCreateFile,
   rfsMove,
   rfsRename,
   rfsStat,
+  rfsRealpath,
+  rfsValidateWorkspace,
   rfsDelete,
   clearRemoteDirCache as clearRemoteFsDirCache,
   disposeRemote,
@@ -76,6 +93,10 @@ import {
 import { decodeTextBuffer } from './textEncoding'
 import {
   loadAutomaticWorkspace,
+  listAutomaticWorkspaces,
+  observeAutomaticWorkspace,
+  moveWorkspaceAgentTab,
+  releaseWorkspaceAgentTabs,
   listWorkspaceSnapshots,
   loadWorkspaceSnapshot,
   saveAutomaticWorkspace,
@@ -83,7 +104,9 @@ import {
   type AutomaticWorkspaceLocation,
   type WorkspaceSnapshot
 } from './workspace'
-import { disposeAgentSessions, registerAgentIpc } from './agent/agent-service'
+import { disposeAgentSessions, reconnectAgentSessions, registerAgentIpc, withProjectWorkspaceChange } from './agent/agent-service'
+
+protocol.registerSchemesAsPrivileged([MEDIA_SCHEME])
 
 let mainWindow: BrowserWindow | null = null
 let updateCheckStarted = false
@@ -106,6 +129,8 @@ function applyDockIcon(): void {
   const iconPath = getAppIconPath()
   if (iconPath && process.platform === 'darwin' && app.dock) app.dock.setIcon(iconPath)
 }
+
+registerFileDragIpc(ipcMain, getAppIconPath)
 
 async function checkForUpdates(win: BrowserWindow): Promise<void> {
   try {
@@ -227,6 +252,8 @@ function createWindow(setMain = true, opts?: { docOnly?: boolean; termOnly?: boo
   })
 
   if (setMain) mainWindow = win
+  const observerId = win.webContents.id
+  win.webContents.once('destroyed', () => releaseWorkspaceAgentTabs(observerId))
 
   let closeGuardReady = false
   let lastRendererRecoveryAt = 0
@@ -422,8 +449,19 @@ let pendingTabDrag: {
 // 새 창은 렌더러가 준비되기 전이라 페이로드를 큐잉했다가 'tabs:ready' 때 전달.
 const pendingReceive = new Map<number, TabPayload[]>()
 
+const recordTabTransfer = (payload: TabPayload, target: BrowserWindow): void => {
+  const tab = payload.tab as { kind?: unknown; id?: unknown } | undefined
+  if (payload.kind === 'terminal' && tab?.kind === 'agent' && typeof tab.id === 'string') {
+    moveWorkspaceAgentTab(tab.id, target.webContents.id)
+  }
+}
+
+const isBrowserTabPayload = (payload: TabPayload): boolean =>
+  payload.kind === 'doc' && (payload.tab as { kind?: unknown } | undefined)?.kind === 'browser'
+
 // 새 창 (새 작업환경)
 ipcMain.handle('window:new', (_e, opts?: NewWindowOptions) => {
+  if (opts?.tabs?.some(isBrowserTabPayload)) return
   const win = createWindow(false)
   const tabs = Array.isArray(opts?.tabs) ? opts.tabs.filter(Boolean) : []
   if (tabs.length) pendingReceive.set(win.webContents.id, tabs)
@@ -531,9 +569,9 @@ ipcMain.handle('app:setWindowTitle', (e, title: string) => {
 })
 
 // 문서 전용(찢어낸) 창 등에서 'Claude에 물어보기' → 메인 창의 활성 터미널로 전달
-ipcMain.handle('claude:ask', (_e, payload: string) => {
+ipcMain.handle('claude:ask', (_e, payload: string, opts?: SendClaudeOptions) => {
   if (mainWindow && !mainWindow.isDestroyed()) {
-    mainWindow.webContents.send('claude:incoming', payload)
+    mainWindow.webContents.send('claude:incoming', payload, opts)
     mainWindow.focus()
   }
 })
@@ -556,6 +594,8 @@ ipcMain.handle('tabs:dropOnTabBar', (e, target: TabDropTarget): TabMoveResult =>
     drag.completed = { action: 'moved', removeSource: false }
     return drag.completed
   }
+  if (isBrowserTabPayload(payload)) return { action: 'none' }
+  recordTabTransfer(payload, targetWindow)
   targetWindow.webContents.send('tabs:receive', payload)
   targetWindow.focus()
   drag.completed = { action: 'moved', removeSource: true }
@@ -650,13 +690,17 @@ ipcMain.handle('tabs:endDrag', async (): Promise<TabMoveResult> => {
         return { action: 'moved', removeSource: false }
       }
       // 다른 창 탭바 = 그 창으로 이동(merge)
+      if (isBrowserTabPayload(payload)) return { action: 'none' }
+      recordTabTransfer(payload, w)
       w.webContents.send('tabs:receive', payload)
       w.focus()
       return { action: 'moved', removeSource: true }
     }
   }
   // 2) 탭바 밖(본문/창 밖 등)에서 놓임 → 새 전용 창으로 찢기
+  if (isBrowserTabPayload(drag.payload)) return { action: 'none' }
   const win = createWindow(false, kind === 'terminal' ? { termOnly: true } : { docOnly: true })
+  recordTabTransfer(drag.payload, win)
   pendingReceive.set(win.webContents.id, [drag.payload])
   return { action: 'moved', removeSource: true }
 })
@@ -673,6 +717,7 @@ ipcMain.handle('app:openHtml', async (_e, path: string) => {
 
 ipcMain.handle('app:info', () => ({
   version: app.getVersion(),
+  homeDirectory: app.getPath('home'),
   platform: process.platform,
   versions: {
     electron: process.versions.electron,
@@ -680,6 +725,25 @@ ipcMain.handle('app:info', () => ({
     chrome: process.versions.chrome
   }
 }))
+
+ipcMain.handle('app:generalChatDirectory', async (_event, profileId?: string) => {
+  if (profileId) {
+    const profile = (await getSettings()).sshProfiles?.find((item) => item.id === profileId)
+    if (!profile) throw new Error('일반 질문에 사용할 원격 연결을 찾을 수 없습니다.')
+    const home = await listRemoteDir(profile, '~', { refresh: true })
+    if (!home.ok) throw new Error(home.error)
+    const directory = posix.join(home.cwd, GENERAL_CHAT_FOLDER)
+    try {
+      await rfsMkdir(makeRemote(profileId, home.cwd), GENERAL_CHAT_FOLDER)
+    } catch (error) {
+      if (!(await rfsStat(makeRemote(profileId, directory)).catch(() => null))?.isDir) throw error
+    }
+    return directory
+  }
+  const directory = join(app.getPath('home'), GENERAL_CHAT_FOLDER)
+  await mkdir(directory, { recursive: true })
+  return directory
+})
 
 // ── 수동 업데이트 확인 (설정화면) ──
 ipcMain.handle('update:check', () => checkUpdate())
@@ -736,6 +800,10 @@ ipcMain.handle('dialog:openCase', async () => {
 ipcMain.handle('js:setToken', (_e, token: string) => js.setToken(token))
 ipcMain.handle('js:hasToken', () => js.hasToken())
 ipcMain.handle('js:tokenStatus', () => js.tokenStatus())
+ipcMain.handle('js:hearingSummary', async () => {
+  try { return { ok: true, summary: await js.hearingSummary() } }
+  catch (e) { return { ok: false, error: String(e instanceof Error ? e.message : e) } }
+})
 ipcMain.handle('js:listCases', async (_e, params: Record<string, unknown>) => {
   try {
     return { ok: true, cases: await js.listCases(params ?? {}) }
@@ -749,6 +817,62 @@ ipcMain.handle('js:getCase', async (_e, id: string) => {
   } catch (e) {
     return { ok: false, error: String(e instanceof Error ? e.message : e) }
   }
+})
+ipcMain.handle('todo:capabilities', async () => {
+  try { return { ok: true, capabilities: await js.todoCapabilities() } }
+  catch (e) { return { ok: false, error: String(e instanceof Error ? e.message : e) } }
+})
+ipcMain.handle('todo:evidenceSuggestions', async (_e, id: string) => {
+  try {
+    const settings = await getSettings()
+    const token = settings.jurisupportTokenEnc
+    const task = await js.getTodo(id)
+    if (!task) throw new Error('할일 원문을 확인할 수 없습니다.')
+    const linkedCase = task.caseId ? await js.getCase(task.caseId) : null
+    if (task.caseId && (!linkedCase || linkedCase.id !== task.caseId)) throw new Error('연결 사건의 조회 권한을 확인할 수 없습니다.')
+    const pairings = task.caseId ? await allJsPairings() : {}
+    const remoteKeys = (settings.sshProfiles ?? []).map((profile) => `remote:${profile.id}:${task.caseId}`)
+    const preferred = settings.caseOpenTarget?.startsWith('remote:') ? `${settings.caseOpenTarget}:${task.caseId}` : undefined
+    const keys = [preferred && remoteKeys.includes(preferred) ? preferred : undefined, task.caseId, ...remoteKeys]
+    const pairing = keys.map((key) => key ? pairings[key] : undefined).find(Boolean)
+    const caseNumber = linkedCase?.caseNumber
+    const folders: { path: string; kind: 'records' | 'drafts'; caseSpecific?: boolean }[] = []
+    for (const kind of ['records', 'drafts'] as const) {
+      const path = pairing?.[kind]
+      if (!path || folders.some((folder) => folder.path === path)) continue
+      // Resolve local symlinks before treating a folder name as proof of the case scope.
+      const actualPath = isRemote(path) ? path : await realpath(path).catch(() => path)
+      folders.push({ path: actualPath, kind, caseSpecific: kind === 'records' && !!caseNumber && containsCaseNumber(basename(isRemote(actualPath) ? parseRemote(actualPath).path : actualPath), caseNumber) })
+    }
+    const [server, local] = await Promise.all([
+      js.todoEvidenceSuggestions(id).then((candidates) => ({ candidates, error: '' })).catch((e) => ({ candidates: [] as js.TodoEvidence[], error: `서버 근거 조회 실패: ${e instanceof Error ? e.message : String(e)}` })),
+      pairedFileEvidence(caseNumber, folders, async (folder) => {
+        if (isRemote(folder)) return rfsList(folder, { refresh: true, prefetch: false, followSymlinks: false })
+        const entries = (await readdir(folder, { withFileTypes: true })).filter((entry) => !entry.name.startsWith('.')).slice(0, FILE_EVIDENCE_ENTRY_LIMIT + 1)
+        return Promise.all(entries.map(async (entry) => {
+          const path = join(folder, entry.name)
+          const info = entry.isFile() ? await stat(path) : undefined
+          return { name: entry.name, path, isDir: !entry.isFile(), mtimeMs: info?.mtimeMs }
+        }))
+      })
+    ])
+    if (token !== (await getSettings()).jurisupportTokenEnc) throw new Error('계정이 변경되었습니다. 다시 조회해 주세요.')
+    const reviewed = new Set((task.evidence ?? []).map((entry) => `${entry.kind}:${entry.id}`))
+    const candidates = [...server.candidates, ...local.candidates.filter((entry) => !reviewed.has(`${entry.kind}:${entry.id}`))]
+    return { ok: true, candidates, error: [server.error, ...local.warnings].filter(Boolean).join(' ') }
+  } catch (e) { return { ok: false, error: String(e instanceof Error ? e.message : e) } }
+})
+ipcMain.handle('js:caseClosurePreview', async (_e, id: string) => {
+  try { return { ok: true, preview: await js.caseClosurePreview(id) } }
+  catch (e) { return { ok: false, error: String(e instanceof Error ? e.message : e) } }
+})
+ipcMain.handle('js:updateCaseStatus', async (_e, p: { id: string; status: string; taskDispositions?: js.CaseTaskDisposition[]; version?: number }) => {
+  try { return { ok: true, case: await js.updateCaseStatus(p.id, p.status, p.taskDispositions, p.version) } }
+  catch (e) { return { ok: false, error: String(e instanceof Error ? e.message : e) } }
+})
+ipcMain.handle('js:updateCaseEngagement', async (_e, p: { id: string; engagementStatus: string; taskDispositions?: js.CaseTaskDisposition[]; version?: number }) => {
+  try { return { ok: true, case: await js.updateCaseEngagement(p.id, p.engagementStatus, p.taskDispositions, p.version) } }
+  catch (e) { return { ok: false, error: String(e instanceof Error ? e.message : e) } }
 })
 ipcMain.handle('todo:list', async (_e, params: Record<string, unknown>) => {
   try {
@@ -778,16 +902,16 @@ ipcMain.handle('todo:update', async (_e, p: { id: string; patch: js.TodoMutation
     return { ok: false, error: String(e instanceof Error ? e.message : e) }
   }
 })
-ipcMain.handle('todo:complete', async (_e, p: { id: string; progressText?: string; context?: js.TodoTerminalContext }) => {
+ipcMain.handle('todo:complete', async (_e, p: { id: string; progressText?: string; context?: js.TodoTerminalContext; options?: js.TodoStatusOptions }) => {
   try {
-    return { ok: true, todo: await js.completeTodo(p.id, p.progressText, p.context) }
+    return { ok: true, todo: await js.completeTodo(p.id, p.progressText, p.context, p.options) }
   } catch (e) {
     return { ok: false, error: String(e instanceof Error ? e.message : e) }
   }
 })
-ipcMain.handle('todo:archive', async (_e, id: string) => {
+ipcMain.handle('todo:archive', async (_e, p: string | { id: string; options?: js.TodoStatusOptions }) => {
   try {
-    return { ok: true, todo: await js.archiveTodo(id) }
+    return { ok: true, todo: await js.archiveTodo(typeof p === 'string' ? p : p.id, typeof p === 'string' ? undefined : p.options) }
   } catch (e) {
     return { ok: false, error: String(e instanceof Error ? e.message : e) }
   }
@@ -867,11 +991,15 @@ ipcMain.handle('workspace:list', () => listWorkspaceSnapshots())
 ipcMain.handle('workspace:load', (_e, id?: string) => loadWorkspaceSnapshot(id))
 ipcMain.handle(
   'workspace:autoSave',
-  (_e, p: { snapshot: WorkspaceSnapshot; location: AutomaticWorkspaceLocation }) =>
-    saveAutomaticWorkspace(p.snapshot, p.location)
+  (e, p: { snapshot: WorkspaceSnapshot; location: AutomaticWorkspaceLocation }) =>
+    saveAutomaticWorkspace(p.snapshot, p.location, e.sender.id)
 )
-ipcMain.handle('workspace:autoLoad', (_e, location: AutomaticWorkspaceLocation) =>
-  loadAutomaticWorkspace(location)
+ipcMain.handle('workspace:autoLoad', (e, location: AutomaticWorkspaceLocation, observe?: boolean) =>
+  loadAutomaticWorkspace(location, e.sender.id, observe)
+)
+ipcMain.handle('workspace:autoList', (_e, ssh?: SshProfile, includeClosed?: boolean) => listAutomaticWorkspaces(ssh, includeClosed))
+ipcMain.handle('workspace:autoObserve', (e, location: AutomaticWorkspaceLocation, snapshot: WorkspaceSnapshot) =>
+  observeAutomaticWorkspace(location, snapshot, e.sender.id)
 )
 ipcMain.handle('workspace:exportFile', async (e, snapshot: WorkspaceSnapshot) => {
   const win = BrowserWindow.fromWebContents(e.sender)
@@ -939,6 +1067,58 @@ ipcMain.handle('case:history', () => listHistory())
 ipcMain.handle('case:addHistory', (_e, entry: { drafts: string; records?: string; name: string }) =>
   addHistory(entry)
 )
+
+// ── 프로젝트 IPC ──
+const projectStore = new ProjectStore(join(app.getPath('userData'), 'projects.json'))
+function notifyProjectsChanged(): void {
+  for (const win of BrowserWindow.getAllWindows()) {
+    if (!win.isDestroyed() && !win.webContents.isDestroyed()) win.webContents.send('projects:changed')
+  }
+}
+configureProjectAgent({
+  store: projectStore,
+  workspaceRoot: join(app.getPath('userData'), 'project-workspaces'),
+  validateRemoteWorkspace: rfsValidateWorkspace,
+  changed: notifyProjectsChanged,
+  pairings: allJsPairings,
+  caseDetails: js.getCase,
+  list: async (path) => isRemote(path)
+    ? rfsList(path, { refresh: true, prefetch: false, followSymlinks: false })
+    : (await readLocalDirEntries(path)).filter((entry) => !entry.isSymbolicLink()).map((entry) => ({ name: entry.name, path: join(path, entry.name), isDir: entry.isDirectory() })),
+  stat: async (path) => {
+    if (isRemote(path)) return rfsStat(path)
+    const info = await stat(path)
+    return { size: info.size, isDir: info.isDirectory(), mtimeMs: info.mtimeMs }
+  },
+  realpath: (path) => isRemote(path) ? rfsRealpath(path) : realpath(path),
+  readBytes: (path) => isRemote(path) ? rfsReadBytes(path) : readLocalBytes(path),
+  officeText: (path, bytes) => extname(path).toLowerCase() === '.docx' ? extractDocxText(bytes) : extractHwpText(bytes, extname(path).toLowerCase())
+})
+ipcMain.handle('projects:list', () => projectStore.list())
+ipcMain.handle('projects:workspace', (_event, id: string) => getProjectWorkspace(id))
+ipcMain.handle('projects:save', async (_event, input: ProjectInput) => {
+  const previous = input?.id ? (await projectStore.list()).find((project) => project.id === input.id) : undefined
+  const save = async () => {
+    const next = input?.workspacePath != null && input.workspacePath !== previous?.workspacePath
+      ? { ...input, workspacePath: await validateProjectWorkspacePath(input.workspacePath) } : input
+    const profiles = isRemote(next?.workspacePath ?? previous?.workspacePath)
+      ? (await getSettings()).sshProfiles ?? [] : []
+    const project = await projectStore.save(next, (path) => {
+      if (!isRemote(path)) return
+      const remote = parseRemote(path)
+      const profile = profiles.find((item) => item.id === remote.profileId)
+      if (profile) return JSON.stringify(['ssh', profile.host.trim().toLowerCase(), profile.user, profile.port ?? 22, posix.normalize(remote.path)])
+    })
+    notifyProjectsChanged()
+    return project
+  }
+  return previous && input.workspacePath !== undefined && (input.workspacePath ?? undefined) !== previous.workspacePath
+    ? withProjectWorkspaceChange(previous.id, save) : save()
+})
+ipcMain.handle('projects:remove', async (_event, id: string, expectedUpdatedAt?: string) => {
+  await projectStore.remove(id, expectedUpdatedAt)
+  notifyProjectsChanged()
+})
 
 // ── 파일시스템 IPC (탐색기) ──
 const TEXT_EXT = new Set([
@@ -1456,7 +1636,7 @@ async function hydrateLocalCloudFile(filePath: string, timeoutMs = LOCAL_CLOUD_H
 }
 
 function hasVisibleDirEntry(entries: Dirent[]): boolean {
-  return entries.some((entry) => !entry.name.startsWith('.'))
+  return entries.some((entry) => entry.name === '.hearings' || !entry.name.startsWith('.'))
 }
 
 async function hydrateLocalCloudFolder(dirPath: string): Promise<void> {
@@ -2160,20 +2340,22 @@ async function downloadRemotePlanWithProgress(
       destPath
     })
     await mkdir(dirname(file.destPath), { recursive: true })
-    await writeFile(
-      file.destPath,
-      await rfsReadBytes(file.source, (progress) =>
-        onProgress({
-          phase: 'downloading',
-          totalFiles,
-          completedFiles,
-          currentFile: file.label,
-          destPath,
-          totalBytes: progress.totalBytes,
-          downloadedBytes: progress.downloadedBytes
-        })
+    if (!await copyCachedMedia(file.source, file.destPath)) {
+      await writeFile(
+        file.destPath,
+        await rfsReadBytes(file.source, (progress) =>
+          onProgress({
+            phase: 'downloading',
+            totalFiles,
+            completedFiles,
+            currentFile: file.label,
+            destPath,
+            totalBytes: progress.totalBytes,
+            downloadedBytes: progress.downloadedBytes
+          })
+        )
       )
-    )
+    }
     completedFiles += 1
     onProgress({
       phase: 'downloading',
@@ -2267,7 +2449,7 @@ ipcMain.handle('fs:rename', async (_e, p: { path: string; name: string }) => {
 ipcMain.handle('fs:list', async (_e, dirPath: string, opts?: { refresh?: boolean }) => {
   if (isRemote(dirPath)) return rfsList(dirPath, { refresh: !!opts?.refresh })
   const entries = await readLocalDirEntries(dirPath)
-  const visible = entries.filter((e) => !e.name.startsWith('.'))
+  const visible = entries.filter((e) => e.name === '.hearings' || !e.name.startsWith('.'))
   const out = await Promise.all(
     visible.map(async (e) => {
       const path = join(dirPath, e.name)
@@ -2340,6 +2522,25 @@ ipcMain.handle('fs:saveClipboardImage', async (_e, p: { data: Uint8Array; mimeTy
   const filePath = join(dir, name)
   await writeFile(filePath, data)
   return { path: filePath }
+})
+
+ipcMain.handle('remotion:open', async (event, options: RemotionPreviewOptions) => {
+  const owner = BrowserWindow.fromWebContents(event.sender)
+  if (!owner || event.senderFrame !== event.sender.mainFrame) throw new Error('미리보기를 열 작업 창을 찾을 수 없습니다.')
+  return openRemotionPreview(options, owner, (selection) => {
+    if (!event.sender.isDestroyed()) event.sender.send('remotion:selection', selection)
+  })
+})
+ipcMain.handle('remotion:close', (event, id: string) => closeRemotionPreview(id, event.sender.id))
+
+ipcMain.handle('media:forwardAsk', async (event, request: MediaAskRequest) => {
+  const source = BrowserWindow.fromWebContents(event.sender)
+  if (!source || !mainWindow || mainWindow.isDestroyed() || mainWindow === source) throw new Error('질문을 전달할 기본 창을 찾지 못했습니다.')
+  if (!normalizeMediaSelection(request?.selection)) throw new Error('잘못된 미디어 선택 정보입니다.')
+  if (request.capture && (!(request.capture instanceof Uint8Array) || request.capture.byteLength > 5 * 1024 * 1024)) throw new Error('캡처 이미지가 너무 큽니다.')
+  mainWindow.webContents.send('media:ask', request)
+  mainWindow.show()
+  mainWindow.focus()
 })
 
 ipcMain.handle('fs:readBytes', async (event, filePath: string) => {
@@ -2715,6 +2916,7 @@ ipcMain.handle('fs:saveAs', async (_e, p: { content: string; defaultPath?: strin
 
 ipcMain.handle('fs:writeText', async (_e, p: { path: string; content: string; expected?: FileSignature }) => {
   try {
+    if (isRemote(p.path)) return { ok: true, stat: await rfsWriteText(p.path, p.content, p.expected) }
     if (p.expected) {
       const current = await statFileSignature(p.path)
       if (!sameFileSignature(current, p.expected)) {
@@ -2726,10 +2928,10 @@ ipcMain.handle('fs:writeText', async (_e, p: { path: string; content: string; ex
         }
       }
     }
-    if (isRemote(p.path)) await rfsWriteText(p.path, p.content)
-    else await writeFile(p.path, p.content, 'utf8')
+    await writeFile(p.path, p.content, 'utf8')
     return { ok: true, stat: await statFileSignature(p.path).catch(() => undefined) }
   } catch (e) {
+    if (e instanceof RemoteFileConflict) return { ok: false, conflict: true, stat: e.stat, error: e.message }
     return { ok: false, error: String(e) }
   }
 })
@@ -2781,6 +2983,8 @@ ipcMain.handle('fs:readText', async (event, filePath: string) => {
 
 // ── PTY (터미널) IPC ──
 registerAgentIpc(ipcMain)
+registerBrowserIpc(ipcMain)
+registerClaudeRemoteControlIpc(ipcMain)
 
 ipcMain.handle('pty:create', (e, opts: CreatePtyOptions) => {
   createPty(opts, e.sender)
@@ -2793,6 +2997,10 @@ ipcMain.on('pty:detach', (e, { id }: { id: string }) => detachPty(id, e.sender))
 ipcMain.on('pty:kill', (_e, { id }: { id: string }) => killPty(id))
 
 app.on('before-quit', () => {
+  disposeClaudeRemoteControls()
+  disposeBrowsers()
+  void disposeProjectMcp()
+  disposeRemotionPreviews()
   disposeAgentSessions()
   killAllPty()
   disposeRemote()
@@ -2800,6 +3008,9 @@ app.on('before-quit', () => {
 })
 
 app.whenReady().then(() => {
+  powerMonitor.on('resume', reconnectAgentSessions)
+  registerMediaProtocol(session.defaultSession)
+  registerMediaIpc(ipcMain)
   // Windows 토스트 알림에는 AppUserModelID가 필요하다 (electron-builder appId와 일치).
   if (process.platform === 'win32') app.setAppUserModelId('kr.lawpid.legalterminal')
   applyDockIcon()

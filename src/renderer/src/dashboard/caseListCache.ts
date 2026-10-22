@@ -1,4 +1,5 @@
 import type { JsCase } from '../env'
+import { matchesSearch } from '../search/sessionSearch'
 
 const CASE_LIST_CACHE_TTL_MS = 10 * 60_000
 
@@ -16,6 +17,7 @@ type CaseListResult = { ok: boolean; cases?: JsCase[]; error?: string }
 
 const caseListCache = new Map<string, { fetchedAt: number; cases: JsCase[] }>()
 const caseListInflight = new Map<string, Promise<CaseListResult>>()
+let caseListGeneration = 0
 
 function compactQuery(params: CaseListQuery = {}): CaseListQuery {
   return {
@@ -38,11 +40,13 @@ export function readCachedCaseList(params: CaseListQuery = {}): JsCase[] | undef
 }
 
 export function clearCaseListCache(): void {
+  caseListGeneration += 1
   caseListCache.clear()
   caseListInflight.clear()
 }
 
 export function listCasesCached(params: CaseListParams = {}): Promise<CaseListResult> {
+  const generation = caseListGeneration
   const { refresh, ...query } = params
   const key = cacheKey(query)
   const cached = caseListCache.get(key)
@@ -55,9 +59,22 @@ export function listCasesCached(params: CaseListParams = {}): Promise<CaseListRe
     if (inflight) return inflight
   }
 
-  const request = window.lt.js
-    .listCases({ ...compactQuery(query), ...(refresh ? { refresh: true } : {}) })
+  const request = (async (): Promise<CaseListResult> => {
+    const result = await window.lt.js.listCases({ ...compactQuery(query), ...(refresh ? { refresh: true } : {}) })
+    if (generation !== caseListGeneration || !result.ok || !query.search?.trim() || query.page !== undefined || query.limit !== undefined) return result
+    // 서버 검색에서 빠진 재판부를 전체 목록으로 보완하고 기존 검색 결과는 유지한다.
+    const all = await listCasesCached({ ...query, search: undefined, refresh })
+    if (!all.ok) return all
+    const merged = new Map((result.cases ?? []).map((item) => [item.id, item]))
+    for (const item of all.cases ?? []) {
+      if (!merged.has(item.id) && matchesSearch([item.court ?? undefined, item.division ?? undefined], query.search)) {
+        merged.set(item.id, item)
+      }
+    }
+    return { ...result, cases: [...merged.values()] }
+  })()
     .then((result) => {
+      if (generation !== caseListGeneration) return { ok: false, error: '사건 목록이 갱신되었습니다. 다시 검색해 주세요.' }
       if (result.ok) {
         caseListCache.set(key, { fetchedAt: Date.now(), cases: result.cases ?? [] })
       }
