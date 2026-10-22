@@ -125,7 +125,7 @@ export function AgentMediaPreview({ reference, active, onOpen }: {
     },
     onTimeUpdate: () => {
       const player = playerRef.current
-      if (player && selection?.end !== undefined && !player.paused && player.currentTime >= selection.end) {
+      if (player && selection?.end !== undefined && !player.paused && !player.seeking && player.currentTime >= selection.end) {
         player.pause()
         player.currentTime = Math.min(selection.end, player.duration)
       }

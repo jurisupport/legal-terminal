@@ -114,7 +114,7 @@ try { chromePath = await findChrome() } catch { console.log('Chrome integration 
 const directory = await mkdtemp(path.join(tmpdir(), 'lt-browser-test-'))
 const fixture = http.createServer((request, response) => {
   response.setHeader('content-type', 'text/html; charset=utf-8')
-  response.end('<!doctype html><title>Browser fixture</title><h1>Browser test page</h1><input id="name" aria-label="Name"><input type="password" value="secret-password"><input autocomplete="one-time-code" value="secret-code"><textarea>secret-note</textarea><div contenteditable>secret-editable</div><button id="go" onclick="document.querySelector(\'h1\').textContent=\'Clicked \'+document.querySelector(\'#name\').value">Go</button><div style="height:2000px"></div>')
+  response.end('<!doctype html><title>Browser fixture</title><h1>Browser test page</h1><input id="name" aria-label="Name"><input type="password" value="secret-password"><input autocomplete="one-time-code" value="secret-code"><textarea>secret-note</textarea><div contenteditable>secret-editable</div><button id="go" onclick="document.querySelector(\'h1\').textContent=\'Clicked \'+document.querySelector(\'#name\').value">Go</button><div id="viewport"></div><div style="height:2000px"></div><script>document.querySelector("#viewport").textContent="Viewport "+document.documentElement.clientWidth+"x"+document.documentElement.clientHeight</script>')
 })
 await new Promise(resolve => fixture.listen(0, '127.0.0.1', resolve))
 let controller
@@ -124,7 +124,7 @@ try {
   let read
   for (let index = 0; index < 30; index++) {
     read = await controller.command({ action: 'read' })
-    if (read.title === 'Browser fixture') break
+    if (read.title === 'Browser fixture' && /Viewport \d+x\d+/.test(read.text)) break
     await new Promise(resolve => setTimeout(resolve, 100))
   }
   assert.equal(read.title, 'Browser fixture')
@@ -135,8 +135,11 @@ try {
   await controller.command({ action: 'click', selector: '#go' })
   assert.ok((await controller.command({ action: 'read' })).text.includes('Clicked replacement'), 'Platform select-all shortcut should replace the prior text')
   const saver = await controller.frame({ quality: 'saver' })
-  assert.equal(saver.width, 1280)
-  assert.equal(saver.height, 800)
+  const viewport = /Viewport (\d+)x(\d+)/.exec(read.text)
+  assert.ok(viewport, 'the page reports its actual content viewport')
+  // Classic scrollbars reserve width on CI; input coordinates must match content, not the configured outer size.
+  assert.equal(saver.width, Number(viewport[1]))
+  assert.equal(saver.height, Number(viewport[2]))
   assert.equal(saver.data[0], 0xff)
   assert.equal(saver.data[1], 0xd8)
   await controller.command({ action: 'scroll', x: 640, y: 400, deltaY: 500 })

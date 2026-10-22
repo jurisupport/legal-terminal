@@ -67,9 +67,26 @@ if (!process.versions.electron) {
     app.setPath('userData', path.join(temp, 'profile'))
     await app.whenReady()
     const window = new BrowserWindow({ width: 760, height: 1060, show: false, webPreferences: { sandbox: true, contextIsolation: true, nodeIntegration: false } })
-    const run = fn => window.webContents.executeJavaScript(`(${fn.toString()})()`)
+    const run = async fn => {
+      const result = await window.webContents.executeJavaScript(`(async () => {
+        try { return {ok:true,value:await (${fn.toString()})()} }
+        catch(error) { return {ok:false,error:{name:error?.name,message:error?.message??String(error),stack:error?.stack}} }
+      })()`)
+      if (!result.ok) {
+        const error = new Error(result.error.message)
+        error.name = result.error.name ?? 'RendererError'
+        if (result.error.stack) error.stack = result.error.stack
+        throw error
+      }
+      return result.value
+    }
     try {
       await window.loadFile(path.join(temp, 'index.html'))
+      const cpuRate = Number(process.env.LT_AGENT_MEDIA_CPU_THROTTLE ?? 1)
+      if (cpuRate > 1) {
+        window.webContents.debugger.attach('1.3')
+        await window.webContents.debugger.sendCommand('Emulation.setCPUThrottlingRate', { rate: cpuRate })
+      }
       await run(async () => {
         window.waitFor = async condition => { const end=Date.now()+6000;while(!condition()){if(Date.now()>end)throw Error('Timeout: '+condition);await new Promise(resolve=>setTimeout(resolve,20))} }
         window.check = (condition,message)=>{if(!condition)throw Error(message)}
@@ -154,7 +171,11 @@ if (!process.versions.electron) {
         check(test.opens.at(-1).versionId==='v1'&&test.opens.at(-1).path===selection.sourcePath,'quoted version and source are exact')
         const video=document.querySelector('video')
         video.currentTime=1.5
-        await video.play()
+        const playback=video.play()
+        check(video.seeking,'outside-range playback begins with a pending seek')
+        // A queued timeupdate may precede onPlay's reset to the selected start.
+        video.dispatchEvent(new Event('timeupdate'))
+        await playback
         await waitFor(()=>video.currentTime<.8)
         await waitFor(()=>video.paused)
         check(Math.abs(video.currentTime-.8)<.02,'selected range stops at quoted end')
@@ -186,6 +207,23 @@ if (!process.versions.electron) {
       })
       console.log('agent media: path/origin safety, markdown images+links, streaming stability, viewport and size limits, delayed video, quote revisions/ranges, hidden pause, progress/cancel and stale-token release passed')
       app.exit(0)
-    } catch (error) { console.error(error); app.exit(1) }
+    } catch (error) {
+      console.error(error.stack ?? String(error))
+      const failurePath = path.join(repo, 'output/playwright/agent-media/failure')
+      await fs.mkdir(path.dirname(failurePath), { recursive: true })
+      try {
+        await fs.writeFile(`${failurePath}.png`, (await window.webContents.capturePage()).toPNG())
+        const state = await run(() => ({
+          text: document.body.innerText,
+          opens: window.test?.opens,
+          cancels: window.test?.cancels,
+          releases: window.test?.releases,
+          media: [...document.querySelectorAll('video,audio')].map(item => ({ src:item.src, paused:item.paused, seeking:item.seeking, time:item.currentTime, duration:item.duration, readyState:item.readyState, error:item.error?.message }))
+        }))
+        await fs.writeFile(`${failurePath}.json`, JSON.stringify({ error:{name:error.name,message:error.message,stack:error.stack},state }, null, 2))
+        console.error(`Agent media failure evidence: ${failurePath}.{png,json}`)
+      } catch (captureError) { console.error('Could not capture failure evidence:', captureError.stack ?? String(captureError)) }
+      app.exit(1)
+    }
   })()
 }

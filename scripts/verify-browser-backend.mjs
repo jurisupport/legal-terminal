@@ -74,7 +74,8 @@ function run({ root, temp, profile }) {
       const invoke = (channel, ...args) => handlers.get(`browser:${channel}`)(event, ...args)
       const agentId = `browser-test-${path.basename(temp)}`
       const local = await invoke('open', { agentSessionId: agentId, location: 'local' })
-      await invoke('bounds', local.id, { x: 10, y: 100, width: 1100, height: 650 })
+      const [contentWidth, contentHeight] = win.getContentSize()
+      await invoke('bounds', local.id, { x: 10, y: 80, width: Math.min(1100, contentWidth - 20), height: Math.min(650, contentHeight - 90) })
       await invoke('command', local.id, { action: 'navigate', url: `http://127.0.0.1:${sitePort}/` })
       await wait(async () => (await invoke('state', local.id)).title === '브라우저 연결 검사')
       const connection = await bridge.getBrowserAgentConnection(agentId)
