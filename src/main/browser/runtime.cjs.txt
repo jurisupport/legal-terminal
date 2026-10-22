@@ -353,10 +353,12 @@ async function createChromeController(config) {
   let child, cdp, closed = false, started = false, activeTabId = '', captureInFlight = null
   const sessionIds = new Map()
   const initializing = new Map()
+  const closingTabs = new Map()
   const devtoolsFile = path.join(profile, 'DevToolsActivePort')
   const close = async () => {
     if (closed) return
     closed = true
+    for (const finish of closingTabs.values()) finish(new Error('Browser connection closed'))
     if (cdp) { await cdp.send('Browser.close').catch(() => {}); cdp.close() }
     if (child && child.exitCode === null && child.signalCode === null) {
       child.kill('SIGTERM')
@@ -417,6 +419,7 @@ async function createChromeController(config) {
         cdp.send('Target.closeTarget', { targetId: params.targetInfo.targetId }).catch(() => {})
       } else if (method === 'Target.targetDestroyed') {
         sessionIds.delete(params.targetId); initializing.delete(params.targetId)
+        closingTabs.get(params.targetId)?.()
       }
     })
     await cdp.send('Target.setDiscoverTargets', { discover: true })
@@ -456,7 +459,16 @@ async function createChromeController(config) {
         } else if (command.action === 'switch_tab' || command.action === 'close_tab') {
           if (!(await tabs()).some(tab => tab.id === command.tabId)) fail('Browser tab no longer exists', 404)
           if (command.action === 'switch_tab') { await cdp.send('Target.activateTarget', { targetId: command.tabId }); activeTabId = command.tabId }
-          else await cdp.send('Target.closeTarget', { targetId: command.tabId })
+          else await new Promise((resolve, reject) => {
+            const finish = error => {
+              clearTimeout(timer); closingTabs.delete(command.tabId)
+              if (error) reject(error); else resolve()
+            }
+            const timer = setTimeout(() => finish(new Error('Browser tab close timed out')), 15000)
+            closingTabs.set(command.tabId, finish)
+            // The command ACK arrives before the target disappears from getTargets.
+            cdp.send('Target.closeTarget', { targetId: command.tabId }).catch(finish)
+          })
         } else {
           const result = await runPageCommand(await pageSend(), command)
           if (command.action === 'read') return result

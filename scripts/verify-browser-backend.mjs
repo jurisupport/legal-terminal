@@ -100,15 +100,34 @@ function run({ root, temp, profile }) {
       await invoke('command', local.id, { action: 'new_tab', url: `http://127.0.0.1:${sitePort}/new` })
       let localTabs = await invoke('state', local.id)
       assert.equal(localTabs.tabs.length, 2)
-      await invoke('command', local.id, { action: 'close_tab', tabId: localTabs.activeTabId })
-      await wait(async () => (await invoke('state', local.id)).tabs.length === 1)
+      const closingView = win.contentView.children.find(view => String(view.webContents?.id) === localTabs.activeTabId)
+      const closingContents = closingView.webContents
+      const nativeClose = closingContents.close.bind(closingContents)
+      let releaseClose, signalClose, closeSettled = false
+      const closeStarted = new Promise(resolve => { signalClose = resolve })
+      closingContents.close = options => { releaseClose = () => nativeClose(options); signalClose() }
+      const closingTab = invoke('command', local.id, { action: 'close_tab', tabId: localTabs.activeTabId }).finally(() => { closeSettled = true })
+      await closeStarted
+      await new Promise(resolve => setImmediate(resolve))
+      assert.equal(closeSettled, false, 'native close must wait for destruction before returning state')
+      closingContents.close = nativeClose
+      releaseClose()
+      localTabs = await closingTab
+      assert.deepEqual(localTabs.tabs.map(tab => tab.id), [originalTab])
+      assert.equal(localTabs.activeTabId, originalTab)
+      assert.equal(closingContents.isDestroyed(), true)
+      const otherTab = await invoke('command', local.id, { action: 'new_tab', url: 'about:blank' })
+      await invoke('command', local.id, { action: 'switch_tab', tabId: originalTab })
+      const otherClosed = await invoke('command', local.id, { action: 'close_tab', tabId: otherTab.activeTabId })
+      assert.deepEqual(otherClosed.tabs.map(tab => tab.id), [originalTab])
+      assert.equal(otherClosed.activeTabId, originalTab)
       const remaining = (await invoke('state', local.id)).activeTabId
       const retainedView = win.contentView.children.find(view => String(view.webContents?.id) === remaining)
+      const retainedContents = retainedView.webContents
       await retainedView.webContents.executeJavaScript('window.onbeforeunload = () => false; true', true)
-      await invoke('command', local.id, { action: 'close_tab', tabId: remaining })
-      await new Promise(resolve => setTimeout(resolve, 100))
+      const prevented = await invoke('command', local.id, { action: 'close_tab', tabId: remaining })
       assert.ok(win.contentView.children.includes(retainedView), 'a prevented tab close must keep its native view attached')
-      assert.equal((await invoke('state', local.id)).activeTabId, remaining)
+      assert.equal(prevented.activeTabId, remaining)
       await retainedView.webContents.executeJavaScript('window.onbeforeunload = null')
       await assert.rejects(invoke('command', local.id, { action: 'navigate', url: 'file:///etc/passwd' }))
       assert.throws(() => handlers.get('browser:state')({ ...event, senderFrame: {} }, local.id), /앱 화면/)
@@ -123,6 +142,10 @@ function run({ root, temp, profile }) {
         assert.match(await rfs.rfsBrowserExec(profile.id, `python3 -c ${quote(remoteRead)}`), /브라우저 연결 검사/)
         console.log('local browser: remote-agent loopback access passed')
       }
+      const lastClosed = await invoke('command', local.id, { action: 'close_tab', tabId: remaining })
+      assert.equal(lastClosed.tabs.length, 1)
+      assert.notEqual(lastClosed.activeTabId, remaining, 'closing the last native tab must return its replacement')
+      assert.equal(retainedContents.isDestroyed(), true)
       await invoke('close', local.id)
       context.source = 'local'
       const moved = await invoke('open', { agentSessionId: agentId, location: 'local' })

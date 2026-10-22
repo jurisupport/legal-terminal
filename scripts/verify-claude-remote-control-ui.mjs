@@ -21,13 +21,15 @@ function runApp({ root, temp, screenshotDir }) {
   const settings = { sshProfiles: [profile], caseOpenTarget: 'remote:remote-one', notifyDone: false, agentDefaultProvider: 'claude', claudeRemoteConnections: [] }
   const originalSsh = JSON.stringify(settings.sshProfiles)
   const remoteCwd = '/Users/lawyer/legal-terminal-general'
-  let failOpen = false, failSave = false, win
+  let failOpen = false, failSave = false, win, stage = 'load renderer'
   const pause = ms => new Promise(resolve => setTimeout(resolve, ms))
   app.setPath('userData', path.join(temp, 'profile'))
   fs.mkdirSync(path.join(temp, 'home'), { recursive: true })
   app.setPath('home', path.join(temp, 'home'))
   BrowserWindow.prototype.show = function () {}
   BrowserWindow.prototype.maximize = function () {}
+  BrowserWindow.prototype.focus = function () {}
+  app.focus = function () {}
   global.fetch = async () => { throw Error('External network blocked by Remote Control UI test') }
   const handle = ipcMain.handle.bind(ipcMain), on = ipcMain.on.bind(ipcMain)
   ipcMain.on = (channel, callback) => on(channel, channel.startsWith('fs:') || channel.startsWith('pty:') ? () => {} : callback)
@@ -77,7 +79,7 @@ function runApp({ root, temp, screenshotDir }) {
       if (failOpen) throw Error('테스트 연결 실패')
       const { id } = args[0]
       if (views.has(id)) return
-      const view = new WebContentsView({ webPreferences: { sandbox: true, contextIsolation: true, nodeIntegration: false } })
+      const view = new WebContentsView({ webPreferences: { sandbox: true, contextIsolation: true, nodeIntegration: false, backgroundThrottling: false } })
       views.set(id, view)
       view.setVisible(false)
       win.contentView.addChildView(view)
@@ -104,6 +106,7 @@ function runApp({ root, temp, screenshotDir }) {
     win = window
     win.setContentSize(1440, 940)
     win.webContents.setZoomFactor(1)
+    win.webContents.setBackgroundThrottling(false)
     win.webContents.on('console-message', details => { if (details.level === 'error') errors.push(details.message) })
     win.webContents.on('render-process-gone', (_event, details) => errors.push(`Renderer exited: ${details.reason}`))
     win.webContents.once('did-finish-load', resolve)
@@ -114,7 +117,20 @@ function runApp({ root, temp, screenshotDir }) {
     for (let i = 0; i < 200; i++) { if (await check()) return; await pause(40) }
     throw Error(`Timed out: ${label}`)
   }
-  const capture = async name => fs.writeFileSync(path.join(screenshotDir, `${name}.png`), (await win.webContents.capturePage()).toPNG())
+  const capture = async (name, contents = win.webContents) => {
+    stage = `capture ${name}: wait for paint`
+    await contents.executeJavaScript('window.__fixturePaintReady = false; requestAnimationFrame(() => requestAnimationFrame(() => { window.__fixturePaintReady = true })); true')
+    await wait(() => contents.executeJavaScript('window.__fixturePaintReady'), stage)
+    stage = `capture ${name}: read compositor surface`
+    const image = await contents.capturePage()
+    assert.equal(image.isEmpty(), false, `${name} screenshot must contain pixels`)
+    const { width, height } = image.getSize()
+    assert.ok(width > 100 && height > 100, `${name} screenshot must have usable dimensions: ${width}x${height}`)
+    const bitmap = image.toBitmap()
+    assert.ok(bitmap.some((value, index) => value !== bitmap[index % 4]), `${name} screenshot must not be a blank surface`)
+    fs.writeFileSync(path.join(screenshotDir, `${name}.png`), image.toPNG())
+    stage = `after capture ${name}`
+  }
   const showManager = async () => {
     await evaluate("[...document.querySelectorAll('.general-chat-button')].find(el => el.textContent.trim() === '원격 제어').click()")
     await wait(() => evaluate("!!window.manager() && !manager().querySelector('button[type=submit]').disabled"), 'manager loaded')
@@ -130,6 +146,9 @@ function runApp({ root, temp, screenshotDir }) {
   ;(async () => {
     try {
       await ready
+      // A visible host lets Windows create the child WebContentsView's compositor surface.
+      win.showInactive()
+      assert.equal(win.isVisible(), true, 'native-view screenshots require a visible host window')
       await evaluate(`window.manager = () => [...document.querySelectorAll('.claude-remote-manager')].find(el => el.offsetParent !== null); window.panel = () => [...document.querySelectorAll('.claude-remote-panel')].find(el => el.offsetParent !== null); window.fill = (label, url) => { const inputs = manager().querySelectorAll('input'); const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set; [label, url].forEach((value, index) => { setter.call(inputs[index], value); inputs[index].dispatchEvent(new Event('input', { bubbles: true })); }); }; true;`)
       await wait(() => agents.size > 0, 'existing Remote1 agent')
       assert.equal([...agents.values()][0].ssh.host, profile.host)
@@ -166,7 +185,7 @@ function runApp({ root, temp, screenshotDir }) {
       await nativeView.webContents.executeJavaScript("document.querySelector('textarea').focus(); true")
       await nativeView.webContents.insertText('윈도우 작업을 확인해 주세요.')
       assert.equal(await nativeView.webContents.executeJavaScript("document.querySelector('textarea').value"), '윈도우 작업을 확인해 주세요.')
-      fs.writeFileSync(path.join(screenshotDir, 'remote-view-fixture.png'), (await nativeView.webContents.capturePage()).toPNG())
+      await capture('remote-view-fixture', nativeView.webContents)
       await capture('active-session')
       unchangedRemoteOne()
       const beforeHide = calls.length
@@ -202,9 +221,10 @@ function runApp({ root, temp, screenshotDir }) {
       console.log('PASS: Remote1 preserved; official URL validation; save failure/retry; native view; hide/reopen; stable tabs; connection failure/retry; edit/delete; settings persistence. Screenshots: ' + screenshotDir)
       app.exit(0)
     } catch (error) {
-      await capture('failure').catch(() => {})
+      const failedStage = stage
+      await capture('failure').catch(captureError => console.error('Failure screenshot:', captureError))
       console.error(error)
-      console.error(JSON.stringify({ errors, unexpected, calls: calls.slice(-12), dom: await evaluate('document.body.innerText').catch(() => ''), screenshotDir }))
+      console.error(JSON.stringify({ stage: failedStage, visible: win?.isVisible(), errors, unexpected, calls: calls.slice(-12), dom: await evaluate('document.body.innerText').catch(() => ''), screenshotDir }))
       app.exit(1)
     }
   })()

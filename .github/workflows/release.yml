@@ -133,6 +133,7 @@ jobs:
             output/playwright/document-agent-memory/**
             output/playwright/browser/**
             output/playwright/agent-media/**
+            output/playwright/claude-remote-control/**
           if-no-files-found: warn
 
       - name: Package macOS
@@ -230,6 +231,7 @@ jobs:
             output/playwright/document-agent-memory/**
             output/playwright/browser/**
             output/playwright/agent-media/**
+            output/playwright/claude-remote-control/**
           if-no-files-found: warn
 
       - name: Upload Windows

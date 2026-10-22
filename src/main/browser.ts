@@ -158,7 +158,20 @@ async function createLocal(slot: Slot): Promise<void> {
       } else if (command.action === 'close_tab') {
         const view = slot.views!.get(String(command.tabId))
         if (!view) throw new Error('브라우저 탭이 닫혔습니다.')
-        view.webContents.close({ waitForBeforeUnload: true })
+        const wc = view.webContents
+        await new Promise<void>((resolve, reject) => {
+          const finish = (error?: Error): void => {
+            clearTimeout(timer)
+            wc.removeListener('destroyed', completed)
+            wc.removeListener('will-prevent-unload', completed)
+            if (error) reject(error); else resolve()
+          }
+          const completed = (): void => finish()
+          const timer = setTimeout(() => finish(new Error('브라우저 탭 닫기 시간이 초과되었습니다.')), 15000)
+          wc.once('destroyed', completed)
+          wc.once('will-prevent-unload', completed)
+          try { wc.close({ waitForBeforeUnload: true }) } catch (error) { finish(error as Error) }
+        })
       } else {
         const wc = active().webContents
         if (!wc.debugger.isAttached()) wc.debugger.attach('1.3')

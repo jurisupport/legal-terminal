@@ -8,7 +8,7 @@ import { createServer } from 'node:net'
 import * as fs from 'node:fs'
 import { mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import path, { join, posix, win32 } from 'node:path'
 import { createRequire } from 'node:module'
 import vm from 'node:vm'
 import ts from 'typescript'
@@ -19,6 +19,22 @@ const source = await readFile(new URL('../src/main/remoteFs.ts', import.meta.url
 const root = await mkdtemp(join(tmpdir(), 'lt-project-remote-'))
 const fixture = join(root, "작업 ' $(touch injected)")
 const alias = join(root, 'linked')
+const remoteRoot = '/fixture'
+function fixturePaths(nativeRoot, paths) {
+  return {
+    local(remotePath) {
+      assert.ok(remotePath === remoteRoot || remotePath.startsWith(remoteRoot + '/'), 'SFTP paths stay in the virtual fixture')
+      const relative = posix.relative(remoteRoot, remotePath)
+      assert.ok(relative !== '..' && !relative.startsWith('../') && !remotePath.includes('\\'), 'SFTP paths use POSIX separators without escaping the fixture')
+      return paths.join(nativeRoot, ...relative.split('/'))
+    },
+    remote(nativePath) {
+      const relative = paths.relative(nativeRoot, nativePath)
+      assert.ok(!paths.isAbsolute(relative) && relative !== '..' && !relative.startsWith('..' + paths.sep), 'native fixtures remain under their temporary root')
+      return posix.join(remoteRoot, ...relative.split(paths.sep))
+    }
+  }
+}
 const commands = [], bindings = new Map(), sockets = new Set(), peers = new Set()
 const profile = { id: 'fixture', host: '127.0.0.1', user: 'fixture' }
 let connection, fastTimeout = false
@@ -111,26 +127,38 @@ class FakeClient extends EventEmitter {
 }
 try {
   await mkdir(fixture)
-  await symlink(fixture, alias)
+  await symlink(fixture, alias, process.platform === 'win32' ? 'junction' : 'dir')
   await writeFile(join(root, 'file'), 'fixture')
   const httpPort = await listen(http)
   const sshPort = await listen(sshServer)
   const ready = once(client, 'ready')
   client.connect({ host: '127.0.0.1', port: sshPort, username: 'fixture', hostVerifier: value => value.equals(ssh2.utils.parseKey(key.private).getPublicSSH()) })
   await ready
+  const paths = fixturePaths(await realpath(root), path)
   const sftp = Object.assign(new EventEmitter(), {
-    lstat: fs.lstat,
-    stat: fs.stat,
-    realpath: fs.realpath,
-    readdir(path, callback) { fs.readdir(path, (error, files) => callback(error, files?.map(filename => ({ filename })))) }
+    lstat(remotePath, callback) { fs.lstat(paths.local(remotePath), callback) },
+    stat(remotePath, callback) { fs.stat(paths.local(remotePath), callback) },
+    realpath(remotePath, callback) { fs.realpath(paths.local(remotePath), (error, actual) => callback(error, error ? undefined : paths.remote(actual))) },
+    readdir(remotePath, callback) { fs.readdir(paths.local(remotePath), (error, files) => callback(error, files?.map(filename => ({ filename })))) }
   })
   connection = { client, sftp }
-  const uri = path => remote.makeRemote('fixture', path)
-  const canonical = await remote.rfsRealpath(uri(alias))
-  assert.equal(canonical, uri(await realpath(fixture)))
+  const uri = name => remote.makeRemote('fixture', posix.join(remoteRoot, name))
+  const fixtureName = path.basename(fixture)
+  const canonical = await remote.rfsRealpath(uri('linked'))
+  assert.equal(canonical, uri(fixtureName))
   assert.equal((await remote.rfsStat(canonical)).isDir, true)
-  assert.equal((await remote.rfsStat(uri(join(root, 'file')))).isDir, false)
-  await assert.rejects(remote.rfsRealpath(uri(join(root, 'missing'))))
+  assert.equal((await remote.rfsStat(uri('file'))).isDir, false)
+  await assert.rejects(remote.rfsRealpath(uri('missing')))
+  for (const windowsRoot of ['C:\\Users\\fixture\\AppData\\Local\\Temp', '\\\\server\\share\\Temp']) {
+    const windowsPaths = fixturePaths(windowsRoot, win32)
+    const native = win32.join(windowsRoot, fixtureName)
+    assert.equal(windowsPaths.local(posix.join(remoteRoot, fixtureName)), native, 'POSIX SFTP paths map to native Windows paths')
+    assert.equal(windowsPaths.remote(native), posix.join(remoteRoot, fixtureName), 'Windows drive and UNC prefixes never enter SFTP paths')
+    assert.equal(remote.makeRemote('fixture', windowsPaths.remote(native)), uri(fixtureName))
+    assert.throws(() => windowsPaths.local('/fixture/../outside'))
+    assert.throws(() => windowsPaths.local('/fixture/C:\\outside'))
+    assert.throws(() => windowsPaths.remote(win32.join(windowsRoot, '..', 'outside')))
+  }
   assert.equal(commands.length, 0, 'path resolution uses SFTP without interpolating a shell command')
   assert.equal(fs.existsSync(join(root, 'injected')), false, 'metacharacters in paths remain literal')
   assert.equal(fs.readdirSync(fixture).length, 0, 'canonical path checks never create a probe file')
@@ -200,7 +228,7 @@ try {
     for (const port of [0, -1, 65536, 1.5, NaN]) await assert.rejects(remote.rfsForwardLocalPort('fixture', port), /유효한 로컬 포트/)
   }
   await eventually(() => sockets.size === 0)
-  console.log('verify-project-remote-transport: OK (canonical SFTP paths, literal metacharacters, real SSH forwarding, concurrent tunnels, rejection, timeout, disconnect and cleanup)')
+  console.log('verify-project-remote-transport: OK (portable POSIX/SFTP paths, Windows drive/UNC mapping, literal metacharacters, real SSH forwarding, concurrent tunnels, rejection, timeout, disconnect and cleanup)')
 } finally {
   remote.disposeRemote()
   client.destroy()

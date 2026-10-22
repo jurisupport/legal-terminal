@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import http from 'node:http'
 import { spawn, execFileSync } from 'node:child_process'
-import { once } from 'node:events'
+import { EventEmitter, once } from 'node:events'
 
 const source = await readFile(new URL('../src/main/browser/runtime.cjs.txt', import.meta.url), 'utf8')
 const module = { exports: {} }
@@ -109,6 +109,78 @@ try {
 } finally { endpoint.server.close(); endpoint.server.closeAllConnections() }
 console.log('Browser runtime validation, HTTP authentication, policy, bounded requests, MCP, JPEG and 304 checks passed.')
 
+// A close ACK can precede target destruction. Hold that event until the assertion observes the race.
+const raceDirectory = await mkdtemp(path.join(tmpdir(), 'lt-browser-close-test-'))
+const closeTimers = new Map()
+const require = createRequire(import.meta.url)
+let raceController, socket, child, closeAcknowledged, closeFailure
+let targets = [{ targetId: 'initial', type: 'page', url: 'about:blank', title: '' }]
+class CdpSocket extends EventTarget {
+  static OPEN = 1
+  readyState = 1
+  constructor() { super(); socket = this; queueMicrotask(() => this.dispatchEvent(new Event('open'))) }
+  message(data) { this.dispatchEvent(new MessageEvent('message', { data: JSON.stringify(data) })) }
+  send(text) {
+    const { id, method } = JSON.parse(text)
+    const result = method === 'Target.getTargets' ? { targetInfos: targets }
+      : method === 'Target.attachToTarget' ? { sessionId: 'page-session' } : {}
+    queueMicrotask(() => {
+      this.message(method === 'Target.closeTarget' && closeFailure ? { id, error: { message: closeFailure } } : { id, result })
+      if (method === 'Target.closeTarget') closeAcknowledged?.()
+    })
+  }
+  close() { if (this.readyState === 3) return; this.readyState = 3; this.dispatchEvent(new Event('close')) }
+}
+const raceModule = { exports: {} }
+new Function('require', 'module', 'exports', 'WebSocket', 'setTimeout', 'clearTimeout', source)(name => {
+  if (name === 'node:child_process') return { spawn() {
+    child = new EventEmitter(); child.stderr = new EventEmitter(); child.exitCode = null; child.signalCode = null
+    child.kill = () => { child.exitCode = 0; queueMicrotask(() => child.emit('exit', 0)) }
+    return child
+  } }
+  if (name === 'node:fs/promises') return { ...require(name), readFile: (file, ...args) => String(file).endsWith('DevToolsActivePort') ? Promise.resolve('1234\n/devtools/browser/test') : readFile(file, ...args) }
+  return require(name)
+}, raceModule, raceModule.exports, CdpSocket,
+  (fn, ms) => { if (ms !== 15000) return setTimeout(fn, ms); const timer = {}; closeTimers.set(timer, fn); return timer },
+  timer => { if (!closeTimers.delete(timer)) clearTimeout(timer) })
+try {
+  raceController = await raceModule.exports.createChromeController({ directory: raceDirectory, chromePath: process.execPath })
+  const closeTab = () => raceController.command({ action: 'close_tab', tabId: 'initial' })
+  let settled = false
+  const acknowledged = new Promise(resolve => { closeAcknowledged = resolve })
+  const closing = closeTab().finally(() => { settled = true })
+  await acknowledged
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(settled, false, 'close must wait for target destruction after the CDP acknowledgement')
+  targets = [{ targetId: 'remaining', type: 'page', url: 'about:blank', title: '' }]
+  socket.message({ method: 'Target.targetDestroyed', params: { targetId: 'initial' } })
+  assert.deepEqual((await closing).tabs.map(tab => tab.id), ['remaining'])
+  assert.equal(closeTimers.size, 0)
+
+  targets[0].targetId = 'initial'
+  closeFailure = 'Close rejected by Chrome'
+  await assert.rejects(closeTab(), /Close rejected by Chrome/)
+  assert.equal(closeTimers.size, 0, 'failed CDP requests must clear the destruction deadline')
+  closeFailure = undefined
+  const timeoutAck = new Promise(resolve => { closeAcknowledged = resolve })
+  const timedOut = assert.rejects(closeTab(), /timed out/i)
+  await timeoutAck
+  assert.equal(closeTimers.size, 1, 'only the destruction deadline remains after the ACK')
+  for (const timeout of [...closeTimers.values()]) timeout()
+  await timedOut
+  assert.equal(closeTimers.size, 0)
+  const disconnectAck = new Promise(resolve => { closeAcknowledged = resolve })
+  const disconnected = assert.rejects(closeTab(), /closed/i)
+  await disconnectAck
+  socket.close()
+  await disconnected
+  assert.equal(closeTimers.size, 0, 'disconnect must settle the close and clear its deadline')
+} finally {
+  await raceController?.close()
+  await rm(raceDirectory, { recursive: true, force: true })
+}
+console.log('Browser close waits for target destruction and clears pending closes on error, timeout and disconnect.')
+
 let chromePath
 try { chromePath = await findChrome() } catch { console.log('Chrome integration skipped: Chrome/Chromium is not installed.'); process.exit(0) }
 const directory = await mkdtemp(path.join(tmpdir(), 'lt-browser-test-'))
@@ -151,8 +223,17 @@ try {
   assert.notEqual(second.activeTabId, initial)
   await controller.command({ action: 'switch_tab', tabId: initial })
   assert.equal((await controller.state()).activeTabId, initial)
-  await controller.command({ action: 'close_tab', tabId: second.activeTabId })
-  assert.equal((await controller.state()).tabs.length, 1)
+  const otherClosed = await controller.command({ action: 'close_tab', tabId: second.activeTabId })
+  assert.deepEqual(otherClosed.tabs.map(tab => tab.id), [initial])
+  assert.equal(otherClosed.activeTabId, initial)
+  const third = await controller.command({ action: 'new_tab', url: 'about:blank' })
+  const currentClosed = await controller.command({ action: 'close_tab', tabId: third.activeTabId })
+  assert.deepEqual(currentClosed.tabs.map(tab => tab.id), [initial])
+  assert.equal(currentClosed.activeTabId, initial)
+  const lastClosed = await controller.command({ action: 'close_tab', tabId: initial })
+  assert.equal(lastClosed.tabs.length, 1)
+  assert.notEqual(lastClosed.activeTabId, initial, 'closing the last tab must return its replacement')
+  assert.equal(lastClosed.url, 'about:blank')
   await assert.rejects(() => controller.command({ action: 'navigate', url: 'file:///etc/passwd' }))
   console.log(`Chrome integration passed: navigation, credential redaction, typing, clicking, scrolling, ${saver.data.length}-byte saver JPEG and tab lifecycle.`)
 } finally {

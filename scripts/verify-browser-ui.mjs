@@ -16,7 +16,7 @@ await fs.mkdir(screenshotDir, { recursive: true })
 function runApp({ root, temp, screenshotDir, provider, mode, remote }) {
   const { app, BrowserWindow, ipcMain, session } = require('electron')
   const fs = require('node:fs'), path = require('node:path'), assert = require('node:assert/strict')
-  const calls = [], errors = [], unexpected = [], agents = new Map(), browsers = new Map()
+  const calls = [], errors = [], unexpected = [], frameTimes = [], agents = new Map(), browsers = new Map()
   let frameFailure = false, unchangedFrame = false, frameRequests = 0, failLocation = '', stateFailure = false
   const pause = ms => new Promise(resolve => setTimeout(resolve, ms))
   const caseDir = path.join(temp, 'existing-case')
@@ -109,6 +109,7 @@ function runApp({ root, temp, screenshotDir, provider, mode, remote }) {
     }
     if (channel === 'browser:frame') {
       frameRequests++
+      frameTimes.push(performance.now())
       await pause(80)
       if (frameFailure) throw Error('테스트 연결 끊김')
       const state = browsers.get(args[0]); state.traffic.receivedBytes += 12000; state.traffic.sentBytes += 90
@@ -148,14 +149,14 @@ function runApp({ root, temp, screenshotDir, provider, mode, remote }) {
       await wait(() => evaluate("!!bp()?.querySelector('img')"), 'remote frame')
       assert.equal(calls.find(c=>c.channel==='browser:open').args[0].location,'remote')
       assert.equal(calls.find(c=>c.channel==='browser:frame').args[1],'saver')
-      assert.ok(await evaluate("bp().textContent.includes('이번 연결 전송량 11.8 KB')"))
       assert.ok(await evaluate("getComputedStyle(document.querySelector('.agent-panel[data-visible=true] .agent-head-actions')).display!=='none'"))
       assert.ok(await evaluate("!!document.querySelector('.agent-panel[data-visible=true] .agent-composer textarea').offsetParent"))
-      await pause(1100)
-      assert.equal(frameRequests,1,'saver does not request every second')
+      await wait(()=>frameTimes.length>=2,'second saver frame')
+      for (let index=1;index<frameTimes.length;index++) assert.ok(frameTimes[index]-frameTimes[index-1]>=1900,'saver requests stay at least two seconds apart')
       await evaluate("bb('자동 수신 중지').click()")
       await pause(100)
       const pausedAt=frameRequests, pausedCalls=calls.length
+      assert.ok(await evaluate(`bp().textContent.includes('이번 연결 전송량 ${(pausedAt*12090/1024).toFixed(1)} KB')`))
       await pause(2200)
       assert.equal(frameRequests,pausedAt,'pause stops frame requests')
       assert.equal(calls.slice(pausedCalls).filter(c=>c.channel==='browser:state').length,0,'pause does not poll state')
