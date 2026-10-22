@@ -2244,7 +2244,7 @@ export default function HearingRecordPanel({
             ? `... ${formatDuration(dictationSeconds)}`
             : dictationState === 'starting'
               ? '...'
-              : diarize ? '🎙 대화 녹음' : '🎙 받아쓰기'}
+              : diarize ? '🎙 대화 전사' : '🎙 받아쓰기'}
         </button>
         <button
           className="hearing-primary-btn"
