@@ -132,7 +132,15 @@ async function electronCheck({ root, temp, output }) {
     assert.ok(pendingLayout.elements.find(item=>item.selector==='.agent-timeline-wrap').clientHeight>=64, `Pending media must leave a usable message viewport: ${JSON.stringify(pendingLayout)}`)
     assert.ok(pendingLayout.elements.find(item=>item.selector==='.agent-prompt').rect.bottom<=pendingLayout.height+1, 'Pending composer remains inside the window')
     assert.equal(await run("return document.querySelectorAll('.agent-attachments.pending .agent-attachment-chip').length"), 2, 'Pending attachments remain in place during assistant preview')
-    await run("document.querySelector('.agent-msg.assistant .agent-media-preview')?.scrollIntoView({block:'start'})")
+    // User intent stops auto-follow before its queued animation-frame update runs.
+    await run(`
+      const timeline=document.querySelector('.agent-timeline');
+      timeline.dispatchEvent(new WheelEvent('wheel',{bubbles:true,deltaY:-300}));
+      document.querySelector('.agent-msg.assistant .agent-media-preview').scrollIntoView({block:'start'});
+      timeline.dispatchEvent(new Event('scroll',{bubbles:true}));
+      await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));
+    `)
+    await wait("(() => { const view=document.querySelector('.agent-timeline').getBoundingClientRect(),card=document.querySelector('.agent-msg.assistant .agent-media-preview').getBoundingClientRect(); return card.bottom>view.top && card.top<view.bottom })()", 'User scroll keeps the image card visible after auto-follow settles')
     await wait("document.querySelector('.agent-msg.assistant .agent-media-preview img')?.naturalWidth>0", 'Assistant image link resolves through actual media protocol')
     assert.equal(await run("return document.querySelectorAll('.agent-msg.assistant video').length"), 0, 'Assistant movie reference waits for activation')
     await screenshot('agent-inline-media')
