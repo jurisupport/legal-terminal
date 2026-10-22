@@ -36,12 +36,16 @@ async function electronCheck({ root, temp, output }) {
   for (let i = 0; i < 100 && !win; i++) { win = BrowserWindow.getAllWindows()[0]; if (!win) await pause(30) }
   assert.ok(win, 'Application window created')
   const run = body => win.webContents.executeJavaScript(`(async () => { ${body} })()`)
+  const layoutState = () => run(`
+    const selectors=['.agent-panel','.agent-timeline-wrap','.agent-timeline','.agent-prompt','.agent-composer','.agent-attachments.pending .agent-media-list','.agent-msg.assistant .agent-media-preview'];
+    return {width:innerWidth,height:innerHeight,elements:selectors.flatMap(selector=>[...document.querySelectorAll(selector)].map(element=>({selector,rect:element.getBoundingClientRect().toJSON(),scrollHeight:element.scrollHeight,clientHeight:element.clientHeight,scrollTop:element.scrollTop}))) };
+  `)
   const wait = async (condition, label, attempts = 200) => {
     for (let i = 0; i < attempts; i++) {
       if (await run(`return (${condition})`).catch(() => false)) return
       await pause(50)
     }
-    throw new Error(`Timed out: ${label}\n${await run('return document.body.innerText.slice(-4000)')}`)
+    throw new Error(`Timed out: ${label}\n${JSON.stringify(await layoutState())}\n${await run('return document.body.innerText.slice(-4000)')}`)
   }
   const sample = path.join(temp, 'project', 'movie.mp4')
   const audio = path.join(temp, 'project', 'sound.wav')
@@ -53,6 +57,10 @@ async function electronCheck({ root, temp, output }) {
   const checks = []
   try {
     await wait("!!document.querySelector('.case-sidebar-trigger')", 'App ready')
+    win.unmaximize()
+    win.setMinimumSize(0, 0)
+    win.setContentSize(1024, 658)
+    await wait('innerWidth<=1024 && innerHeight<=658', 'Compact display size applied')
     await run(`window.testButton = label => [...document.querySelectorAll('.media-viewer button')].find(item=>item.textContent.trim()===label && item.checkVisibility({checkVisibilityCSS:true})); window.testMedia = () => [...document.querySelectorAll('.media-viewer video,.media-viewer audio')].find(item=>item.checkVisibility({checkVisibilityCSS:true}));`)
     win.webContents.send('tabs:receive', { kind: 'terminal', tab: { id: 'media-fixture-agent', kind: 'agent', agentProvider: 'claude', title: '미디어 검토', cwd: path.dirname(sample), side: 'right', createdAt: Date.now() } })
     for (let i = 0; i < 200 && !agentCreated; i++) await pause(50)
@@ -96,14 +104,18 @@ async function electronCheck({ root, temp, output }) {
     assert.ok(labels.some(item => item.text.includes('화면 캡처')))
     const captures = await fs.readdir(path.join(path.dirname(sample), '.legal-terminal/media-context'))
     assert.equal(captures.length, 1)
-    const capture = await fs.readFile(path.join(path.dirname(sample), '.legal-terminal/media-context', captures[0]))
+    const imagePath = path.join(path.dirname(sample), '.legal-terminal/media-context', captures[0])
+    const imageReference = imagePath.replace(/\\/g, '/')
+    const videoReference = sample.replace(/\\/g, '/')
+    const capture = await fs.readFile(imagePath)
     assert.equal(capture[0], 255)
     assert.equal(capture[1], 216)
     checks.push('Canvas capture with real protocol CORS and saved JPEG attachment in Agent input')
 
+    await run(`const card=[...document.querySelectorAll('.agent-attachments.pending .agent-media-preview')].find(item=>item.dataset.mediaPath===${JSON.stringify(imageReference)});card.scrollIntoView({block:'nearest'});`)
     await wait("document.querySelector('.agent-attachments.pending .agent-media-preview img')?.naturalWidth>0", 'Captured frame appears directly in Agent input')
     assert.equal(await run("return document.querySelectorAll('.agent-attachments.pending .agent-media-preview video').length"), 0, 'Quoting a movie does not auto-load its full file')
-    await run(`const card=[...document.querySelectorAll('.agent-attachments.pending .agent-media-preview')].find(item=>item.dataset.mediaPath===${JSON.stringify(sample)});[...card.querySelectorAll('button')].find(button=>button.textContent==='미리보기 불러오기').click();`)
+    await run(`const card=[...document.querySelectorAll('.agent-attachments.pending .agent-media-preview')].find(item=>item.dataset.mediaPath===${JSON.stringify(videoReference)});card.scrollIntoView({block:'nearest'});[...card.querySelectorAll('button')].find(button=>button.textContent==='미리보기 불러오기').click();`)
     await wait("document.querySelector('.agent-attachments.pending .agent-media-preview video')?.readyState>=3 && !document.querySelector('.agent-attachments.pending .agent-media-preview video')?.seeking", 'Quoted video plays inside Agent input')
     const inline = await run("const video=document.querySelector('.agent-attachments.pending .agent-media-preview video'); return {time:video.currentTime,paused:video.paused,url:video.src}")
     assert.ok(Math.abs(inline.time - .9) < .02, 'inline quote preserves the selected timestamp')
@@ -111,16 +123,21 @@ async function electronCheck({ root, temp, output }) {
     assert.match(inline.url, /^lt-media:\/\/snapshot\//)
     checks.push('Inline image decoding, explicit video loading, immutable quoted time and no autoplay')
 
-    const imagePath = path.join(path.dirname(sample), '.legal-terminal/media-context', captures[0])
     const answerId = 'inline-media-answer'
     win.webContents.send('agent:event', { type: 'message:assistant_delta', sessionId: agentSessionId, messageId: answerId,
-      text: `확인할 파일입니다.\n\n![선택한 장면](<${imagePath}>)\n\n[인용 영상](<${sample}>)` })
+      text: `확인할 파일입니다.\n\n![선택한 장면](<${imageReference}>)\n\n[인용 영상](<${videoReference}>)` })
     win.webContents.send('agent:event', { type: 'message:assistant_done', sessionId: agentSessionId, messageId: answerId })
     await wait("document.querySelectorAll('.agent-msg.assistant .agent-media-preview').length===2", 'Assistant media references become inline cards')
-    await run("document.querySelector('.agent-msg.assistant .agent-media-preview')?.scrollIntoView({block:'center'})")
+    const pendingLayout = await layoutState()
+    assert.ok(pendingLayout.elements.find(item=>item.selector==='.agent-timeline-wrap').clientHeight>=64, `Pending media must leave a usable message viewport: ${JSON.stringify(pendingLayout)}`)
+    assert.ok(pendingLayout.elements.find(item=>item.selector==='.agent-prompt').rect.bottom<=pendingLayout.height+1, 'Pending composer remains inside the window')
+    assert.equal(await run("return document.querySelectorAll('.agent-attachments.pending .agent-attachment-chip').length"), 2, 'Pending attachments remain in place during assistant preview')
+    await run("document.querySelector('.agent-msg.assistant .agent-media-preview')?.scrollIntoView({block:'start'})")
     await wait("document.querySelector('.agent-msg.assistant .agent-media-preview img')?.naturalWidth>0", 'Assistant image link resolves through actual media protocol')
     assert.equal(await run("return document.querySelectorAll('.agent-msg.assistant video').length"), 0, 'Assistant movie reference waits for activation')
     await screenshot('agent-inline-media')
+    await fs.writeFile(path.join(output, 'agent-inline-media-layout.json'), JSON.stringify(await layoutState(), null, 2))
+    checks.push('Compact window keeps pending media and a visible conversation with viewport-gated image loading')
     checks.push('Assistant Markdown image and video links display in the conversation')
 
     win.unmaximize()
@@ -183,12 +200,13 @@ async function electronCheck({ root, temp, output }) {
     assert.equal(await run('return testMedia().src'), videoSnapshot, 'Tab return keeps existing snapshot token')
     assert.equal(await run('return testMedia().paused'), true, 'Tab return does not resume playback')
     checks.push('Tab switching pauses and retains exact media snapshot')
-    await fs.writeFile(path.join(output, 'result.json'), JSON.stringify({ checks, platform: process.platform, screenshots: ['media-review-min-window.png'] }, null, 2))
+    await fs.writeFile(path.join(output, 'result.json'), JSON.stringify({ checks, platform: process.platform, screenshots: ['agent-inline-media.png', 'media-review-min-window.png'] }, null, 2))
     console.log('MEDIA_UI_RESULT '+JSON.stringify({checks,output}))
     app.exit(0)
   } catch (error) {
     await screenshot('media-review-failure').catch(()=>{})
-    console.error(error)
+    await fs.writeFile(path.join(output, 'media-review-failure.json'), JSON.stringify({ error:{message:error.message,stack:error.stack},layout:await layoutState() }, null, 2)).catch(()=>{})
+    console.error(error.stack ?? String(error))
     app.exit(1)
   }
 }

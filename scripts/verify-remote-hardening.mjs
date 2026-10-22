@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { createHash } from 'node:crypto'
+import { createHash, generateKeyPairSync } from 'node:crypto'
 import { EventEmitter, once } from 'node:events'
 import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
@@ -55,9 +55,10 @@ const remote = await load('remoteFs.ts', {
   }
 }, {}, '\nexport { connect as connectForTest }\n')
 
-const key = ssh2.utils.generateKeyPairSync('ed25519')
-const changedKey = ssh2.utils.generateKeyPairSync('ed25519')
-await writeFile(join(root, 'client-key'), key.private, { mode: 0o600 })
+// ssh2's Ed25519 generator truncates public keys whose first byte is zero.
+const key = generateKeyPairSync('rsa', { modulusLength: 2048, privateKeyEncoding: { type: 'pkcs1', format: 'pem' } })
+const changedKey = generateKeyPairSync('rsa', { modulusLength: 2048, privateKeyEncoding: { type: 'pkcs1', format: 'pem' } })
+await writeFile(join(root, 'client-key'), key.privateKey, { mode: 0o600 })
 const serverClients = new Set()
 let authenticationCalls = 0
 let server
@@ -84,7 +85,7 @@ async function stopServer() {
 const trustFiles = () => readdir(join(root, 'ssh-host-keys')).catch(() => [])
 
 try {
-  await startServer(key.private)
+  await startServer(key.privateKey)
   prompt = async (options) => {
     assert.equal(authenticationCalls, 0, 'user authentication must wait for approval')
     assert.equal(options.defaultId, 0)
@@ -121,7 +122,7 @@ try {
 
   const port = profile.port
   await stopServer()
-  await startServer(changedKey.private, port)
+  await startServer(changedKey.privateKey, port)
   authenticationCalls = 0
   await assert.rejects(remote.connectForTest('test'), /서버키가 변경/)
   assert.equal(authenticationCalls, 0, 'changed host key must send no authentication')
@@ -129,12 +130,12 @@ try {
   await stopServer()
 
   // Trust is scoped by host, port and key algorithm, independently of profile/user.
-  const raw = ssh2.utils.parseKey(key.private).getPublicSSH()
+  const raw = ssh2.utils.parseKey(key.privateKey).getPublicSSH()
   const fingerprintPath = (host, port, type) => join(root, 'ssh-host-keys', createHash('sha256').update(JSON.stringify([host, port, type])).digest('hex'))
   prompt = async () => ({ response: 1 })
   await hostKeys.verifySshHostKey({ host: 'other.example', port }, raw, new AbortController().signal)
   await hostKeys.verifySshHostKey({ host: profile.host, port: port + 1 }, raw, new AbortController().signal)
-  assert.ok((await readFile(fingerprintPath('other.example', port, 'ssh-ed25519'), 'utf8')).length)
+  assert.ok((await readFile(fingerprintPath('other.example', port, 'ssh-rsa'), 'utf8')).length)
   assert.equal((await trustFiles()).length, 3)
   console.log('SSH: real handshake rejects changed/rejected/timed-out keys before authentication; approved keys persist')
 
@@ -296,7 +297,7 @@ try {
     sftp.on('OPEN', (id, path) => sftp.handle(id, Buffer.from(path)))
     sftp.on('WRITE', () => client.end())
   }
-  await startServer(key.private)
+  await startServer(key.privateKey)
   fakeSftp = undefined
   const live = await remote.connectForTest('test')
   fakeSftp = live.sftp

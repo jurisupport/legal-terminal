@@ -2,6 +2,7 @@
 // Managed-directory and profile validation are exercised by verify-project-remote-connection.mjs;
 // selected-directory validation is exercised by verify-project-agent.mjs (the former shell validator is gone).
 import assert from 'node:assert/strict'
+import { generateKeyPairSync } from 'node:crypto'
 import { EventEmitter, once } from 'node:events'
 import { createServer as createHttpServer, get } from 'node:http'
 import { createServer } from 'node:net'
@@ -30,7 +31,7 @@ function fixturePaths(nativeRoot, paths) {
     },
     remote(nativePath) {
       const relative = paths.relative(nativeRoot, nativePath)
-      assert.ok(!paths.isAbsolute(relative) && relative !== '..' && !relative.startsWith('..' + paths.sep), 'native fixtures remain under their temporary root')
+      assert.ok(!paths.isAbsolute(relative) && relative !== '..' && !relative.startsWith('..' + paths.sep), `native fixtures remain under their temporary root: ${JSON.stringify({ nativeRoot, nativePath, relative })}`)
       return posix.join(remoteRoot, ...relative.split(paths.sep))
     }
   }
@@ -60,10 +61,11 @@ const remote = (() => {
   }, { filename: 'remoteFs.ts' })
   return module.exports
 })()
-const key = ssh2.utils.generateKeyPairSync('ed25519')
+// ssh2's Ed25519 generator truncates public keys whose first byte is zero.
+const key = generateKeyPairSync('rsa', { modulusLength: 2048, privateKeyEncoding: { type: 'pkcs1', format: 'pem' } })
 const client = new ssh2.Client()
 client.on('error', () => {})
-const sshServer = new ssh2.Server({ hostKeys: [key.private] }, peer => {
+const sshServer = new ssh2.Server({ hostKeys: [key.privateKey] }, peer => {
   peers.add(peer)
   peer.on('error', () => {})
   peer.on('close', () => peers.delete(peer))
@@ -132,13 +134,14 @@ try {
   const httpPort = await listen(http)
   const sshPort = await listen(sshServer)
   const ready = once(client, 'ready')
-  client.connect({ host: '127.0.0.1', port: sshPort, username: 'fixture', hostVerifier: value => value.equals(ssh2.utils.parseKey(key.private).getPublicSSH()) })
+  client.connect({ host: '127.0.0.1', port: sshPort, username: 'fixture', hostVerifier: value => value.equals(ssh2.utils.parseKey(key.privateKey).getPublicSSH()) })
   await ready
+  // Promise realpath is native; use the native callback too so Windows short names resolve identically.
   const paths = fixturePaths(await realpath(root), path)
   const sftp = Object.assign(new EventEmitter(), {
     lstat(remotePath, callback) { fs.lstat(paths.local(remotePath), callback) },
     stat(remotePath, callback) { fs.stat(paths.local(remotePath), callback) },
-    realpath(remotePath, callback) { fs.realpath(paths.local(remotePath), (error, actual) => callback(error, error ? undefined : paths.remote(actual))) },
+    realpath(remotePath, callback) { fs.realpath.native(paths.local(remotePath), (error, actual) => callback(error, error ? undefined : paths.remote(actual))) },
     readdir(remotePath, callback) { fs.readdir(paths.local(remotePath), (error, files) => callback(error, files?.map(filename => ({ filename })))) }
   })
   connection = { client, sftp }
@@ -146,10 +149,11 @@ try {
   const fixtureName = path.basename(fixture)
   const canonical = await remote.rfsRealpath(uri('linked'))
   assert.equal(canonical, uri(fixtureName))
+  assert.equal(canonical, remote.makeRemote('fixture', paths.remote(await realpath(fixture))), 'native callback and promise resolution agree for the junction target')
   assert.equal((await remote.rfsStat(canonical)).isDir, true)
   assert.equal((await remote.rfsStat(uri('file'))).isDir, false)
   await assert.rejects(remote.rfsRealpath(uri('missing')))
-  for (const windowsRoot of ['C:\\Users\\fixture\\AppData\\Local\\Temp', '\\\\server\\share\\Temp']) {
+  for (const windowsRoot of ['C:\\Users\\fixture\\AppData\\Local\\Temp', 'C:\\Users\\RUNNER~1\\AppData\\Local\\Temp', '\\\\server\\share\\Temp', win32.toNamespacedPath('C:\\Users\\fixture\\Temp')]) {
     const windowsPaths = fixturePaths(windowsRoot, win32)
     const native = win32.join(windowsRoot, fixtureName)
     assert.equal(windowsPaths.local(posix.join(remoteRoot, fixtureName)), native, 'POSIX SFTP paths map to native Windows paths')

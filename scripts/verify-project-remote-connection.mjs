@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { generateKeyPairSync } from 'node:crypto'
 import { EventEmitter, once } from 'node:events'
 import { readFile } from 'node:fs/promises'
 import { createServer as createHttpServer } from 'node:http'
@@ -9,7 +10,8 @@ import ts from 'typescript'
 import ssh2 from 'ssh2'
 
 const require = createRequire(import.meta.url)
-const key = ssh2.utils.generateKeyPairSync('ed25519')
+// ssh2's Ed25519 generator truncates public keys whose first byte is zero.
+const key = generateKeyPairSync('rsa', { modulusLength: 2048, privateKeyEncoding: { type: 'pkcs1', format: 'pem' } })
 const client = new ssh2.Client()
 const bindings = new Map()
 const serverPeers = new Set()
@@ -49,7 +51,7 @@ const http = createHttpServer((request, response) => {
   response.setHeader('Content-Type', 'application/json')
   response.end(JSON.stringify({ path: request.url, authorized: true }))
 })
-const server = new ssh2.Server({ hostKeys: [key.private] }, (peer) => {
+const server = new ssh2.Server({ hostKeys: [key.privateKey] }, (peer) => {
   serverPeer = peer; serverPeers.add(peer)
   peer.on('error', () => {})
   peer.on('authentication', (context) => context.accept())
@@ -128,7 +130,7 @@ try {
 
   http.listen(0, '127.0.0.1'); await once(http, 'listening')
   server.listen(0, '127.0.0.1'); await once(server, 'listening')
-  client.connect({ host: '127.0.0.1', port: server.address().port, username: 'test', hostVerifier: () => true })
+  client.connect({ host: '127.0.0.1', port: server.address().port, username: 'test', hostVerifier: value => value.equals(ssh2.utils.parseKey(key.privateKey).getPublicSSH()) })
   await once(client, 'ready')
   const local = `http://127.0.0.1:${http.address().port}`
   const [first, second] = await Promise.all([

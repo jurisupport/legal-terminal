@@ -17,3 +17,7 @@
 .agent-attachments.pending .agent-media-list { grid-template-columns: repeat(auto-fit, minmax(min(160px, 100%), 1fr)); max-height: 220px; overflow: auto; align-items: start; }
 .agent-attachments.pending .agent-media-preview { margin: 0; max-width: none; }
 .agent-attachments.pending .agent-media-preview img, .agent-attachments.pending .agent-media-preview video { max-height: 120px; }
+@media (max-height: 760px) {
+  .agent-attachments.pending .agent-media-list { max-height: 12vh; }
+  .agent-panel:has(.agent-attachments.pending .agent-media-preview) .agent-head-actions { flex-shrink: 0; }
+}

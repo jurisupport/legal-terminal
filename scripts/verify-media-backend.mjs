@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { createHash } from 'node:crypto'
+import { createHash, generateKeyPairSync } from 'node:crypto'
 import { EventEmitter, once } from 'node:events'
 import { utimesSync, writeFileSync } from 'node:fs'
 import { mkdir, mkdtemp, open, readFile, readdir, realpath, rm, stat, symlink, utimes, writeFile } from 'node:fs/promises'
@@ -90,9 +90,10 @@ const sha = (bytes) => createHash('sha256').update(bytes).digest('hex')
 const noParts = async () => assert.equal((await readdir(join(mediaRoot, 'media-review/files'))).filter((f) => f.endsWith('.part')).length, 0)
 const tick = () => new Promise((resolve) => setTimeout(resolve, 20))
 
-const key = ssh2.utils.generateKeyPairSync('ed25519')
-await writeFile(join(root, 'key'), key.private, { mode: 0o600 })
-const server = new ssh2.Server({ hostKeys: [key.private] }, (client) => {
+// ssh2's Ed25519 generator truncates public keys whose first byte is zero.
+const key = generateKeyPairSync('rsa', { modulusLength: 2048, privateKeyEncoding: { type: 'pkcs1', format: 'pem' } })
+await writeFile(join(root, 'key'), key.privateKey, { mode: 0o600 })
+const server = new ssh2.Server({ hostKeys: [key.privateKey] }, (client) => {
   clients.add(client)
   client.on('error', () => {})
   client.on('close', () => clients.delete(client))
@@ -252,7 +253,7 @@ try {
   trustedConnection.client.end()
   assert.ok(authenticationCalls > 0)
   assert.equal(hostKeyPrompts, 2)
-  const changedKey = ssh2.utils.parseKey(ssh2.utils.generateKeyPairSync('ed25519').private).getPublicSSH()
+  const changedKey = ssh2.utils.parseKey(generateKeyPairSync('rsa', { modulusLength: 2048, privateKeyEncoding: { type: 'pkcs1', format: 'pem' } }).privateKey).getPublicSSH()
   await assert.rejects(hostKeys.verifySshHostKey(profile, changedKey, new AbortController().signal), /서버키가 변경/)
   assert.equal(hostKeyPrompts, 2, 'changed server key must not prompt for replacement')
   console.log('SSH identity: rejection blocks authentication, explicit approval persists and changed keys fail closed')
