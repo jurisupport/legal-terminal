@@ -18,10 +18,15 @@ async function checkLayout({ root, temp, output, channels }) {
   const fs = require('node:fs'), path = require('node:path')
   app.setPath('userData', path.join(temp, 'profile'))
   const errors = [], results = []
+  let markRendererReady
+  const rendererReady = new Promise(resolve => { markRendererReady = resolve })
   const longName = 'contract_'.repeat(20) + '.md'
   const failure = 'Request failed: ' + 'connection_details_'.repeat(30)
   const settings = { sshProfiles: [], notifyDone: false, agentDefaultProvider: 'claude' }
   for (const channel of channels) ipcMain.handle(channel, (_event, ...args) => {
+    if (channel === 'tabs:ready') { markRendererReady(); return }
+    if (channel === 'setup:status') return { items: [], ready: true }
+    if (channel === 'caseManagement:get') return { ok: true, state: { generation: 'fixture', revision: 0, ui: { selectedTaskByCase: {}, focus: null, previousFocus: null, recovery: { caseId: null, seenCaseIds: [] } } } }
     if (channel === 'settings:get' || channel === 'settings:set') return settings
     if (channel === 'app:info') return { platform: process.platform, version: 'Width fixture', homeDirectory: '/synthetic' }
     if (channel === 'app:generalChatDirectory') return ''
@@ -88,6 +93,7 @@ async function checkLayout({ root, temp, output, channels }) {
   }
   try {
     await w.loadFile(path.join(root, 'out/renderer/index.html'))
+    await rendererReady
     await wait("!!document.querySelector('.case-sidebar-trigger')")
     w.webContents.send('tabs:receive', { kind: 'terminal', tab: { id: 'width-agent', kind: 'agent', agentProvider: 'claude', title: '패널 너비 검증', cwd: '/synthetic', side: 'right', createdAt: Date.now() } })
     await wait("!!document.querySelector('.agent-panel[data-visible=true] .agent-composer')")
@@ -162,6 +168,7 @@ async function checkLayout({ root, temp, output, channels }) {
   } catch (error) {
     await capture('failure').catch(() => {})
     console.error(error)
+    console.error(JSON.stringify({ errors, dom: await run('return document.body.innerText.slice(-2000)').catch(() => '') }))
     app.exit(1)
   }
 }

@@ -136,6 +136,7 @@ jobs:
             output/playwright/document-agent-memory/**
             output/playwright/browser/**
             output/playwright/agent-media/**
+            output/playwright/agent-panel-width/**
             output/playwright/claude-remote-control/**
           if-no-files-found: warn
 
@@ -237,6 +238,7 @@ jobs:
             output/playwright/document-agent-memory/**
             output/playwright/browser/**
             output/playwright/agent-media/**
+            output/playwright/agent-panel-width/**
             output/playwright/claude-remote-control/**
           if-no-files-found: warn
 
