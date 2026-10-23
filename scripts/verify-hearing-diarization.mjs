@@ -11,6 +11,8 @@ const api = {}
 let responses = []
 let requests = []
 let timer
+let delays = []
+let onDelay
 runInNewContext(ts.transpileModule(source, {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 }
 }).outputText, {
@@ -22,14 +24,17 @@ runInNewContext(ts.transpileModule(source, {
     throw new Error(`Unexpected import: ${name}`)
   },
   Buffer, Uint8Array, Blob, FormData, AbortController, Error,
-  setTimeout: (callback, delay) => { timer = { callback, delay }; return timer },
+  setTimeout: (callback, delay) => {
+    if (delay <= 30_000) { delays.push(delay); onDelay?.(); queueMicrotask(callback); return {} }
+    timer = { callback, delay }; return timer
+  },
   clearTimeout: () => {},
   fetch: async (url, options) => {
     requests.push({ url, ...options, timeout: timer.delay })
     const next = responses.shift()
     assert.ok(next, 'Unexpected API request')
     if (typeof next === 'function') return next(options)
-    return new Response(next.body, { status: next.status ?? 200 })
+    return new Response(next.body, { status: next.status ?? 200, headers: next.headers })
   }
 })
 
@@ -39,9 +44,9 @@ const segments = [
   { speaker: 'B', text: '출석하겠습니다.', start: 2, end: 4 },
   { speaker: 'A', text: '네.', start: 5, end: 5.5 }
 ]
-async function transcribe(reply, patch = {}) {
+async function transcribe(reply, patch = {}, fallbackResponses = []) {
   requests = []
-  responses = [{ body: JSON.stringify(reply) }]
+  responses = [{ body: JSON.stringify(reply) }, ...fallbackResponses]
   return api.transcribe({ ...input, ...patch })
 }
 
@@ -79,6 +84,9 @@ referenceAudio.writeUInt16LE(16, 34)
 referenceAudio.write('data', 36)
 referenceAudio.writeUInt32LE(referenceAudio.length - 44, 40)
 const knownSpeakers = [{ name: 'speaker_0', audio: referenceAudio }, { name: 'speaker_1', audio: referenceAudio }]
+await transcribe({ segments }, { audio: referenceAudio, mimeType: 'audio/wav' })
+assert.equal(requests[0].body.get('file').name, 'dictation.wav')
+assert.equal(requests[0].body.get('file').type, 'audio/wav')
 result = await transcribe({ segments: [{ ...segments[0], speaker: 'speaker_1' }] }, { knownSpeakers })
 assert.equal(result.ok, true)
 assert.equal(result.segments[0].speaker, 'speaker_1')
@@ -100,29 +108,96 @@ for (const invalid of [
     { start: -1 }, { start: '0' }, { start: null }, { end: -1 }, { end: null }
   ].map((patch) => ({ segments: [segments[0], { ...segments[1], ...patch }] }))
 ]) {
-  result = await transcribe(invalid)
+  result = await transcribe(invalid, {}, [{ body: '{}' }])
   assert.equal(result.ok, false, JSON.stringify(invalid))
   assert.equal(result.segments, undefined, 'Never keep only part of a malformed transcript')
-  assert.equal(requests.length, 1)
+  assert.equal(requests.length, 2, 'Malformed diarization tries plain fallback without accepting partial segments')
 }
 for (const audio of [new Uint8Array(), new Uint8Array(25 * 1024 * 1024 + 1)]) {
   assert.equal((await transcribe({}, { audio })).ok, false)
   assert.equal(requests.length, 0, 'Invalid audio must not reach the API')
 }
-for (const response of [
-  { body: 'Rate limit', status: 429 },
-  { body: 'not JSON' },
-  () => { throw new Error('Network error') },
-  () => { timer.callback(); throw new Error('Aborted') }
+for (const [response, attempts] of [
+  [{ body: 'Rate limit', status: 429 }, 3],
+  [{ body: 'not JSON' }, 2],
+  [() => { throw new Error('Network error') }, 3],
+  [() => { timer.callback(); throw new Error('Aborted') }, 2]
 ]) {
   requests = []
-  responses = [response]
+  responses = Array(attempts).fill(response)
   result = await api.transcribe(input)
   assert.equal(result.ok, false)
   assert.ok(result.error)
-  assert.equal(requests.length, 1)
+  assert.equal(requests.length, attempts)
 }
 assert.match(result.error, /시간 초과/)
+
+const fallbackText = '대체 전사로 보존한 원문입니다.'
+const fallbackReply = { body: JSON.stringify({ text: fallbackText }) }
+for (const diarize of [false, true]) {
+  requests = []
+  delays = []
+  responses = [() => { throw new Error('Network failure') }, { status: 503, body: 'Overloaded' }, fallbackReply]
+  result = await api.transcribe({ ...input, diarize, context: { court: '서울중앙지법' } })
+  assert.equal(result.ok, true)
+  assert.equal(result.text, fallbackText)
+  assert.equal(result.fallback, 'whisper-1')
+  assert.equal(result.segments, undefined)
+  assert.deepEqual(requests.map((request) => request.body.get('model')),
+    [diarize ? 'gpt-4o-transcribe-diarize' : 'gpt-transcribe', diarize ? 'gpt-4o-transcribe-diarize' : 'gpt-transcribe', 'whisper-1'])
+  assert.ok(delays[0] >= 1000 && delays[1] >= 2000)
+  const fallback = requests[2].body
+  assert.equal(fallback.get('language'), 'ko')
+  assert.equal(fallback.get('response_format'), 'json')
+  assert.deepEqual([...fallback.keys()].sort(), ['file', 'language', 'model', 'response_format'])
+  for (const request of requests) assert.deepEqual([...new Uint8Array(await request.body.get('file').arrayBuffer())], [1, 2, 3])
+}
+
+for (const first of [
+  { status: 404, body: JSON.stringify({ error: { code: 'model_not_found' } }) },
+  { body: 'broken json' }, { body: '{}' },
+  () => { timer.callback(); throw new Error('Aborted') }
+]) {
+  requests = []
+  responses = [first, fallbackReply]
+  result = await api.transcribe(input)
+  assert.equal(result.fallback, 'whisper-1')
+  assert.equal(requests.length, 2, 'Missing models, unusable output and timeout go directly to fallback')
+}
+
+for (const status of [400, 401, 403, 413, 422]) {
+  requests = []
+  responses = [{ status, body: 'Cannot accept request' }]
+  assert.equal((await api.transcribe(input)).ok, false)
+  assert.equal(requests.length, 1, 'Authentication and invalid requests do not trigger paid fallback attempts')
+}
+for (const code of ['insufficient_quota', 'credit_balance_exhausted', 'organization_spend_limit_exceeded',
+  'project_spend_limit_exceeded', 'organization_usage_limit_exceeded']) {
+  requests = []
+  responses = [{ status: 429, body: JSON.stringify({ error: { code } }) }]
+  assert.equal((await api.transcribe(input)).ok, false)
+  assert.equal(requests.length, 1)
+}
+for (const retryAfter of ['5', new Date(Date.now() + 10_000).toUTCString()]) {
+  requests = []
+  delays = []
+  responses = [{ status: 429, body: 'Slow down', headers: { 'retry-after': retryAfter } }, { body: JSON.stringify({ segments }) }]
+  assert.equal((await api.transcribe(input)).ok, true)
+  assert.ok(delays[0] >= (retryAfter === '5' ? 5000 : 8000), 'Honor numeric and HTTP-date cooldowns')
+  assert.equal(requests.length, 2)
+}
+requests = []
+responses = [{ status: 503, body: 'Wait', headers: { 'retry-after': '120' } }]
+assert.match((await api.transcribe(input)).error, /120초 후/)
+assert.equal(requests.length, 1, 'Do not bypass long server cooldowns with fallback')
+
+const cancelled = new AbortController()
+requests = []
+responses = [{ status: 503, body: 'Overloaded' }]
+onDelay = () => cancelled.abort()
+assert.match((await api.transcribe(input, cancelled.signal)).error, /취소/)
+onDelay = undefined
+assert.equal(requests.length, 1, 'Deleting audio during backoff prevents subsequent uploads')
 
 for (const diarize of [false, true]) {
   requests = []
@@ -326,6 +401,17 @@ assert.notEqual(migrated.entries[0].speakerId, migrated.entries[1].speakerId)
 assert.ok(migrated.entries.every(({ participantSource }) => participantSource === undefined))
 assert.deepEqual(plain(panel.sanitizeRecord(plain(migrated))), plain(migrated), 'Migration is stable after saving and reopening')
 console.log('anonymous A/B/C groups, global rename and assignment, voice reuse, roster preservation, reload and report labels verified')
+
+const fallbackRecord = panel.sanitizeRecord({ ...plain(renamed), entries: [{
+  id: 'fallback-entry', speakerId: '', text: '화자 없는 복구 원문', transcriptionFallback: true,
+  createdAt: '2026-10-23T00:00:00.000Z'
+}] })
+assert.equal(fallbackRecord.entries[0].transcriptionFallback, true)
+assert.equal(fallbackRecord.entries[0].speakerId, '')
+const fallbackReport = panel.buildReport(fallbackRecord)
+assert.match(fallbackReport, /화자 미구분: 화자 없는 복구 원문 \[대체 전사로 복구됨\]/)
+assert.doesNotMatch(fallbackReport, /사전준비: 화자 없는/)
+console.log('transcription retry limits, model fallback, cooldown/cancellation, and unassigned fallback reports verified')
 
 // Run the actual load, rename, autosave, and flush callbacks with controlled file I/O.
 const panelAst = ts.createSourceFile('panel.tsx', panelSource, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX)

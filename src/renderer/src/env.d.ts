@@ -1,4 +1,5 @@
 /// <reference types="vite/client" />
+import type { DictationBackup, DictationBackupQuery } from '../../shared/dictationRecovery'
 import type { BrowserApi } from '../../shared/browser'
 import type { ClaudeRemoteControlApi, RemoteControlConnection } from '../../shared/claudeRemoteControl'
 import type { CaseManagementState, CaseManagementPatch } from '../../shared/caseManagement'
@@ -341,6 +342,7 @@ export interface DictationContext {
 }
 
 export interface DictationTranscribeInput {
+  backupId?: string
   audio: Uint8Array
   mimeType: string
   context?: DictationContext
@@ -363,6 +365,7 @@ export interface DictationTranscribeResult {
   corrected?: boolean
   segments?: DictationSegment[]
   error?: string
+  fallback?: 'whisper-1'
 }
 
 export interface SessionSearchContext {
@@ -940,6 +943,9 @@ export interface LtApi {
     keyStatus: () => Promise<'ok' | 'missing' | 'locked' | 'unavailable'>
     setKey: (key: string) => Promise<void>
     transcribe: (input: DictationTranscribeInput) => Promise<DictationTranscribeResult>
+    backup: (input: DictationBackup) => Promise<void>
+    backups: (query: DictationBackupQuery) => Promise<DictationBackup[]>
+    removeBackup: (id: string) => Promise<void>
   }
   export: {
     mdToPdf: (

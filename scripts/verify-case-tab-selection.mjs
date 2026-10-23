@@ -22,7 +22,7 @@ function loadHandlers(names, context = {}) {
     return `const ${name} = ${handlers.get(name)};`
   }).join('\n') + `\n({ ${names.join(', ')} })`
   return vm.runInNewContext(ts.transpileModule(source, {
-    compilerOptions: { target: ts.ScriptTarget.ES2022 }
+    compilerOptions: { target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.React }
   }).outputText, Object.assign(context, { isGeneralChatDirectory }))
 }
 const caseHelpers = [
@@ -559,3 +559,56 @@ for (const scenario of ['active', 'last', 'background', 'cancel-working', 'cance
 }
 
 console.log('case tab selection and bulk agent closing ok')
+
+const hearingTabs = ['left', 'right'].map((side) => ({
+  id: `hearing-${side}`, kind: 'hearing', caseTabId: 'original', side
+}))
+for (const side of ['left', 'right']) {
+  const mounted = loadHandlers(['docSide', 'mountedDocs'], {
+    docs: [], docTabs: hearingTabs, side, activeDocForPane: undefined
+  }).mountedDocs
+  assert.deepEqual(Array.from(mounted, (tab) => tab.id), [`hearing-${side}`],
+    'background hearing stays mounted in its own pane even when the active case has no documents')
+}
+
+let hearingProps
+const hearingContext = {
+  React: { Fragment: 'fragment', createElement(type, props) { if (type === 'hearing-panel') hearingProps = props } },
+  HearingRecordPanel: 'hearing-panel', summarizeHearingReportWithClaude() {},
+  caseTabs: [{ id: 'original', drafts: '/original', name: '원래 사건', meta: { caseNumber: '2026가단1' } }],
+  currentCase: { drafts: '/other', name: '다른 사건', meta: { caseNumber: '2026가단2' } },
+  activeDraftsFolder: '/other', activeCaseTabId: 'other', activeDoc: 'hearing-right',
+  docOnly: false, termOnly: false, activeWorkKeyForSide: (side) => `doc:hearing-${side}`
+}
+const hearingRender = loadHandlers([
+  'docSide', 'docKey', 'caseIdForDoc', 'isSharedDocTab', 'visibleInActiveCase', 'isDocVisibleInActiveCase',
+  'currentCaseFromCaseTab', 'hearingCaseFromCurrent', 'renderDocContent'
+], hearingContext).renderDocContent
+hearingRender(hearingTabs[1])
+assert.equal(hearingProps.draftsDir, '/original', 'a tab awaiting folder loading must not save in the newly active case')
+assert.equal(hearingProps.initialCase.caseNumber, '2026가단1', 'background case context belongs to its owner')
+assert.equal(hearingProps.visible, false, 'stale activeDoc cannot enable the hidden hearing shortcut')
+hearingContext.caseTabs[0].drafts = ''
+hearingRender(hearingTabs[1])
+assert.equal(hearingProps.draftsDir, '', 'a shell awaiting its own folder cannot use the other case folder')
+hearingContext.caseTabs[0].drafts = '/original'
+hearingRender({ ...hearingTabs[1], caseTabId: 'missing' })
+assert.equal(hearingProps.draftsDir, undefined, 'an unknown owner never falls back to an unrelated folder')
+assert.equal(hearingProps.initialCase, undefined)
+hearingRender({ ...hearingTabs[1], hearingDrafts: '/pinned', hearingCase: { caseNumber: 'pinned' } })
+assert.equal(hearingProps.draftsDir, '/pinned')
+assert.equal(hearingProps.initialCase.caseNumber, 'pinned')
+hearingContext.activeCaseTabId = 'original'
+hearingRender(hearingTabs[1])
+assert.equal(hearingProps.visible, true)
+hearingRender(hearingTabs[0])
+assert.equal(hearingProps.visible, false, 'two visible hearing panes must not both handle the recording shortcut')
+hearingContext.activeWorkKeyForSide = () => 'doc:settings'
+hearingRender(hearingTabs[1])
+assert.equal(hearingProps.visible, false, 'a covered hearing tab must not handle the shortcut')
+hearingContext.docOnly = true
+hearingRender(hearingTabs[1])
+assert.equal(hearingProps.visible, true, 'detached document windows keep their recording shortcut')
+
+
+console.log('hearing case lifetime, context and shortcut isolation ok')

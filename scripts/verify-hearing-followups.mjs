@@ -19,7 +19,7 @@ const actions=['자료 회신 확인','의견서 검토','응답 지연 조치',
 const record={version:1,id:'record-1',case:{jsId:'case-1',caseNumber:'2026가단1'},speakers:[{id:'court',label:'재판부',role:'court'}],activeSpeakerId:'court',requests:[],entries:[],result:{nextActions:actions,nextDate:'2026-10-08'},createdAt:'2026-10-01T00:00:00Z',updatedAt:'2026-10-01T00:00:00Z',jsSync:{syncedAt:'2026-10-01T00:00:00Z',todoId:'record-completed'}}
 const files={'/synthetic/record.json':JSON.stringify(record),'/synthetic/other.json':JSON.stringify({...record,id:'record-2',case:{jsId:'case-2'},result:{nextActions:['다른 사건 조치']}})}
 window.calls=[];window.rows=[];window.mode='ok';window.release=null;window.changed=0
-window.lt={fs:{stat:async()=>({ok:true,isDir:true}),readText:async(path)=>({text:files[path]}),writeText:async(path,content)=>{window.calls.push(['write',path,JSON.parse(content)]);files[path]=content;return {ok:true}},mkdir:async()=>({ok:true,path:'/synthetic/.hearings'})},todo:{
+window.lt={dictation:{backups:async()=>[],removeBackup:async()=>{}},fs:{stat:async()=>({ok:true,isDir:true}),readText:async(path)=>({text:files[path]}),writeText:async(path,content)=>{window.calls.push(['write',path,JSON.parse(content)]);files[path]=content;return {ok:true}},mkdir:async()=>({ok:true,path:'/synthetic/.hearings'})},todo:{
  list:async(params)=>{window.calls.push(['list',params]);if(window.mode==='lookup-error')return {ok:false,error:'조회 장애'};return {ok:true,todos:structuredClone(window.rows)}},
  get:async(id)=>{window.calls.push(['get',id]);return {ok:true,todo:structuredClone(window.rows.find(row=>row.id===id))}},
  assignees:async(params)=>{window.calls.push(['assignees',params]);return {ok:true,assignees:[{id:'member-1',name:'담당 변호사'}]}},
@@ -60,7 +60,7 @@ window.uiCheck=async()=>{
 `
 try {
  await fs.mkdir(path.dirname(screenshot), { recursive: true })
- await build({ stdin: { contents: source, resolveDir: root, loader: 'tsx' }, bundle: true, outfile: path.join(temp, 'ui.js'), platform: 'browser', loader: { '.ttf': 'file' }, jsx: 'automatic' })
+ await build({ stdin: { contents: source, resolveDir: root, loader: 'tsx' }, bundle: true, outfile: path.join(temp, 'ui.js'), platform: 'browser', loader: { '.ttf': 'file', '.worklet.js': 'text' }, jsx: 'automatic' })
  await fs.writeFile(path.join(temp, 'index.html'), '<html><head><meta charset="utf-8"><link rel="stylesheet" href="ui.css"></head><body><div id="root"></div><script src="ui.js"></script></body></html>')
  await fs.writeFile(path.join(temp, 'main.cjs'), `const {app,BrowserWindow}=require('electron');const fs=require('fs');app.whenReady().then(async()=>{const w=new BrowserWindow({width:1280,height:1000,show:false,webPreferences:{contextIsolation:true,nodeIntegration:false}});try{await w.loadFile(${JSON.stringify(path.join(temp,'index.html'))});const result=await w.webContents.executeJavaScript('window.uiCheck()');fs.writeFileSync(${JSON.stringify(screenshot)},(await w.webContents.capturePage()).toPNG());w.setSize(500,900);await new Promise(resolve=>setTimeout(resolve,100));if(await w.webContents.executeJavaScript('document.querySelector("dialog").scrollWidth > document.querySelector("dialog").clientWidth'))throw Error('Narrow dialog overflow');console.log('HEARING_FOLLOWUPS_RESULT '+JSON.stringify(result));app.exit(0)}catch(error){console.error(error);console.error(await w.webContents.executeJavaScript('document.body.innerText'));app.exit(1)}})`)
  const electron = createRequire(import.meta.url)('electron')

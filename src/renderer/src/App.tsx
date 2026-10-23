@@ -8304,26 +8304,30 @@ export default function App(): JSX.Element {
           onScrollPosition={(position) => updateDocScrollPosition(tab.id, position)}
         />
       )}
-      {tab?.kind === 'hearing' && (
-        <HearingRecordPanel
-          key={tab.id}
-          draftsDir={tab.hearingDrafts ?? activeDraftsFolder}
-          initialCase={tab.hearingCase ?? (currentCase ? hearingCaseFromCurrent(currentCase) : undefined)}
-          initialHearing={tab.hearing}
-          initialPath={tab.path}
-          visible={activeDoc === tab.id}
-          onSavedPath={(path, title) =>
-            setDocTabs((tabs) =>
-              tabs.some((item) => item.id === tab.id && (item.path !== path || item.title !== title))
-                ? tabs.map((item) => (item.id === tab.id ? { ...item, path, title } : item))
-                : tabs
-            )
-          }
-          onOpenReport={(path, title) => openFile(path, title, 'left')}
-          onSummarizeReport={summarizeHearingReportWithClaude}
-          onTasksChanged={() => setTodoNonce((value) => value + 1)}
-        />
-      )}
+      {tab?.kind === 'hearing' && (() => {
+        const owner = caseTabs.find((item) => item.id === caseIdForDoc(tab))
+        return (
+          <HearingRecordPanel
+            key={tab.id}
+            draftsDir={tab.hearingDrafts ?? owner?.drafts}
+            initialCase={tab.hearingCase ?? (owner ? hearingCaseFromCurrent(currentCaseFromCaseTab(owner)) : undefined)}
+            initialHearing={tab.hearing}
+            initialPath={tab.path}
+            visible={activeDoc === tab.id && (docOnly ||
+              (isDocVisibleInActiveCase(tab) && activeWorkKeyForSide(docSide(tab)) === docKey(tab.id)))}
+            onSavedPath={(path, title) =>
+              setDocTabs((tabs) =>
+                tabs.some((item) => item.id === tab.id && (item.path !== path || item.title !== title))
+                  ? tabs.map((item) => (item.id === tab.id ? { ...item, path, title } : item))
+                  : tabs
+              )
+            }
+            onOpenReport={(path, title) => openFile(path, title, 'left')}
+            onSummarizeReport={summarizeHearingReportWithClaude}
+            onTasksChanged={() => setTodoNonce((value) => value + 1)}
+          />
+        )
+      })()}
       {(tab?.kind === 'mdview' || tab?.kind === 'markdown') && (
         <MarkdownEditor
           key={tab.id}
@@ -8805,7 +8809,7 @@ export default function App(): JSX.Element {
     const activeDocForPane =
       activeParsed?.kind === 'doc' ? docs.find((t) => t.id === activeParsed.id) : undefined
     const mountedDocs = [...docs, ...docTabs.filter((tab) =>
-      (tab.kind === 'media' || tab.kind === 'browser' || tab.kind === 'remote-control') && docSide(tab) === side && !docs.some((item) => item.id === tab.id)
+      (tab.kind === 'media' || tab.kind === 'browser' || tab.kind === 'remote-control' || tab.kind === 'hearing') && docSide(tab) === side && !docs.some((item) => item.id === tab.id)
     )].filter(
       (t) =>
         t.id === activeDocForPane?.id ||

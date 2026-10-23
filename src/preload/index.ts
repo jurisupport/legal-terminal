@@ -5,6 +5,7 @@ import type { MediaApi, MediaSelection, MediaViewState } from '../shared/media'
 import type { AgentWorkspaceContext } from '../shared/agentWorkspaceContext'
 import type { SendClaudeOptions } from '../shared/claudeAsk'
 import type { Project, ProjectFolderLink, ProjectInput } from '../shared/project'
+import type { DictationBackup, DictationBackupQuery } from '../shared/dictationRecovery'
 import type { BrowserApi } from '../shared/browser'
 import type { ClaudeRemoteControlApi, RemoteControlConnection } from '../shared/claudeRemoteControl'
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
@@ -289,6 +290,7 @@ interface DictationContext {
 }
 
 interface DictationTranscribeInput {
+  backupId?: string
   audio: Uint8Array
   mimeType: string
   context?: DictationContext
@@ -311,6 +313,7 @@ interface DictationTranscribeResult {
   corrected?: boolean
   segments?: DictationSegment[]
   error?: string
+  fallback?: 'whisper-1'
 }
 
 interface WorkspaceListResult {
@@ -899,7 +902,10 @@ const api = {
       ipcRenderer.invoke('dictation:keyStatus'),
     setKey: (key: string): Promise<void> => ipcRenderer.invoke('dictation:setKey', key),
     transcribe: (input: DictationTranscribeInput): Promise<DictationTranscribeResult> =>
-      ipcRenderer.invoke('dictation:transcribe', input)
+      ipcRenderer.invoke('dictation:transcribe', input),
+    backup: (input: DictationBackup): Promise<void> => ipcRenderer.invoke('dictation:backup', input),
+    backups: (query: DictationBackupQuery): Promise<DictationBackup[]> => ipcRenderer.invoke('dictation:backups', query),
+    removeBackup: (id: string): Promise<void> => ipcRenderer.invoke('dictation:removeBackup', id)
   },
   export: {
     mdToPdf: (

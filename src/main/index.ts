@@ -19,7 +19,9 @@ import { getSettings, setSettings, getCaseManagementState, updateCaseManagementS
 import { checkUpdate, compareVersions, fetchLatestRelease } from './update'
 import { promptBundledSkillInstall } from './skillInstall'
 import { imageInfo } from './imageSize'
-import { keyStatus as dictationKeyStatus, setKey as setDictationKey, transcribe as transcribeDictation, type DictationTranscribeInput } from './dictation'
+import { keyStatus as dictationKeyStatus, setKey as setDictationKey, type DictationTranscribeInput } from './dictation'
+import { saveDictationBackup, listDictationBackups, removeDictationBackup, transcribeWithBackup } from './dictationRecovery'
+import type { DictationBackup, DictationBackupQuery } from '../shared/dictationRecovery'
 import {
   getPairing,
   setPairing,
@@ -1075,7 +1077,10 @@ ipcMain.handle('settings:set', async (_e, patch: Partial<Settings>) => {
 })
 ipcMain.handle('dictation:keyStatus', () => dictationKeyStatus())
 ipcMain.handle('dictation:setKey', (_e, key: string) => setDictationKey(key))
-ipcMain.handle('dictation:transcribe', (_e, input: DictationTranscribeInput) => transcribeDictation(input))
+ipcMain.handle('dictation:transcribe', (_e, input: DictationTranscribeInput & { backupId?: string }) => transcribeWithBackup(input))
+ipcMain.handle('dictation:backup', (_e, input: DictationBackup) => saveDictationBackup(input))
+ipcMain.handle('dictation:backups', (_e, query: DictationBackupQuery) => listDictationBackups(query))
+ipcMain.handle('dictation:removeBackup', (_e, id: string) => removeDictationBackup(id))
 
 // ── 사건 페어링·히스토리 IPC ──
 ipcMain.handle('case:getPairing', (_e, drafts: string) => getPairing(drafts))

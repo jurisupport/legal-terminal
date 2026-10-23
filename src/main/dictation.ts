@@ -39,14 +39,40 @@ export interface DictationTranscribeResult {
   corrected?: boolean
   segments?: DictationSegment[]
   error?: string
+  fallback?: 'whisper-1'
 }
 
 const TRANSCRIPTION_URL = 'https://api.openai.com/v1/audio/transcriptions'
 const RESPONSES_URL = 'https://api.openai.com/v1/responses'
 const TRANSCRIPTION_MODEL = 'gpt-transcribe'
 const DIARIZATION_MODEL = 'gpt-4o-transcribe-diarize'
+// shortcut: whisper-1 is available until 2027-02-26; replace this fallback before its retirement.
+const FALLBACK_MODEL = 'whisper-1'
 const CORRECTION_MODEL = 'gpt-5.4-mini'
 const MAX_AUDIO_BYTES = 25 * 1024 * 1024
+
+interface TranscriptionAttempt extends DictationTranscribeResult {
+  retryable?: boolean
+  fallbackAllowed?: boolean
+  retryAfterMs?: number
+}
+
+function transcriptionFailure(body: string, status: number, retryAfter: string | null): TranscriptionAttempt {
+  let code: unknown
+  let type: unknown
+  try { ({ code, type } = JSON.parse(body)?.error ?? {}) } catch { /* Non-JSON errors still have an HTTP status. */ }
+  const blocked = status === 401 || status === 403 || type === 'insufficient_quota' ||
+    ['insufficient_quota', 'credit_balance_exhausted', 'organization_spend_limit_exceeded',
+      'project_spend_limit_exceeded', 'organization_usage_limit_exceeded'].includes(String(code))
+  const retryable = !blocked && (status === 408 || status === 429 || status >= 500)
+  const delay = retryAfter === null ? 0 : /^\d+(?:\.\d+)?$/.test(retryAfter.trim())
+    ? Number(retryAfter) * 1000 : Date.parse(retryAfter) - Date.now()
+  return {
+    ok: false, error: apiErrorMessage(body, status), retryable,
+    fallbackAllowed: !blocked && (retryable || code === 'model_not_found'),
+    retryAfterMs: Number.isFinite(delay) ? Math.max(0, delay) : 0
+  }
+}
 
 function encodeSecret(value: string): string {
   if (!value) return ''
@@ -430,22 +456,29 @@ async function resolveParticipants(
 
 async function transcribeAudio(
   key: string,
-  input: DictationTranscribeInput
-): Promise<DictationTranscribeResult> {
+  input: DictationTranscribeInput,
+  fallback = false,
+  signal?: AbortSignal
+): Promise<TranscriptionAttempt> {
+  if (signal?.aborted) return { ok: false, error: '전사가 취소되었습니다.' }
   if (!(input.audio instanceof Uint8Array) || input.audio.byteLength === 0) {
     return { ok: false, error: '녹음 파일이 비어 있습니다.' }
   }
   if (input.audio.byteLength > MAX_AUDIO_BYTES) {
     return { ok: false, error: '녹음 파일이 25MB를 초과했습니다.' }
   }
-  const diarize = input.diarize === true
-  if (diarize && input.knownSpeakers !== undefined && !validSpeakerReferences(input.knownSpeakers)) {
+  const diarize = input.diarize === true && !fallback
+  if (input.diarize && input.knownSpeakers !== undefined && !validSpeakerReferences(input.knownSpeakers)) {
     return { ok: false, error: '화자 음성 참조가 올바르지 않습니다. 기록을 다시 열고 녹음해 주세요.' }
   }
   const form = new FormData()
-  form.append('model', diarize ? DIARIZATION_MODEL : TRANSCRIPTION_MODEL)
-  form.append('file', new Blob([copyAudioBuffer(input.audio)], { type: input.mimeType || 'audio/webm' }), 'dictation.webm')
-  if (diarize) {
+  form.append('model', fallback ? FALLBACK_MODEL : diarize ? DIARIZATION_MODEL : TRANSCRIPTION_MODEL)
+  form.append('file', new Blob([copyAudioBuffer(input.audio)], { type: input.mimeType || 'audio/webm' }),
+    input.mimeType?.split(';')[0] === 'audio/wav' ? 'dictation.wav' : 'dictation.webm')
+  if (fallback) {
+    form.append('language', 'ko')
+    form.append('response_format', 'json')
+  } else if (diarize) {
     form.append('language', 'ko')
     form.append('response_format', 'diarized_json')
     form.append('chunking_strategy', 'auto')
@@ -461,6 +494,8 @@ async function transcribeAudio(
   }
 
   const ctrl = new AbortController()
+  const cancel = (): void => ctrl.abort()
+  signal?.addEventListener('abort', cancel, { once: true })
   const timer = setTimeout(() => ctrl.abort(), diarize ? 600_000 : 120_000)
   try {
     const response = await fetch(TRANSCRIPTION_URL, {
@@ -470,16 +505,16 @@ async function transcribeAudio(
       signal: ctrl.signal
     })
     const text = await response.text()
-    if (!response.ok) return { ok: false, error: apiErrorMessage(text, response.status) }
+    if (!response.ok) return transcriptionFailure(text, response.status, response.headers.get('retry-after'))
     let parsed: unknown
     try {
       parsed = JSON.parse(text) as unknown
     } catch {
-      return { ok: false, error: '전사 응답 JSON 파싱 실패' }
+      return { ok: false, error: '전사 응답 JSON 파싱 실패', fallbackAllowed: true }
     }
     if (diarize) {
       const segments = extractSegments(parsed)
-      if (!segments) return { ok: false, error: '화자 분리 결과가 비어 있거나 올바르지 않습니다. 전사를 다시 시도해 주세요.' }
+      if (!segments) return { ok: false, error: '화자 분리 결과가 비어 있거나 올바르지 않습니다. 전사를 다시 시도해 주세요.', fallbackAllowed: true }
       return {
         ok: true,
         text: extractText(parsed).trim() || segments.map((segment) => segment.text).join('\n'),
@@ -488,7 +523,8 @@ async function transcribeAudio(
       }
     }
     const rawText = stripCodeFence(extractText(parsed))
-    if (!rawText.trim()) return { ok: false, error: '전사 결과가 비어 있습니다.' }
+    if (!rawText.trim()) return { ok: false, error: '전사 결과가 비어 있습니다.', fallbackAllowed: true }
+    if (fallback) return { ok: true, text: rawText, corrected: false, fallback: FALLBACK_MODEL }
     const corrected = await correctTranscript(key, rawText, input.context)
     return corrected.ok
       ? { ok: true, text: corrected.text, corrected: true }
@@ -496,7 +532,9 @@ async function transcribeAudio(
   } catch (error) {
     return {
       ok: false,
-      error: ctrl.signal.aborted
+      retryable: !signal?.aborted && !ctrl.signal.aborted,
+      fallbackAllowed: !signal?.aborted,
+      error: signal?.aborted ? '전사가 취소되었습니다.' : ctrl.signal.aborted
         ? 'OpenAI 전사 시간 초과'
         : error instanceof Error
           ? error.message
@@ -504,11 +542,13 @@ async function transcribeAudio(
     }
   } finally {
     clearTimeout(timer)
+    signal?.removeEventListener('abort', cancel)
   }
 }
 
 export async function transcribe(
-  input: DictationTranscribeInput
+  input: DictationTranscribeInput,
+  signal?: AbortSignal
 ): Promise<DictationTranscribeResult> {
   const key = await getKey()
   if (!key) {
@@ -523,5 +563,19 @@ export async function transcribe(
             : 'OpenAI API 키가 설정되지 않았습니다.'
     }
   }
-  return transcribeAudio(key, input)
+  let fallback = false
+  let retried = false
+  let attempt = 0
+  for (;;) {
+    const { retryable, fallbackAllowed, retryAfterMs = 0, ...result } = await transcribeAudio(key, input, fallback, signal)
+    if (result.ok || fallback || !fallbackAllowed) return result
+    // Do not ignore a long server cooldown by immediately switching models.
+    if (retryAfterMs > 30_000) return { ...result, error: `${result.error} · ${Math.ceil(retryAfterMs / 1000)}초 후 다시 시도하세요.` }
+    if (retryable && !retried) retried = true
+    else fallback = true
+    if (retryable || retryAfterMs > 0) {
+      await new Promise<void>((resolve) => setTimeout(resolve, Math.max(retryAfterMs, 1000 * 2 ** attempt + Math.random() * 250)))
+    }
+    attempt += 1
+  }
 }
