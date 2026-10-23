@@ -4,6 +4,7 @@ import {
   Fragment,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -9138,6 +9139,50 @@ export default function App(): JSX.Element {
     const element = shellRef.current?.querySelector<HTMLElement>(paneSelector(pane))
     return element?.getBoundingClientRect().width ?? paneMinimum(pane)
   }
+  useLayoutEffect(() => {
+    const shell = shellRef.current
+    if (!shell) return
+    const fitPanes = (): void => {
+      const shellRight = shell.getBoundingClientRect().right
+      let overflow = Math.ceil(Math.max(
+        0,
+        ...Array.from(shell.querySelectorAll<HTMLElement>(':scope > .work-pane'))
+          .filter((pane) => pane.getClientRects().length > 0)
+          .map((pane) => {
+            const bounds = pane.getBoundingClientRect()
+            return bounds.right - shellRight + (generalChatSide ? Math.max(0, MIN_WORK_PANE_WIDTH - bounds.width) : 0)
+          })
+      ))
+      if (!overflow) return
+      const widths: Partial<typeof paneWidths> = {}
+      for (const pane of ['left', 'evidence', 'side'] as const) {
+        if (pane === 'left' && generalChatSide) continue
+        const element = shell.querySelector<HTMLElement>(paneSelector(pane))
+        if (!element?.getClientRects().length) continue
+        const width = Number.parseFloat(shell.style.getPropertyValue(paneCssVariable(pane)))
+        if (!Number.isFinite(width)) continue
+        const nextWidth = Math.max(paneMinimum(pane), width - overflow)
+        if (nextWidth >= width) continue
+        overflow -= width - nextWidth
+        widths[pane] = nextWidth
+        shell.style.setProperty(paneCssVariable(pane), `${nextWidth}px`)
+      }
+      if (!Object.keys(widths).length) return
+      const resize = paneResizeRef.current
+      if (resize) {
+        widths[resize.pane] = Number.parseFloat(
+          shell.style.getPropertyValue(paneCssVariable(resize.pane))
+        )
+        paneResizeRef.current = null
+        document.documentElement.classList.remove('pane-resizing')
+      }
+      setPaneWidths((current) => ({ ...current, ...widths }))
+    }
+    fitPanes()
+    const observer = new ResizeObserver(fitPanes)
+    observer.observe(shell)
+    return () => observer.disconnect()
+  }, [explorerVisible, isViewer, generalChatSide, projectManagementVisible, projectAgentVisible])
   const setPaneWidth = (pane: ResizablePane, width: number): void => {
     const nextWidth = Math.round(Math.max(paneMinimum(pane), Math.min(width, paneMaximum(pane))))
     shellRef.current?.style.setProperty(paneCssVariable(pane), `${nextWidth}px`)

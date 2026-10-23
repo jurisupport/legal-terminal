@@ -2852,6 +2852,7 @@ body {
   min-width: 0;
   max-width: 100%;
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   grid-template-rows: auto minmax(0, 1fr) auto auto;
   overflow: hidden;
   background: #181818;
@@ -5100,6 +5101,7 @@ button.agent-attachment-chip {
   border-radius: 4px;
   color: #ffd3d3;
   font-size: var(--agent-small-font-size);
+  overflow-wrap: anywhere;
 }
 .agent-copy-feedback {
   margin: 0 10px 8px;
