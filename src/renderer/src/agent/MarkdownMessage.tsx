@@ -41,6 +41,8 @@ export function MarkdownMessage({
       const decoded = document.createElement('textarea')
       decoded.innerHTML = token.text
       const path = decoded.value
+      // Bare names can describe suffixes or groups, not actual files in cwd.
+      if (!/[\\/]/.test(path)) return Renderer.prototype.codespan.call(this, token)
       return referenceLink(path, path, false) ?? Renderer.prototype.codespan.call(this, token)
     }
     return { html: renderMarkdownForDisplay(text, renderer), references }

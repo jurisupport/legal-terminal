@@ -13,7 +13,7 @@ if (!process.versions.electron) {
   try {
     await fs.copyFile(path.join(repo, 'scripts/fixtures/media-review/red.mp4'), path.join(temp, 'sample.mp4'))
     await fs.writeFile(path.join(temp, 'sample.png'), Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGNQyW4DAAHMARYGRxnIAAAAAElFTkSuQmCC', 'base64'))
-    const urls = Object.fromEntries(['sample.mp4', 'sample.png'].map(name => [name, pathToFileURL(path.join(temp, name)).href]))
+    const urls = Object.fromEntries(['sample.mp4', 'sample.png', 'sample.jpg'].map(name => [name, pathToFileURL(path.join(temp, name)).href]))
     await build({ stdin: { resolveDir: repo, loader: 'tsx', contents: `
       import React from 'react'
       import {createRoot} from 'react-dom/client'
@@ -30,7 +30,7 @@ if (!process.versions.electron) {
       state.setInView = value => {state.inView=value;state.observers.forEach(item=>item.callback([{isIntersecting:value}]))}
       const fileSize = source => source.includes('huge') ? 30*1024*1024 : source.includes('large') ? 3*1024*1024 : 1024
       let token = 0
-      const make = input => ({sourcePath:input.path,versionId:input.versionId??'v1',size:fileSize(input.path),mimeType:input.path.endsWith('.png')?'image/png':'video/mp4',mtimeMs:1,createdAt:1,token:'token-'+(++token),url:urls[input.path.endsWith('.png')?'sample.png':'sample.mp4']})
+      const make = input => ({sourcePath:input.path,versionId:input.versionId??'v1',size:fileSize(input.path),mimeType:input.path.endsWith('.png')?'image/png':input.path.endsWith('.jpg')?'image/jpeg':'video/mp4',mtimeMs:1,createdAt:1,token:'token-'+(++token),url:urls[input.path.endsWith('.png')?'sample.png':input.path.endsWith('.jpg')?'sample.jpg':'sample.mp4']})
       window.lt = {
         fs:{stat:async path=>({ok:true,size:fileSize(path),isDir:false})},
         app:{openExternal:async url=>{state.external.push(url)}},
@@ -62,7 +62,7 @@ if (!process.versions.electron) {
   } finally { await fs.rm(temp, { recursive: true, force: true }) }
 } else {
   void (async () => {
-    const { app, BrowserWindow } = await import('electron')
+    const { app, BrowserWindow, nativeImage } = await import('electron')
     const temp = process.env.LT_AGENT_MEDIA_DIR
     app.setPath('userData', path.join(temp, 'profile'))
     await app.whenReady()
@@ -81,6 +81,7 @@ if (!process.versions.electron) {
       return result.value
     }
     try {
+      await fs.writeFile(path.join(temp, 'sample.jpg'), nativeImage.createFromPath(path.join(temp, 'sample.png')).toJPEG(90))
       await window.loadFile(path.join(temp, 'index.html'))
       const cpuRate = Number(process.env.LT_AGENT_MEDIA_CPU_THROTTLE ?? 1)
       if (cpuRate > 1) {
@@ -135,6 +136,22 @@ if (!process.versions.electron) {
       const screenshot = path.join(repo, 'output/playwright/agent-media/inline-media.png')
       await fs.mkdir(path.dirname(screenshot), { recursive: true })
       await fs.writeFile(screenshot, (await window.webContents.capturePage()).toPNG())
+      await run(async () => {
+        const opensBeforeShorthand=test.opens.length
+        test.render({text:'폴더의 이미지: `_1~3.jpg` 3장과 `_gemini.jpg` 3장입니다. 파일명 예: `sample.png`.'})
+        await waitFor(()=>document.querySelector('.agent-md-body')?.textContent.includes('_gemini.jpg'))
+        check(!document.querySelector('.agent-media-preview')&&!document.querySelector('[data-agent-media]'),'filename shorthand stays text instead of inventing paths under cwd')
+        await new Promise(resolve=>setTimeout(resolve,50))
+        check(test.opens.length===opensBeforeShorthand,'filename shorthand never starts a download')
+        test.render({text:'![파일명 링크](sample.png)'})
+        await waitFor(()=>document.querySelector('[data-media-path="ssh://server/work/sample.png"] img')?.naturalWidth>0)
+        check(document.querySelectorAll('.agent-media-preview').length===1,'explicit markdown image still accepts a filename relative to cwd')
+        const images=Array.from({length:6},(_,index)=>'/work/_자료/2026도8892 관련 판결/일러스트_'+(index+1)+'.jpg')
+        test.render({text:images.map((path,index)=>'![일러스트 '+(index+1)+']('+(index<3?'<'+path+'>':encodeURI(path))+')').join('\n\n')})
+        await waitFor(()=>document.querySelectorAll('.agent-media-preview img').length===6&&[...document.querySelectorAll('.agent-media-preview img')].every(image=>image.naturalWidth>0))
+        check(images.every(path=>test.opens.some(input=>input.path==='ssh://server'+path)),'each image uses its complete Korean path including spaces')
+      })
+      await fs.writeFile(path.join(path.dirname(screenshot), 'image-paths.png'), (await window.webContents.capturePage()).toPNG())
       await run(async () => {
         test.render({text:'인용: `output/clip.mp4`와 `/tmp/my%20image.png`'})
         await waitFor(()=>document.querySelector('[data-media-path="ssh://server/tmp/my%20image.png"] img')?.naturalWidth>0)
@@ -205,7 +222,7 @@ if (!process.versions.electron) {
         test.unmount()
         check(test.listeners.size===0,'subscriptions released')
       })
-      console.log('agent media: path/origin safety, markdown images+links, streaming stability, viewport and size limits, delayed video, quote revisions/ranges, hidden pause, progress/cancel and stale-token release passed')
+      console.log('agent media: path/origin safety, filename shorthand, six JPEG paths with Korean/spaces, markdown images+links, streaming stability, viewport and size limits, delayed video, quote revisions/ranges, hidden pause, progress/cancel and stale-token release passed')
       app.exit(0)
     } catch (error) {
       console.error(error.stack ?? String(error))

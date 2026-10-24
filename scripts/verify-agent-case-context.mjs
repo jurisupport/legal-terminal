@@ -42,6 +42,13 @@ assert.doesNotMatch(buildAgentWorkspaceContext({ kind: 'global', cwd: '/work', p
 assert.doesNotMatch(buildAgentWorkspaceContext({ kind: 'folder', cwd: '/work', projectId: 'stale-project' }), /stale-project|projectId/)
 assert.match(buildAgentWorkspaceContext({ kind: 'case', cwd: '/work', caseId: 'case-1' }), /"caseId": "case-1"[\s\S]*"draftsFolder": "\/work"/)
 
+for (const kind of ['case', 'global', 'folder', 'project']) {
+  const mediaContext = buildAgentWorkspaceContext({ kind, cwd: '/work' })
+  assert.ok(mediaContext.includes('![설명](<정확한 절대 경로>)'), `${kind} context explains image preview links`)
+  assert.match(mediaContext, /존재를 확인한 개별 파일마다/)
+  assert.match(mediaContext, /각 파일의 전체 경로를 각각 제공/)
+}
+
 const scope = { kind: 'case', cwd: '/work', caseId: 'case-1' }
 let reads = 0
 let done = false
