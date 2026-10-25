@@ -172,28 +172,34 @@ window.uiCheck = async () => {
     const renderedTable = view.dom.querySelector('.cm-md-table')
     check(!!renderedTable, 'Tall table is rendered before positioning the selection fixture')
     // Table cells use the bundled font, which may load only after scrolling into view.
+    renderedTable.getBoundingClientRect()
     await document.fonts.ready
+    await new Promise(resolve => view.requestMeasure({ read: () => null, write: resolve }))
     await pause(200)
-    const tableBounds = renderedTable.getBoundingClientRect(), viewport = view.scrollDOM.getBoundingClientRect()
-    view.scrollDOM.scrollTop += tableBounds.top - viewport.top + tableBounds.height / 2
+    // A real pointer selection starts at a visible anchor, even for a tall table.
+    const from = prefix.length - 1, to = prefix.length + table.length, pointerAnchor = reverse ? to : from
+    view.dispatch({ selection: { anchor: pointerAnchor }, userEvent: 'select.pointer',
+      effects: EditorView.scrollIntoView(pointerAnchor, { y: reverse ? 'end' : 'start', yMargin: 24 }) })
     await pause(250)
+    await new Promise(resolve => view.requestMeasure({ read: () => null, write: resolve }))
     const anchor = [...view.dom.querySelectorAll('.cm-md-cell-content')].find(el => {
       const rect = el.getBoundingClientRect(), bounds = view.scrollDOM.getBoundingClientRect()
       return el.textContent.startsWith('항목 ') && rect.top > bounds.top && rect.bottom < bounds.bottom
     })
     check(!!anchor, 'Formatted selection starts inside a tall rendered table')
-    const before = { top: view.scrollDOM.scrollTop, height: view.scrollDOM.scrollHeight, y: anchor.getBoundingClientRect().top,
-      tableHeight: renderedTable.getBoundingClientRect().height, fonts: document.fonts.status }
-    const from = prefix.length - 1, to = prefix.length + table.length
+    const geometry = () => ({ top: view.scrollDOM.scrollTop, height: view.scrollDOM.scrollHeight, y: anchor.getBoundingClientRect().top,
+      tableHeight: renderedTable.getBoundingClientRect().height, fonts: document.fonts.status, connected: anchor.isConnected })
+    const before = geometry()
     view.dispatch({ selection: { anchor: reverse ? to : from, head: reverse ? from : to }, userEvent: 'select.pointer' })
+    const selected = geometry()
     await pause(150)
+    const settled = geometry()
     question.focus({ preventScroll: true })
     await pause(150)
     check(anchor.isConnected && Math.abs(anchor.getBoundingClientRect().top - before.y) < 2 &&
       Math.abs(view.scrollDOM.scrollTop - before.top) < 2 && view.scrollDOM.scrollHeight === before.height,
       (reverse ? 'Reverse' : 'Forward') + ' formatted block selection and question focus preserve the visible passage',
-      JSON.stringify({ before, after: { top: view.scrollDOM.scrollTop, height: view.scrollDOM.scrollHeight, connected: anchor.isConnected,
-        tableHeight: renderedTable.getBoundingClientRect().height, fonts: document.fonts.status } }))
+      JSON.stringify({ before, selected, settled, after: geometry() }))
     check(view.state.sliceDoc(view.state.selection.main.from, view.state.selection.main.to) === formatted.slice(from, to),
       'Formatted selection retains the complete Markdown source')
     check(view.state.doc.toString() === formatted && !dirty, 'Quoting does not edit or dirty the source')

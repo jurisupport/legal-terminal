@@ -170,9 +170,12 @@ jobs:
       - name: Install dependencies
         run: npm ci --include=optional
 
-      - name: Verify editor refresh before Windows preflight
+      - name: Verify document selection before Windows preflight
         if: ${{ inputs.windows_preflight }}
-        run: npm run verify:editor-refresh
+        run: |
+          npm run verify:editor-refresh
+          npm run build
+          npm run verify:inline-selection-ui
 
       - name: Verify durable segmented transcription
         run: npm run verify:transcription-safety
