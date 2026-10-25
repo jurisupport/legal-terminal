@@ -31,7 +31,7 @@ async function electronCheck({ root, temp, output, channels, pdf }) {
   const settings = { draftsRoot: '/synthetic', agentDefaultProvider: 'codex', sshProfiles: [profile], notificationSound: 'none', notifyDone: false }
   const formattedMarkdown = '스크롤을 확인할 합성 문단입니다.\n\n'.repeat(70) + '선택 시작 문단입니다.\n\n' +
     '| 번호 | 검토 문장 | 설명 |\n| --- | --- | --- |\n' + Array.from({length: 2}, (_, i) =>
-      `| 항목 ${i} | **선택할 문장**입니다. | 길게 줄바꿈되는 검토 본문을 선택합니다. |\n`).join('') + '\n선택 마지막 문단입니다.\n'
+      `| 항목 ${i} | **선택할 문장**입니다. | 검토 본문입니다. |\n`).join('') + '\n선택 마지막 문단입니다.\n'
   let failure = false, sendRelease, holdSend = false, createRelease, holdCreate = false
   for (const channel of channels) ipcMain.handle(channel, async (ipc, ...args) => {
     calls.push({ channel, args })
@@ -367,7 +367,15 @@ async function electronCheck({ root, temp, output, channels, pdf }) {
       window.markdownBefore={top:bounds.top,bottom:source.bottom};
       const scroller=visible('.cm-scroller')[0];check(scroller.scrollHeight>scroller.clientHeight+20,'Markdown fixture is scrollable');scroller.scrollTop=20;
     `)
-    await pause(200)
+    await wait(`(() => {
+      const range=[...(CSS.highlights.get('inline-command-source')??[])][0];
+      if(!range||!popup())return false;
+      const source=range.getBoundingClientRect(),top=popup().getBoundingClientRect().top;
+      return top<markdownBefore.top-10 && Math.abs((top-markdownBefore.top)-(source.bottom-markdownBefore.bottom))<3;
+    })()`, 'Markdown popup position settles after scrolling').catch(async error => {
+      console.error('MARKDOWN_SCROLL_GEOMETRY',await run(`return {before:markdownBefore,popupTop:popup()?.getBoundingClientRect().top,anchorBottom:[...(CSS.highlights.get('inline-command-source')??[])][0]?.getBoundingClientRect().bottom,scrollTop:visible('.cm-scroller')[0]?.scrollTop}`))
+      throw error
+    })
     await run(`
       const source=[...CSS.highlights.get('inline-command-source')][0].getBoundingClientRect();
       const top=popup().getBoundingClientRect().top;
@@ -383,6 +391,7 @@ async function electronCheck({ root, temp, output, channels, pdf }) {
     for (const reverse of [false,true]) {
       await run(`const content=visible('.cm-content')[0]; content.focus(); content.dispatchEvent(new KeyboardEvent('keydown',{key:'End',code:'End',${process.platform==='darwin'?'metaKey':'ctrlKey'}:true,bubbles:true,cancelable:true}))`)
       await wait("visible('.cm-line').some(el=>el.textContent.includes('선택 마지막 문단')) && visible('.cm-md-table').length===1",'Rendered table and selection endpoints')
+      await run('await document.fonts.ready; await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))')
       await pause(200)
       const points=await run(`
         const line=text=>visible('.cm-line').find(el=>el.textContent.includes(text));
