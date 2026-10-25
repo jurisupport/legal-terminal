@@ -30,7 +30,7 @@ async function electronCheck({ root, temp, output, channels, pdf }) {
   const profile = { id: 'fixture-ssh', label: '합성 원격', host: 'example.invalid', user: 'test' }
   const settings = { draftsRoot: '/synthetic', agentDefaultProvider: 'codex', sshProfiles: [profile], notificationSound: 'none', notifyDone: false }
   const formattedMarkdown = '스크롤을 확인할 합성 문단입니다.\n\n'.repeat(70) + '선택 시작 문단입니다.\n\n' +
-    '| 번호 | 검토 문장 | 설명 |\n| --- | --- | --- |\n' + Array.from({length: 4}, (_, i) =>
+    '| 번호 | 검토 문장 | 설명 |\n| --- | --- | --- |\n' + Array.from({length: 2}, (_, i) =>
       `| 항목 ${i} | **선택할 문장**입니다. | 길게 줄바꿈되는 검토 본문을 선택합니다. |\n`).join('') + '\n선택 마지막 문단입니다.\n'
   let failure = false, sendRelease, holdSend = false, createRelease, holdCreate = false
   for (const channel of channels) ipcMain.handle(channel, async (ipc, ...args) => {
@@ -127,6 +127,7 @@ async function electronCheck({ root, temp, output, channels, pdf }) {
     await run(keyboard ? `document.dispatchEvent(new KeyboardEvent('keydown', {key:'j',${keyboard === 'meta' ? 'metaKey' : 'ctrlKey'}:true,bubbles:true,cancelable:true}))` : `click(visible('.sel-actions button').find(button => button.textContent.includes('이 부분에 지시')))`)
     await wait("!!popup()", 'Inline popup')
     await wait("document.activeElement === popup()?.querySelector('textarea')", 'Inline input focus')
+    await run('await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))')
   }
   const fill = text => run(`setValue(popup().querySelector('textarea'), ${JSON.stringify(text)})`)
   const enter = () => run(`popup().querySelector('textarea').dispatchEvent(new KeyboardEvent('keydown', {key:'Enter',bubbles:true,cancelable:true}))`)
@@ -187,7 +188,15 @@ async function electronCheck({ root, temp, output, channels, pdf }) {
       check(wrap.scrollHeight > wrap.clientHeight + 24, 'PDF fixture provides a real scrollable viewport');
       wrap.scrollTop += 24;
     `)
-    await pause(200)
+    await wait(`(() => {
+      const range=[...(CSS.highlights.get('inline-command-source')??[])][0];
+      if(!range||!popup())return false;
+      const selected=range.getBoundingClientRect(),top=popup().getBoundingClientRect().top;
+      return Math.abs((top-beforeScroll.popupTop)-(selected.bottom-beforeScroll.anchorBottom))<3 && top<beforeScroll.popupTop-10;
+    })()`, 'PDF popup position settles after scrolling').catch(async error => {
+      console.error('PDF_SCROLL_GEOMETRY',await run(`return {before:beforeScroll,popupTop:popup()?.getBoundingClientRect().top,anchorBottom:[...(CSS.highlights.get('inline-command-source')??[])][0]?.getBoundingClientRect().bottom,scrollTop:visible('.pdf-canvas-wrap')[0]?.scrollTop}`))
+      throw error
+    })
     await run(`
       const selected=[...CSS.highlights.get('inline-command-source')][0].getBoundingClientRect();
       const top=popup().getBoundingClientRect().top;
@@ -398,7 +407,7 @@ async function electronCheck({ root, temp, output, channels, pdf }) {
       await run(`
         const before=formattedBefore,scroller=visible('.cm-scroller')[0];
         check(before.table.isConnected && Math.abs(before.anchor.getBoundingClientRect().top-before.y)<2 && Math.abs(scroller.scrollTop-before.top)<2,${JSON.stringify((reverse?'Reverse':'Forward')+' native formatted selection and inline question preserve the visible passage')}+JSON.stringify({before:{top:before.top,y:before.y},after:{top:scroller.scrollTop,y:before.anchor.getBoundingClientRect().top,table:before.table.isConnected}}));
-        check(popup().querySelector('.inline-selection-source').title.includes('**선택할 문장**') && popup().querySelector('.inline-selection-source').title.includes('| 항목 3 |'),'Question retains complete Markdown source from the rendered table');
+        check(popup().querySelector('.inline-selection-source').title.includes('**선택할 문장**') && popup().querySelector('.inline-selection-source').title.includes('| 항목 1 |'),'Question retains complete Markdown source from the rendered table');
       `)
       const selectedSource=await run(`const title=popup().querySelector('.inline-selection-source').title;return title.slice(title.indexOf(String.fromCharCode(10))+1)`)
       await close();await wait('!popup()','Close formatted selection question')
