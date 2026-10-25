@@ -167,8 +167,12 @@ window.uiCheck = async () => {
     const view = await mount(false, formatted)
     view.dom.style.width = '550px'
     view.focus()
+    view.dispatch({ effects: EditorView.scrollIntoView(prefix.length, { y: 'start', yMargin: 24 }) })
     await pause(200)
-    view.scrollDOM.scrollTop = 3000
+    const renderedTable = view.dom.querySelector('.cm-md-table')
+    check(!!renderedTable, 'Tall table is rendered before positioning the selection fixture')
+    const tableBounds = renderedTable.getBoundingClientRect(), viewport = view.scrollDOM.getBoundingClientRect()
+    view.scrollDOM.scrollTop += tableBounds.top - viewport.top + tableBounds.height / 2
     await pause(250)
     const anchor = [...view.dom.querySelectorAll('.cm-md-cell-content')].find(el => {
       const rect = el.getBoundingClientRect(), bounds = view.scrollDOM.getBoundingClientRect()

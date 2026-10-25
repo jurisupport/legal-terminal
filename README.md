@@ -214,7 +214,7 @@ AI에는 매 요청마다 최신 목표·메모와 연결 자료 목록이 전�
 
 ## 이번 업데이트
 
-최신 릴리스: [v0.1.302](https://github.com/jurisupport/legal-terminal/releases/tag/v0.1.302)
+최신 릴리스: [v0.1.303](https://github.com/jurisupport/legal-terminal/releases/tag/v0.1.303)
 
 - **선택 후 질문할 때 문서 위치 유지**: Markdown 서식 화면에서 마우스로 블록을 선택하는 동안 표와 서식의 높이를 유지해, ‘이 부분에 지시’를 열 때 보던 위치가 바뀌는 문제를 수정했습니다.
 - **선택 원문 보존**: 표와 강조 표시를 포함한 Markdown 원문을 그대로 질문에 전달합니다. 검색·원문 이동과 선택한 부분의 편집도 유지됩니다.
