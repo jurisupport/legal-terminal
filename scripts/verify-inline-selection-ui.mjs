@@ -29,6 +29,9 @@ async function electronCheck({ root, temp, output, channels, pdf }) {
   const calls = [], created = new Map(), blockedRequests = []
   const profile = { id: 'fixture-ssh', label: '합성 원격', host: 'example.invalid', user: 'test' }
   const settings = { draftsRoot: '/synthetic', agentDefaultProvider: 'codex', sshProfiles: [profile], notificationSound: 'none', notifyDone: false }
+  const formattedMarkdown = '스크롤을 확인할 합성 문단입니다.\n\n'.repeat(70) + '선택 시작 문단입니다.\n\n' +
+    '| 번호 | 검토 문장 | 설명 |\n| --- | --- | --- |\n' + Array.from({length: 4}, (_, i) =>
+      `| 항목 ${i} | **선택할 문장**입니다. | 길게 줄바꿈되는 검토 본문을 선택합니다. |\n`).join('') + '\n선택 마지막 문단입니다.\n'
   let failure = false, sendRelease, holdSend = false, createRelease, holdCreate = false
   for (const channel of channels) ipcMain.handle(channel, async (ipc, ...args) => {
     calls.push({ channel, args })
@@ -38,7 +41,9 @@ async function electronCheck({ root, temp, output, channels, pdf }) {
     if (channel === 'app:info') return { platform: process.platform, version: 'UI fixture', homeDirectory: '/synthetic' }
     if (channel === 'dialog:message') return args[0] === 'confirm'
     if (channel === 'fs:readText') {
-      const text = '첫 번째 선택 문장입니다.\n두 번째 선택 문장입니다.\n\n' + '스크롤을 확인할 합성 문단입니다.\n\n'.repeat(70)
+      const text = String(args[0]).endsWith('/서식선택.md')
+        ? formattedMarkdown
+        : '첫 번째 선택 문장입니다.\n두 번째 선택 문장입니다.\n\n' + '스크롤을 확인할 합성 문단입니다.\n\n'.repeat(70)
       return { kind: 'text', ext: '.md', text, size: Buffer.byteLength(text), mtimeMs: 1 }
     }
     if (channel === 'fs:loadDocumentDraft') return { ok: true }
@@ -358,6 +363,50 @@ async function electronCheck({ root, temp, output, channels, pdf }) {
     await screenshot('inline-command-markdown')
     await close();await wait('!popup()','Explicitly close Markdown command')
     await run(`check(!CSS.highlights.has('inline-command-source'),'Closing inline command removes saved source highlight')`)
+    w.webContents.send('tabs:receive',{kind:'document',tab:{id:'formatted-selection',kind:'mdview',path:'ssh://fixture-ssh/cases/remote/서식선택.md',title:'서식선택.md',side:'left'}})
+    await wait("visible('.cm-content').length===1 && visible('.work-left .tab.active').some(el=>el.textContent.includes('서식선택.md'))",'Formatted document loaded')
+    await pause(150)
+    for (const reverse of [false,true]) {
+      await run(`const content=visible('.cm-content')[0]; content.focus(); content.dispatchEvent(new KeyboardEvent('keydown',{key:'End',code:'End',${process.platform==='darwin'?'metaKey':'ctrlKey'}:true,bubbles:true,cancelable:true}))`)
+      await wait("visible('.cm-line').some(el=>el.textContent.includes('선택 마지막 문단')) && visible('.cm-md-table').length===1",'Rendered table and selection endpoints')
+      await pause(200)
+      const points=await run(`
+        const line=text=>visible('.cm-line').find(el=>el.textContent.includes(text));
+        const first=line('선택 시작'),last=line('선택 마지막');
+        const rect=el=>{const r=document.createRange();r.selectNodeContents(el);return r.getBoundingClientRect()};
+        const a=rect(first),b=rect(last),scroller=visible('.cm-scroller')[0],bounds=scroller.getBoundingClientRect();
+        check(a.top>bounds.top && b.bottom<bounds.bottom,'Native selection endpoints are in the scrolled viewport');
+        window.formattedBefore={table:visible('.cm-md-table')[0],anchor:first,y:first.getBoundingClientRect().top,top:scroller.scrollTop};
+        return {first:{x:Math.ceil(a.left+1),y:Math.round((a.top+a.bottom)/2)},last:{x:Math.floor(b.right-1),y:Math.round((b.top+b.bottom)/2)}};
+      `)
+      const start=reverse?points.last:points.first,end=reverse?points.first:points.last
+      w.webContents.sendInputEvent({type:'mouseDown',button:'left',clickCount:1,...start})
+      for(let step=1;step<=8;step++) {
+        w.webContents.sendInputEvent({type:'mouseMove',button:'left',modifiers:['leftButtonDown'],x:Math.round(start.x+(end.x-start.x)*step/8),y:Math.round(start.y+(end.y-start.y)*step/8)})
+        await pause()
+      }
+      w.webContents.sendInputEvent({type:'mouseUp',button:'left',clickCount:1,...end})
+      await wait("visible('.sel-actions button').some(el=>el.textContent.includes('이 부분에 지시'))",'Native formatted block selection')
+      await run(`click(visible('.sel-actions button').find(el=>el.textContent.includes('이 부분에 지시')))`)
+      await wait("document.activeElement===popup()?.querySelector('textarea')",'Formatted selection question focus')
+      await pause(200)
+      await run(`
+        const before=formattedBefore,scroller=visible('.cm-scroller')[0];
+        check(before.table.isConnected && Math.abs(before.anchor.getBoundingClientRect().top-before.y)<2 && Math.abs(scroller.scrollTop-before.top)<2,${JSON.stringify((reverse?'Reverse':'Forward')+' native formatted selection and inline question preserve the visible passage')}+JSON.stringify({before:{top:before.top,y:before.y},after:{top:scroller.scrollTop,y:before.anchor.getBoundingClientRect().top,table:before.table.isConnected}}));
+        check(popup().querySelector('.inline-selection-source').title.includes('**선택할 문장**') && popup().querySelector('.inline-selection-source').title.includes('| 항목 3 |'),'Question retains complete Markdown source from the rendered table');
+      `)
+      const selectedSource=await run(`const title=popup().querySelector('.inline-selection-source').title;return title.slice(title.indexOf(String.fromCharCode(10))+1)`)
+      await close();await wait('!popup()','Close formatted selection question')
+      if(reverse) {
+        assertFixture(formattedMarkdown.includes(selectedSource),'Captured selection is an exact original Markdown range')
+        await run(`visible('.cm-content')[0].focus()`)
+        await pause(150)
+        w.webContents.sendInputEvent({type:'char',keyCode:'X'})
+        for(let i=0;i<100&&!calls.some(call=>call.channel==='fs:saveDocumentDraft'&&call.args[0].content.includes('X'));i++) await pause()
+        const saved=calls.findLast(call=>call.channel==='fs:saveDocumentDraft')?.args[0]?.content
+        assertFixture(saved===formattedMarkdown.replace(selectedSource,'X'),'Native typing replaces exactly the selected Markdown across the rendered table')
+      }
+    }
     if(consoleErrors.length) throw Error('Renderer console errors: '+consoleErrors.join('\n'))
     const result={checks:[...await run('return checks'),...fixtureChecks],consoleErrors,sends:sends().map(item=>({sessionId:item.sessionId,text:item.input.text,delivery:item.input.delivery})),blockedRequests,screenshots:fs.readdirSync(output).filter(name=>name.startsWith('inline-command-')&&name.endsWith('.png')).map(name=>path.join(output,name))}
     fs.writeFileSync(path.join(output,'result.json'),JSON.stringify(result,null,2)); console.log('INLINE_SELECTION_UI_RESULT '+JSON.stringify(result)); app.exit(0)

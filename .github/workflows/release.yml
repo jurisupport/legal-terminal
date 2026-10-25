@@ -117,7 +117,7 @@ jobs:
         run: npm run verify:html-quote
 
       - name: Verify document-linked instructions and scroll position
-        run: npm run verify:agent-quote && npm run verify:document-agent-memory-ui
+        run: npm run verify:agent-quote && npm run verify:document-agent-memory-ui && npm run verify:inline-selection-ui
 
       - name: Verify native media review
         run: npm run verify:media && npm run verify:media-viewer && npm run verify:media-ui
@@ -134,6 +134,7 @@ jobs:
             .omx/state/general-chat-preview/**
             output/playwright/html-quote/**
             output/playwright/document-agent-memory/**
+            output/playwright/inline-selection/**
             output/playwright/browser/**
             output/playwright/agent-media/**
             output/playwright/agent-panel-width/**
@@ -213,7 +214,7 @@ jobs:
         run: npm run verify:html-quote
 
       - name: Verify document-linked instructions and scroll position
-        run: npm run verify:agent-quote && npm run verify:document-agent-memory-ui
+        run: npm run verify:agent-quote && npm run verify:document-agent-memory-ui && npm run verify:inline-selection-ui
 
       - name: Verify native media review
         run: npm run verify:media && npm run verify:media-viewer && npm run verify:media-ui
@@ -236,6 +237,7 @@ jobs:
             .omx/state/general-chat-preview/**
             output/playwright/html-quote/**
             output/playwright/document-agent-memory/**
+            output/playwright/inline-selection/**
             output/playwright/browser/**
             output/playwright/agent-media/**
             output/playwright/agent-panel-width/**

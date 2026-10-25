@@ -814,6 +814,10 @@ function build(state: EditorState): DecorationSet {
  */
 export const livePreview = StateField.define<DecorationSet>({
   create: (state) => build(state),
-  update: (deco, tr) => (tr.docChanged || tr.selection ? build(tr.state) : deco),
+  update(deco, tr) {
+    // Keep table and line heights stable while dragging a range to quote.
+    if (!tr.docChanged && !tr.state.selection.main.empty && tr.isUserEvent('select.pointer')) return deco
+    return tr.docChanged || tr.selection ? build(tr.state) : deco
+  },
   provide: (f) => EditorView.decorations.from(f)
 })

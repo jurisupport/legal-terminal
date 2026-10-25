@@ -155,6 +155,51 @@ window.uiCheck = async () => {
   const merge = mergeTextAgainstBase('첫 문단\n\n둘째 문단', '첫 문단 사용자\n\n둘째 문단', '첫 문단\n\n둘째 문단 외부')
   check(merge.status === 'merged' && merge.text === '첫 문단 사용자\n\n둘째 문단 외부', 'Independent edits merge without losing text')
   check(mergeTextAgainstBase('원문', '사용자 수정', '외부 수정').status === 'conflict', 'Conflicting edits remain protected')
+  const prefix = '# 선택 검사\n\n' + '스크롤 기준 문장입니다.\n\n'.repeat(60)
+  const table = '| 번호 | 검토 문장 | 설명 |\n| --- | --- | --- |\n' + Array.from({ length: 24 }, (_, i) =>
+    '| 항목 ' + i + ' | **선택할 문장**입니다. | ' + '길게 줄바꿈되는 본문입니다. '.repeat(16) + ' |\n'
+  ).join('')
+  const formatted = prefix + table + '\n마지막 문단입니다.\n'
+  const question = document.createElement('textarea')
+  question.style.cssText = 'position:fixed;right:0;top:0'
+  document.body.appendChild(question)
+  for (const reverse of [false, true]) {
+    const view = await mount(false, formatted)
+    view.dom.style.width = '550px'
+    view.focus()
+    await pause(200)
+    view.scrollDOM.scrollTop = 3000
+    await pause(250)
+    const anchor = [...view.dom.querySelectorAll('.cm-md-cell-content')].find(el => {
+      const rect = el.getBoundingClientRect(), bounds = view.scrollDOM.getBoundingClientRect()
+      return el.textContent.startsWith('항목 ') && rect.top > bounds.top && rect.bottom < bounds.bottom
+    })
+    check(!!anchor, 'Formatted selection starts inside a tall rendered table')
+    const before = { top: view.scrollDOM.scrollTop, height: view.scrollDOM.scrollHeight, y: anchor.getBoundingClientRect().top }
+    const from = prefix.length - 1, to = prefix.length + table.length
+    view.dispatch({ selection: { anchor: reverse ? to : from, head: reverse ? from : to }, userEvent: 'select.pointer' })
+    await pause(150)
+    question.focus({ preventScroll: true })
+    await pause(150)
+    check(anchor.isConnected && Math.abs(anchor.getBoundingClientRect().top - before.y) < 2 &&
+      Math.abs(view.scrollDOM.scrollTop - before.top) < 2 && view.scrollDOM.scrollHeight === before.height,
+      (reverse ? 'Reverse' : 'Forward') + ' formatted block selection and question focus preserve the visible passage',
+      JSON.stringify({ before, after: { top: view.scrollDOM.scrollTop, height: view.scrollDOM.scrollHeight, connected: anchor.isConnected } }))
+    check(view.state.sliceDoc(view.state.selection.main.from, view.state.selection.main.to) === formatted.slice(from, to),
+      'Formatted selection retains the complete Markdown source')
+    check(view.state.doc.toString() === formatted && !dirty, 'Quoting does not edit or dirty the source')
+    // Search and source navigation must still reveal a selection inside the table.
+    const cell = formatted.indexOf('선택할 문장')
+    view.dispatch({ selection: { anchor: cell, head: cell + 6 }, scrollIntoView: true })
+    await pause(150)
+    check(!view.dom.querySelector('.cm-md-table') && view.coordsAtPos(cell) != null,
+      'Programmatic source navigation still reveals selected table text')
+    const selection = view.state.selection.main
+    view.dispatch({ changes: { from: selection.from, to: selection.to, insert: '수정 문장' }, selection: { anchor: selection.from + 5 }, userEvent: 'input.type' })
+    check(view.state.doc.toString() === formatted.slice(0, cell) + '수정 문장' + formatted.slice(cell + 6),
+      'Typing replaces only the selected source range')
+  }
+  question.remove()
   for (const plain of [false, true]) {
     const mode = plain ? 'source' : 'preview'
     const view = await mount(plain)

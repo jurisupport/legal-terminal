@@ -10418,6 +10418,8 @@ function SelectionAsk({ onAsk, onInline, inlineOpen = false, selectionDocument =
         return
       }
       const el = elementFromSelectionNode(sel.anchorNode)
+      // CodeMirror supplies the full Markdown range; the DOM only has rendered text.
+      if (!sourceFrame && el?.closest('.cm-content') && !el.closest('.cm-md-table')) return
       if (!canShowSelectionActions(el) || (sourceFrame && !sourceFrame.getClientRects().length)) {
         setBox(null)
         return
