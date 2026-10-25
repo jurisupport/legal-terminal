@@ -113,6 +113,7 @@ async function electronCheck({ root, temp, output, channels, pdf }) {
   }
   const selectText = async () => {
     await pause(200)
+    await run('await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))')
     await run(`
       document.activeElement?.blur(); visible('.pdf-canvas-wrap')[0].focus();
       const span = visible('.textLayer span')[0], range = document.createRange(); range.selectNodeContents(span);
@@ -158,6 +159,8 @@ async function electronCheck({ root, temp, output, channels, pdf }) {
       document.querySelector('[data-term-id="a1"] .agent-panel').dispatchEvent(new DragEvent('drop', {dataTransfer:transfer,bubbles:true,cancelable:true}));
     `)
     await wait("document.querySelector('[data-term-id=\"a1\"] .agent-attachments.pending')?.textContent.includes('보존할첨부.md')", 'Normal draft attachment')
+    await run('await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))')
+    await wait("document.activeElement===draft('a1')", 'Attachment composer focus settles before document selection')
     await open()
     await run(`
       check(popup().getAttribute('role') === 'dialog', 'Selection opens accessible inline command');
