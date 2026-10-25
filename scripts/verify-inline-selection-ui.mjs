@@ -39,6 +39,7 @@ async function electronCheck({ root, temp, output, channels, pdf }) {
     if (channel === 'setup:status') return { items: [], ready: true }
     if (channel === 'settings:get' || channel === 'settings:set') return settings
     if (channel === 'app:info') return { platform: process.platform, version: 'UI fixture', homeDirectory: '/synthetic' }
+    if (channel === 'app:generalChatDirectory') return ''
     if (channel === 'dialog:message') return args[0] === 'confirm'
     if (channel === 'fs:readText') {
       const text = String(args[0]).endsWith('/서식선택.md')
@@ -56,6 +57,7 @@ async function electronCheck({ root, temp, output, channels, pdf }) {
     if (channel === 'js:tokenStatus' || channel === 'dictation:keyStatus') return 'missing'
     if (channel === 'js:listCases') return { ok: true, cases: [] }
     if (channel === 'js:hearingSummary') return { ok: true, summary: { todayCount: 0, weekCount: 0 } }
+    if (channel === 'js:upcomingHearings') return { ok: true, hearings: [], complete: true }
     if (channel === 'agent:create') {
       created.set(args[0].id, args[0])
       if (holdCreate) await new Promise(resolve => { createRelease = resolve })
