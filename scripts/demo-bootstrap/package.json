@@ -1,0 +1,7 @@
+{
+  "name": "legal-terminal",
+  "productName": "legal-terminal",
+  "version": "0.0.0-demo",
+  "private": true,
+  "main": "main.cjs"
+}
