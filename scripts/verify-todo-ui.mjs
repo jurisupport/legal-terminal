@@ -35,6 +35,13 @@ const rows = [
 ]
 const completedRows=[{id:'today-done',title:'오늘 완료한 검토',status:'completed',completedAt:new Date().toISOString()},{id:'past-done',title:'지난 완료 검토',status:'completed',completedAt:'2020-01-01'},{id:'unknown-done',title:'완료일 모르는 검토',status:'completed',completedAt:null},{id:'hearing-done',title:'[기일기록] 변론 결과',status:'completed',completedAt:new Date().toISOString()}];
 let memos = [{id:'memo',type:'memo',title:'기존 사건 메모',version:7,status:'pending',caseId:'case-1'}]
+const hearingCases = [
+ {id:'hearing-case-a',caseNumber:'2026가단12345',caseName:'대여금',court:'서울중앙지방법원',parties:[{role:'client',party:{name:'김합성'}},{role:'opponent',party:{name:'이합성'}},{role:'other',party:{name:'주식회사 긴상호'.repeat(12)}}]},
+ {id:'hearing-case-b',caseNumber:'2026가합67890',caseName:'손해배상',court:'부산지방법원',parties:[{role:'client',party:{name:'박합성'}}]},
+ {id:'hearing-case-empty',caseNumber:null,caseName:null,court:null,parties:[]}
+];
+const upcomingHearings=hearingCases.map((c,index)=>({id:'hearing-'+index,dateTime:'2026-10-01T10:00:00+09:00',type:'hearing',case:c}));
+window.hearingOpened=[];
 window.calls=[]; window.handoffs=[]; window.failUpdate=false
 const capabilities={queryFields:[],createFields:['priority','parentId','reviewAt'],updateFields:['priority','reviewAt','evidence'],statusFields:['childDispositions'],evidenceSuggestions:true,caseClosure:true}
 window.lt = {
@@ -52,7 +59,7 @@ window.lt = {
  js:{listCases:async()=>({ok:true,cases:[{id:'case-2',caseName:'이관 대상 사건',status:'active'}]}),caseClosurePreview:async()=>({ok:true,preview:{id:'case-1',version:3,status:'active',engagementStatus:'unknown',tasks:rows.filter(r=>r.caseId),blocked:false}}),updateCaseStatus:async(...args)=>{window.calls.push(['caseStatus',...args]);return {ok:true}},updateCaseEngagement:async(...args)=>{window.calls.push(['engagement',...args]);return {ok:true}}},
  app:{openExternal:async(uri)=>window.calls.push(['open',uri])}
 }
-function Harness(){const [toolExpanded,setToolExpanded]=useState(false);const [tick,setTick]=useState(0);const [filter,setFilter]=useState('open');const [hearingState,setHearingState]=useState({summary:{todayCount:27,weekCount:42,fetchedAt:'2026-09-12T00:00:00Z'},error:''});window.setHearingState=setHearingState;const snapshot={todos:[...rows],loading:false,error:'',hasToken:true,fetchedAt:'2026-09-12T00:00:00Z',refresh:()=>setTick(t=>t+1)};return <div style={{height:'100vh',overflow:'auto'}}><TodoSummary snapshot={snapshot} onFilter={setFilter} hearingSummary={hearingState.summary} hearingsError={hearingState.error}/><TodosDashboard onManageTodos={(items)=>window.handoffs.push(items)} onOpenDefault={()=>window.calls.push(['workspace'])} onOpenEvidenceFile={(file,label)=>window.calls.push(['openFile',file,label])} snapshot={snapshot} initialFilter={filter} filterNonce={tick}/><ToolRow step={{id:'managed-tool',title:'',toolName:'mcp__legal_terminal_jurisupport__update_task',input:JSON.stringify({id:'opaque-task-id',title:'제출 확인'}),status:'done'}} expanded={toolExpanded} onToggle={()=>setToolExpanded(v=>!v)}/></div>}
+function Harness(){const [toolExpanded,setToolExpanded]=useState(false);const [tick,setTick]=useState(0);const [filter,setFilter]=useState('open');const [hearingState,setHearingState]=useState({summary:{todayCount:27,weekCount:42,fetchedAt:'2026-09-12T00:00:00Z'},error:''});window.setHearingState=setHearingState;const snapshot={todos:[...rows],loading:false,error:'',hasToken:true,fetchedAt:'2026-09-12T00:00:00Z',refresh:()=>setTick(t=>t+1)};return <div style={{height:'100vh',overflow:'auto'}}><TodoSummary snapshot={snapshot} onFilter={setFilter} hearingSummary={hearingState.summary} hearingsError={hearingState.error} upcomingHearings={upcomingHearings} onOpenCase={c=>window.hearingOpened.push(c)}/><TodosDashboard onManageTodos={(items)=>window.handoffs.push(items)} onOpenDefault={()=>window.calls.push(['workspace'])} onOpenEvidenceFile={(file,label)=>window.calls.push(['openFile',file,label])} snapshot={snapshot} initialFilter={filter} filterNonce={tick}/><ToolRow step={{id:'managed-tool',title:'',toolName:'mcp__legal_terminal_jurisupport__update_task',input:JSON.stringify({id:'opaque-task-id',title:'제출 확인'}),status:'done'}} expanded={toolExpanded} onToggle={()=>setToolExpanded(v=>!v)}/></div>}
 createRoot(document.getElementById('root')).render(<Harness/>);
 window.uiCheck = async () => {
  const wait=async(fn)=>{for(let i=0;i<100;i++){if(fn())return;await new Promise(r=>setTimeout(r,20))}throw Error('Timed out: '+fn)};
@@ -71,6 +78,12 @@ window.uiCheck = async () => {
 
  const hearingMetric=(label)=>[...document.querySelectorAll('.todo-metric')].find(e=>e.querySelector('span').textContent===label).querySelector('strong').textContent;
  check(hearingMetric('오늘 기일')==='27','Complete today aggregate exceeds twenty');check(hearingMetric('앞으로 7일 기일')==='42','Complete seven-day aggregate exceeds twenty');
+ const hearingList=document.querySelector('.today-hearings');hearingList.open=true;
+ const hearingRows=[...hearingList.querySelectorAll('li')];
+ check(['서울중앙지방법원','2026가단12345','대여금','김합성','이합성','주식회사 긴상호'.repeat(12),'변론기일'].every(text=>hearingRows[0].textContent.includes(text)),'Each hearing shows court, number, case name and every party without truncation');
+ check(hearingRows[1].textContent.includes('부산지방법원')&&hearingRows[1].textContent.includes('2026가합67890')&&hearingRows[1].textContent.includes('박합성')&&!hearingRows[1].textContent.includes('김합성'),'Case identities remain associated with the correct hearing');
+ check(['법원 미등록','사건번호 미등록','당사자 미등록'].every(text=>hearingRows[2].textContent.includes(text)),'Missing case identity is explicit');
+ await click('사건 열기',hearingRows[1]);check(window.hearingOpened[0]===hearingCases[1],'Open case retains the exact hearing case');
  window.setHearingState({summary:{todayCount:27,weekCount:42,fetchedAt:'2026-09-12T00:00:00Z'},error:'합성 기일 조회 실패'});await wait(()=>document.querySelector('.todo-summary').textContent.includes('이전 조회 결과입니다.'));check(hearingMetric('오늘 기일')==='27','Failed hearing refresh retains aggregate with stale warning');
  window.setHearingState({summary:null,error:'합성 기일 조회 실패'});await wait(()=>hearingMetric('오늘 기일')==='—');check(hearingMetric('앞으로 7일 기일')==='—','Missing hearing aggregate is not zero');
  window.setHearingState({summary:{todayCount:27,weekCount:42,fetchedAt:'2026-09-12T00:00:00Z'},error:''});await wait(()=>hearingMetric('오늘 기일')==='27');

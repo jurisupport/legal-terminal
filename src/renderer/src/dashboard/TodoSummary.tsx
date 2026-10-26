@@ -47,7 +47,15 @@ export default function TodoSummary({ snapshot, onFilter, onGlobalWork, hearingS
     {hearingSummary && <p className="muted small">기일 조회 {new Date(hearingSummary.fetchedAt).toLocaleString('ko-KR', { timeZone: 'Asia/Seoul' })} (한국 시간)</p>}
     {hearingsLoading && <p className="muted small">기일을 불러오는 중…</p>}
     {hearingsComplete === false && <p className="todo-warning">기일 전체 조회를 확인하지 못했습니다. 표시된 목록 외에 추가 기일이 있을 수 있습니다.</p>}
-    {upcomingHearings && <details className="today-hearings"><summary>앞으로 7일 기일 전체 보기 · {upcomingHearings.length}건{hearingsComplete === false ? ' (전체성 미확인)' : ''}</summary><ul>{upcomingHearings.map((hearing) => <li key={hearing.id}><span>{new Date(hearing.dateTime).toLocaleString('ko-KR', { timeZone: 'Asia/Seoul' })} · {formatHearingLabel(hearing.case, hearing)}</span>{onOpenCase && <button className="todo-small" onClick={() => onOpenCase(hearing.case)}>사건 열기</button>}</li>)}</ul></details>}
+    {upcomingHearings && <details className="today-hearings">
+      <summary>앞으로 7일 기일 전체 보기 · {upcomingHearings.length}건{hearingsComplete === false ? ' (전체성 미확인)' : ''}</summary>
+      <ul>{upcomingHearings.map((hearing) => <li key={hearing.id}>
+        <div>{new Date(hearing.dateTime).toLocaleString('ko-KR', { timeZone: 'Asia/Seoul' })} · {formatHearingLabel(hearing.case, hearing)}</div>
+        <div><strong>{hearing.case.court || '법원 미등록'} · {hearing.case.caseNumber || '사건번호 미등록'}</strong>{hearing.case.caseName && <> · {hearing.case.caseName}</>}</div>
+        <div>당사자: {hearing.case.parties.map(({ party }) => party.name).join(', ') || '당사자 미등록'}</div>
+        {onOpenCase && <button className="todo-small" onClick={() => onOpenCase(hearing.case)}>사건 열기</button>}
+      </li>)}</ul>
+    </details>}
     <TodoSnapshotState snapshot={snapshot} />
     {counts && counts.openCount === 0 && !snapshot.error && !snapshot.loading && <p className="muted">처리할 할일이 없습니다.</p>}
     {overdue.length > 0 && <div className="todo-summary-overdue"><strong>오래된 도과 할일 · 전체 {counts?.overdueCount}건</strong><ul>{overdue.slice(0, 5).map((todo) => <li key={todo.id}><span>{kstDateKey(todo.dueDate)} · {todo.title}</span><small>{todo.caseNumber || todo.caseName || '사건 미연결'}</small></li>)}</ul><button className="todo-small" onClick={() => onFilter?.('overdue')} disabled={!onFilter}>전체 보기</button></div>}
