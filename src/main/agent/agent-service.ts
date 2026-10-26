@@ -203,6 +203,7 @@ interface AgentSession {
 }
 
 const sessions = new Map<string, AgentSession>()
+const CLAUDE_DIALOG_KINDS = ['permission_ask_user_question']
 const projectWorkspaceUpdates = new Set<string>()
 const PROJECT_WORKSPACE_UPDATING = '프로젝트 작업 폴더를 변경하고 있습니다. 잠시 후 다시 시도해 주세요.'
 
@@ -1500,9 +1501,12 @@ function questionPermissionUpdatedInput(
   answer: AgentDialogAnswer
 ): Record<string, unknown> {
   const response = answer.response?.trim()
+  const answers = { ...(answer.answers ?? {}) }
+  const unanswered = normalizeDialogQuestions(input).find((question) => !answers[question.question]?.trim())
+  if (response && unanswered) answers[unanswered.question] = response
   return {
     ...input,
-    answers: { ...(answer.answers ?? {}) },
+    answers,
     ...(response ? { response } : {})
   }
 }
@@ -1572,6 +1576,7 @@ function awaitQuestionPermissionAnswer(
   }, USER_DIALOG_TIMEOUT_MS)
   session.pendingDialogs.set(toolUseId, { sessionId: session.id, finish, timer })
   signal?.addEventListener('abort', abort, { once: true })
+  if (signal?.aborted) abort()
   return true
 }
 
@@ -1599,57 +1604,25 @@ function requestUserDialog(
   request: UserDialogRequest,
   signal: AbortSignal
 ): Promise<UserDialogResult> {
-  const dialogId = request.toolUseID ?? randomUUID()
-  const dialog = makeQuestionDialog(session, {
-    dialogId,
-    dialogKind: request.dialogKind,
-    payload: request.payload,
-    toolUseId: request.toolUseID,
-    blocking: true
-  })
-  if (!dialog) {
-    emitProcessEvent(
-      session,
-      `dialog-${dialogId}`,
-      'Claude 선택 요청',
-      safeJsonPreview(request.payload),
-      'cancelled'
-    )
+  const input = asRecord(request.payload.input)
+  const requestId = stringValue(request.payload.requestId)
+  const toolName = stringValue(request.payload.toolName)
+  if (signal.aborted || !CLAUDE_DIALOG_KINDS.includes(request.dialogKind) || !input || !requestId ||
+      !toolName || !isAskUserQuestionTool(toolName) || !asRecord(request.payload.permissionResult)) {
     return Promise.resolve({ behavior: 'cancelled' })
   }
-
   return new Promise<UserDialogResult>((resolve) => {
-    let timer: NodeJS.Timeout | undefined
-    let settled = false
-    function abort(): void {
-      finish({ behavior: 'cancelled' }, { sessionId: session.id, dialogId, cancelled: true })
-    }
-    function finish(result: UserDialogResult, answer?: AgentDialogAnswer): void {
-      if (settled) return
-      settled = true
-      clearTimeout(timer)
-      signal.removeEventListener('abort', abort)
-      session.pendingDialogs.delete(dialogId)
-      emit(session, {
-        type: 'dialog:resolved',
-        sessionId: session.id,
-        dialogId,
-        answers: answer?.answers,
-        response: answer?.response,
-        cancelled: answer?.cancelled
-      })
-      emit(session, { type: 'status', sessionId: session.id, status: 'working' })
-      resolve(result)
-    }
-    timer = responseTimer(session, () => {
-      finish({ behavior: 'cancelled' }, { sessionId: session.id, dialogId, cancelled: true })
-    }, USER_DIALOG_TIMEOUT_MS)
-    session.pendingDialogs.set(dialogId, {
-      sessionId: session.id,
-      finish,
-      timer
-    })
-    signal.addEventListener('abort', abort, { once: true })
+    const handled = awaitQuestionPermissionAnswer(
+      session,
+      request.dialogKind,
+      { ...input, questions: request.payload.questions },
+      request.toolUseID ?? requestId,
+      (result, decision) => resolve(decision === 'allow'
+        ? { behavior: 'completed', result }
+        : { behavior: 'cancelled' }),
+      signal
+    )
+    if (!handled) resolve({ behavior: 'cancelled' })
   })
 }
 
@@ -4285,7 +4258,7 @@ function runRemoteAgentMessage(
     let mcpTimer: NodeJS.Timeout | undefined
     const mcpRequest = (): void => {
       mcpRequestId = randomUUID()
-      proc.stdin.write(JSON.stringify({ type: 'control_request', request_id: mcpRequestId, request: { subtype: mcpStage, ...(mcpStage === 'mcp_set_servers' ? { servers } : {}) } }) + '\n')
+      proc.stdin.write(JSON.stringify({ type: 'control_request', request_id: mcpRequestId, request: { subtype: mcpStage, ...(mcpStage === 'initialize' ? { supportedDialogKinds: CLAUDE_DIALOG_KINDS } : {}), ...(mcpStage === 'mcp_set_servers' ? { servers } : {}) } }) + '\n')
     }
     const handleMcpBootstrap = (message: Record<string, unknown> | null): void => {
       if (!mcpRequestId || message?.type !== 'control_response') return
@@ -4399,8 +4372,8 @@ function runRemoteAgentMessage(
       } catch {
         /* Non-JSON output is handled by the normal stream parser. */
       }
-      if (line.trim()) sawJson = true
       const message = handleRemoteJsonLine(session, line)
+      if (line.trim() && message?.type !== 'control_response') sawJson = true
       if (closed) {
         if (message?.type === 'result') endRemoteInput()
       } else {
@@ -4496,7 +4469,10 @@ function runRemoteAgentMessage(
     if (Object.keys(servers).length) {
       mcpTimer = setTimeout(() => { emit(session, { type: 'error', sessionId: session.id, message: `원격 ${label} 도구 연결 시간이 초과되었습니다.`, recoverable: true }); emit(session, { type: 'status', sessionId: session.id, status: 'error' }); proc.kill() }, MCP_STATUS_TIMEOUT_MS)
       mcpRequest()
-    } else proc.stdin.write(`${remotePromptLine(prompt)}\n`)
+    } else {
+      proc.stdin.write(JSON.stringify({ type: 'control_request', request_id: randomUUID(), request: { subtype: 'initialize', supportedDialogKinds: CLAUDE_DIALOG_KINDS } }) + '\n')
+      proc.stdin.write(`${remotePromptLine(prompt)}\n`)
+    }
   })
 }
 
@@ -5675,6 +5651,7 @@ function startAgentTurn(session: AgentSession, input: AgentSendInput, codexComma
           canUseTool: (toolName, toolInput, permissionOptions) =>
             requestPermission(session, toolName, toolInput, permissionOptions),
           onUserDialog: (request, options) => requestUserDialog(session, request, options.signal),
+          supportedDialogKinds: CLAUDE_DIALOG_KINDS,
           toolConfig: {
             askUserQuestion: { previewFormat: 'html' }
           },

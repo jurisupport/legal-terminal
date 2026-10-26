@@ -50,6 +50,7 @@ import { DiffPreview } from './DiffPreview'
 import { MarkdownMessage } from './MarkdownMessage'
 import { AgentAttachmentMedia } from './AgentMediaPreview'
 import { htmlToPlainText } from '../markdownClipboard'
+import { isCommittedEnter } from '../ime'
 import { ToolRow, toolDisplayName, toolStepDisplay, type ProcessStep } from './ToolRow'
 import { activeSubAgentCount } from './subAgentStatus'
 import { quoteAgentRequest, restoreTextSelection, selectionTextOffsets } from './quote'
@@ -2657,6 +2658,13 @@ export default function AgentPanel({
     }
     return undefined
   }, [items])
+  const waitingDialog = [...items].reverse().find((item) => item.kind === 'dialog' && item.status === 'waiting')
+  const streamingAnswer = timelineTurns.at(-1)?.some((item) =>
+    item.kind === 'assistant' && item.status === 'streaming' && Boolean(item.text)
+  )
+  const activityLabel = status === 'working'
+    ? activeSubAgents > 0 ? '작업 진행 중' : runningToolLabel ? '도구 실행 중' : streamingAnswer ? '답변 작성 중' : '생각 중'
+    : status === 'waiting_user' && waitingDialog ? '선택을 기다리고 있어요' : baseStatusLabel
   const stopButtonClassName = escInterruptArmed ? 'agent-stop-button armed' : 'agent-stop-button'
   const stopButtonTitle = escInterruptArmed
     ? `Esc ${Math.round(ESC_INTERRUPT_ARM_MS / 1000)}초 안에 한 번 더 누르면 중지됩니다`
@@ -4123,10 +4131,10 @@ export default function AgentPanel({
             const choices = dialogChoices[dialogId] ?? {}
             const directResponse = dialogResponses[dialogId] ?? ''
             return (
-              <section key={item.id} className={`agent-card dialog ${item.status ?? ''}`}>
+              <section key={item.id} id={`agent-dialog-${id}-${dialogId}`} className={`agent-card dialog ${item.status ?? ''}`}>
                 <div className="agent-card-head">
                   <span>{item.title ?? `${agentLabel} 질문`}</span>
-                  {item.status && <span className="agent-card-status">{item.status}</span>}
+                  <span className="agent-card-status">{waiting ? '선택해 주세요' : item.status === 'cancelled' ? '취소됨' : '응답 완료'}</span>
                 </div>
                 <div className="agent-question-list">
                   {questions.map((question) => (
@@ -4136,19 +4144,25 @@ export default function AgentPanel({
                         <strong>{question.question}</strong>
                       </div>
                       <div className="agent-option-grid">
-                        {question.options.map((option) => {
-                          const selected = (choices[question.id] ?? []).includes(option.label)
+                        {question.options.map((option, optionIndex) => {
+                          const selected = waiting
+                            ? (choices[question.id] ?? []).includes(option.label)
+                            : item.answers?.[question.question] === option.label || (item.answers?.[question.question] ?? '').split(', ').includes(option.label)
                           return (
                             <button
                               key={option.id}
                               type="button"
                               className={`agent-option ${selected ? 'selected' : ''}`}
+                              aria-pressed={selected}
                               disabled={!waiting}
                               onClick={() => void selectDialogOption(item, question, option)}
                             >
-                              <span>{option.label}</span>
-                              {option.description && <small>{option.description}</small>}
-                              {option.preview && <pre>{option.preview}</pre>}
+                              <span className="agent-option-number" aria-hidden="true">{selected ? '✓' : optionIndex + 1}</span>
+                              <span className="agent-option-content">
+                                <span>{option.label}</span>
+                                {option.description && <small>{option.description}</small>}
+                                {option.preview && <pre>{option.preview}</pre>}
+                              </span>
                             </button>
                           )
                         })}
@@ -4170,6 +4184,7 @@ export default function AgentPanel({
                   <>
                     <input
                       className="agent-question-freeform"
+                      aria-label="추가 메시지 또는 직접 입력"
                       value={directResponse}
                       placeholder="추가 메시지 또는 직접 입력"
                       onChange={(e) =>
@@ -4179,7 +4194,7 @@ export default function AgentPanel({
                         }))
                       }
                       onKeyDown={(e) => {
-                        if (e.key !== 'Enter') return
+                        if (!isCommittedEnter(e)) return
                         e.preventDefault()
                         void submitDialogChoices(item)
                       }}
@@ -4701,11 +4716,13 @@ export default function AgentPanel({
           <div
             className={`agent-status-line ${status}${escInterruptArmed ? ' esc-armed' : ''}`}
             aria-live="polite"
-            aria-label={statusAccessibleLabel}
+            aria-label={authActive ? `${agentLabel} 로그인 진행 중` : `${activityLabel}, ${statusAccessibleLabel}`}
           >
-            <span className="agent-status-spinner" aria-hidden="true" />
+            <span className={`agent-status-indicator${status === 'working' || authActive ? ' active' : ''}`} aria-hidden="true">
+              <IconClaude size={24} />
+            </span>
             <span className="agent-status-text">
-              {authActive ? `${agentLabel} 로그인 진행 중` : baseStatusLabel}
+              {authActive ? `${agentLabel} 로그인 진행 중` : activityLabel}
               {queuesNewInput && elapsedSeconds > 0 && ` · ${formatElapsedSeconds(elapsedSeconds)}`}
             </span>
             {!authActive && (activeSubAgents > 0 || runningToolLabel) && (
@@ -4717,6 +4734,13 @@ export default function AgentPanel({
               </span>
             )}
             {queuedCount > 0 && <span className="agent-status-queue">대기 {queuedCount}</span>}
+            {status === 'waiting_user' && waitingDialog && (
+              <button type="button" className="agent-status-jump" onClick={() => {
+                const card = document.getElementById(`agent-dialog-${id}-${waitingDialog.dialogId ?? waitingDialog.id}`)
+                card?.scrollIntoView({ block: 'nearest' })
+                card?.querySelector<HTMLButtonElement>('button:not(:disabled)')?.focus({ preventScroll: true })
+              }}>선택지 보기 ↑</button>
+            )}
             <span className="agent-status-hint">
               {escInterruptArmed ? 'Esc 한 번 더 누르면 중지' : 'Esc 두 번으로 중지'}
             </span>

@@ -138,6 +138,7 @@ jobs:
             output/playwright/browser/**
             output/playwright/agent-media/**
             output/playwright/agent-panel-width/**
+            output/playwright/agent-interaction/**
             output/playwright/claude-remote-control/**
           if-no-files-found: warn
 
@@ -241,6 +242,7 @@ jobs:
             output/playwright/browser/**
             output/playwright/agent-media/**
             output/playwright/agent-panel-width/**
+            output/playwright/agent-interaction/**
             output/playwright/claude-remote-control/**
           if-no-files-found: warn
 
