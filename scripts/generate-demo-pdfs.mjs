@@ -2,7 +2,7 @@
 // 실행: ELECTRON 바이너리로 직접 구동 (ELECTRON_RUN_AS_NODE 없이):
 //   node_modules/electron/dist/Electron.app/Contents/MacOS/Electron scripts/generate-demo-pdfs.mjs
 import { app, BrowserWindow } from 'electron'
-import { writeFile } from 'node:fs/promises'
+import { mkdir, writeFile } from 'node:fs/promises'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import path from 'node:path'
 
@@ -16,6 +16,7 @@ const jobs = [
 ]
 
 app.whenReady().then(async () => {
+  await mkdir(outDir, { recursive: true })
   const win = new BrowserWindow({ show: false, width: 900, height: 1200 })
   for (const [html, pdf] of jobs) {
     await win.loadURL(pathToFileURL(path.join(fixtures, html)).href)
