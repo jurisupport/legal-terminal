@@ -43,6 +43,7 @@ const state = {
 const focus = []
 const context = {
   ...state,
+  docOnly: false, termOnly: false, documentAgentTabs: {},
   activeCaseTabIdRef: { current: state.activeCaseTabId }, unloadedSharedCasesRef: { current: new Set() },
   autoRestoreWorkspaceRef: { current: async () => {} },
   savedCaseLabels: [], caseTabSubtitle: (tab) => tab.drafts, sessionListKey: (path) => path, sessionContextForTerm: noop,
@@ -74,7 +75,7 @@ for (const key of Object.keys(state)) {
   }
 }
 const names = [
-  'docSide', 'termSide', 'docKey', 'termKeyOf', 'parseWorkKey', 'isAgentTab',
+  'docSide', 'termSide', 'docKey', 'termKeyOf', 'parseWorkKey', 'isAgentTab', 'documentAgentKey',
   'normalizedCasePathKey', 'compareCaseTabOrder', 'orderedCaseTabs',
   'termsForCaseTab', 'docsForCaseTab', 'caseTabRows', 'sidebarCases',
   'clearCaseDocumentUpdates', 'updateCaseTabActivity', 'activateDocTab', 'activateTermTab',

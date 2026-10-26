@@ -151,12 +151,20 @@ assert.equal(actual.upsertCaseTab([{ ...linkedTab, id: folderTab.id, drafts: '/m
 
 const noop = () => {}
 // A file click can be followed by a queued focus event from the previous case.
-for (const scenario of ['background-focus', 'current-focus', 'explicit-selection', 'missing', 'detached-focus']) {
-  const previous = { id: 'previous-agent', caseTabId: 'previous-case', side: 'right' }
-  const current = { id: 'current-agent', caseTabId: 'current-case', side: 'right' }
-  const state = { activeCase: 'current-case', activeTerm: current.id, calls: [] }
-  const selection = loadHandlers(['selectTerm'], {
+for (const scenario of ['background-focus', 'current-focus', 'explicit-selection', 'missing', 'detached-focus', 'closed-document', 'terminal-selection']) {
+  const previous = { id: 'previous-agent', kind: scenario === 'terminal-selection' ? 'terminal' : 'agent', caseTabId: 'previous-case', side: 'right' }
+  const current = { id: 'current-agent', kind: 'agent', caseTabId: 'current-case', side: 'right' }
+  const state = { activeCase: 'current-case', activeTerm: current.id, activeDoc: 'current-file', calls: [] }
+  const selection = loadHandlers(['isAgentTab', 'documentAgentKey', 'selectTerm'], {
     termTabs: [previous, current], activeWork: { left: 'doc:current-file', right: 'terminal:current-agent' },
+    activeDoc: state.activeDoc,
+    docTabs: [
+      { id: 'current-file', caseTabId: 'current-case', path: '/shared.md', side: 'left' },
+      ...(scenario === 'closed-document' ? [] : [{ id: 'previous-file', caseTabId: 'previous-case', path: '/shared.md', side: 'left' }])
+    ],
+    documentAgentTabs: { '["previous-case","/shared.md"]': previous.id, '["current-case","/shared.md"]': current.id },
+    caseIdForDoc: (doc) => doc.caseTabId, docSide: (doc) => doc.side, docKey: (id) => `doc:${id}`,
+    setActiveDoc: (id) => { state.activeDoc = id }, setWorkActive: noop, clearCaseDocumentUpdates: noop,
     activeCaseTabIdRef: { current: state.activeCase }, docOnly: false, termOnly: scenario === 'detached-focus',
     caseIdForTerm: (term) => term.caseTabId,
     activateTermTab: (id) => { state.activeTerm = id; state.calls.push('activate') },
@@ -170,7 +178,9 @@ for (const scenario of ['background-focus', 'current-focus', 'explicit-selection
     window: { lt: { app: { dismissNotify: () => state.calls.push('notify') } } }
   })
   selection.selectTerm(scenario === 'missing' ? 'closed-agent'
-    : scenario === 'current-focus' ? current.id : previous.id, scenario === 'explicit-selection')
+    : scenario === 'current-focus' ? current.id : previous.id, ['explicit-selection', 'closed-document', 'terminal-selection'].includes(scenario))
+  assert.equal(state.activeDoc, scenario === 'explicit-selection' ? 'previous-file' : 'current-file',
+    `${scenario}: restore only an open document in the explicitly selected agent's case`)
   if (scenario === 'background-focus' || scenario === 'missing') {
     assert.equal(state.activeCase, 'current-case', `${scenario} must preserve the selected file's case`)
     assert.equal(state.activeTerm, current.id)

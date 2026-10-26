@@ -4066,9 +4066,26 @@ export default function App(): JSX.Element {
     const nextCase = currentCaseFromTerm(tab)
     setCurrentCase(nextCase)
     registerCaseTabFromTerm(tab, reopen)
+    const nextWork = { ...activeWork, [termSide(tab)]: termKeyOf(tab.id) }
+    let linkedDoc: DocTab | undefined
+    // Restore on explicit selection, not focus events triggered by document navigation.
+    if (reopen && !docOnly && !termOnly && isAgentTab(tab)) {
+      const linkedDocs = docTabs.filter((doc) =>
+        caseIdForDoc(doc) === caseIdForTerm(tab) && documentAgentTabs[documentAgentKey(doc)] === id)
+      linkedDoc = linkedDocs.find((doc) => doc.id === activeDoc) ?? linkedDocs[0]
+      if (linkedDoc) {
+        setActiveDoc(linkedDoc.id)
+        if (docSide(linkedDoc) !== termSide(tab)) {
+          nextWork[docSide(linkedDoc)] = docKey(linkedDoc.id)
+          setWorkActive(docSide(linkedDoc), docKey(linkedDoc.id))
+          clearCaseDocumentUpdates(caseIdForDoc(linkedDoc), linkedDoc.path)
+        }
+      }
+    }
     updateCaseTabActivity(caseIdForTerm(tab), {
       activeTermId: tab.id,
-      activeWork: { ...activeWork, [termSide(tab)]: termKeyOf(tab.id) }
+      ...(linkedDoc ? { activeDocId: linkedDoc.id } : {}),
+      activeWork: nextWork
     })
     setTermAttention((s) => {
       if (!s.has(id)) return s

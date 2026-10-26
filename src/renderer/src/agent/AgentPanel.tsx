@@ -3857,7 +3857,11 @@ export default function AgentPanel({
       </header>
 
       {documentLink && (
-        <label className="agent-document-link" title={`「${documentLink.title}」로 돌아오면 이 에이전트 패널을 엽니다`}>
+        <label
+          className="agent-document-link"
+          title={`「${documentLink.title}」와 이 에이전트 패널을 선택할 때 서로 연결합니다`}
+          onMouseDown={(event) => event.stopPropagation()}
+        >
           <input
             type="checkbox"
             aria-label="에이전트 패널 기억하기"
