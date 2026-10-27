@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url'
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const temp = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-tab-ui-'))
-function runApp({ root, temp, appMain }) {
+function runApp({ root, temp, appMain, syncBaseline }) {
   const { app, BrowserWindow, ipcMain, session } = require('electron')
   const assert = require('node:assert/strict')
   const calls = [], errors = [], sessions = new Map()
@@ -136,6 +136,7 @@ function runApp({ root, temp, appMain }) {
       // A history row is visible before the remote open state has been applied.
       await wait(() => evaluate(`!!document.querySelector('.case-sidebar-group[data-open="true"] .case-sidebar-case')`))
       assert.equal(sessions.size, 0, 'discovery leaves cases collapsed and agents unloaded')
+      assert.equal(await evaluate(`document.querySelectorAll('.toast.synced').length`), 0, 'startup discovery is quiet')
       assert.equal(await evaluate(`document.querySelector('.case-sidebar-group').dataset.open`), 'true',
         'an open phone case is automatically an open desktop tab')
       assert.equal(await evaluate(`!!document.querySelector('.case-sidebar-group.active')`), false,
@@ -212,6 +213,24 @@ function runApp({ root, temp, appMain }) {
       await wait(() => evaluate(`document.body.innerText.includes('다른 컴퓨터의 새 대화')`))
       assert.equal(await evaluate(`[...document.querySelectorAll('.tab.active')].some(tab => tab.innerText.includes('폰에서 열린 대화'))`), true,
         'focus refresh keeps the existing active agent')
+      const syncOutput = require('node:path').join(root, '.omx/state/sync-notice')
+      require('node:fs').mkdirSync(syncOutput, { recursive: true })
+      await evaluate('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))')
+      require('node:fs').writeFileSync(require('node:path').join(syncOutput, syncBaseline ? 'desktop-before.png' : 'desktop-after.png'),
+        (await win.webContents.capturePage()).toPNG())
+      if (syncBaseline) { app.exit(0); return }
+      assert.equal(await evaluate(`document.querySelectorAll('.toast.synced').length`), 1,
+        'one light notice groups new case and conversation tabs')
+      assert.equal(await evaluate(`document.querySelector('.toast.synced').textContent.includes('새 탭 2개')`), true)
+      assert.equal(await evaluate(`document.querySelector('.toast.synced').getAttribute('role')`), 'status')
+      assert.equal(calls.some(call => ['app:notify', 'app:requestAttention', 'app:setBadgeCount'].includes(call.channel)), false,
+        'sync notifications do not interrupt with native alerts or badges')
+      await wait(() => evaluate(`!document.querySelector('.toast.synced')`))
+      const syncReads = calls.filter(call => call.channel === 'workspace:autoObserve').length
+      await evaluate(`window.dispatchEvent(new Event('focus'))`)
+      await wait(() => calls.filter(call => call.channel === 'workspace:autoObserve').length > syncReads)
+      assert.equal(await evaluate(`document.querySelectorAll('.toast.synced').length`), 0,
+        'unchanged refreshes do not repeat the notification')
       await evaluate(`document.querySelector('.case-sidebar-trigger').click()`)
       await wait(() => evaluate(`document.body.innerText.includes('다른 컴퓨터의 사건')`))
       await evaluate(`document.querySelector('.case-sidebar-trigger').click()`)
@@ -267,7 +286,7 @@ function runApp({ root, temp, appMain }) {
   })()
 }
 const appMain = process.env.LT_TEST_APP_MAIN || path.join(root, 'out/main/index.js')
-await fs.writeFile(path.join(temp, 'main.cjs'), `(${runApp.toString()})(${JSON.stringify({ root, temp, appMain })})`)
+await fs.writeFile(path.join(temp, 'main.cjs'), `(${runApp.toString()})(${JSON.stringify({ root, temp, appMain, syncBaseline: process.argv.includes('--sync-baseline') })})`)
 const env = { ...process.env }
 delete env.ELECTRON_RUN_AS_NODE
 try {

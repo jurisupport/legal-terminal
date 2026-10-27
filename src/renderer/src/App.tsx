@@ -1061,6 +1061,9 @@ const sessionRememberInput = (
 const sessionListCache = new Map<string, { entries: SessionListEntry[]; fetchedAt: number }>()
 const sessionListInflight = new Map<string, Promise<SessionListEntry[]>>()
 
+const workspaceHostKey = (ssh?: SshConn): string =>
+  ssh ? `${ssh.user}@${ssh.host}:${ssh.port ?? 22}` : 'local'
+
 const sessionListKey = (
   cwd: string,
   ssh?: SshConn,
@@ -1732,6 +1735,7 @@ export default function App(): JSX.Element {
   const [retainedSharedCases, setRetainedSharedCases] = useState<Set<string>>(new Set())
   const refreshAutomaticCasesRef = useRef<() => Promise<void>>(async () => {})
   const automaticCasesLoadingRef = useRef(false)
+  const observedWorkspaceHostsRef = useRef(new Set<string>())
   const automaticCasesRefreshPendingRef = useRef(false)
   const automaticCasesRefreshActiveRef = useRef(false)
   const [workspaceSyncError, setWorkspaceSyncError] = useState('')
@@ -4185,6 +4189,17 @@ export default function App(): JSX.Element {
     setToasts((ts) => ts.filter((x) => x.termId !== termId))
   const dismissToast = (key: number): void => setToasts((ts) => ts.filter((x) => x.key !== key))
 
+  const pushSyncedTabsToast = (count: number): void => {
+    const key = ++toastSeq.current
+    setToasts((current) => {
+      const total = count + (current.find((toast) => toast.status === 'synced')?.count ?? 0)
+      return [...current.filter((toast) => toast.status !== 'synced'), {
+        key, termId: '', title: `새 탭 ${total}개를 가져왔습니다`, status: 'synced', count: total
+      }]
+    })
+    setTimeout(() => setToasts((current) => current.filter((toast) => toast.key !== key)), 4000)
+  }
+
   // Ctrl+Tab: 같은 종류 탭 순환 (터미널끼리 / 문서끼리)
   const cycleTerm = (dir: number, sourceTermId = activeTerm): void => {
     const cur = termTabs.find((t) => t.id === sourceTermId)
@@ -5494,6 +5509,9 @@ export default function App(): JSX.Element {
                 !termTabsRef.current.some((term) => caseIdForTerm(term) === id)
             )
             autoSaveEligibleRef.current.add(id)
+            if (refresh && observedWorkspaceHostsRef.current.has(workspaceHostKey(source.ssh))) {
+              pushSyncedTabsToast(added.length)
+            }
           }
         }
         // Keep the local backup usable offline, but leave remote restoration retryable.
@@ -5546,7 +5564,7 @@ export default function App(): JSX.Element {
       }
       // Query each host once even when it has multiple local profile names.
       const profiles = [...new Map(sshProfiles.map((profile) =>
-        [`${profile.user}@${profile.host}:${profile.port ?? 22}`, profile])).values()]
+        [workspaceHostKey(profile), profile])).values()]
       const results = await Promise.allSettled([undefined, ...profiles].map(async (profile) => {
         const result = await window.lt.workspace.autoList(profile ? sshConnFromProfile(profile) : undefined, true)
         if (!result.ok) throw new Error(result.error)
@@ -5618,6 +5636,7 @@ export default function App(): JSX.Element {
               caseTabsRef.current = next
               setCaseTabs(next)
               expectedCases = next
+              if (observedWorkspaceHostsRef.current.has(workspaceHostKey(profile))) pushSyncedTabsToast(1)
             }
             continue
           }
@@ -5628,6 +5647,7 @@ export default function App(): JSX.Element {
           expectedTerms = termTabsRef.current
           expectedCases = caseTabsRef.current
         }
+        observedWorkspaceHostsRef.current.add(workspaceHostKey(profile))
       }
       setWorkspaceSyncError(failed ? '사건탭 공유 실패 · 연결 후 다시 시도합니다' : '')
     }
@@ -6825,7 +6845,8 @@ export default function App(): JSX.Element {
     key: number
     termId: string
     title: string
-    status: 'done' | 'question'
+    status: 'done' | 'question' | 'synced'
+    count?: number
   }[]>([])
 
   // 독/작업표시줄 배지 = 미확인 완료·질문 개수
@@ -9967,23 +9988,26 @@ export default function App(): JSX.Element {
           {toasts.map((t) => (
             <div
               key={t.key}
-              className="toast"
+              className={`toast${t.status === 'synced' ? ' synced' : ''}`}
+              role={t.status === 'synced' ? 'status' : undefined}
               onClick={() => {
+                if (t.status === 'synced') return
                 selectTerm(t.termId)
                 dismissToast(t.key)
               }}
             >
-              <span className="toast-icon">{t.status === 'question' ? '?' : '✓'}</span>
+              <span className="toast-icon" aria-hidden="true">{t.status === 'question' ? '?' : t.status === 'synced' ? '+' : '✓'}</span>
               <span className="toast-body">
                 <b>{t.title}</b>
                 <span className="toast-sub">
-                  {t.status === 'question'
+                  {t.status === 'synced' ? '다른 기기에서 열린 탭입니다' : t.status === 'question'
                     ? '확인/입력을 기다립니다 · 클릭하여 이동'
                     : '작업이 완료되었습니다 · 클릭하여 이동'}
                 </span>
               </span>
               <button
                 className="toast-x"
+                aria-label="알림 닫기"
                 onClick={(e) => {
                   e.stopPropagation()
                   dismissToast(t.key)

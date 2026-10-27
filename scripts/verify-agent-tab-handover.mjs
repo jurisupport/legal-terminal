@@ -271,9 +271,12 @@ try {
   let restored
   const alerts = []
   const observed = []
+  const syncedNotices = []
   const context = {
     isGeneralChatDirectory,
     docOnly: false, termOnly: false,
+    observedWorkspaceHostsRef: { current: new Set(['host']) }, workspaceHostKey: () => 'host',
+    pushSyncedTabsToast: count => syncedNotices.push(count),
     modeRef: { current: 'explorer' },
     resolveCaseTabId: () => 'case', workspaceLocationKey: () => 'key', workspaceLocation: () => location,
     autoRestoreDoneRef: { current: new Set() }, autoRestoreInFlightRef: { current: new Map() },
@@ -315,6 +318,7 @@ try {
   assert.equal(restored.s.docs.length, 0)
   assert.equal(restored.activate, false, 'existing agent focus is preserved')
   assert.equal(alerts.length, 1, 'successful handover requires no confirmation')
+  assert.deepEqual(syncedNotices, [], 'initial restoration does not announce old tabs')
   await run({})
   assert.equal(loaded, 2, 'same workspace is not repeatedly restored')
   context.autoRestoreDoneRef.current.clear()
@@ -330,6 +334,7 @@ try {
   context.caseTabsRef.current = [{ id: 'case' }]
   response = { ok: true, remote: { snapshot: snapshot([phone]) } }
   await run({}, true)
+  assert.deepEqual(syncedNotices, [1], 'a new conversation received during refresh gets one notice')
   assert.equal(observed[0], response.remote.snapshot, 'acknowledge the exact applied response without rereading')
   restored = undefined
   context.termTabsRef.current = [term('closing-agent')]

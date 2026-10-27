@@ -17,7 +17,7 @@ visit(parsed)
 assert.ok(refresh)
 const helpers = ['safeHash', 'normalizedCasePathKey', 'caseProfileKey', 'caseIdentityKey', 'caseTabId',
   'findCaseTab', 'caseTabFromCurrentCase', 'currentCaseFromCaseTab', 'upsertCaseTab', 'compareCaseTabOrder',
-  'markWorkspaceReopened', 'saveCaseWorkspace', 'sameWorkspaceLocation']
+  'markWorkspaceReopened', 'saveCaseWorkspace', 'sameWorkspaceLocation', 'workspaceHostKey']
 const code = ts.transpileModule(helpers.map(name => `const ${name} = ${declarations.get(name)};`).join('\n') +
   `\nrefreshAutomaticCasesRef.current = ${refresh};\n({ ${helpers.join(', ')} })`, {
   compilerOptions: { target: ts.ScriptTarget.ES2022 }
@@ -28,12 +28,13 @@ const snapshot = (path, workspaceOpen = true, opened = '2026-10-01T00:00:00Z') =
   currentCase: { drafts: path, name: path }, terminals: [], docs: []
 })
 function harness(snapshots) {
-  const state = { cases: [], history: [], error: '', loads: [], closes: [], fail: false, onList: null, listCalls: 0 }
+  const state = { cases: [], history: [], error: '', loads: [], closes: [], notices: [], fail: false, onList: null, listCalls: 0 }
   const cases = { current: state.cases }
   const context = {
     isGeneralChatDirectory, console, Date,
     automaticCasesRefreshActiveRef: { current: true }, automaticCasesRefreshPendingRef: { current: false },
     todoAccountGeneration: { current: 0 }, pendingAgentClosesRef: { current: new Map() },
+    observedWorkspaceHostsRef: { current: new Set() }, pushSyncedTabsToast: count => state.notices.push(count),
     automaticCasesLoadingRef: { current: false }, termTabsRef: { current: [] }, caseTabsRef: cases,
     saveAllCaseWorkspacesRef: { current: async () => true }, workspaceHostsRef: { current: 'office' }, workspaceHostsSignature: 'office',
     sshProfiles: [profile], sshConnFromProfile: p => p,
@@ -82,12 +83,14 @@ await h.run()
 assert.equal(h.state.cases.length, 2, 'only explicitly open remote cases become open tabs')
 assert.equal(h.state.history.length, 4, 'closed and legacy workspaces remain discoverable')
 assert.equal(h.state.loads.length, 0, 'discovery must not start agents')
+assert.deepEqual(h.state.notices, [], 'first successful discovery is quiet')
 assert.equal(h.context.unloadedSharedCasesRef.current.size, 2)
 assert.deepEqual(Array.from(h.state.cases.sort(h.actual.compareCaseTabOrder), tab => tab.remotePath), ['/cases/earlier', '/cases/later'],
   'ISO timestamps with different fractional precision sort chronologically')
 await h.run()
 assert.equal(h.state.cases.length, 2, 'repeated reads do not duplicate open tabs')
 assert.equal(h.state.loads.length, 0, 'unselected shared cases remain unloaded on later refreshes')
+assert.deepEqual(h.state.notices, [], 'unchanged refresh is quiet')
 
 const later = h.state.cases.find(tab => tab.remotePath === '/cases/later')
 h.context.unloadedSharedCasesRef.current.delete(later.id)
@@ -105,10 +108,36 @@ shared[0].workspaceOpen = true
 await h.run()
 assert.equal(h.state.cases.length, 2, 'explicit remote reopen restores the outer tab')
 assert.ok(h.context.unloadedSharedCasesRef.current.has(later.id), 'reopen waits for local selection before loading agents')
+assert.deepEqual(h.state.notices, [1], 'a newly opened remote case produces one light notice')
 h.state.fail = true
 await h.run()
 assert.equal(h.state.cases.length, 2, 'offline/error is never interpreted as an empty remote list')
 assert.match(h.state.error, /공유 실패/)
+assert.deepEqual(h.state.notices, [1], 'a failed refresh cannot notify about nonexistent additions')
+h.state.fail = false
+shared.push(snapshot('/cases/new-arrival'))
+await h.run()
+assert.deepEqual(h.state.notices, [1, 1], 'new cases are noticed after reconnection without renotifying existing tabs')
+
+let toasts = [{ key: 1, termId: 'pending-question', status: 'question' }]
+const timers = []
+const notify = vm.runInNewContext(ts.transpileModule(`(${declarations.get('pushSyncedTabsToast')})`, {
+  compilerOptions: { target: ts.ScriptTarget.ES2022 }
+}).outputText, {
+  toastSeq: { current: 1 }, setToasts: update => { toasts = update(toasts) },
+  setTimeout: (callback, delay) => { assert.equal(delay, 4000); timers.push(callback) }
+})
+notify(1)
+notify(2)
+assert.equal(toasts.length, 2, 'sync notices coalesce while keeping pending questions')
+assert.equal(toasts.at(-1).count, 3)
+assert.equal(toasts.at(-1).title, '새 탭 3개를 가져왔습니다')
+timers[0]()
+assert.equal(toasts.length, 2, 'an older expiry cannot remove a newer notice')
+timers[1]()
+assert.equal(toasts.length, 1)
+assert.equal(toasts[0].status, 'question', 'a short sync notice never dismisses a question')
+
 
 const pending = harness([snapshot('/cases/pending')])
 pending.context.pendingCaseClosesRef.current.set('ssh://office/cases/pending', () => {})

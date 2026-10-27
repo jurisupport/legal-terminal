@@ -181,7 +181,7 @@ async function checkInteraction({ root, temp, output, channels }) {
     send({ type: 'message:assistant_delta', messageId: 'test-reply', text: '알겠습니다. 테스트 세션으로 진행할게요.' })
     send({ type: 'message:assistant_done', messageId: 'test-reply' })
     send({ type: 'status', status: 'done' })
-    await wait("document.querySelector('.agent-system-log summary')?.textContent === '시스템 기록 6개'")
+    await wait("document.querySelector('.agent-system-log summary')?.textContent === '시스템 기록 6개' && document.querySelector('.agent-panel[data-visible=true]').innerText.includes('테스트 세션으로 진행할게요')")
     check(await run("const log = document.querySelector('.agent-system-log'); const visible = document.querySelector('.agent-panel[data-visible=true]').innerText; return !log.open && !visible.includes('RAW_HOOK_OUTPUT') && !visible.includes('SessionStart:startup') && !visible.includes('allowed') && visible.includes('테스트 세션으로 진행할게요')"), 'the reported remote transcript must show the reply and one collapsed diagnostic group')
     await capture('system-logs-collapsed')
     await run("document.querySelector('.agent-system-log summary').click(); document.querySelector('.agent-system-log .agent-tool-line').click()")
