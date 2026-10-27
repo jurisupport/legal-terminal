@@ -14,7 +14,7 @@ runInNewContext(ts.transpileModule(readFileSync(new URL('../src/renderer/src/age
   exports,
   require: name => name === './values' ? values : name === './subAgentStatus' ? subAgents : require(name)
 })
-const { toolStepDisplay, ToolRow } = exports
+const { toolStepDisplay, ToolRow, isDiagnosticStep, processStepStatus } = exports
 const { renderToStaticMarkup } = require('react-dom/server')
 const command = 'python /private/case/scan.py --all'
 const description = '사건 기록에서 관련 판례를 찾습니다'
@@ -47,3 +47,34 @@ for (const title of ['명령 출력', '명령 출력 · stderr', '프로세스 �
 assert.equal(toolStepDisplay({ id: 'managed', title: '', toolName: 'mcp__legal_terminal_jurisupport__get_task',
   input: '{"id":"opaque-id"}', text: 'opaque-id' }).arg, undefined)
 console.log('Agent tool display: SDK descriptions, live summaries, raw-detail disclosure, malformed/truncated input, Claude/Codex fallbacks passed')
+
+const hook = { id: 'hook', title: 'Hook · SessionStart:startup', text: 'RAW_HOOK_OUTPUT' }
+for (const status of ['running', 'success', 'done', 'completed']) {
+  assert.equal(isDiagnosticStep({ ...hook, status }), true, 'normal hooks belong in collapsed diagnostics')
+}
+for (const status of ['error', 'failed', 'cancelled', 'canceled', 'blocked', 'unknown']) {
+  assert.equal(isDiagnosticStep({ ...hook, status }), false, 'failed or uncertain hooks must remain visible')
+}
+const limit = { id: 'limit', title: 'Rate limit' }
+assert.equal(isDiagnosticStep({ ...limit, status: 'allowed', text: 'allowed' }), true)
+assert.equal(isDiagnosticStep({ ...limit, text: 'allowed' }), true, 'legacy snapshots may only store the rate status as text')
+for (const status of ['allowed_warning', 'rejected', 'unknown']) {
+  assert.equal(isDiagnosticStep({ ...limit, status }), false)
+}
+assert.equal(isDiagnosticStep({ ...step, status: 'done' }), false, 'real tool work stays in the main timeline')
+assert.equal(isDiagnosticStep({ ...step, title: hook.title }), false, 'tool calls must not be classified by a system-event title')
+assert.equal(isDiagnosticStep({ id: 'connection', title: '원격 재연결 중', status: 'running' }), false)
+assert.equal(processStepStatus({ ...hook, status: 'success' }), 'done')
+assert.equal(processStepStatus({ ...hook, status: 'error' }), 'error')
+assert.equal(processStepStatus({ ...limit, status: 'allowed_warning' }), 'warning')
+assert.equal(processStepStatus({ ...limit, status: 'rejected' }), 'error')
+assert.equal(processStepStatus({ ...step, status: 'running' }), 'running')
+assert.equal(toolStepDisplay({ ...hook, status: 'error' }).name, '자동 처리 오류')
+assert.equal(toolStepDisplay({ ...hook, status: 'error' }).arg, undefined, 'hook output stays in details')
+assert.equal(toolStepDisplay({ ...limit, status: 'allowed_warning' }).name, '사용 한도에 가까워졌습니다')
+assert.equal(toolStepDisplay({ ...limit, status: 'rejected' }).name, '사용 한도에 도달했습니다')
+const hookError = { ...hook, status: 'error' }
+assert.ok(!renderToStaticMarkup(ToolRow({ step: hookError, expanded: false, onToggle() {} })).includes('RAW_HOOK_OUTPUT'))
+const hookDetails = renderToStaticMarkup(ToolRow({ step: hookError, expanded: true, onToggle() {} }))
+assert.ok(hookDetails.includes('RAW_HOOK_OUTPUT') && hookDetails.includes(hook.title), 'original diagnostics remain inspectable')
+console.log('System diagnostics: normal logs fold, failures and usage warnings remain visible, legacy events preserve raw details')

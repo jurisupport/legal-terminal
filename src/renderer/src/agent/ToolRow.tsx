@@ -101,8 +101,46 @@ export function toolDisplayName(rawName: string): string {
   return toolNameLabels[rawName] ?? (mcp ? `${mcp[1]} · ${mcp[2]}` : rawName)
 }
 
+const isHookStep = (step: ProcessStep): boolean => !step.toolName && step.title.startsWith('Hook · ')
+
+export function processStepStatus(step: ProcessStep): string {
+  if (!step.toolName && step.title === 'Rate limit') {
+    const status = step.status ?? step.text
+    if (status === 'allowed') return 'done'
+    if (status === 'allowed_warning') return 'warning'
+    if (status === 'rejected') return 'error'
+  }
+  const status = step.status ?? 'running'
+  if (isHookStep(step)) {
+    if (status === 'success' || status === 'completed') return 'done'
+    if (['failed', 'blocked', 'denied'].includes(status)) return 'error'
+    if (!['running', 'done', 'error', 'cancelled', 'canceled', 'paused'].includes(status)) return 'warning'
+  }
+  return status
+}
+
+export function isDiagnosticStep(step: ProcessStep): boolean {
+  if (isHookStep(step)) return ['running', 'done'].includes(processStepStatus(step))
+  return !step.toolName && step.title === 'Rate limit' && (step.status ?? step.text) === 'allowed'
+}
+
 export function toolStepDisplay(step: ProcessStep): { name: string; arg?: string; rawName: string } {
   const rawName = step.toolName ?? step.title.replace(/^도구 · /, '')
+  if (isHookStep(step)) {
+    const status = processStepStatus(step)
+    const name = status === 'error' ? '자동 처리 오류'
+      : status === 'cancelled' || status === 'canceled' ? '자동 처리 중지됨'
+        : status === 'running' ? '자동 처리 중'
+          : status === 'done' ? '자동 처리 완료' : '자동 처리 확인 필요'
+    return { name, rawName }
+  }
+  if (!step.toolName && rawName === 'Rate limit') {
+    const status = step.status ?? step.text
+    const name = status === 'allowed' ? '사용량 정상'
+      : status === 'allowed_warning' ? '사용 한도에 가까워졌습니다'
+        : status === 'rejected' ? '사용 한도에 도달했습니다' : '사용량 상태 확인'
+    return { name, rawName }
+  }
   const name = toolDisplayName(rawName)
   const input = parsePreviewJson(step.input)
   if (rawName.startsWith(MANAGED_MCP_PREFIX)) {
@@ -198,9 +236,9 @@ export function ToolRow({
   }
 
   const { name, arg, rawName } = toolStepDisplay(step)
-  const status = step.status ?? 'running'
+  const status = processStepStatus(step)
   const elapsed = stepElapsedLabel(step)
-  const hasDetails = Boolean(step.description || step.input || step.output || step.text)
+  const hasDetails = Boolean(step.description || step.input || step.output || step.text || name !== rawName)
   const subAgent = isSubAgentStep(step)
   return (
     <div className={`agent-tool-row ${status}`}>
@@ -222,6 +260,7 @@ export function ToolRow({
           {subAgent && status === 'done' && <span className="agent-tool-flag">완료</span>}
           {status === 'paused' && <span className="agent-tool-flag">일시 중지</span>}
           {status === 'error' && <span className="agent-tool-flag error">실패</span>}
+          {status === 'warning' && <span className="agent-tool-flag">주의</span>}
           {(status === 'cancelled' || status === 'canceled') && (
             <span className="agent-tool-flag">중지됨</span>
           )}
@@ -243,7 +282,7 @@ export function ToolRow({
           )}
           {name !== rawName && (
             <div className="agent-tool-detail">
-              <span className="agent-tool-detail-label">도구</span>
+              <span className="agent-tool-detail-label">{step.toolName ? '도구' : '항목'}</span>
               <pre className="agent-process-step-text">{rawName}</pre>
             </div>
           )}

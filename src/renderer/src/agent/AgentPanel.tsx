@@ -51,7 +51,7 @@ import { MarkdownMessage } from './MarkdownMessage'
 import { AgentAttachmentMedia } from './AgentMediaPreview'
 import { htmlToPlainText } from '../markdownClipboard'
 import { isCommittedEnter } from '../ime'
-import { ToolRow, toolDisplayName, toolStepDisplay, type ProcessStep } from './ToolRow'
+import { ToolRow, isDiagnosticStep, toolDisplayName, toolStepDisplay, type ProcessStep } from './ToolRow'
 import { activeSubAgentCount } from './subAgentStatus'
 import { quoteAgentRequest, restoreTextSelection, selectionTextOffsets } from './quote'
 import { currentAgentModel } from './modelDisplay'
@@ -2654,7 +2654,7 @@ export default function AgentPanel({
     for (let index = items.length - 1; index >= 0; index -= 1) {
       const item = items[index]
       if (item.kind !== 'process') continue
-      const running = (item.processSteps ?? []).filter((step) => step.status === 'running')
+      const running = (item.processSteps ?? []).filter((step) => step.status === 'running' && !isDiagnosticStep(step))
       const latest = running[running.length - 1]
       if (!latest) continue
       const display = toolStepDisplay(latest)
@@ -3971,19 +3971,20 @@ export default function AgentPanel({
           {turn.map((item) => {
             if (item.kind === 'process') {
               const steps = item.processSteps ?? []
+              const diagnostics = steps.filter(isDiagnosticStep)
+              const renderStep = (step: ProcessStep): JSX.Element => {
+                const stepKey = `${item.id}:${step.id}`
+                return <ToolRow key={step.id} step={step} expanded={expandedProcessIds.has(stepKey)} onToggle={() => toggleProcess(stepKey)} />
+              }
               return (
                 <div key={item.id} className="agent-tools">
-                  {steps.map((step) => {
-                    const stepKey = `${item.id}:${step.id}`
-                    return (
-                      <ToolRow
-                        key={step.id}
-                        step={step}
-                        expanded={expandedProcessIds.has(stepKey)}
-                        onToggle={() => toggleProcess(stepKey)}
-                      />
-                    )
-                  })}
+                  {steps.filter((step) => !isDiagnosticStep(step)).map(renderStep)}
+                  {diagnostics.length > 0 && (
+                    <details className="agent-system-log">
+                      <summary>시스템 기록 {diagnostics.length}개</summary>
+                      {diagnostics.map(renderStep)}
+                    </details>
+                  )}
                 </div>
               )
             }

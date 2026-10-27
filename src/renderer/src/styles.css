@@ -5637,6 +5637,16 @@ button.agent-attachment-chip {
   white-space: nowrap;
 }
 /* ── 도구 실행 한 줄 행 ── */
+.agent-system-log > summary {
+  padding: 4px;
+  color: var(--fg-muted);
+  font-size: var(--agent-small-font-size);
+  cursor: pointer;
+}
+.agent-system-log > summary:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
 .agent-tools {
   min-width: 0;
   margin: 0 0 8px;
@@ -5686,6 +5696,9 @@ button.agent-attachment-chip {
 }
 .agent-tool-dot.error {
   background: #e0785c;
+}
+.agent-tool-dot.warning {
+  background: #d7ba7d;
 }
 .agent-tool-dot.cancelled,
 .agent-tool-dot.canceled {

@@ -140,6 +140,50 @@ for (const remote of [false, true]) {
     message: { content: [{ type: 'tool_result', tool_use_id: 'agent-tool', content: 'launched' }] }
   })
 
+  for (const [outcome, hookName, hookEvent] of [
+    ['success', 'SessionStart:startup', 'SessionStart'],
+    ['error', 'UserPromptSubmit', 'UserPromptSubmit'],
+    ['cancelled', 'Stop', 'Stop']
+  ]) {
+    const hookId = `hook-${outcome}`
+    const hook = (subtype, extra = {}) => send({ type: 'system', subtype, hook_id: hookId, hook_name: hookName, hook_event: hookEvent, ...extra })
+    hook('hook_started')
+    assert.equal(step(hookId).status, 'running')
+    assert.equal(step(hookId).text, hookEvent, 'hook event details must remain available even when the normal diagnostic row is collapsed')
+    hook('hook_progress', { output: 'Checking setup\nStill working', stdout: 'Checking setup\nStill working', stderr: '' })
+    assert.equal(step(hookId).status, 'running')
+    assert.equal(step(hookId).text, 'Checking setup\nStill working')
+    const detail = `${hookName}: ${outcome}\nTechnical details for troubleshooting`
+    hook('hook_response', { outcome, output: detail, stdout: outcome === 'error' ? '' : detail, stderr: outcome === 'error' ? detail : '' })
+    const event = events.filter((event) => event.type === 'process:event' && event.processId === hookId).at(-1)
+    assert.equal(event.title, `Hook · ${hookName}`, 'the wire title must remain compatible with stored process events')
+    assert.equal(event.status, outcome, 'hook success, failure, and cancellation must preserve their original severity')
+    assert.equal(event.text, detail)
+    assert.equal(step(hookId).title, event.title)
+    assert.equal(step(hookId).status, outcome)
+    assert.equal(step(hookId).text, detail)
+    assert.equal(items.flatMap((item) => item.processSteps ?? []).filter((entry) => entry.id === hookId).length, 1,
+      'hook start, progress, and response with one hook_id must update one row')
+  }
+  for (const [status, utilization] of [['allowed', 0.4], ['allowed_warning', 0.9], ['rejected', 1]]) {
+    const id = `rate-${status}`
+    send({ type: 'rate_limit_event', uuid: id, rate_limit_info: {
+      status, rateLimitType: 'five_hour', utilization, resetsAt: 1800000000, isUsingOverage: false
+    } })
+    assert.equal(step(id).title, 'Rate limit')
+    assert.equal(step(id).text, status, 'the raw rate-limit detail must remain inspectable')
+    assert.equal(step(id).status, status, 'warning and rejected events must not be downgraded to normal diagnostics')
+    const usage = events.filter((event) => event.type === 'usage:update').at(-1)
+    assert.equal(usage.rateLimit.status, status, 'diagnostic presentation must not suppress usage updates')
+    assert.equal(usage.rateLimit.utilization, utilization * 100)
+    assert.equal(usage.rateLimit.remainingPercent, 100 - utilization * 100)
+    assert.equal(usage.rateLimit.resetsAt, 1800000000000)
+    assert.equal(usage.rateLimit.isUsingOverage, false)
+    assert.equal(usage.rateLimits.length, 1)
+    assert.equal(usage.rateLimits[0].status, status)
+    assert.equal(session.rateLimitUsages.get('five_hour').status, status)
+  }
+
   const commandInput = { command: `python3 ${'x'.repeat(1700)}`, description: '사건기록에서 쟁점 찾기' }
   send({ type: 'stream_event', event: { type: 'content_block_start', content_block: { type: 'tool_use', id: 'shell-tool', name: 'Bash', input: {} } } })
   send({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 'shell-tool', name: 'Bash', input: commandInput }] } })
