@@ -9,6 +9,7 @@ export interface ProcessStep {
   text?: string
   status?: string
   toolName?: string
+  description?: string
   input?: string
   output?: string
   elapsedMs?: number
@@ -24,13 +25,10 @@ const TOOL_ARG_KEYS = [
   'file_path',
   'path',
   'notebook_path',
-  'command',
   'pattern',
   'query',
   'url',
-  'skill',
-  'description',
-  'prompt'
+  'skill'
 ]
 
 const TOOL_ARG_LIMIT = 72
@@ -113,19 +111,20 @@ export function toolStepDisplay(step: ProcessStep): { name: string; arg?: string
     const statusLabel = status && ({ pending: '예정', in_progress: '진행중', completed: '완료', closed: '종료' }[status])
     return { name, ...(title || statusLabel ? { arg: clipArg(title || statusLabel!) } : {}), rawName }
   }
+  const description = (isSubAgentStep(step) ? step.text?.trim() : undefined)
+    || step.description?.trim() || stringValue(input?.description)?.trim()
+  if (description) return { name, arg: clipArg(description), rawName }
   if (input) {
     for (const key of TOOL_ARG_KEYS) {
       const value = stringValue(input[key])
-      if (value) return { name, arg: clipArg(key === 'command' ? value : shortenPathLike(value)), rawName }
+      if (value) return { name, arg: clipArg(shortenPathLike(value)), rawName }
     }
     const todos = recordArray(input.todos)
     if (todos.length > 0) return { name, arg: `${todos.length}개 항목`, rawName }
-  } else if (step.input && (rawName === 'Bash' || rawName === 'Shell')) {
-    // Codex 계열은 inputPreview가 JSON이 아니라 `명령\n작업폴더` 평문으로 온다
-    const command = step.input.split('\n', 1)[0]
-    if (command.trim()) return { name, arg: clipArg(command), rawName }
   }
-  if (step.text && (!step.toolName || isSubAgentStep(step))) return { name, arg: clipArg(step.text), rawName }
+  if (step.text && !step.toolName && !/^(명령 출력|프로세스 출력|프로세스 종료|Codex)(?: · |$)/.test(rawName)) {
+    return { name, arg: clipArg(step.text), rawName }
+  }
   return { name, rawName }
 }
 
@@ -201,7 +200,7 @@ export function ToolRow({
   const { name, arg, rawName } = toolStepDisplay(step)
   const status = step.status ?? 'running'
   const elapsed = stepElapsedLabel(step)
-  const hasDetails = Boolean(step.input || step.output || step.text)
+  const hasDetails = Boolean(step.description || step.input || step.output || step.text)
   const subAgent = isSubAgentStep(step)
   return (
     <div className={`agent-tool-row ${status}`}>
@@ -210,12 +209,14 @@ export function ToolRow({
         className="agent-tool-line"
         aria-expanded={expanded}
         disabled={!hasDetails}
-        title={name === rawName ? name : `${name} · ${rawName}`}
+        title={(subAgent && step.text) || step.description || arg || name}
         onClick={onToggle}
       >
         <span className={`agent-tool-dot ${status}`} aria-hidden="true" />
-        <span className="agent-tool-name">{name}</span>
-        {arg && <span className="agent-tool-arg">({arg})</span>}
+        <span className="agent-tool-label">
+          <span className="agent-tool-name">{name}</span>
+          {arg && <span className="agent-tool-arg"> · {arg}</span>}
+        </span>
         <span className="agent-tool-meta">
           {subAgent && status === 'running' && <span className="agent-tool-flag">실행 중</span>}
           {subAgent && status === 'done' && <span className="agent-tool-flag">완료</span>}
@@ -234,6 +235,12 @@ export function ToolRow({
       </button>
       {expanded && hasDetails && (
         <div className="agent-tool-details">
+          {step.description && (
+            <div className="agent-tool-detail">
+              <span className="agent-tool-detail-label">작업 설명</span>
+              <pre className="agent-process-step-text">{step.description}</pre>
+            </div>
+          )}
           {name !== rawName && (
             <div className="agent-tool-detail">
               <span className="agent-tool-detail-label">도구</span>

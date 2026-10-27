@@ -157,6 +157,7 @@ interface AgentSession {
   assistantText: Map<string, string>
   assistantStreamed: Set<string>
   startedTools: Set<string>
+  proposedDiffTools?: Set<string>
   claudeTasks?: Map<string, ClaudeTask>
   claudeBackgroundTasks?: Set<string>
   queue: QueuedAgentMessage[]
@@ -2286,9 +2287,12 @@ function rememberCodexRateLimits(session: AgentSession, value: unknown): void {
 }
 
 function makeDiffProposal(session: AgentSession, toolId: string, input: Record<string, unknown>): void {
+  if (session.proposedDiffTools?.has(toolId)) return
   const edits = diffEditsFromInput(input)
   const filePath = stringValue(input.file_path)
   if (!filePath && edits.length === 0) return
+  session.proposedDiffTools ??= new Set()
+  session.proposedDiffTools.add(toolId)
   const singleEdit = edits.length === 1 ? edits[0] : undefined
   emit(session, {
     type: 'diff:proposed',
@@ -2331,16 +2335,20 @@ function handleAssistantMessage(session: AgentSession, message: Record<string, u
     if (isAskUserQuestionTool(name)) {
       continue
     }
-    if (session.startedTools.has(toolId)) continue
-    session.startedTools.add(toolId)
-    emit(session, {
-      type: 'tool:start',
-      sessionId: session.id,
-      toolId,
-      name,
-      label: name,
-      inputPreview: safeJsonPreview(input)
-    })
+    if (session.startedTools.has(toolId)) {
+      emit(session, { type: 'tool:input', sessionId: session.id, toolId, inputPreview: safeJsonPreview(input), description: stringValue(input.description) })
+    } else {
+      session.startedTools.add(toolId)
+      emit(session, {
+        type: 'tool:start',
+        sessionId: session.id,
+        toolId,
+        name,
+        label: name,
+        inputPreview: safeJsonPreview(input),
+        description: stringValue(input.description)
+      })
+    }
     if (EDIT_TOOLS.has(name)) makeDiffProposal(session, toolId, input)
   }
 
@@ -2461,7 +2469,8 @@ function handleStreamEvent(session: AgentSession, message: Record<string, unknow
         toolId,
         name,
         label: name,
-        inputPreview: safeJsonPreview(input)
+        inputPreview: safeJsonPreview(input),
+        description: stringValue(input.description)
       })
       if (EDIT_TOOLS.has(name)) makeDiffProposal(session, toolId, input)
     }
@@ -4258,7 +4267,7 @@ function runRemoteAgentMessage(
     let mcpTimer: NodeJS.Timeout | undefined
     const mcpRequest = (): void => {
       mcpRequestId = randomUUID()
-      proc.stdin.write(JSON.stringify({ type: 'control_request', request_id: mcpRequestId, request: { subtype: mcpStage, ...(mcpStage === 'initialize' ? { supportedDialogKinds: CLAUDE_DIALOG_KINDS } : {}), ...(mcpStage === 'mcp_set_servers' ? { servers } : {}) } }) + '\n')
+      proc.stdin.write(JSON.stringify({ type: 'control_request', request_id: mcpRequestId, request: { subtype: mcpStage, ...(mcpStage === 'initialize' ? { supportedDialogKinds: CLAUDE_DIALOG_KINDS, agentProgressSummaries: true } : {}), ...(mcpStage === 'mcp_set_servers' ? { servers } : {}) } }) + '\n')
     }
     const handleMcpBootstrap = (message: Record<string, unknown> | null): void => {
       if (!mcpRequestId || message?.type !== 'control_response') return
@@ -4470,7 +4479,7 @@ function runRemoteAgentMessage(
       mcpTimer = setTimeout(() => { emit(session, { type: 'error', sessionId: session.id, message: `원격 ${label} 도구 연결 시간이 초과되었습니다.`, recoverable: true }); emit(session, { type: 'status', sessionId: session.id, status: 'error' }); proc.kill() }, MCP_STATUS_TIMEOUT_MS)
       mcpRequest()
     } else {
-      proc.stdin.write(JSON.stringify({ type: 'control_request', request_id: randomUUID(), request: { subtype: 'initialize', supportedDialogKinds: CLAUDE_DIALOG_KINDS } }) + '\n')
+      proc.stdin.write(JSON.stringify({ type: 'control_request', request_id: randomUUID(), request: { subtype: 'initialize', supportedDialogKinds: CLAUDE_DIALOG_KINDS, agentProgressSummaries: true } }) + '\n')
       proc.stdin.write(`${remotePromptLine(prompt)}\n`)
     }
   })
@@ -5657,6 +5666,7 @@ function startAgentTurn(session: AgentSession, input: AgentSendInput, codexComma
           },
           includeHookEvents: true,
           includePartialMessages: true,
+          agentProgressSummaries: true,
           enableFileCheckpointing: true,
           env: cleanEnv()
         }

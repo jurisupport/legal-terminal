@@ -52,6 +52,7 @@ let remoteProcess
 let queryFailure
 let onQueryMessage
 const queryPrompts = []
+const queryOptions = []
 runInNewContext(ts.transpileModule(`${serviceSource}\nexport const progressCheck = { sessions, handleSdkMessage, handleRemoteJsonLine, currentSessionStatus, startAgentTurn, runRemoteAgentMessage, handleCodexNotification, handleCodexJsonLine, runCodexAgentMessage, rememberCodexTokenUsage, startCodexProcess, stopCodexProcess, ensureCodexInitialized, ensureCodexThread };`, {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 }
 }).outputText, {
@@ -61,7 +62,8 @@ runInNewContext(ts.transpileModule(`${serviceSource}\nexport const progressCheck
       if (!remoteProcess) throw new Error('Unexpected subprocess')
       return remoteProcess
     } }
-    if (name === '@anthropic-ai/claude-agent-sdk') return { query: ({ prompt }) => {
+    if (name === '@anthropic-ai/claude-agent-sdk') return { query: ({ prompt, options }) => {
+      queryOptions.push(options)
       assert.notEqual(typeof prompt, 'string', 'single-turn SDK input closes before background results arrive')
       const input = prompt[Symbol.asyncIterator]()
       let ended = false
@@ -138,6 +140,24 @@ for (const remote of [false, true]) {
     message: { content: [{ type: 'tool_result', tool_use_id: 'agent-tool', content: 'launched' }] }
   })
 
+  const commandInput = { command: `python3 ${'x'.repeat(1700)}`, description: '사건기록에서 쟁점 찾기' }
+  send({ type: 'stream_event', event: { type: 'content_block_start', content_block: { type: 'tool_use', id: 'shell-tool', name: 'Bash', input: {} } } })
+  send({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 'shell-tool', name: 'Bash', input: commandInput }] } })
+  assert.equal(step('shell-tool').description, commandInput.description, 'full tool input must hydrate the streamed row even when its JSON preview is truncated')
+  assert.match(step('shell-tool').input, /python3/)
+  assert.equal(events.filter((event) => event.type === 'tool:start' && event.toolId === 'shell-tool').length, 1)
+  send({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'shell-tool', content: '검토 완료' }] } })
+  send({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 'shell-tool', name: 'Bash', input: commandInput }] } })
+  assert.equal(step('shell-tool').status, 'done', 'late input hydration must not restart completed work')
+  assert.equal(items.flatMap((item) => item.processSteps ?? []).filter((entry) => entry.id === 'shell-tool').length, 1)
+  send({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 'full-tool', name: 'Bash', input: { command: 'pwd', description: '작업 폴더 확인' } }] } })
+  assert.equal(step('full-tool').description, '작업 폴더 확인', 'non-streamed tools also retain their readable description')
+  const editInput = { file_path: '/tmp/streamed-edit.md', old_string: 'old', new_string: 'new' }
+  send({ type: 'stream_event', event: { type: 'content_block_start', content_block: { type: 'tool_use', id: 'streamed-edit', name: 'Edit', input: {} } } })
+  for (let i = 0; i < 2; i++) send({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 'streamed-edit', name: 'Edit', input: editInput }] } })
+  assert.equal(events.filter((event) => event.type === 'diff:proposed' && event.proposal.toolUseId === 'streamed-edit').length, 1,
+    'hydrated edit input must produce one diff proposal, including repeated full snapshots')
+
   send({ type: 'stream_event', event: { type: 'content_block_start', content_block: { type: 'tool_use', id: 'agent-tool', name: 'Agent', input: {} } } })
   send({ type: 'tool_progress', tool_use_id: 'agent-tool', tool_name: 'Agent', elapsed_time_seconds: 12 })
   assert.equal(activeSubAgentCount(items), 1, 'heartbeat must not replace running status with elapsed seconds')
@@ -158,8 +178,11 @@ for (const remote of [false, true]) {
   send({ type: 'user', parent_tool_use_id: 'agent-tool', message: { content: [{ type: 'tool_result', tool_use_id: 'child-edit', content: 'ok' }] } })
   assert.equal(step('child-edit').status, 'done')
   items.push({ id: 'question-2', kind: 'user' })
-  taskEvent('task_progress', { description: '자료 검토 중', usage: { duration_ms: 24000 } })
+  taskEvent('task_progress', { description: '자료 검토 중', summary: '판결문에서 책임 범위를 비교하는 중', usage: { duration_ms: 24000 } })
   assert.equal(step().elapsedMs, 24000)
+  assert.equal(step().text, '판결문에서 책임 범위를 비교하는 중', 'SDK progress summaries take precedence over original task descriptions')
+  send({ type: 'tool_use_summary', uuid: 'tool-summary', summary: '관련 판례와 기록을 확인했습니다.', preceding_tool_use_ids: ['shell-tool'] })
+  assert.equal(step('tool-summary').text, '관련 판례와 기록을 확인했습니다.')
   taskEvent('task_notification', { status: 'completed', summary: '판례 확인 완료' })
   assert.equal(activeSubAgentCount(items), 0, 'completion after another question must update the original agent row')
   assert.equal(items.filter((item) => item.processSteps?.some((entry) => entry.id === 'agent-tool')).length, 1)
@@ -205,6 +228,7 @@ queryMessages = [{ type: 'system', subtype: 'task_started', task_id: 'unfinished
 startAgentTurn(endedSession, { text: 'Track unfinished child' })
 for (let i = 0; i < 10 && endedSession.running; i++) await new Promise((resolve) => setImmediate(resolve))
 assert.equal(endedSession.running, undefined)
+assert.equal(queryOptions.at(-1).agentProgressSummaries, true, 'normal SDK queries must request readable subagent progress summaries')
 assert.equal(endedEvents.some((event) => event.type === 'process:event' && event.status === 'error'), true,
   'a closed event stream must mark unfinished work as unverified instead of leaving it running')
 assert.equal(endedEvents.filter((event) => event.type === 'status').at(-1).status, 'error')
@@ -251,6 +275,8 @@ endedSession.firstUserText = undefined
 endedSession.running = new AbortController()
 endedSession.claudeTasks = new Map()
 const remoteRun = runRemoteAgentMessage(endedSession, 'Track remote work', endedSession.running)
+assert.equal(writes.find((message) => message.request?.subtype === 'initialize').request.agentProgressSummaries, true,
+  'SSH must request the same summaries through the supported initialize control field')
 const remoteSend = (message) => remoteProcess.stdout.emit('data', Buffer.from(`${JSON.stringify(message)}\n`))
 remoteSend({ type: 'system', subtype: 'background_tasks_changed', tasks: [] })
 remoteSend({ type: 'system', subtype: 'task_started', task_id: 'remote', task_type: 'local_agent', is_backgrounded: true })

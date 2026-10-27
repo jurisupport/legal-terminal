@@ -1394,6 +1394,7 @@ function mergeProcessStep(existing: ProcessStep | undefined, patch: ProcessStepP
     text: patch.text ?? existing?.text,
     status: patch.status ?? existing?.status,
     toolName: patch.toolName ?? existing?.toolName,
+    description: patch.description ?? existing?.description,
     input: patch.input ?? existing?.input,
     output: patch.output ?? existing?.output,
     elapsedMs: patch.elapsedMs ?? existing?.elapsedMs
@@ -1578,7 +1579,17 @@ function reduceTimeline(items: TimelineItem[], event: AgentEvent, agentLabel: st
       title: `도구 · ${name}`,
       toolName: name,
       input: stringValue(event.inputPreview),
+      description: stringValue(event.description),
       status: 'running'
+    })
+  }
+  if (event.type === 'tool:input') {
+    const id = stringValue(event.toolId)
+    if (!id) return items
+    return upsertProcessStep(items, {
+      id,
+      input: stringValue(event.inputPreview),
+      description: stringValue(event.description)
     })
   }
   if (event.type === 'tool:done') {

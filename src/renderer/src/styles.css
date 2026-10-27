@@ -5691,8 +5691,14 @@ button.agent-attachment-chip {
 .agent-tool-dot.canceled {
   background: #6a6a6a;
 }
+.agent-tool-label {
+  flex: 1;
+  min-width: 0;
+  word-break: keep-all;
+  overflow-wrap: anywhere;
+}
 .agent-tool-name {
-  flex: 0 0 auto;
+  white-space: nowrap;
   color: #b8c4d0;
   font-family: var(--font-mono);
   font-size: var(--agent-small-font-size);
@@ -5701,15 +5707,12 @@ button.agent-attachment-chip {
   color: #d9e2ea;
 }
 .agent-tool-arg {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
   color: var(--fg-muted);
-  font-family: var(--font-mono);
-  font-size: var(--agent-micro-font-size);
+  font-size: var(--agent-small-font-size);
 }
 .agent-tool-meta {
+  flex: 0 0 auto;
+  white-space: nowrap;
   margin-left: auto;
   display: inline-flex;
   align-items: center;

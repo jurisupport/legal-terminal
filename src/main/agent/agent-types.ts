@@ -284,7 +284,8 @@ export type AgentEvent =
   | { type: 'queue:promoted'; sessionId: string; queueId: string; position: number }
   | { type: 'queue:removed'; sessionId: string; queueId: string }
   | { type: 'queue:cleared'; sessionId: string; queueIds: string[] }
-  | { type: 'tool:start'; sessionId: string; toolId: string; name: string; label: string; inputPreview?: string }
+  | { type: 'tool:start'; sessionId: string; toolId: string; name: string; label: string; inputPreview?: string; description?: string }
+  | { type: 'tool:input'; sessionId: string; toolId: string; inputPreview?: string; description?: string }
   | { type: 'tool:done'; sessionId: string; toolId: string; outputPreview?: string; elapsedMs?: number; isError?: boolean }
   | { type: 'permission:request'; request: AgentPermissionRequest }
   | { type: 'permission:resolved'; sessionId: string; requestId: string; decision: 'allow' | 'reject' }
