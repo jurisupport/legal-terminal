@@ -161,6 +161,7 @@ interface AgentSession {
   claudeTasks?: Map<string, ClaudeTask>
   claudeBackgroundTasks?: Set<string>
   queue: QueuedAgentMessage[]
+  turnUserMessageId?: string
   turnAssistantMessageId?: string
   activeAssistantMessageId?: string
   running?: AbortController
@@ -1664,9 +1665,10 @@ function startAssistant(session: AgentSession, messageId: string): void {
   emit(session, { type: 'message:assistant_start', sessionId: session.id, messageId })
 }
 
-function completeAssistant(session: AgentSession, messageId: string): void {
+function completeAssistant(session: AgentSession, messageId: string, transcriptId?: string): void {
   if (!session.assistantMessages.has(messageId)) return
-  emit(session, { type: 'message:assistant_done', sessionId: session.id, messageId })
+  emit(session, { type: 'message:assistant_done', sessionId: session.id, messageId,
+    ...(transcriptId ? { transcriptId } : {}) })
 }
 
 function commonOverlapLength(left: string, right: string): number {
@@ -2365,7 +2367,7 @@ function handleAssistantMessage(session: AgentSession, message: Record<string, u
     rememberClaudeUsageSummary(session, snapshot)
     reconcileAssistantSnapshot(session, messageId, snapshot)
   }
-  completeAssistant(session, messageId)
+  completeAssistant(session, messageId, stringValue(message.uuid))
   if (session.activeAssistantMessageId === messageId) session.activeAssistantMessageId = undefined
 }
 
@@ -3898,9 +3900,10 @@ function handleRemoteJsonLine(session: AgentSession, line: string): Record<strin
   }
 }
 
-function remotePromptLine(prompt: string): string {
+function remotePromptLine(prompt: string, messageId?: string): string {
   return JSON.stringify({
     type: 'user',
+    ...(messageId ? { uuid: messageId } : {}),
     session_id: '',
     message: {
       role: 'user',
@@ -4288,7 +4291,7 @@ function runRemoteAgentMessage(
         if (session.projectMcp) session.projectMcpReady = true
         if (session.managedMcp) session.managedMcpReady = true
         if (mcpTimer) clearTimeout(mcpTimer)
-        proc.stdin.write(`${remotePromptLine(prompt)}\n`)
+        proc.stdin.write(`${remotePromptLine(prompt, session.turnUserMessageId)}\n`)
       } catch (error) {
         processFailed = true
         emit(session, { type: 'error', sessionId: session.id, message: String(error), recoverable: true })
@@ -4480,7 +4483,7 @@ function runRemoteAgentMessage(
       mcpRequest()
     } else {
       proc.stdin.write(JSON.stringify({ type: 'control_request', request_id: randomUUID(), request: { subtype: 'initialize', supportedDialogKinds: CLAUDE_DIALOG_KINDS, agentProgressSummaries: true } }) + '\n')
-      proc.stdin.write(`${remotePromptLine(prompt)}\n`)
+      proc.stdin.write(`${remotePromptLine(prompt, session.turnUserMessageId)}\n`)
     }
   })
 }
@@ -5539,6 +5542,7 @@ function startAgentTurn(session: AgentSession, input: AgentSendInput, codexComma
     session.claudeBackgroundTasks = undefined
   }
   session.turnAssistantMessageId = assistantMessageId
+  session.turnUserMessageId = messageId
   session.activeAssistantMessageId = assistantMessageId
   const userDisplayText = agentInputDisplayText(input)
   if (!session.firstUserText) session.firstUserText = userDisplayText
@@ -5625,7 +5629,7 @@ function startAgentTurn(session: AgentSession, input: AgentSendInput, codexComma
           await ready
           if (abortController.signal.aborted || !setupSucceeded) return
           assertManagedAccount(session)
-          yield { type: 'user' as const, session_id: '', parent_tool_use_id: null, message: { role: 'user' as const, content: prompt } }
+          yield { type: 'user' as const, uuid: messageId, session_id: '', parent_tool_use_id: null, message: { role: 'user' as const, content: prompt } }
           await inputFinished
         })(),
         options: {

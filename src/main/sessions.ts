@@ -987,20 +987,24 @@ function parseTranscriptMessages(
     } catch {
       continue
     }
-    if (entry.isMeta === true) continue
+    if (entry.isMeta === true || entry.isSidechain === true) continue
     const message = recordValue(entry.message)
     const roleValue = typeof message?.role === 'string' ? message.role : entry.type
     const role = roleValue === 'user' || roleValue === 'assistant' ? roleValue : undefined
     if (!role || !message) continue
     if (role === 'assistant') model = typeof message.model === 'string' ? message.model : model
     const text = extractTranscriptText(message.content).trim()
-    const visibleText = role === 'user' ? cleanUserInstruction(text, true) : text
+    const visibleText = role === 'user'
+      ? cleanUserInstruction(text, true) ?? (text.includes('[legal-terminal attachments]') ? '[첨부 자료]' : undefined)
+      : text
     if (!visibleText) continue
     const timestamp = typeof entry.timestamp === 'number'
       ? entry.timestamp
       : typeof entry.timestamp === 'string' ? Date.parse(entry.timestamp) : NaN
     messages.push({
-      id: `${sessionId}-history-${lineIndex}`,
+      id: typeof entry.uuid === 'string' && entry.uuid
+        ? entry.uuid
+        : `${sessionId}-history-${lineIndex}`,
       role,
       text: clipTranscriptText(visibleText),
       ...(Number.isFinite(timestamp) ? { timestamp } : {})

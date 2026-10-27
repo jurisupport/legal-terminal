@@ -181,6 +181,7 @@ export interface AgentDraftState {
 
 interface TimelineItem {
   id: string
+  transcriptIds?: string[]
   timestamp?: number
   kind:
     | 'user'
@@ -1516,7 +1517,11 @@ function reduceTimeline(items: TimelineItem[], event: AgentEvent, agentLabel: st
   if (event.type === 'message:assistant_done') {
     const id = stringValue(event.messageId)
     if (!id) return items
-    return items.map((item) => (item.id === id ? { ...item, status: 'done' } : item))
+    const nativeId = stringValue(event.transcriptId)
+    return items.map(item => item.id === id ? {
+      ...item, status: 'done',
+      ...(nativeId ? { transcriptIds: [...new Set([...(item.transcriptIds ?? []), `history-${nativeId}`])] } : {})
+    } : item)
   }
   if (event.type === 'process:event') {
     return upsertProcessStep(items, {
@@ -1852,6 +1857,65 @@ function transcriptToTimeline(transcript: SessionTranscript, agentLabel: string)
   }))
 }
 
+function mergeTranscriptTimeline(current: TimelineItem[], history: TimelineItem[]): TimelineItem[] {
+  if (!history.length) return current
+  const merged = [...current]
+  const known = (item: TimelineItem, saved: TimelineItem): boolean =>
+    item.id === saved.id || `history-${item.id}` === saved.id || Boolean(item.transcriptIds?.includes(saved.id))
+  // A bounded snapshot with no overlap is newer than the already displayed history.
+  let cursor = history.some(saved => current.some(item => known(item, saved))) ? 0 : current.length
+  let changed = false
+  for (let start = 0; start < history.length;) {
+    let end = start + 1
+    while (end < history.length && history[end].kind !== 'user') end++
+    const turn = history.slice(start, end)
+    const user = turn[0]
+    if (user.kind === 'user') {
+      let index = merged.findIndex(item => item.kind === 'user' && known(item, user))
+      if (index < 0) {
+        // Replayed older runs can have a different user UUID; their response UUIDs still identify the turn.
+        index = merged.findIndex(item => item.kind === 'assistant' && !item.id.startsWith('history-') &&
+          turn.some(saved => known(item, saved)))
+        while (index >= 0 && merged[index].kind !== 'user') index--
+      }
+      if (index >= 0 && !merged[index].id.startsWith('history-')) {
+        const ids = new Set(merged[index].transcriptIds)
+        for (const item of turn) ids.add(item.id)
+        if (ids.size !== merged[index].transcriptIds?.length) {
+          merged[index] = { ...merged[index], transcriptIds: [...ids] }
+          changed = true
+        }
+        // A local answer combines native blocks and owns its tools, attachments and approvals.
+        cursor = index + 1
+        while (cursor < merged.length && merged[cursor].kind !== 'user') cursor++
+        start = end
+        continue
+      }
+    }
+    for (const item of turn) {
+      const owner = merged.findIndex(existing => existing.transcriptIds?.includes(item.id))
+      if (owner >= 0) {
+        cursor = owner + 1
+        while (cursor < merged.length && merged[cursor].kind !== 'user') cursor++
+        continue
+      }
+      const index = merged.findIndex(existing => existing.id === item.id)
+      if (index >= 0) {
+        if (merged[index].text !== item.text) {
+          merged[index] = { ...merged[index], text: item.text }
+          changed = true
+        }
+        cursor = index + 1
+      } else {
+        merged.splice(cursor++, 0, item)
+        changed = true
+      }
+    }
+    start = end
+  }
+  return changed ? merged : current
+}
+
 function historyBeforeRestoredTurn(items: TimelineItem[], startedAt?: number): TimelineItem[] {
   return startedAt === undefined ? items : items.filter((item) =>
     !item.id.startsWith('history-') || item.timestamp === undefined || item.timestamp < startedAt
@@ -2033,6 +2097,7 @@ export default function AgentPanel({
   const copyFeedbackTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const loadedHistoryKeyRef = useRef<string | null>(null)
   const historyLoadRef = useRef<Promise<void>>()
+  const liveHistoryPendingRef = useRef(false)
   const pendingHistorySendRef = useRef<Promise<void>>()
   const restoredTurnStartedAtRef = useRef<number>()
   const hasLiveMessagesRef = useRef(false)
@@ -2480,6 +2545,57 @@ export default function AgentPanel({
       if (pendingHistorySendRef.current === historyLoad) pendingHistorySendRef.current = undefined
     }
   }, [agentLabel, provider, rememberPrompts, resumeSessionId, ssh])
+
+  useEffect(() => {
+    if (provider !== 'claude' || !resumeSessionId || !visible || isActiveAgentStatus(status)) return
+    let alive = true
+    let revision = 0
+    let busy = false
+    const off = window.lt.agent.onEvent(event => {
+      if (eventSessionId(event) !== id) return
+      if (event.type === 'message:user' || event.type === 'session:restored') {
+        revision++
+        busy = true
+      }
+      if (event.type === 'status') {
+        revision++
+        busy = event.status === 'working' || event.status === 'waiting_permission' || event.status === 'waiting_user'
+      }
+    })
+    const refresh = async (): Promise<void> => {
+      if (!alive || liveHistoryPendingRef.current || busy || document.hidden) return
+      liveHistoryPendingRef.current = true
+      const requestedRevision = revision
+      try {
+        await historyLoadRef.current
+        if (!alive || busy || requestedRevision !== revision || document.hidden) return
+        const transcript = await loadSessionTranscript(resumeSessionId, ssh, { refresh: true })
+        if (!alive || busy || requestedRevision !== revision || document.hidden || !transcript?.messages.length) return
+        setResumedModel(transcript.model ?? null)
+        const history = transcriptToTimeline(transcript, agentLabel)
+        setItems(current => alive && !busy && requestedRevision === revision
+          ? mergeTranscriptTimeline(current, history) : current)
+      } catch {
+        // Keep the displayed conversation during a disconnect; the next poll retries.
+      } finally {
+        liveHistoryPendingRef.current = false
+      }
+    }
+    const wake = (): void => { void refresh() }
+    const timer = setInterval(wake, 2500)
+    window.addEventListener('focus', wake)
+    window.addEventListener('online', wake)
+    document.addEventListener('visibilitychange', wake)
+    wake()
+    return () => {
+      alive = false
+      off()
+      clearInterval(timer)
+      window.removeEventListener('focus', wake)
+      window.removeEventListener('online', wake)
+      document.removeEventListener('visibilitychange', wake)
+    }
+  }, [agentLabel, id, provider, resumeSessionId, ssh, status, visible])
 
   useEffect(() => {
     if (!modeMenuOpen) return

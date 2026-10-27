@@ -27,6 +27,7 @@ function runApp({ root, temp, appMain }) {
   }
   const sharedCases = new Map([[cwd, snapshot]])
   const knownTabs = new Map()
+  const phoneMessages = [{ id: 'phone-user-1', role: 'user', text: '폰에서 보낸 질문' }]
   let releaseStartupDiscovery
   const startupDiscovery = new Promise(resolve => { releaseStartupDiscovery = resolve })
   let delayStartupDiscovery = true
@@ -65,7 +66,8 @@ function runApp({ root, temp, appMain }) {
     if (channel === 'fs:listDocumentDrafts') return { ok: true, entries: [] }
     if (['case:getPairing', 'case:getJsPairing', 'sessions:current'].includes(channel)) return null
     if (channel === 'sessions:remember') return undefined
-    if (channel === 'sessions:transcript') return { sessionId: 'phone-session', messages: [{ role: 'user', text: '폰에서 보낸 질문' }] }
+    if (channel === 'sessions:transcript') return { sessionId: args[0].sessionId,
+      messages: args[0].sessionId === 'phone-session' ? structuredClone(phoneMessages) : [] }
     if (channel === 'workspace:autoList') {
       if (args[0] && delayNextDiscovery) {
         const delay = delayNextDiscovery
@@ -150,6 +152,29 @@ function runApp({ root, temp, appMain }) {
       assert.equal(await evaluate(`document.body.innerText.includes('빈 에이전트 탭')`), true)
       assert.equal(await evaluate(`!!document.querySelector('.workspace-restore-prompt')`), false)
       assert.equal(calls.some((call) => call.channel === 'agent:send' || call.channel === 'dialog:message'), false)
+      await evaluate(`Object.defineProperty(document, 'hidden', { configurable: true, value: false }); window.dispatchEvent(new Event('focus'))`)
+      await wait(() => evaluate(`document.body.innerText.includes('폰에서 보낸 질문')`))
+      await evaluate(`(() => {
+        const input = [...document.querySelectorAll('.agent-composer textarea')].find(el => el.offsetParent);
+        Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set.call(input, 'PC에서 작성 중인 초안');
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+      })()`)
+      phoneMessages.push({ id: 'phone-user-2', role: 'user', text: '폰에서 추가한 실시간 질문' },
+        { id: 'phone-answer-2', role: 'assistant', text: '폰 작업의 새 답변' })
+      await wait(() => evaluate(`document.body.innerText.includes('폰 작업의 새 답변')`))
+      assert.equal(await evaluate(`[...document.querySelectorAll('.agent-composer textarea')].find(el => el.offsetParent).value`),
+        'PC에서 작성 중인 초안', 'polling does not replace the draft')
+      assert.equal(await evaluate(`[...document.querySelectorAll('.agent-msg.user')].filter(el => el.innerText.includes('폰에서 추가한 실시간 질문')).length`), 1)
+      phoneMessages.at(-1).text = '폰 작업의 새 답변 완성'
+      await evaluate(`window.dispatchEvent(new Event('focus'))`)
+      await wait(() => evaluate(`document.body.innerText.includes('폰 작업의 새 답변 완성')`))
+      assert.equal(await evaluate(`[...document.querySelectorAll('.agent-msg.assistant')].filter(el => el.innerText.includes('폰 작업의 새 답변')).length`), 1,
+        'remote answer growth updates the existing bubble')
+      await evaluate(`(() => {
+        const input = [...document.querySelectorAll('.agent-composer textarea')].find(el => el.offsetParent);
+        Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set.call(input, '');
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+      })()`)
       await wait(() => calls.some((call) => call.channel === 'workspace:autoSave'))
       const saved = calls.find((call) => call.channel === 'workspace:autoSave').args[0].snapshot
       assert.deepEqual(saved.terminals.map((tab) => tab.id).sort(), ['blank-agent', 'mobile-agent'])

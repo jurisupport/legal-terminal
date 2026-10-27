@@ -96,6 +96,8 @@ for (const provider of ['claude', 'ssh', 'codex']) {
     assert.equal(view.items()[0].text, chunks.join(''), `${provider}: the final answer must not append a second copy`)
     assert.equal(streamed, chunks.join(''), `${provider}: repeated text and whitespace must survive streaming`)
     assert.equal(view.items()[0].status, 'done')
+    if (provider !== 'codex') assert.deepEqual(Array.from(view.items()[0].transcriptIds), ['history-native-answer-1'],
+      `${provider}: native response IDs survive repeated completion events for live history matching`)
     view.session.turnAssistantMessageId = 'answer-2'
     view.reply(chunks, 'native-answer-2')
     assert.equal(view.items().length, 2, `${provider}: a new turn may intentionally repeat the previous answer`)
@@ -106,5 +108,7 @@ for (const provider of ['claude', 'ssh', 'codex']) {
   view.reply(['검토 결과:\n', '- 확인 필요\n', '- 확인 필요\n', '이상입니다.'], 'native-answer-2')
   assert.equal(view.items().map((item) => item.text).join(''), '먼저 자료를 확인하겠습니다.\n\n검토 결과:\n- 확인 필요\n- 확인 필요\n이상입니다.',
     `${provider}: later replies in the same turn must preserve earlier output`)
+  if (provider !== 'codex') assert.deepEqual(Array.from(view.items()[0].transcriptIds), ['history-native-answer-1', 'history-native-answer-2'],
+    'one rich local answer retains every native response identity')
 }
 console.log('agent response text: local Claude, SSH and Codex preserve repeated text across chunk boundaries without duplicating completed replies')
