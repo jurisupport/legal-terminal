@@ -580,7 +580,8 @@ assert.equal(endedSession.running, undefined, 'an unavailable context sample mus
 const eventBranch = (eventType, context) => {
   let branch
   const visit = (node) => {
-    if (ts.isIfStatement(node) && node.expression.getText(panelAst) === `event.type === '${eventType}'`) branch = node
+    if (ts.isIfStatement(node) && node.expression.getText(panelAst) === `event.type === '${eventType}'`
+      && node.thenStatement.getText(panelAst).includes(eventType === 'status' ? 'setStatus(' : 'setUsage(')) branch = node
     ts.forEachChild(node, visit)
   }
   visit(panelAst)
