@@ -9,6 +9,8 @@ import ts from 'typescript'
 import * as shared from '../src/shared/sharedUiState.ts'
 
 const root = await mkdtemp(join(tmpdir(), 'lt-shared-ui-'))
+const shell = process.platform === 'win32' ? join(process.env.ProgramFiles || 'C:/Program Files', 'Git/bin/bash.exe') : '/bin/sh'
+const shellHome = process.platform === 'win32' ? root.replace(/\\/g, '/').replace(/^([A-Za-z]):/, (_, drive) => `/${drive.toLowerCase()}`) : root
 const require = createRequire(import.meta.url)
 const code = ts.transpileModule(await readFile(new URL('../src/main/sharedUi.ts', import.meta.url), 'utf8'), {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 }
@@ -18,10 +20,10 @@ const mocks = {
   '../shared/sharedUiState': shared,
   './sshOptions': { buildSshArgs: () => [] },
   child_process: {
-    execFile: (_bin, args, options, callback) => execFile('/bin/sh', ['-c', args.at(-1)],
-      { ...options, env: { ...process.env, HOME: root } }, callback),
-    spawn: (_bin, args, options) => spawn('/bin/sh', ['-c', args.at(-1)],
-      { ...options, env: { ...process.env, HOME: root } })
+    execFile: (_bin, args, options, callback) => execFile(shell, ['-c', args.at(-1)],
+      { ...options, env: { ...process.env, HOME: shellHome } }, callback),
+    spawn: (_bin, args, options) => spawn(shell, ['-c', args.at(-1)],
+      { ...options, env: { ...process.env, HOME: shellHome } })
   }
 }
 vm.runInNewContext(`${code}\nmodule.exports.transactionScript = transactionScript`, { module, exports: module.exports, require: (id) => mocks[id] ?? require(id),
@@ -46,7 +48,7 @@ try {
   let state = (await api.readSharedUi(ssh)).state
   assert.equal(state.revision, 2)
   assert.equal(Object.keys(state.cases[caseKey].documents).length, 2)
-  assert.equal((await stat(stateFile)).mode & 0o777, 0o600)
+  if (process.platform !== 'win32') assert.equal((await stat(stateFile)).mode & 0o777, 0o600)
   state.extra = { preserved: true }
   await writeFile(stateFile, JSON.stringify(state))
   await api.applySharedUi(ssh, op('selection', { type: 'selection', tab: { kind: 'document', id: '/사건/증거.pdf' } }))
@@ -86,7 +88,7 @@ try {
   assert.equal((await api.applySharedUi(ssh, op('bad', { type: 'document', path: 'relative', open: true }))).ok, false)
   const original = await readFile(stateFile, 'utf8')
   const interruptedWrite = (input) => new Promise((resolve, reject) => {
-    const child = spawn('/bin/sh', ['-c', api.transactionScript], { env: { ...process.env, HOME: root } })
+    const child = spawn('/bin/sh', ['-c', api.transactionScript], { env: { ...process.env, HOME: shellHome } })
     child.on('error', reject)
     child.stdout.once('data', () => child.stdin.end(input))
     child.stdin.on('error', () => {})

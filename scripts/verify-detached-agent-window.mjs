@@ -16,6 +16,13 @@ function runApp({ root, temp, closeMode }) {
   const { app, BrowserWindow, ipcMain, screen, session } = require('electron')
   const assert = require('node:assert/strict')
   const calls = [], errors = [], windows = [], sessions = new Map()
+  const fs = require('node:fs'), path = require('node:path')
+  const sharedUiModule = { exports: {} }, uiStates = new Map()
+  const ts = require(path.join(root, 'node_modules/typescript'))
+  const code = ts.transpileModule(fs.readFileSync(path.join(root, 'src/shared/sharedUiState.ts'), 'utf8'), {
+    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 }
+  }).outputText
+  require('node:vm').runInNewContext(code, { module: sharedUiModule, exports: sharedUiModule.exports })
   const movedAgentOwners = new Map()
   let draggedAgentId
   const profile = { id: 'detached-test', label: '검증 서버', host: 'example.invalid', user: 'test' }
@@ -84,6 +91,13 @@ function runApp({ root, temp, closeMode }) {
       ...snapshot,
       terminals: snapshot.terminals.filter(tab => !movedAgentOwners.has(tab.id) || movedAgentOwners.get(tab.id) === event.sender.id)
     } : null } }
+    if (channel === 'workspace:sharedUiRead' || channel === 'workspace:sharedUiApply') {
+      const host = `${args[0].user}@${args[0].host}:${args[0].port ?? 22}`
+      const state = uiStates.get(host) ?? sharedUiModule.exports.emptySharedUiState()
+      if (channel === 'workspace:sharedUiApply') sharedUiModule.exports.applySharedUiOperation(state, args[1])
+      uiStates.set(host, state)
+      return { ok: true, state: structuredClone(state) }
+    }
     if (channel === 'workspace:autoObserve') return undefined
     if (channel === 'workspace:autoSave') {
       if (windowId === blockedSaveWindow) return new Promise(() => {})

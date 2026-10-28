@@ -17,6 +17,12 @@ function runApp({ root, temp, screenshotDir }) {
   const { app, BrowserWindow, WebContentsView, ipcMain, session } = require('electron')
   const fs = require('node:fs'), path = require('node:path'), assert = require('node:assert/strict')
   const calls = [], errors = [], unexpected = [], agents = new Map(), views = new Map()
+  const sharedUiModule = { exports: {} }, uiStates = new Map()
+  const ts = require(path.join(root, 'node_modules/typescript'))
+  const code = ts.transpileModule(fs.readFileSync(path.join(root, 'src/shared/sharedUiState.ts'), 'utf8'), {
+    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 }
+  }).outputText
+  require('node:vm').runInNewContext(code, { module: sharedUiModule, exports: sharedUiModule.exports })
   const profile = { id: 'remote-one', label: '원격1 · Mac', host: 'example.invalid', user: 'lawyer' }
   const settings = { sshProfiles: [profile], caseOpenTarget: 'remote:remote-one', notifyDone: false, agentDefaultProvider: 'claude', claudeRemoteConnections: [] }
   const originalSsh = JSON.stringify(settings.sshProfiles)
@@ -60,6 +66,13 @@ function runApp({ root, temp, screenshotDir }) {
     if (channel === 'workspace:autoList') return { ok: true, snapshots: [] }
     if (channel === 'workspace:autoLoad') return { ok: true, remote: { ok: true, snapshot: null } }
     if (channel === 'workspace:autoSave') return { ok: true }
+    if (channel === 'workspace:sharedUiRead' || channel === 'workspace:sharedUiApply') {
+      const host = `${args[0].user}@${args[0].host}:${args[0].port ?? 22}`
+      const state = uiStates.get(host) ?? sharedUiModule.exports.emptySharedUiState()
+      if (channel === 'workspace:sharedUiApply') sharedUiModule.exports.applySharedUiOperation(state, args[1])
+      uiStates.set(host, state)
+      return { ok: true, state: structuredClone(state) }
+    }
     if (channel === 'workspace:autoObserve') return
     if (channel === 'workspace:list') return { ok: true, entries: [] }
     if (channel === 'agent:models') return { ok: true, models: [] }

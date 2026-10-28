@@ -81,7 +81,7 @@ for (const kind of ['doc', 'term']) {
       termStatus: new Map([[target.id, 'working']]),
       docSide: () => 'left', docKey: (id) => `doc:${id}`, workKeysForSide: () => [],
       resolveActiveWorkKey: () => '', nextWorkKeyAfterClose: () => '',
-      activateWorkKeyAfterClose: noop, setActiveDoc: noop,
+      activateWorkKeyAfterClose: noop, setActiveDoc: noop, shareDocument: noop,
       setDirtyDocs: (update) => { dirty.current = update(dirty.current) },
       setPdfStatus: (update) => { update({}) },
       setDocTabs: (update) => { refs.current = update(refs.current) },
