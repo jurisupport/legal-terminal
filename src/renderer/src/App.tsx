@@ -109,6 +109,7 @@ import {
 } from './caseFolderMatch'
 import { mergeWorkspaceSessions } from './workspaceSessions'
 import { agentTabsOnly, isAgentTabClosed } from '../../shared/workspaceAgentTabs'
+import type { SharedUiActivity, SharedUiOperation, SharedUiState, SharedUiTab } from '../../shared/sharedUiState'
 import { isGeneralChatDirectory } from '../../shared/generalChat'
 import type {
   AppSettings,
@@ -1734,11 +1735,64 @@ export default function App(): JSX.Element {
   const pendingAgentClosesRef = useRef(new Map<string, TermTab[]>())
   const [retainedSharedCases, setRetainedSharedCases] = useState<Set<string>>(new Set())
   const refreshAutomaticCasesRef = useRef<() => Promise<void>>(async () => {})
+  const sharedUiSendRef = useRef<(tab: CaseWorkspaceTab | undefined, operation: SharedUiOperation) => void>(() => {})
+  const sharedUiRefreshRef = useRef<() => Promise<void>>(async () => {})
+  const sharedUiRunsRef = useRef(new Map<string, { runId: string; sequence: number }>())
+  const sharedUiSequenceRef = useRef(0)
+  const sharedUiLoadingRef = useRef(false)
+  const sharedUiQueueRef = useRef<{ host: string; operation: SharedUiOperation }[]>(
+    (() => { try { const value = JSON.parse(localStorage.getItem('shared-ui-pending') ?? '[]'); return Array.isArray(value) ? value : [] } catch { return [] } })()
+  )
+  const sharedUiChainRef = useRef<Promise<void>>(Promise.resolve())
+  const sharedUiActivitiesRef = useRef(new Map<string, Record<string, SharedUiActivity>>())
+  const sharedUiOpenAgentsRef = useRef(new Map<string, Set<string>>())
+  const observedSharedUiHostsRef = useRef(new Set<string>())
+  const sharedUiSeenSelectionsRef = useRef(new Map<string, string>())
+  const sharedUiPendingSelectionsRef = useRef(new Map<string, string>())
+  const [sharedUiActivities, setSharedUiActivities] = useState(new Map<string, Record<string, SharedUiActivity>>())
+  const sharedUiCaseKey = (tab: CaseWorkspaceTab): string => JSON.stringify([
+    (tab.remotePath ?? parseRemoteUri(tab.drafts)?.path ?? tab.drafts).normalize('NFC').replace(/\/+$/, '') || '/',
+    tab.meta?.jsId ?? ''
+  ])
+  const sharedUiCase = (id: string | undefined): CaseWorkspaceTab | undefined =>
+    caseTabsRef.current.find((tab) => tab.id === id && !!tab.ssh && !!tab.profileId)
+  const sharedUiActivityId = (term: TermTab): string => isAgentTab(term) ? term.id : `terminal:${term.id}`
+  const sharedUiDocumentPath = (path: string | undefined, tab: CaseWorkspaceTab): string | undefined => {
+    if (!path) return undefined
+    const remote = parseRemoteUri(path)
+    if (!remote || remote.profileId !== tab.profileId) return undefined
+    return remote.path.normalize('NFC').replace(/\/+$/, '') || '/'
+  }
+  const shareSelection = (tab: CaseWorkspaceTab | undefined, target: SharedUiTab | null): void => {
+    if (tab) sharedUiSendRef.current(tab, { id: newId(), type: 'selection', caseKey: sharedUiCaseKey(tab), tab: target })
+  }
+  const shareDocument = (doc: DocTab, open: boolean): void => {
+    const tab = sharedUiCase(doc.caseTabId ?? inferCaseTabIdForPath(doc.path, caseTabsRef.current))
+    const path = tab && sharedUiDocumentPath(doc.path, tab)
+    if (tab && path) sharedUiSendRef.current(tab, { id: newId(), type: 'document', caseKey: sharedUiCaseKey(tab), path, open })
+  }
+  const shareAcknowledgement = (id: string): void => {
+    const term = termTabsRef.current.find((item) => item.id === id)
+    const tab = term && sharedUiCase(caseIdForTerm(term))
+    const activityId = term && sharedUiActivityId(term)
+    const activity = tab && activityId ? sharedUiActivitiesRef.current.get(tab.id)?.[activityId] : undefined
+    if (tab && activity?.attention) sharedUiSendRef.current(tab, {
+      id: newId(), type: 'ack', caseKey: sharedUiCaseKey(tab), agentId: activityId!, runId: activity.runId, sequence: activity.sequence
+    })
+  }
+  const clearSharedTermActivity = (term: TermTab): void => {
+    const tab = sharedUiCase(caseIdForTerm(term))
+    const run = sharedUiRunsRef.current.get(term.id)
+    if (tab && run) sharedUiSendRef.current(tab, { id: newId(), type: 'activity', caseKey: sharedUiCaseKey(tab),
+      agentId: sharedUiActivityId(term), runId: run.runId, sequence: ++run.sequence, status: 'idle', attention: false, start: false })
+    sharedUiRunsRef.current.delete(term.id)
+  }
   const automaticCasesLoadingRef = useRef(false)
   const observedWorkspaceHostsRef = useRef(new Set<string>())
   const automaticCasesRefreshPendingRef = useRef(false)
   const automaticCasesRefreshActiveRef = useRef(false)
   const [workspaceSyncError, setWorkspaceSyncError] = useState('')
+  const [sharedUiConflict, setSharedUiConflict] = useState('')
   const autoWorkspaceSaveChainRef = useRef<Promise<void>>(Promise.resolve())
   const saveAllCaseWorkspacesRef = useRef<() => Promise<boolean>>(async () => true)
   const agentAttachmentRequestsRef = useRef<Record<string, AgentAttachmentRequest[]>>({})
@@ -2068,6 +2122,9 @@ export default function App(): JSX.Element {
   const activateDocTab = (id: string): void => {
     const tab = docTabs.find((t) => t.id === id)
     const caseTabIdValue = tab?.caseTabId ?? activeCaseTabId
+    const sharedCase = sharedUiCase(caseTabIdValue)
+    const path = sharedCase && sharedUiDocumentPath(tab?.path, sharedCase)
+    if (path) shareSelection(sharedCase, { kind: 'document', id: path })
     clearCaseDocumentUpdates(caseTabIdValue, tab?.path)
     setActiveDoc(id)
     const side = docSide(tab)
@@ -2338,19 +2395,30 @@ export default function App(): JSX.Element {
     setActiveDoc(tab.id)
     setWorkActive(side, docKey(tab.id))
   }
-  const setDocPath = (id: string, path: string): void =>
+  const setDocPath = (id: string, path: string): void => {
+    const existing = docTabsRef.current.find((tab) => tab.id === id)
+    if (existing && existing.path !== path) {
+      if (existing.path) shareDocument(existing, false)
+      const next = { ...existing, path }
+      shareDocument(next, true)
+      const sharedCase = sharedUiCase(next.caseTabId)
+      const sharedPath = sharedCase && sharedUiDocumentPath(path, sharedCase)
+      if (sharedPath) shareSelection(sharedCase, { kind: 'document', id: sharedPath })
+    }
     setDocTabs((tabs) =>
       tabs.map((t) =>
         t.id === id ? { ...t, path, title: path.split(/[\\/]/).pop() ?? t.title } : t
       )
     )
-  const closeDoc = async (id: string, opts: { confirmDirty?: boolean } = {}): Promise<boolean> => {
+  }
+  const closeDoc = async (id: string, opts: { confirmDirty?: boolean; fromSync?: boolean } = {}): Promise<boolean> => {
     let tab = docTabsRef.current.find((t) => t.id === id)
     if (!tab) return false
     const confirmDirty = opts.confirmDirty ?? true
     if (confirmDirty && dirtyDocsRef.current.has(id) && !(await confirmCloseDirtyDocs('tab', tab.title))) return false
     tab = docTabsRef.current.find((t) => t.id === id)
     if (!tab) return false
+    if (!opts.fromSync) shareDocument(tab, false)
     const side = docSide(tab)
     const closingKey = docKey(id)
     const sideKeys = workKeysForSide(visibleDocTabs, visibleTermTabs, side)
@@ -2358,6 +2426,17 @@ export default function App(): JSX.Element {
       resolveActiveWorkKey(sideKeys, activeWork[side]) === closingKey
         ? nextWorkKeyAfterClose(sideKeys, closingKey)
         : undefined
+    if (!opts.fromSync && nextKey !== undefined) {
+      const sharedCase = sharedUiCase(tab.caseTabId ?? caseIdForDoc(tab))
+      const fallbackKey = nextKey || activeWork[otherSide(side)]
+      const fallback = parseWorkKey(fallbackKey)
+      const fallbackDoc = fallback?.kind === 'doc' && docTabsRef.current.find((item) => item.id === fallback.id)
+      const fallbackTerm = fallback?.kind === 'terminal' && termTabsRef.current.find((item) => item.id === fallback.id)
+      const path = sharedCase && fallbackDoc && sharedUiDocumentPath(fallbackDoc.path, sharedCase)
+      const selection: SharedUiTab | null = path ? { kind: 'document', id: path }
+        : fallbackTerm && isAgentTab(fallbackTerm) ? { kind: 'agent', id: fallbackTerm.id } : null
+      shareSelection(sharedCase, selection)
+    }
     setDirtyDocs((s) => {
       if (!s.has(id)) return s
       const n = new Set(s)
@@ -2526,6 +2605,7 @@ export default function App(): JSX.Element {
   const openSettings = (): void => {
     const existing = docTabs.find((t) => t.kind === 'settings')
     if (existing) {
+      shareDocument(existing, true)
       activateDocTab(existing.id)
       return
     }
@@ -2601,6 +2681,10 @@ export default function App(): JSX.Element {
     clearCaseDocumentUpdates(caseTabIdValue, path)
     const kind = docKindForPath(path)
     const tab: DocTab = { id: newId(), title: name, kind, caseTabId: caseTabIdValue, path, side }
+    shareDocument(tab, true)
+    const sharedCase = sharedUiCase(caseTabIdValue)
+    const sharedPath = sharedCase && sharedUiDocumentPath(path, sharedCase)
+    if (sharedPath) shareSelection(sharedCase, { kind: 'document', id: sharedPath })
     setDocTabs((t) => [...t, tab])
     setActiveDoc(tab.id)
     setWorkActive(side, docKey(tab.id))
@@ -2764,6 +2848,7 @@ export default function App(): JSX.Element {
   const registerCaseTabFromTerm = (term: TermTab, reopen = false): CaseWorkspaceTab => {
     if (reopen) markWorkspaceReopened(currentCaseFromTerm(term), term)
     const tab = registerCaseTab(currentCaseFromTerm(term), term.id, term.caseTabId)
+    if (reopen && isAgentTab(term)) shareSelection(tab, { kind: 'agent', id: term.id })
     if (term.caseTabId !== tab.id) {
       setTermTabs((tabs) => tabs.map((item) => item.id === term.id ? { ...item, caseTabId: tab.id } : item))
     }
@@ -2802,6 +2887,7 @@ export default function App(): JSX.Element {
   const openCaseContext = (source: CurrentCase, activeTermId?: string): CaseWorkspaceTab => {
     markWorkspaceReopened(source)
     const tab = registerCaseTab(source, activeTermId)
+    shareSelection(tab, activeTermId ? { kind: 'agent', id: activeTermId } : null)
     source = currentCaseFromCaseTab(tab)
     setCurrentCase(source)
     if (activeTermId) {
@@ -3193,7 +3279,8 @@ export default function App(): JSX.Element {
     setActiveTerm(tab.id)
     setWorkActive(side, termKeyOf(tab.id))
     setCurrentCase(source)
-    registerCaseTab(source, tab.id)
+    const registeredCase = registerCaseTab(source, tab.id)
+    if (!isGeneralChatDirectory(remotePath)) shareSelection(registeredCase, kind === 'agent' ? { kind: 'agent', id: tab.id } : null)
     preloadPastSessions(tab.cwd, tab)
     if (meta?.contextKind !== 'project' && !isGeneralChatDirectory(remotePath)) window.lt.case.addHistory({ drafts: draftsUri, records, name: title }).then(setRecent)
     markWorkspaceReopened(source, tab)
@@ -3983,7 +4070,8 @@ export default function App(): JSX.Element {
     window.lt.case.addHistory({ drafts, records: rec, name: nextSource.name }).then(setRecent)
   }
 
-  const removeTermTabs = (ids: ReadonlySet<string>): void => {
+  const removeTermTabs = (ids: ReadonlySet<string>, preserveActivity = false, fromSync = false): void => {
+    if (!preserveActivity) for (const term of termTabsRef.current.filter((item) => ids.has(item.id))) clearSharedTermActivity(term)
     const inActiveCase = (caseId?: string): boolean =>
       docOnly || termOnly || (caseId ?? '') === activeCaseTabIdRef.current
     const visibleTerms = termTabsRef.current.filter((term) => inActiveCase(caseIdForTerm(term)))
@@ -3999,6 +4087,16 @@ export default function App(): JSX.Element {
           sideKeys.filter((key) => key === activeKey || !closingKeys.has(key)), activeKey
         )
       }
+    }
+    const selectedTerm = termTabsRef.current.find((term) => term.id === activeTerm && ids.has(term.id))
+    if (!preserveActivity && !fromSync && selectedTerm && caseIdForTerm(selectedTerm) === activeCaseTabIdRef.current) {
+      const tab = sharedUiCase(caseIdForTerm(selectedTerm))
+      const side = termSide(selectedTerm)
+      const fallback = parseWorkKey(nextWork[side] || activeWorkRef.current[otherSide(side)])
+      const doc = fallback?.kind === 'doc' && docTabsRef.current.find((item) => item.id === fallback.id)
+      const term = fallback?.kind === 'terminal' && termTabsRef.current.find((item) => item.id === fallback.id && !ids.has(item.id))
+      const path = tab && doc && sharedUiDocumentPath(doc.path, tab)
+      shareSelection(tab, path ? { kind: 'document', id: path } : term && isAgentTab(term) ? { kind: 'agent', id: term.id } : null)
     }
     setActiveTerm((active) => {
       let next = active
@@ -4044,7 +4142,7 @@ export default function App(): JSX.Element {
       if (key !== undefined) activateWorkKeyAfterClose(side, key)
     }
   }
-  const closeTerm = (id: string): boolean => {
+  const closeTerm = (id: string, fromSync = false): boolean => {
     const tab = termTabsRef.current.find((t) => t.id === id)
     if (!tab) return false
     if (isAgentTab(tab)) {
@@ -4052,11 +4150,11 @@ export default function App(): JSX.Element {
       pendingAgentClosesRef.current.set(key, [...(pendingAgentClosesRef.current.get(key) ?? []), tab])
       window.lt.agent.close(id)
     } else window.lt.pty.kill(id)
-    removeTermTabs(new Set([id]))
+    removeTermTabs(new Set([id]), false, fromSync)
     return true
   }
   const detachTerm = (id: string): boolean => {
-    removeTermTabs(new Set([id]))
+    removeTermTabs(new Set([id]), true)
     return true
   }
 
@@ -4066,6 +4164,9 @@ export default function App(): JSX.Element {
     if (!tab) return
     // A queued focus event from a hidden pane must not undo the user's case/file selection.
     if (!reopen && !docOnly && !termOnly && caseIdForTerm(tab) !== activeCaseTabIdRef.current) return
+    const sharedCase = sharedUiCase(caseIdForTerm(tab))
+    if (reopen && isAgentTab(tab)) shareSelection(sharedCase, { kind: 'agent', id })
+    shareAcknowledgement(id)
     activateTermTab(id)
     const nextCase = currentCaseFromTerm(tab)
     setCurrentCase(nextCase)
@@ -4119,6 +4220,24 @@ export default function App(): JSX.Element {
     const previousStatus = termStatusRef.current.get(id)
     // 같은 렌더 사이에 done → idle이 도착해도 최신 완료 상태를 유지한다.
     const nextStatus = status === 'idle' && previousStatus === 'done' ? 'done' : status
+    const term = termTabsRef.current.find((item) => item.id === id)
+    const sharedCase = term ? sharedUiCase(caseIdForTerm(term)) : undefined
+    const activityId = term ? sharedUiActivityId(term) : id
+    let run = sharedUiRunsRef.current.get(id)
+    const start = status === 'working' && (!run || previousStatus !== 'working')
+    if (start) {
+      run = { runId: newId(), sequence: 0 }
+      sharedUiRunsRef.current.set(id, run)
+    }
+    if (sharedCase && run && (start || previousStatus !== nextStatus)) {
+      const attention = (nextStatus === 'done' || nextStatus === 'question') &&
+        !(isTermVisibleInCurrentWorkspace(id) && document.hasFocus())
+      const expectedRunId = sharedUiActivitiesRef.current.get(sharedCase.id)?.[activityId]?.runId ?? null
+      const activity = { runId: run.runId, sequence: ++run.sequence, status: nextStatus, attention }
+      sharedUiActivitiesRef.current.set(sharedCase.id, { ...sharedUiActivitiesRef.current.get(sharedCase.id), [activityId]: activity })
+      sharedUiSendRef.current(sharedCase, { id: newId(), type: 'activity', caseKey: sharedUiCaseKey(sharedCase),
+        agentId: activityId, ...activity, ...(start ? { start: true, expectedRunId } : { start: false }) })
+    }
     termStatusRef.current = new Map(termStatusRef.current).set(id, nextStatus)
     setTermStatus((m) => {
       if (m.get(id) === nextStatus) return m
@@ -4160,10 +4279,10 @@ export default function App(): JSX.Element {
       return
     }
     window.lt.app.requestAttention(status)
-    const term = termTabs.find((t) => t.id === id)
+    const notificationTerm = termTabs.find((t) => t.id === id)
     window.lt.app.notify({
       termId: id,
-      title: term?.title ?? '세션',
+      title: notificationTerm?.title ?? '세션',
       body: status === 'question' ? '확인/입력을 기다립니다' : '작업이 완료되었습니다',
       urgency: status
     })
@@ -5485,7 +5604,7 @@ export default function App(): JSX.Element {
             return true
           }
           for (const term of termTabsRef.current) {
-            if (caseIdForTerm(term) === id && isAgentTabClosed(remote, term) && !hasLocalTermWork(term)) closeTerm(term.id)
+            if (caseIdForTerm(term) === id && isAgentTabClosed(remote, term) && !hasLocalTermWork(term)) closeTerm(term.id, true)
           }
         }
         const selected = local && remote ? mergeWorkspaceSessions(local, remote) : remote ?? local
@@ -5537,6 +5656,194 @@ export default function App(): JSX.Element {
   }
   autoRestoreWorkspaceRef.current = async (source) => {
     if (!(await restoreAutomaticWorkspace(source))) throw new Error('사건 작업환경을 복원하지 못했습니다.')
+  }
+
+  const persistSharedUiQueue = (): void => {
+    try { localStorage.setItem('shared-ui-pending', JSON.stringify(sharedUiQueueRef.current)) } catch { /* retry remains in memory */ }
+  }
+  const flushSharedUiQueue = async (): Promise<void> => {
+    for (const item of [...sharedUiQueueRef.current]) {
+      const profile = sshProfiles.find((entry) => workspaceHostKey(entry) === item.host)
+      if (!profile) continue
+      const result = await window.lt.workspace.sharedUiApply(sshConnFromProfile(profile), item.operation)
+      if (!result.ok) throw new Error(result.error || '공유 상태 저장 실패')
+      if (item.operation.type === 'activity' && item.operation.start && result.state) {
+        const accepted = result.state.cases[item.operation.caseKey]?.activity[item.operation.agentId]?.runId === item.operation.runId
+        setSharedUiConflict(accepted ? '' : '작업 상태 공유 충돌 · 다른 기기의 상태를 유지했습니다')
+      }
+      sharedUiQueueRef.current = sharedUiQueueRef.current.filter((pending) => pending.operation.id !== item.operation.id)
+      persistSharedUiQueue()
+    }
+  }
+  sharedUiSendRef.current = (tab, operation) => {
+    if (!tab?.ssh) return
+    sharedUiSequenceRef.current += 1
+    const host = workspaceHostKey(tab.ssh)
+    sharedUiQueueRef.current.push({ host, operation })
+    persistSharedUiQueue()
+    const send = async (): Promise<void> => {
+      await flushSharedUiQueue()
+    }
+    sharedUiChainRef.current = sharedUiChainRef.current.then(send).catch(() => {
+      setWorkspaceSyncError('화면 공유 실패 · 연결 후 다시 시도합니다')
+    })
+  }
+  const applySharedUi = (profile: SshProfile, state: SharedUiState): void => {
+    const host = workspaceHostKey(profile)
+    const tabs = caseTabsRef.current.filter((tab) => tab.ssh && workspaceHostKey(tab.ssh) === host)
+    const activities = new Map(sharedUiActivitiesRef.current)
+    for (const tab of tabs) {
+      const shared = state.cases[sharedUiCaseKey(tab)]
+      if (!shared || !tab.profileId) continue
+      const previous = sharedUiActivitiesRef.current.get(tab.id) ?? {}
+      const openAgents = sharedUiOpenAgentsRef.current.get(tab.id)
+      const visibleActivity = Object.fromEntries(Object.entries(shared.activity).filter(([id]) =>
+        id.startsWith('terminal:') || !openAgents || openAgents.has(id) || termTabsRef.current.some((term) => term.id === id && caseIdForTerm(term) === tab.id)))
+      if (observedSharedUiHostsRef.current.has(host)) {
+        for (const [id, activity] of Object.entries(visibleActivity)) {
+          const prior = previous[id]
+          const term = termTabsRef.current.find((item) => sharedUiActivityId(item) === id)
+          if (prior?.attention && !activity.attention) {
+            dismissToastForTerm(id)
+            window.lt.app.dismissNotify(id)
+            if (term && term.id !== id) dismissToastForTerm(term.id)
+          }
+          if (!activity.attention || (activity.status !== 'done' && activity.status !== 'question') ||
+            (prior?.runId === activity.runId && prior.status === activity.status) ||
+            sharedUiRunsRef.current.get(term?.id ?? id)?.runId === activity.runId ||
+            (activity.status === 'done' && !notifyDone) ||
+            (term && isTermVisibleInCurrentWorkspace(term.id) && document.hasFocus())) continue
+          if (term) pushToast(term.id, activity.status)
+          else {
+            const key = ++toastSeq.current
+            setToasts((current) => [...current.filter((item) => item.termId !== id), { key, termId: id, title: tab.name, status: activity.status as 'done' | 'question' }])
+            if (activity.status === 'done') setTimeout(() => setToasts((current) => current.filter((item) => item.key !== key)), 12000)
+          }
+          if (document.hasFocus()) playNotificationSound(notificationSound, notificationVolume)
+          else {
+            window.lt.app.requestAttention(activity.status)
+            window.lt.app.notify({ termId: id, title: term?.title ?? tab.name,
+              body: activity.status === 'question' ? '확인/입력을 기다립니다' : '작업이 완료되었습니다', urgency: activity.status })
+          }
+        }
+      }
+      activities.set(tab.id, visibleActivity)
+      for (const [path, open] of Object.entries(shared.documents)) {
+        const uri = remoteUri(tab.profileId, path)
+        const existing = docTabsRef.current.find((doc) => caseIdForDoc(doc) === tab.id && sharedUiDocumentPath(doc.path, tab) === path)
+        if (open && !existing) {
+          const doc: DocTab = { id: newId(), title: fileNameFromPath(path), kind: docKindForPath(path), caseTabId: tab.id, path: uri, side: 'left' }
+          docTabsRef.current = [...docTabsRef.current, doc]
+          setDocTabs(docTabsRef.current)
+        } else if (!open && existing && !dirtyDocsRef.current.has(existing.id)) {
+          void closeDoc(existing.id, { confirmDirty: false, fromSync: true })
+        }
+      }
+      for (const term of termTabsRef.current.filter((item) => caseIdForTerm(item) === tab.id)) {
+        const activity = visibleActivity[sharedUiActivityId(term)]
+        if (!activity) continue
+        const localRun = sharedUiRunsRef.current.get(term.id)
+        if (localRun && ((localRun.runId === activity.runId && localRun.sequence > activity.sequence) ||
+          (localRun.runId !== activity.runId && ['working', 'question'].includes(termStatusRef.current.get(term.id) ?? '')))) continue
+        setTermStatus((current) => current.get(term.id) === activity.status ? current : new Map(current).set(term.id, activity.status))
+        setTermAttention((current) => {
+          if (current.has(term.id) === activity.attention) return current
+          const next = new Set(current)
+          if (activity.attention) next.add(term.id)
+          else next.delete(term.id)
+          return next
+        })
+      }
+    }
+    sharedUiActivitiesRef.current = activities
+    setSharedUiActivities(activities)
+    observedSharedUiHostsRef.current.add(host)
+    const selectionKey = JSON.stringify(state.selection)
+    if (sharedUiSeenSelectionsRef.current.get(host) !== selectionKey) {
+      sharedUiSeenSelectionsRef.current.set(host, selectionKey)
+      sharedUiPendingSelectionsRef.current.set(host, selectionKey)
+    }
+    if (sharedUiPendingSelectionsRef.current.get(host) !== selectionKey) return
+    const selected = tabs.find((tab) => sharedUiCaseKey(tab) === state.selection.caseKey)
+    if (!selected) {
+      sharedUiPendingSelectionsRef.current.delete(host)
+      return
+    }
+    const currentTab = caseTabsRef.current.find((tab) => tab.id === activeCaseTabIdRef.current)
+    if (currentTab && (!currentTab.ssh || workspaceHostKey(currentTab.ssh) !== host)) return
+    if (dirtyDocsRef.current.size || document.activeElement?.closest('input, textarea, [contenteditable="true"], .cm-editor')) return
+    const target = state.selection.tab
+    if (target?.kind === 'view') {
+      const hearing = target.id === 'hearing' && docTabsRef.current.find((item) => item.kind === 'hearing' && caseIdForDoc(item) === selected.id)
+      if (target.id === 'hearing' && !hearing) {
+        setSharedUiConflict('공유 기일기록을 이 PC에서 먼저 열어 주세요')
+        return
+      }
+      setSharedUiConflict((current) => current === '공유 기일기록을 이 PC에서 먼저 열어 주세요' ? '' : current)
+      if (activeCaseTabIdRef.current !== selected.id || (hearing && activeWorkRef.current[docSide(hearing)] !== docKey(hearing.id))) {
+        openCaseTab(selected, hearing ? { key: docKey(hearing.id), side: docSide(hearing) } : undefined, true)
+      }
+      if (target.id !== 'hearing') {
+        setSidebarView('files')
+        setExplorerVisible(true)
+        setMode(target.id === 'records' ? 'viewer' : 'explorer')
+      }
+      sharedUiPendingSelectionsRef.current.delete(host)
+      return
+    }
+    const doc = target?.kind === 'document' && docTabsRef.current.find((item) => caseIdForDoc(item) === selected.id && sharedUiDocumentPath(item.path, selected) === target.id)
+    const term = target?.kind === 'agent' && termTabsRef.current.find((item) => caseIdForTerm(item) === selected.id && item.id === target.id)
+    if (target && !doc && !term) {
+      if (unloadedSharedCasesRef.current.has(selected.id)) openCaseTab(selected, undefined, true)
+      return
+    }
+    const key = doc ? docKey(doc.id) : term ? termKeyOf(term.id) : undefined
+    const side = doc ? docSide(doc) : term ? termSide(term) : undefined
+    if (activeCaseTabIdRef.current !== selected.id || (key && side && activeWorkRef.current[side] !== key)) {
+      openCaseTab(selected, key && side ? { key, side } : undefined, true)
+    }
+    sharedUiPendingSelectionsRef.current.delete(host)
+  }
+  const bootstrapSharedUi = (profile: SshProfile, state: SharedUiState): void => {
+    const tabs = caseTabsRef.current.filter((tab) => tab.ssh && workspaceHostKey(tab.ssh) === workspaceHostKey(profile))
+    for (const tab of tabs) {
+      const caseKey = sharedUiCaseKey(tab)
+      const known = state.cases[caseKey]?.documents ?? {}
+      for (const doc of docTabsRef.current.filter((item) => caseIdForDoc(item) === tab.id)) {
+        const path = sharedUiDocumentPath(doc.path, tab)
+        if (path && !Object.hasOwn(known, path)) sharedUiSendRef.current(tab, {
+          id: newId(), type: 'document', caseKey, path, open: true, onlyIfMissing: true
+        })
+      }
+    }
+    if (state.selection.caseKey !== null) return
+    const active = tabs.find((tab) => tab.id === activeCaseTabIdRef.current)
+    if (!active) return
+    const focused = focusedWorkSide()
+    const key = focused ? activeWorkRef.current[focused] : activeWorkRef.current.right || activeWorkRef.current.left
+    const target = parseWorkKey(key)
+    const doc = target?.kind === 'doc' && docTabsRef.current.find((item) => item.id === target.id)
+    const term = target?.kind === 'terminal' && termTabsRef.current.find((item) => item.id === target.id)
+    const path = doc && sharedUiDocumentPath(doc.path, active)
+    const selected: SharedUiTab | null = path ? { kind: 'document', id: path }
+      : term && isAgentTab(term) ? { kind: 'agent', id: term.id } : null
+    sharedUiSendRef.current(active, { id: newId(), type: 'selection', caseKey: sharedUiCaseKey(active), tab: selected, onlyIfUnset: true })
+  }
+  sharedUiRefreshRef.current = async () => {
+    if (sharedUiLoadingRef.current) return
+    sharedUiLoadingRef.current = true
+    try {
+      await sharedUiChainRef.current
+      await flushSharedUiQueue()
+      const generation = sharedUiSequenceRef.current
+      for (const profile of new Map(sshProfiles.map((item) => [workspaceHostKey(item), item])).values()) {
+        const result = await window.lt.workspace.sharedUiRead(sshConnFromProfile(profile))
+        if (!result.ok || !result.state) throw new Error(result.error || '공유 상태 조회 실패')
+        if (generation !== sharedUiSequenceRef.current) return
+        applySharedUi(profile, result.state)
+        bootstrapSharedUi(profile, result.state)
+      }
+    } finally { sharedUiLoadingRef.current = false }
   }
 
   refreshAutomaticCasesRef.current = async () => {
@@ -5635,12 +5942,14 @@ export default function App(): JSX.Element {
               unloadedSharedCasesRef.current.add(next[0].id)
               caseTabsRef.current = next
               setCaseTabs(next)
+              sharedUiOpenAgentsRef.current.set(next[0].id, new Set((snapshot.terminals ?? []).map((term) => term.id)))
               expectedCases = next
               if (observedWorkspaceHostsRef.current.has(workspaceHostKey(profile))) pushSyncedTabsToast(1)
             }
             continue
           }
           const next = caseTabsRef.current.map((tab) => tab.id === existing.id ? { ...tab, workspaceOpenedAt } : tab)
+          sharedUiOpenAgentsRef.current.set(existing.id, new Set((snapshot.terminals ?? []).map((term) => term.id)))
           caseTabsRef.current = next
           setCaseTabs(next)
           if (!unloadedSharedCasesRef.current.has(existing.id) && !(await restoreAutomaticWorkspace(source, true))) failed = true
@@ -5649,6 +5958,7 @@ export default function App(): JSX.Element {
         }
         observedWorkspaceHostsRef.current.add(workspaceHostKey(profile))
       }
+      try { await sharedUiRefreshRef.current() } catch { failed = true }
       setWorkspaceSyncError(failed ? '사건탭 공유 실패 · 연결 후 다시 시도합니다' : '')
     }
     const pending = autoWorkspaceSaveChainRef.current.then(refresh)
@@ -5682,6 +5992,7 @@ export default function App(): JSX.Element {
     window.addEventListener('blur', flush)
     const timer = window.setInterval(() => {
       if (document.hasFocus()) refresh()
+      else void sharedUiRefreshRef.current().catch(() => setWorkspaceSyncError('화면 공유 실패 · 연결 후 다시 시도합니다'))
     }, 20_000)
     return () => {
       automaticCasesRefreshActiveRef.current = false
@@ -6869,12 +7180,20 @@ export default function App(): JSX.Element {
       return n
     })
     for (const id of visible) {
+      shareAcknowledgement(id)
       dismissToastForTerm(id)
       window.lt.app.dismissNotify(id)
     }
   }
   const selectTermRef = useRef<(id: string) => void>(() => {})
-  selectTermRef.current = selectTerm
+  selectTermRef.current = (id) => {
+    const term = termTabsRef.current.find((item) => item.id === id || sharedUiActivityId(item) === id)
+    if (term) return selectTerm(term.id)
+    const tab = caseTabsRef.current.find((item) => sharedUiActivitiesRef.current.get(item.id)?.[id])
+    if (!tab) return
+    openCaseTab(tab, undefined, true)
+    if (!id.startsWith('terminal:')) shareSelection(sharedUiCase(tab.id), { kind: 'agent', id })
+  }
   useEffect(() => {
     const onFocus = (): void => notifyFocusAckRef.current()
     window.addEventListener('focus', onFocus)
@@ -6901,9 +7220,13 @@ export default function App(): JSX.Element {
     const noticeTerms = terms.filter((term) => termStatus.get(term.id) === 'question' ||
       (termAttention.has(term.id) && termStatus.get(term.id) === 'done'))
     const documentUpdateCount = documentUpdates?.paths.length ?? 0
-    const working = terms.some((term) => termStatus.get(term.id) === 'working')
-    const questionTaskCount = noticeTerms.filter((term) => termStatus.get(term.id) === 'question').length
-    const doneTaskCount = noticeTerms.filter((term) => termStatus.get(term.id) === 'done').length
+    const unloadedActivities = Object.entries(sharedUiActivities.get(tab.id) ?? {})
+      .filter(([id]) => !terms.some((term) => sharedUiActivityId(term) === id)).map(([, activity]) => activity)
+    const working = terms.some((term) => termStatus.get(term.id) === 'working') || unloadedActivities.some((activity) => activity.status === 'working')
+    const questionTaskCount = noticeTerms.filter((term) => termStatus.get(term.id) === 'question').length +
+      unloadedActivities.filter((activity) => activity.status === 'question').length
+    const doneTaskCount = noticeTerms.filter((term) => termStatus.get(term.id) === 'done').length +
+      unloadedActivities.filter((activity) => activity.status === 'done' && activity.attention).length
     const tabCount = terms.length + docs.length
     return {
       tab,
@@ -7226,7 +7549,7 @@ export default function App(): JSX.Element {
     setMode('explorer')
   }
 
-  const openCaseTab = (tab: CaseWorkspaceTab, targetWork?: { side: DockSide; key: WorkTabKey }): void => {
+  const openCaseTab = (tab: CaseWorkspaceTab, targetWork?: { side: DockSide; key: WorkTabKey }, fromSync = false): void => {
     const terms = termsForCaseTab(tab)
     const docs = docsForCaseTab(tab)
     const target = targetWork ? parseWorkKey(targetWork.key) : null
@@ -7240,6 +7563,14 @@ export default function App(): JSX.Element {
       docs.find((doc) => doc.id === tab.activeDocId) ||
       docs.find((doc) => doc.id === activeDoc) ||
       docs[0]
+    if (!fromSync) {
+      const sharedCase = sharedUiCase(tab.id)
+      const docPath = sharedCase && sharedUiDocumentPath(preferredDoc?.path, sharedCase)
+      const selected = target?.kind === 'doc' && docPath ? { kind: 'document' as const, id: docPath }
+        : preferred && isAgentTab(preferred) ? { kind: 'agent' as const, id: preferred.id }
+          : docPath ? { kind: 'document' as const, id: docPath } : null
+      shareSelection(sharedCase, selected)
+    }
     const source = currentCaseFromCaseTab(tab)
     const pastSessionSource = currentCaseSessionSource(source, sshProfiles)
     setCurrentCase(source)
@@ -7285,6 +7616,7 @@ export default function App(): JSX.Element {
       return next.size === ids.size ? ids : next
     })
     for (const term of viewedTerms) {
+      if (!fromSync) shareAcknowledgement(term.id)
       dismissToastForTerm(term.id)
       window.lt.app.dismissNotify(term.id)
     }
@@ -7424,6 +7756,7 @@ export default function App(): JSX.Element {
     closedAutomaticCasesRef.current.add(workspaceLocationKey(source))
     const closingIndex = caseTabsRef.current.findIndex((item) => item.id === tabId)
     const nextCaseTab = caseTabsRef.current[closingIndex + 1] ?? caseTabsRef.current[closingIndex - 1]
+    for (const term of terms) clearSharedTermActivity(term)
     caseTabsRef.current = caseTabsRef.current.filter((item) => item.id !== tabId)
     const saveClosedCase = async (): Promise<void> => {
       if (!closingSnapshot) return
@@ -7506,7 +7839,8 @@ export default function App(): JSX.Element {
     // A remote close must not navigate away from a dashboard form or folder picker.
     if (!fromSync || modeRef.current === 'explorer' || modeRef.current === 'viewer') {
       setMode('explorer')
-      if (nextCaseTab) openCaseTab(nextCaseTab)
+    if (nextCaseTab) openCaseTab(nextCaseTab, undefined, fromSync)
+    else if (!fromSync && tab.ssh) sharedUiSendRef.current(tab, { id: newId(), type: 'selection', caseKey: null, tab: null })
     }
   }
   closeActiveCaseTabRef.current = (): void => {
@@ -7570,7 +7904,7 @@ export default function App(): JSX.Element {
       describeCaseStatus(activeTermTab, currentCase),
       describeRecordsStatus(activeRecordsFolder, activeSuggestedRecords, !!(activeTermTab || currentCase)),
       describeTermStatus(activeTermTab, activeTermRunStatus),
-      bridgeStatus || workspaceSyncError || undefined,
+      bridgeStatus || sharedUiConflict || workspaceSyncError || undefined,
       retainedSharedCases.size ? '다른 기기에서 닫은 사건 · 미저장·진행 중 작업을 마치면 닫힙니다' : undefined
     ]) || '작업환경 준비'
   const windowTitle = buildWindowTitle({
@@ -7719,6 +8053,7 @@ export default function App(): JSX.Element {
   ): Promise<void> => {
     // 해당 날짜의 기록이 없으면 같은 사건의 최근 기록을 이어서 연다.
     const path = await resolveHearingRecordPath(drafts, hearingCase, hearing)
+    shareSelection(sharedUiCase(currentCaseTabIdForNewTab(activeTermTab)), { kind: 'view', id: 'hearing' })
     const existing = docTabs.find((tab) => tab.kind === 'hearing' && tab.path === path)
     if (existing) {
       moveDocToSide(existing.id, side)
@@ -9276,6 +9611,9 @@ export default function App(): JSX.Element {
     }
     setMode(nextMode)
     setExplorerVisible(true)
+    if (nextMode === 'viewer' || nextMode === 'explorer') shareSelection(sharedUiCase(activeCaseTabIdRef.current), {
+      kind: 'view', id: nextMode === 'viewer' ? 'records' : 'files'
+    })
   }
   const shellStyle = {
     '--side-pane-width': `${paneWidths.side}px`,
@@ -9630,7 +9968,10 @@ export default function App(): JSX.Element {
             <button type="button" aria-pressed={sidebarView === 'cases'} onClick={() => setSidebarView('cases')}>
               <IconCases size={15} /> 사건
             </button>
-            <button type="button" aria-pressed={sidebarView === 'files'} onClick={() => setSidebarView('files')}>
+            <button type="button" aria-pressed={sidebarView === 'files'} onClick={() => {
+              setSidebarView('files')
+              shareSelection(sharedUiCase(activeCaseTabIdRef.current), { kind: 'view', id: 'files' })
+            }}>
               <IconExplorer size={15} /> 파일
             </button>
           </div>
@@ -9992,7 +10333,7 @@ export default function App(): JSX.Element {
               role={t.status === 'synced' ? 'status' : undefined}
               onClick={() => {
                 if (t.status === 'synced') return
-                selectTerm(t.termId)
+                selectTermRef.current(t.termId)
                 dismissToast(t.key)
               }}
             >

@@ -13,6 +13,12 @@ function runApp({ root, temp, screenshot }) {
   const { app, BrowserWindow, ipcMain, session } = require('electron')
   const assert = require('node:assert/strict')
   const calls = [], errors = [], agents = new Map()
+  const sharedUiModule = { exports: {} }
+  const sharedUiCode = require(require('node:path').join(root, 'node_modules/typescript')).transpileModule(
+    require('node:fs').readFileSync(require('node:path').join(root, 'src/shared/sharedUiState.ts'), 'utf8'),
+    { compilerOptions: { module: 1, target: 9 } }).outputText
+  require('node:vm').runInNewContext(sharedUiCode, { module: sharedUiModule, exports: sharedUiModule.exports })
+  const uiStates = new Map()
   const now = Date.now(), day = 86400000
   const profile = { id: 'server', label: '사무실', host: 'example.invalid', user: 'lawyer' }
   const history = [
@@ -102,6 +108,13 @@ function runApp({ root, temp, screenshot }) {
       : snapshots.find((s) => s.currentCase.drafts === args[0].cwd &&
         (!args[0].caseId || s.currentCase.meta?.jsId === args[0].caseId)) } }
     if (channel === 'workspace:autoSave') return { ok: true }
+    if (channel === 'workspace:sharedUiRead' || channel === 'workspace:sharedUiApply') {
+      const host = `${args[0].user}@${args[0].host}:${args[0].port ?? 22}`
+      const state = uiStates.get(host) ?? sharedUiModule.exports.emptySharedUiState()
+      if (channel === 'workspace:sharedUiApply') sharedUiModule.exports.applySharedUiOperation(state, args[1])
+      uiStates.set(host, state)
+      return { ok: true, state: structuredClone(state) }
+    }
     if (channel === 'workspace:list') return { ok: true, entries: [{ id: 'legacy', label: history[1].name, cwd: history[1].drafts, caseNumber: '2025가단54321', caseName: '임대차보증금', client: '이서연', savedAt: new Date().toISOString() }] }
     if (channel === 'workspace:autoObserve') return
     if (channel === 'agent:create') { agents.set(args[0].id, args[0]); return { ok: true } }

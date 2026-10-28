@@ -40,6 +40,12 @@ function runApp({ root, temp, appMain, syncBaseline }) {
     { compilerOptions: { module: 1, target: 9 } }).outputText
   require('node:vm').runInNewContext(sharedCode, { module: sharedModule, exports: sharedModule.exports })
   const { mergeSharedAgentTabs } = sharedModule.exports
+  const sharedUiModule = { exports: {} }
+  const sharedUiCode = require(require('node:path').join(root, 'node_modules/typescript')).transpileModule(
+    require('node:fs').readFileSync(require('node:path').join(root, 'src/shared/sharedUiState.ts'), 'utf8'),
+    { compilerOptions: { module: 1, target: 9 } }).outputText
+  require('node:vm').runInNewContext(sharedUiCode, { module: sharedUiModule, exports: sharedUiModule.exports })
+  const uiStates = new Map()
   app.setPath('userData', require('node:path').join(temp, 'profile'))
   BrowserWindow.prototype.show = function () {}
   global.fetch = async () => { throw Error('External network blocked by test') }
@@ -95,6 +101,13 @@ function runApp({ root, temp, appMain, syncBaseline }) {
         await new Promise(resolve => { releaseCloseObservation = resolve })
       }
       return
+    }
+    if (channel === 'workspace:sharedUiRead' || channel === 'workspace:sharedUiApply') {
+      const host = `${args[0].user}@${args[0].host}:${args[0].port ?? 22}`
+      const state = uiStates.get(host) ?? sharedUiModule.exports.emptySharedUiState()
+      if (channel === 'workspace:sharedUiApply') sharedUiModule.exports.applySharedUiOperation(state, args[1])
+      uiStates.set(host, state)
+      return { ok: true, state: structuredClone(state) }
     }
     if (channel === 'workspace:autoSave') {
       const saved = sharedCases.get(args[0].location.cwd)

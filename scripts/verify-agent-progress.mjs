@@ -617,7 +617,8 @@ const dismissed = []
 const onTermStatus = runInNewContext(ts.transpileModule(`${termStatusSource}\nonTermStatus`, {
   compilerOptions: { target: ts.ScriptTarget.ES2022 }
 }).outputText, {
-  termStatusRef,
+  termStatusRef, termTabsRef: { current: [] }, sharedUiRunsRef: { current: new Map() },
+  newId: () => "test-run",
   setTermStatus: (update) => statusUpdates.push(update),
   setTermAttention: (update) => { termAttention = update(termAttention) },
   dismissToastForTerm: (id) => dismissed.push(id),

@@ -1,3 +1,4 @@
+import type { SharedUiOperation, SharedUiResult } from '../shared/sharedUiState'
 import type { JsUpcomingHearing, TodoAssigneesParams } from '../main/jurisupport'
 import type { CaseManagementState, CaseManagementPatch } from '../shared/caseManagement'
 import type { RemotionPreviewOptions, RemotionPreviewSelection, RemotionPreviewResult } from '../shared/remotionPreview'
@@ -1284,6 +1285,9 @@ const api = {
     }
   },
   workspace: {
+    sharedUiRead: (ssh: SshConn): Promise<SharedUiResult> => ipcRenderer.invoke('workspace:sharedUiRead', ssh),
+    sharedUiApply: (ssh: SshConn, operation: SharedUiOperation): Promise<SharedUiResult> => ipcRenderer.invoke('workspace:sharedUiApply', ssh, operation),
+
     save: (snapshot: WorkspaceSnapshot): Promise<WorkspaceSaveResult> =>
       ipcRenderer.invoke('workspace:save', snapshot),
     list: (): Promise<WorkspaceListResult> => ipcRenderer.invoke('workspace:list'),

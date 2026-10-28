@@ -61,6 +61,10 @@ const context = {
   isTermVisibleInCurrentWorkspace: (id) => state.activeCaseTabId === id[0] && Object.values(state.activeWork).includes(`terminal:${id}`),
   bumpFocusNonce: (current, id) => ({ ...current, [id]: (current[id] ?? 0) + 1 }),
   dismissToastForTerm: noop, pushToast: noop, playNotificationSound: noop,
+  sharedUiCase: noop, sharedUiDocumentPath: noop, shareSelection: noop, shareAcknowledgement: noop, shareDocument: noop,
+  sharedUiActivities: new Map(), sharedUiActivitiesRef: { current: new Map() }, sharedUiRunsRef: { current: new Map() },
+  sharedUiSendRef: { current: noop }, sharedUiCaseKey: noop,
+  sharedUiActivityId: term => term.kind === 'agent' ? term.id : `terminal:${term.id}`,
   window: { lt: { app: { dismissNotify: noop, requestAttention: noop, notify: noop } } },
   document: { hasFocus: () => true }, notifyDone: true, notificationSound: '', notificationVolume: 0,
   pathLeaf: (path) => path.split('/').at(-1), docKindForPath: () => 'markdown', newId: () => 'new-doc',
@@ -83,6 +87,7 @@ const names = [
 ]
 function render() {
   context.termStatusRef.current = state.termStatus
+  context.termTabsRef = { current: state.termTabs }
   context.sidebarCaseTabs = [...state.caseTabs, { id: 'history', drafts: '/history', updatedAt: Date.now() }]
   const code = names.map((name) => {
     assert.ok(declarations.has(name), `find actual ${name} implementation`)

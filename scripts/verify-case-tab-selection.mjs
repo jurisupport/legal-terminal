@@ -167,6 +167,7 @@ for (const scenario of ['background-focus', 'current-focus', 'explicit-selection
     setActiveDoc: (id) => { state.activeDoc = id }, setWorkActive: noop, clearCaseDocumentUpdates: noop,
     activeCaseTabIdRef: { current: state.activeCase }, docOnly: false, termOnly: scenario === 'detached-focus',
     caseIdForTerm: (term) => term.caseTabId,
+    sharedUiCase: noop, shareSelection: noop, shareAcknowledgement: noop,
     activateTermTab: (id) => { state.activeTerm = id; state.calls.push('activate') },
     currentCaseFromTerm: (term) => ({ id: term.caseTabId }),
     setCurrentCase: (source) => { state.activeCase = source.id },
@@ -363,6 +364,8 @@ for (const scenario of ['active', 'active-middle', 'active-end', 'empty-neighbor
     upsertCaseTab: actual.upsertCaseTab,
     sshProfiles: [], currentCaseSessionSource: noop, preloadPastSessions: noop,
     dismissToastForTerm: noop, clearCaseDocumentUpdates: noop,
+    sharedUiCase: noop, sharedUiDocumentPath: noop, shareSelection: noop, shareAcknowledgement: noop,
+    clearSharedTermActivity: noop, sharedUiSendRef: { current: noop },
     workspaceLocationKey: (source) => source.drafts,
     workspaceLocation: (source) => ({ cwd: source.drafts }),
     autoSaveEligibleRef: { current: new Set() }, autoRestoreDoneRef: { current: new Set() },
@@ -486,6 +489,10 @@ for (const scenario of ['active', 'last', 'background', 'cancel-working', 'cance
   const closed = [], confirmations = []
   Object.assign(context, {
     closeTabs, caseIdForTerm: (tab) => tab.caseTabId, caseIdForDoc: (tab) => tab.caseTabId,
+    clearSharedTermActivity: noop, sharedUiCase: noop, sharedUiDocumentPath: noop, shareSelection: noop,
+    otherSide: side => side === 'left' ? 'right' : 'left',
+    parseWorkKey: key => key?.startsWith('doc:') ? { kind: 'doc', id: key.slice(4) }
+      : key?.startsWith('terminal:') ? { kind: 'terminal', id: key.slice(9) } : null,
     workspaceLocationKey: (source) => source.drafts,
     currentCaseFromTerm: (term) => ({ drafts: '/' + term.caseTabId }),
     pendingAgentClosesRef: { current: new Map() },

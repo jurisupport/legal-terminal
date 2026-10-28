@@ -1,3 +1,5 @@
+import { applySharedUi, readSharedUi } from './sharedUi'
+import type { SharedUiOperation } from '../shared/sharedUiState'
 import { openRemotionPreview, closeRemotionPreview, disposeRemotionPreviews } from './remotionPreview'
 import { registerFileDragIpc } from './fileDrag'
 import { registerBrowserIpc, disposeBrowsers } from './browser'
@@ -1020,6 +1022,8 @@ ipcMain.handle('workspace:autoLoad', (e, location: AutomaticWorkspaceLocation, o
   loadAutomaticWorkspace(location, e.sender.id, observe)
 )
 ipcMain.handle('workspace:autoList', (_e, ssh?: SshProfile, includeClosed?: boolean) => listAutomaticWorkspaces(ssh, includeClosed))
+ipcMain.handle('workspace:sharedUiRead', (_e, ssh: SshProfile) => readSharedUi(ssh))
+ipcMain.handle('workspace:sharedUiApply', (_e, ssh: SshProfile, operation: SharedUiOperation) => applySharedUi(ssh, operation))
 ipcMain.handle('workspace:autoObserve', (e, location: AutomaticWorkspaceLocation, snapshot: WorkspaceSnapshot) =>
   observeAutomaticWorkspace(location, snapshot, e.sender.id)
 )

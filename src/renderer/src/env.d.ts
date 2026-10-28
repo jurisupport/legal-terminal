@@ -1,4 +1,5 @@
 /// <reference types="vite/client" />
+import type { SharedUiOperation, SharedUiResult } from '../../shared/sharedUiState'
 import type { DictationBackup, DictationBackupQuery } from '../../shared/dictationRecovery'
 import type { BrowserApi } from '../../shared/browser'
 import type { ClaudeRemoteControlApi, RemoteControlConnection } from '../../shared/claudeRemoteControl'
@@ -1151,6 +1152,9 @@ export interface LtApi {
     onEvent: (cb: (event: AgentEvent) => void) => () => void
   }
   workspace: {
+    sharedUiRead: (ssh: SshConn) => Promise<SharedUiResult>
+    sharedUiApply: (ssh: SshConn, operation: SharedUiOperation) => Promise<SharedUiResult>
+
     save: (snapshot: WorkspaceSnapshot) => Promise<WorkspaceSaveResult>
     list: () => Promise<WorkspaceListResult>
     load: (id?: string) => Promise<WorkspaceLoadResult>

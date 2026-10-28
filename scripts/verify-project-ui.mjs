@@ -26,6 +26,11 @@ function runApp({ root, temp, screenshotDir, agentSmoke, claudeAuthSmoke, remote
   const calls = [], errors = []
   const storeModule = { exports: {} }
   const ts = require(path.join(root, 'node_modules/typescript'))
+  const sharedUiModule = { exports: {} }, uiStates = new Map()
+  const sharedUiCode = ts.transpileModule(fs.readFileSync(path.join(root, 'src/shared/sharedUiState.ts'), 'utf8'), {
+    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 }
+  }).outputText
+  require('node:vm').runInNewContext(sharedUiCode, { module: sharedUiModule, exports: sharedUiModule.exports })
   require('node:vm').runInNewContext(ts.transpileModule(fs.readFileSync(path.join(root, 'src/main/projectStore.ts'), 'utf8'), {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 }
   }).outputText, { exports: storeModule.exports, require })
@@ -143,6 +148,13 @@ function runApp({ root, temp, screenshotDir, agentSmoke, claudeAuthSmoke, remote
         } : snapshot)
       }
       return { ok: true }
+    }
+    if (channel === 'workspace:sharedUiRead' || channel === 'workspace:sharedUiApply') {
+      const host = `${args[0].user}@${args[0].host}:${args[0].port ?? 22}`
+      const state = uiStates.get(host) ?? sharedUiModule.exports.emptySharedUiState()
+      if (channel === 'workspace:sharedUiApply') sharedUiModule.exports.applySharedUiOperation(state, args[1])
+      uiStates.set(host, state)
+      return { ok: true, state: structuredClone(state) }
     }
     if (channel === 'workspace:autoObserve') return
     if (channel === 'workspace:list') return { ok: true, entries: [] }

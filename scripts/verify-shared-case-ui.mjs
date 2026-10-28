@@ -50,6 +50,8 @@ function harness(snapshots) {
     closeCaseTab: async id => { state.closes.push(id); context.setCaseTabs(state.cases.filter(tab => tab.id !== id)) },
     restoreAutomaticWorkspace: async s => { state.loads.push(s); return true },
     setWorkspaceSyncError: value => { state.error = value }, autoWorkspaceSaveChainRef: { current: Promise.resolve() },
+    sharedUiRefreshRef: { current: async () => {} },
+    sharedUiOpenAgentsRef: { current: new Map() },
     refreshAutomaticCasesRef: { current: undefined },
     window: { lt: { workspace: { autoList: async ssh => {
       const listed = ssh ? structuredClone(snapshots) : []

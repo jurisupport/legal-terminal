@@ -85,6 +85,9 @@ jobs:
       - name: Verify shared case tabs across devices
         run: npm run verify:shared-case-tabs
 
+      - name: Verify shared screen state
+        run: npm run verify:shared-ui
+
       - name: Verify closed agent tabs stay closed
         run: npm run verify:agent-tab-close
 
@@ -193,6 +196,9 @@ jobs:
 
       - name: Verify shared case tabs across devices
         run: npm run verify:shared-case-tabs
+
+      - name: Verify shared screen state
+        run: npm run verify:shared-ui
 
       - name: Verify closed agent tabs stay closed
         run: npm run verify:agent-tab-close
