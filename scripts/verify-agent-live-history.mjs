@@ -71,6 +71,23 @@ assert.equal(parse([...lines, '{"type":"assistant",'].join('\n'), 'shared-sessio
 assert.deepEqual(parse(JSON.stringify({ type: 'user', uuid: 'attachment-only', message: { role: 'user', content: '[legal-terminal attachments]\n첨부 파일' } }), 'shared-session').messages,
   [{ id: 'attachment-only', role: 'user', text: '[첨부 자료]' }], 'attachment-only turns retain their identity')
 
+// Claude stores API request blobs after real turns; their embedded messages are copies, not new turns.
+const requestBlobs = [
+  { role: 'user', content: '원격 질문' },
+  { role: 'assistant', content: [{ type: 'text', text: '첫 블록' }] },
+  { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'loaded-tool', content: 'ok' }, { type: 'text', text: 'Tool loaded.' }] },
+  { role: 'user', content: [{ type: 'text', text: '[Image: original 3750x1667, displayed at 2000x889. Multiply coordinates by 1.88 to map to original image.]' }] }
+].map((message, index) => JSON.stringify({ type: 'api-request-blob', sessionId: 'shared-session', hash: `blob-${index}`, message }))
+const withRequestBlobs = parse([...lines, ...requestBlobs].join('\n'), 'shared-session').messages
+assert.deepEqual(withRequestBlobs, full, 'API request caches must not replay old questions, answers or tool metadata')
+const displayed = history(full)
+assert.equal(mergeTranscriptTimeline(displayed, history(withRequestBlobs)), displayed,
+  'polling a transcript with newly written API cache records must leave the displayed conversation unchanged')
+assert.deepEqual(parse([...lines, ...Array(101).fill(requestBlobs[0])].join('\n'), 'shared-session').messages, full,
+  'request caches must not consume the 100-message history window')
+assert.deepEqual(parse([...requestBlobs, ...lines].join('\n'), 'shared-session').messages, full,
+  'real messages after request cache records retain their native IDs and order')
+
 const service = ast('../src/main/agent/agent-service.ts')
 const remotePromptLine = compile(helpers(service, ['remotePromptLine']), {}, 'remotePromptLine')
 assert.equal(JSON.parse(remotePromptLine('첨부와 인용이 있는 요청', 'stable-user-id')).uuid, 'stable-user-id')

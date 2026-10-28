@@ -987,6 +987,8 @@ function parseTranscriptMessages(
     } catch {
       continue
     }
+    // API request blobs embed past messages but are not conversation entries.
+    if (entry.type !== 'user' && entry.type !== 'assistant') continue
     if (entry.isMeta === true || entry.isSidechain === true) continue
     const message = recordValue(entry.message)
     const roleValue = typeof message?.role === 'string' ? message.role : entry.type
