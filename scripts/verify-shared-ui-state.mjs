@@ -29,6 +29,7 @@ const mocks = {
 vm.runInNewContext(`${code}\nmodule.exports.transactionScript = transactionScript`, { module, exports: module.exports, require: (id) => mocks[id] ?? require(id),
   process, Buffer, setTimeout, clearTimeout })
 const api = module.exports
+assert.match(api.transactionScript, /^umask 077/m, 'remote writes require private permissions')
 const ssh = { host: 'host', user: 'owner' }
 const caseKey = JSON.stringify(['/사건', 'case-id'])
 const op = (id, data) => ({ id, caseKey, ...data })
@@ -88,7 +89,7 @@ try {
   assert.equal((await api.applySharedUi(ssh, op('bad', { type: 'document', path: 'relative', open: true }))).ok, false)
   const original = await readFile(stateFile, 'utf8')
   const interruptedWrite = (input) => new Promise((resolve, reject) => {
-    const child = spawn('/bin/sh', ['-c', api.transactionScript], { env: { ...process.env, HOME: shellHome } })
+    const child = spawn(shell, ['-c', api.transactionScript], { env: { ...process.env, HOME: shellHome } })
     child.on('error', reject)
     child.stdout.once('data', () => child.stdin.end(input))
     child.stdin.on('error', () => {})
