@@ -2280,6 +2280,7 @@ export default function AgentPanel({
   const timelineTurns = useMemo(() => {
     const turns: TimelineItem[][] = []
     for (const item of items) {
+      if (isWaitingQueueItem(item)) continue
       if (item.kind === 'user' || turns.length === 0) turns.push([])
       turns[turns.length - 1].push(item)
     }
@@ -2692,15 +2693,8 @@ export default function AgentPanel({
   }, [selectionMenu])
 
   const hasPrompt = useMemo(() => input.trim().length > 0 || attachments.length > 0, [attachments.length, input])
-  const queuedCount = useMemo(
-    () =>
-      items.filter(
-        (item) =>
-          item.kind === 'queue' &&
-          (item.status === 'queued' || item.status === 'priority')
-      ).length,
-    [items]
-  )
+  const queuedItems = useMemo(() => items.filter(isWaitingQueueItem), [items])
+  const queuedCount = queuedItems.length
   const activeSubAgents = useMemo(() => activeSubAgentCount(items), [items])
   const subAgentStatusLabel = activeSubAgents > 0 ? `서브에이전트 ${activeSubAgents}개 실행 중` : ''
   const baseStatusLabel = agentStatusLabels[status]
@@ -4111,7 +4105,8 @@ export default function AgentPanel({
                     <span>{item.title ?? '계획 제안'}</span>
                   </div>
                   {item.planMarkdown && (
-                    <MarkdownMessage text={item.planMarkdown} onCopyCode={copyCodeBlock} />
+                    <MarkdownMessage text={item.planMarkdown} onCopyCode={copyCodeBlock}
+                      mediaContext={{ cwd, remote: !!ssh, profileId }} active={visible} onOpenFile={onOpenFile} />
                   )}
                 </section>
               )
@@ -4343,7 +4338,6 @@ export default function AgentPanel({
             )
           }
           const cardStatus = timelineStatusLabel(item)
-          const waitingQueue = isWaitingQueueItem(item)
           const revertingDiff = revertingDiffIds.has(item.id)
           const showRevertDiff = item.kind === 'diff' && item.status === 'applied' && canRevertDiff(item.diff)
           const showOpenChangedFile =
@@ -4420,23 +4414,6 @@ export default function AgentPanel({
                       </button>
                     </span>
                   )}
-                  {waitingQueue && item.queueId && (
-                    <span className="agent-queue-actions" aria-label="대기 중인 지시 작업">
-                      <button
-                        type="button"
-                        onClick={() => void promoteQueuedMessage(item.queueId!)}
-                      >
-                        바로 지시하기
-                      </button>
-                      <button
-                        type="button"
-                        className="danger"
-                        onClick={() => void removeQueuedMessage(item.queueId!)}
-                      >
-                        삭제
-                      </button>
-                    </span>
-                  )}
                   {cardStatus && <span className="agent-card-status">{cardStatus}</span>}
                 </span>
               </div>
@@ -4491,7 +4468,8 @@ export default function AgentPanel({
               )}
               {item.kind !== 'diff' && item.text && <pre className="agent-card-text">{item.text}</pre>}
               {item.kind === 'permission' && item.planMarkdown && (
-                <MarkdownMessage text={item.planMarkdown} onCopyCode={copyCodeBlock} />
+                <MarkdownMessage text={item.planMarkdown} onCopyCode={copyCodeBlock}
+                  mediaContext={{ cwd, remote: !!ssh, profileId }} active={visible} onOpenFile={onOpenFile} />
               )}
               {item.kind === 'permission' && !item.planMarkdown && item.diff && (
                 <DiffPreview
@@ -4894,6 +4872,47 @@ export default function AgentPanel({
             >
               ×
             </button>
+          </div>
+        )}
+        {queuedItems.length > 0 && (
+          <div className="agent-queue-list" role="region" aria-label="대기 중인 지시">
+            {queuedItems.map((item, index) => (
+              <details key={item.id} className="agent-queue-item">
+                <summary title="지시 펼치기/접기">
+                  <span className="agent-process-chevron" aria-hidden="true">›</span>
+                  <span className="agent-queue-number">{index + 1}</span>
+                  <span className="agent-queue-preview">{item.text || '첨부된 자료'}</span>
+                  <span className="agent-card-status">{timelineStatusLabel(item)}</span>
+                </summary>
+                <div className="agent-queue-detail">
+                  {item.quote && <QuoteReference quote={item.quote} onOpen={() => revealQuotedMessage(item.quote!)} />}
+                  {item.text && <pre className="agent-card-text">{item.text}</pre>}
+                  {item.attachments && item.attachments.length > 0 && (
+                    <div className="agent-attachments sent" aria-label="대기 중인 첨부">
+                      {item.attachments.map((attachment, attachmentIndex) => (
+                        <button
+                          key={`${attachment.path ?? attachment.label}-${attachmentIndex}`}
+                          type="button"
+                          className="agent-attachment-chip"
+                          title={attachmentTitle(attachment)}
+                          disabled={!canOpenAttachmentSource(attachment)}
+                          onClick={() => onOpenAttachmentSource?.(attachment)}
+                        >
+                          <span className="agent-attachment-kind">{attachmentKindLabel(attachment.kind)}</span>
+                          <span className="agent-attachment-label">{attachment.label}</span>
+                        </button>
+                      ))}
+                      <AgentAttachmentMedia attachments={item.attachments} context={{ cwd, remote: !!ssh, profileId }} active={visible} onOpenFile={onOpenFile} onOpenSource={onOpenAttachmentSource} />
+                    </div>
+                  )}
+                  <div className="agent-queue-actions" aria-label="대기 중인 지시 작업">
+                    {item.text && <button type="button" onClick={() => void copyPrompt(item.text!)}>복사</button>}
+                    <button type="button" onClick={() => void promoteQueuedMessage(item.queueId!)}>바로 지시하기</button>
+                    <button type="button" className="danger" onClick={() => void removeQueuedMessage(item.queueId!)}>삭제</button>
+                  </div>
+                </div>
+              </details>
+            ))}
           </div>
         )}
         <div className="agent-composer">

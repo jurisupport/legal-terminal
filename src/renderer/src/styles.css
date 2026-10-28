@@ -4510,6 +4510,58 @@ body {
   color: var(--fg);
   background: rgba(255, 255, 255, 0.07);
 }
+.agent-queue-list {
+  min-width: 0;
+  max-height: min(30vh, 240px);
+  overflow-y: auto;
+  margin-bottom: 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+}
+.agent-queue-item + .agent-queue-item {
+  border-top: 1px solid var(--border);
+}
+.agent-queue-item > summary {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 6px 8px;
+  font-size: var(--agent-small-font-size);
+  line-height: 1.5;
+  list-style: none;
+  cursor: pointer;
+}
+.agent-queue-item > summary::-webkit-details-marker {
+  display: none;
+}
+.agent-queue-item > summary:hover {
+  background: rgba(255, 255, 255, 0.04);
+}
+.agent-queue-item > summary:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: -1px;
+}
+.agent-queue-item[open] > summary .agent-process-chevron {
+  transform: rotate(90deg);
+}
+.agent-queue-number {
+  flex-shrink: 0;
+  color: var(--fg-muted);
+}
+.agent-queue-preview {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.agent-queue-detail {
+  padding: 0 8px 8px;
+}
+.agent-queue-detail > .agent-card-text {
+  margin: 0 0 8px;
+}
 .agent-queue-actions {
   min-width: 0;
   display: inline-flex;

@@ -7,7 +7,20 @@ const prompt = prependAgentContext(context, '준비서면을 검토해줘')
 
 assert.ok(prompt.startsWith(context), 'the authoritative case context must precede the user request')
 assert.ok(prompt.includes('<legal-terminal-user-request>\n준비서면을 검토해줘\n</legal-terminal-user-request>'))
-assert.equal(prependAgentContext(undefined, '그대로'), '그대로', 'folder-only agents without context stay unchanged')
+for (const scope of [undefined, '', '  ', context]) {
+  const request = 'Answer in English.\nKeep `my_file.ts` unchanged.'
+  const result = prependAgentContext(scope, request)
+  assert.match(result, /<legal-terminal-language>[\s\S]*진행 설명[\s\S]*중간 요약[\s\S]*한국어/)
+  assert.match(result, /하위 에이전트의 진행 요약/)
+  assert.match(result, /코드 식별자, 명령어, 파일 경로, 원문 오류와 인용은 그대로 보존/)
+  assert.match(result, /다른 언어를 명시적으로 요청한 경우/)
+  assert.match(result, /AskUserQuestion 도구가 제공되는 경우에만/)
+  assert.match(result, /단순한 질문이나 추가 작업이 필요 없이 끝난 요청에는 선택지를 붙이지/)
+  assert.match(result, /이미 요청받은 작업을 수행하기 위한 불필요한 확인으로 사용하지/)
+  assert.match(result, /선택한 작업을 마친 직후에는 다시 후속 선택지를 묻지/)
+  assert.ok(result.endsWith(`<legal-terminal-user-request>\n${request}\n</legal-terminal-user-request>`),
+    'all scopes receive the language policy without rewriting the user request')
+}
 
 console.log('agent case context ok')
 

@@ -17,7 +17,7 @@ async function checkInteraction({ root, temp, output, channels }) {
   const { app, BrowserWindow, ipcMain, session } = require('electron')
   const fs = require('node:fs'), path = require('node:path')
   app.setPath('userData', path.join(temp, 'profile'))
-  const errors = [], answers = []
+  const errors = [], answers = [], documentReads = [], externalLinks = []
   let markRendererReady
   const rendererReady = new Promise(resolve => { markRendererReady = resolve })
   const settings = { sshProfiles: [], notifyDone: false, agentDefaultProvider: 'claude' }
@@ -28,7 +28,8 @@ async function checkInteraction({ root, temp, output, channels }) {
     if (channel === 'settings:get' || channel === 'settings:set') return settings
     if (channel === 'app:info') return { platform: process.platform, version: 'Interaction fixture', homeDirectory: '/synthetic' }
     if (channel === 'app:generalChatDirectory') return ''
-    if (channel === 'fs:readText') return { kind: 'text', ext: '.md', text: '# 계약서\n\n검토할 문서입니다.', size: 60, mtimeMs: 0 }
+    if (channel === 'fs:readText') { documentReads.push(args[0]); return { kind: 'text', ext: '.md', text: '# 계약서\n\n검토할 문서입니다.', size: 60, mtimeMs: 0 } }
+    if (channel === 'app:openExternal') { externalLinks.push(args[0]); return }
     if (channel === 'fs:stat') return { ok: true, isDir: !String(args[0]).endsWith('.md'), size: 60, mtimeMs: 0 }
     if (['fs:list', 'fs:listPdfs', 'case:history', 'case:addHistory', 'sessions:list', 'sessions:byFolder', 'sessions:workLog'].includes(channel)) return []
     if (channel === 'sessions:byCase') return {}
@@ -152,20 +153,24 @@ async function checkInteraction({ root, temp, output, channels }) {
     send({ type: 'status', status: 'working' })
     send({ type: 'tool:start', toolId: 'described-shell', name: 'Bash', inputPreview: '{}' })
     const command = 'python /synthetic/scan.py --all'
-    const description = '사건 기록에서 관련 판례를 찾습니다'
+    const description = 'Searching case records for precedents'
     send({ type: 'tool:input', toolId: 'described-shell', inputPreview: JSON.stringify({ command, description }), description })
-    await wait("document.querySelector('.agent-status-tool')?.textContent.includes('사건 기록에서 관련 판례를 찾습니다')")
+    await wait("document.querySelector('.agent-status-tool')?.textContent.includes('명령 실행')")
     send({ type: 'tool:done', toolId: 'described-shell', outputPreview: 'RAW_PROCESS_OUTPUT' })
     send({ type: 'tool:start', toolId: 'described-agent', name: 'Agent', inputPreview: '{"description":"최초 검토 작업","prompt":"RAW_AGENT_PROMPT"}' })
-    send({ type: 'process:event', processId: 'described-agent', title: '도구 · Agent', toolName: 'Agent', text: '판례 세 건의 사실관계를 비교하고 있습니다', status: 'running' })
-    send({ type: 'process:event', processId: 'progress-summary', title: '도구 요약', text: '관련 판례 세 건을 확인했습니다', status: 'done' })
-    await wait("Array.from(document.querySelectorAll('.agent-tool-arg')).some(el => el.textContent.includes('판례 세 건의 사실관계'))")
+    send({ type: 'process:event', processId: 'described-agent', title: '도구 · Agent', toolName: 'Agent', text: 'Comparing facts from three precedents', status: 'running' })
+    send({ type: 'process:event', processId: 'progress-summary', title: '도구 요약', text: 'Found three relevant precedents', status: 'done' })
+    await wait("Array.from(document.querySelectorAll('.agent-tool-row.running .agent-tool-name')).some(el => el.textContent === '하위 작업')")
+    check(await run("return Array.from(document.querySelectorAll('.agent-tool-line')).every(el => !/Searching case|Comparing facts|Found three/.test(el.textContent + el.title))"), 'English summaries stay out of collapsed rows and tooltips')
     check(await run("const flag = Array.from(document.querySelectorAll('.agent-tool-flag')).find(el => el.textContent === '실행 중'); return flag && flag.getBoundingClientRect().height < 30"), 'running status must stay on one line in a narrow panel')
     check(await run("return !document.querySelector('.agent-panel[data-visible=true]').textContent.includes('RAW_PROCESS_OUTPUT') && !document.querySelector('.agent-panel[data-visible=true]').textContent.includes('python /synthetic') && !document.querySelector('.agent-panel[data-visible=true]').textContent.includes('RAW_AGENT_PROMPT')"), 'commands and raw output stay collapsed')
     check(await run("const p = document.querySelector('.agent-panel[data-visible=true]'); return p.scrollWidth <= p.clientWidth + 1"), 'progress descriptions must fit a narrow panel')
     await capture('progress-descriptions')
-    await run("Array.from(document.querySelectorAll('.agent-tool-line')).find(el => el.textContent.includes('사건 기록에서 관련 판례를 찾습니다')).click()")
+    await run("Array.from(document.querySelectorAll('.agent-tool-line')).find(el => el.textContent.includes('명령 실행')).click()")
     await wait("Array.from(document.querySelectorAll('.agent-tool-details')).some(el => el.textContent.includes('RAW_PROCESS_OUTPUT') && el.textContent.includes('python /synthetic'))")
+    check(await run("return Array.from(document.querySelectorAll('.agent-tool-details')).some(el => el.textContent.includes('Searching case records for precedents'))"), 'original tool description stays available')
+    await run("Array.from(document.querySelectorAll('.agent-tool-line')).find(el => el.textContent.includes('하위 작업')).click(); Array.from(document.querySelectorAll('.agent-tool-line')).find(el => el.textContent.includes('도구 요약')).click()")
+    await wait("Array.from(document.querySelectorAll('.agent-tool-details')).some(el => el.textContent.includes('Comparing facts from three precedents')) && Array.from(document.querySelectorAll('.agent-tool-details')).some(el => el.textContent.includes('Found three relevant precedents'))")
     await capture('progress-details')
     send({ type: 'process:event', processId: 'described-agent', title: '도구 · Agent', toolName: 'Agent', status: 'done' })
     send({ type: 'message:user', messageId: 'system-log-user', text: '테스트 세션이야.' })
@@ -181,7 +186,7 @@ async function checkInteraction({ root, temp, output, channels }) {
     send({ type: 'message:assistant_delta', messageId: 'test-reply', text: '알겠습니다. 테스트 세션으로 진행할게요.' })
     send({ type: 'message:assistant_done', messageId: 'test-reply' })
     send({ type: 'status', status: 'done' })
-    await wait("document.querySelector('.agent-system-log summary')?.textContent === '시스템 기록 6개' && document.querySelector('.agent-panel[data-visible=true]').innerText.includes('테스트 세션으로 진행할게요')")
+    await wait("document.querySelector('.agent-system-log summary')?.textContent === '시스템 기록 6개'")
     check(await run("const log = document.querySelector('.agent-system-log'); const visible = document.querySelector('.agent-panel[data-visible=true]').innerText; return !log.open && !visible.includes('RAW_HOOK_OUTPUT') && !visible.includes('SessionStart:startup') && !visible.includes('allowed') && visible.includes('테스트 세션으로 진행할게요')"), 'the reported remote transcript must show the reply and one collapsed diagnostic group')
     await capture('system-logs-collapsed')
     await run("document.querySelector('.agent-system-log summary').click(); document.querySelector('.agent-system-log .agent-tool-line').click()")
@@ -197,8 +202,29 @@ async function checkInteraction({ root, temp, output, channels }) {
     await wait("Array.from(document.querySelectorAll('.agent-tools > .agent-tool-row.error')).some(row => row.innerText.includes('사용 한도에 도달했습니다'))")
     check(await run("const p = document.querySelector('.agent-panel[data-visible=true]'); return p.scrollWidth <= p.clientWidth + 1"), 'system warnings must fit a narrow panel')
     await capture('system-logs-action-needed')
+    send({ type: 'message:assistant_delta', messageId: 'document-links', text: '[내부 문서](<file:///synthetic/준비%20서면.md>) · [웹 문서](https://example.com/docs)' })
+    send({ type: 'message:assistant_done', messageId: 'document-links' })
+    await wait("!!document.querySelector('#agent-message-interaction-agent-document-links [data-agent-file]')")
+    await run("document.querySelector('#agent-message-interaction-agent-document-links [data-agent-file]').click()")
+    for (let i = 0; i < 120 && !documentReads.includes('/synthetic/준비 서면.md'); i++) await pause()
+    check(documentReads.includes('/synthetic/준비 서면.md'), 'assistant document link must reach the real App document reader')
+    check(externalLinks.length === 0, 'internal document links must not reach the OS URL handler')
+    await run("document.querySelector('#agent-message-interaction-agent-document-links a[href^=https]').click()")
+    for (let i = 0; i < 120 && !externalLinks.length; i++) await pause()
+    check(externalLinks[0] === 'https://example.com/docs', 'web links must keep their external route')
+    send({ type: 'plan:proposed', planId: 'linked-plan', markdown: '[계획 참고 문서](./계획.md)' })
+    await wait("!!document.querySelector('.agent-card.plan [data-agent-file]')")
+    await run("document.querySelector('.agent-card.plan [data-agent-file]').click()")
+    for (let i = 0; i < 120 && !documentReads.includes('/synthetic/계획.md'); i++) await pause()
+    check(documentReads.includes('/synthetic/계획.md'), 'plan links must resolve against the agent workspace')
+    send({ type: 'message:assistant_delta', messageId: 'inline-file', text: '결과 파일: ' + String.fromCharCode(96) + '/synthetic/분석_gemini-3.8-flash.md' + String.fromCharCode(96) })
+    send({ type: 'message:assistant_done', messageId: 'inline-file' })
+    await wait("!!document.querySelector('#agent-message-interaction-agent-inline-file [data-agent-file] code')")
+    await run("document.querySelector('#agent-message-interaction-agent-inline-file [data-agent-file] code').click()")
+    for (let i = 0; i < 120 && !documentReads.includes('/synthetic/분석_gemini-3.8-flash.md'); i++) await pause()
+    check(documentReads.includes('/synthetic/분석_gemini-3.8-flash.md'), 'inline-code result path must open the App document reader')
     check(errors.length === 0, errors.join('\n'))
-    console.log('Agent interaction: thinking/tool/response states, choices, freeform, IME, cancel, jump, narrow layout, SDK descriptions and raw-detail disclosure passed')
+    console.log('Agent interaction: thinking/tool/response states, choices, freeform, IME, cancel, jump, narrow layout, SDK descriptions, raw-detail disclosure and document/web links passed')
     app.exit(0)
   } catch (error) {
     await capture('failure').catch(() => {})

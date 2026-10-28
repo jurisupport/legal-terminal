@@ -20,15 +20,19 @@ const command = 'python /private/case/scan.py --all'
 const description = '사건 기록에서 관련 판례를 찾습니다'
 const step = { id: 'shell', title: '도구 · Bash', toolName: 'Bash', status: 'running',
   input: JSON.stringify({ command, description }), output: 'RAW_PROCESS_OUTPUT' }
-assert.equal(toolStepDisplay(step).arg, description, 'use the SDK explanation instead of the command')
+assert.equal(toolStepDisplay(step).name, '명령 실행')
+assert.equal(toolStepDisplay(step).arg, undefined, 'generated explanations stay in details regardless of language')
 const collapsed = renderToStaticMarkup(ToolRow({ step, expanded: false, onToggle() {} }))
-assert.ok(collapsed.includes(description))
+assert.ok(collapsed.includes('명령 실행') && collapsed.includes('실행 중'))
+assert.ok(!collapsed.includes(description), 'generated explanations must not leak through the tooltip')
 assert.ok(!collapsed.includes(command) && !collapsed.includes('RAW_PROCESS_OUTPUT'), 'raw data stays in the disclosure')
 const expanded = renderToStaticMarkup(ToolRow({ step, expanded: true, onToggle() {} }))
-assert.ok(expanded.includes(command) && expanded.includes('RAW_PROCESS_OUTPUT'))
+assert.ok(expanded.includes(command) && expanded.includes('RAW_PROCESS_OUTPUT') && expanded.includes(description))
 
-assert.equal(toolStepDisplay({ ...step, input: '{"command":"' + 'x'.repeat(1600) + '...', description }).arg, description,
-  'a truncated input preview must not hide the separate description')
+const truncated = { ...step, input: '{"command":"' + 'x'.repeat(1600) + '...', description }
+assert.equal(toolStepDisplay(truncated).arg, undefined)
+assert.ok(renderToStaticMarkup(ToolRow({ step: truncated, expanded: true, onToggle() {} })).includes(description),
+  'a truncated input preview must preserve the separate description in details')
 for (const input of [JSON.stringify({ command }), JSON.stringify({ command, description: '  ' }), '{invalid']) {
   assert.equal(toolStepDisplay({ ...step, input }).arg, undefined, 'missing descriptions must not expose commands')
 }
@@ -37,16 +41,40 @@ assert.equal(toolStepDisplay({ ...step, toolName: 'Shell', input: command + '\n/
 assert.equal(toolStepDisplay({ id: 'read', title: '', toolName: 'Read', input: '{"file_path":"/case/소장.pdf"}' }).arg, '소장.pdf')
 assert.equal(toolStepDisplay({ id: 'search', title: '', toolName: 'WebSearch', input: '{"query":"임대차 판례"}' }).arg, '임대차 판례')
 assert.equal(toolStepDisplay({ id: 'agent', title: '', toolName: 'Agent', input: '{"description":"최초 작업","prompt":"RAW_PROMPT"}', text: '판례 세 건의 사실관계를 비교하고 있습니다' }).arg,
-  '판례 세 건의 사실관계를 비교하고 있습니다', 'live progress replaces the initial task description')
+  undefined, 'live progress stays in details')
 assert.equal(toolStepDisplay({ id: 'agent', title: '', toolName: 'Agent', input: '{"prompt":"RAW_PROMPT"}' }).arg, undefined)
 assert.equal(toolStepDisplay({ id: 'summary', title: '도구 요약', text: '관련 판례 세 건을 확인했습니다' }).arg,
-  '관련 판례 세 건을 확인했습니다')
+  undefined)
 for (const title of ['명령 출력', '명령 출력 · stderr', '프로세스 출력 · stdout', '프로세스 종료', 'Codex']) {
   assert.equal(toolStepDisplay({ id: 'process', title, text: 'RAW_PROCESS_OUTPUT' }).arg, undefined)
 }
 assert.equal(toolStepDisplay({ id: 'managed', title: '', toolName: 'mcp__legal_terminal_jurisupport__get_task',
   input: '{"id":"opaque-id"}', text: 'opaque-id' }).arg, undefined)
-console.log('Agent tool display: SDK descriptions, live summaries, raw-detail disclosure, malformed/truncated input, Claude/Codex fallbacks passed')
+for (const sample of [
+  { id: 'agent', title: '도구 · Agent', toolName: 'Agent', text: 'Comparing precedents', description: 'Review records', output: 'RAW_AGENT_RESULT', status: 'running' },
+  { id: 'codex-agent:child', title: '도구 · Agent', text: 'Analyzing evidence', status: 'done' },
+  { id: 'claude-task:child', title: '백그라운드 작업', text: 'Analyzing evidence', status: 'paused' },
+  { id: 'summary', title: '도구 요약', text: 'Found three precedents', status: 'done' },
+  { id: 'external', title: '도구 · mcp__external__lookup', toolName: 'mcp__external__lookup', text: 'Looking up documents', status: 'error' },
+  { id: 'legacy', title: '도구 · unknown_tool', text: 'Processing request', status: 'cancelled' }
+]) {
+  const before = JSON.stringify(sample)
+  const display = toolStepDisplay(sample)
+  assert.match(display.name, /[가-힣]/)
+  const closed = renderToStaticMarkup(ToolRow({ step: sample, expanded: false, onToggle() {} }))
+  assert.ok(!closed.includes(sample.text), 'raw summaries stay out of collapsed rows and tooltips')
+  const opened = renderToStaticMarkup(ToolRow({ step: sample, expanded: true, onToggle() {} }))
+  assert.ok(opened.includes(sample.text), 'original summaries remain available even alongside output')
+  if (sample.output) assert.ok(opened.includes(sample.output))
+  if (sample.description) assert.ok(opened.includes(sample.description))
+  assert.equal(JSON.stringify(sample), before, 'display formatting must not rewrite stored events')
+}
+for (const [status, label] of Object.entries({ running: '실행 중', done: '완료', completed: '완료', paused: '일시 중지', error: '실패', cancelled: '중지됨' })) {
+  assert.ok(renderToStaticMarkup(ToolRow({ step: { ...step, status }, expanded: false, onToggle() {} })).includes(label))
+}
+assert.equal(toolStepDisplay({ id: 'read', title: '', toolName: 'Read', description: 'Reading source', input: '{"file_path":"/case/contract.pdf"}' }).arg, 'contract.pdf',
+  'file names remain unchanged even when descriptions are hidden')
+console.log('Agent tool display: Korean rows and statuses, original-detail disclosure, malformed/truncated input, Claude/Codex fallbacks passed')
 
 const hook = { id: 'hook', title: 'Hook · SessionStart:startup', text: 'RAW_HOOK_OUTPUT' }
 for (const status of ['running', 'success', 'done', 'completed']) {

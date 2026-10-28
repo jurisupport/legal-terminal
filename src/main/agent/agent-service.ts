@@ -5376,7 +5376,7 @@ export async function runAgentSlashCommand(
 
 function queuedTextPreview(input: AgentSendInput): string {
   const text = agentInputDisplayText(input).trim()
-  if (text) return textPreview(text, 360)
+  if (text) return text
   return (input.attachments ?? []).map((attachment) => attachment.label).join(', ')
 }
 
