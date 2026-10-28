@@ -1,0 +1,19 @@
+.agent-media-list { display: grid; gap: 8px; min-width: 0; width: 100%; }
+.agent-media-list:empty { display: none; }
+.agent-media-preview { margin: 8px 0 0; overflow: hidden; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-alt); min-width: 0; width: 100%; max-width: 560px; }
+.agent-media-preview figcaption { display: flex; flex-direction: column; gap: 3px; padding: 9px 11px; font-size: 12px; }
+.agent-media-preview figcaption strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.agent-media-preview figcaption span, .agent-media-placeholder small { color: var(--fg-muted); font-size: 11px; }
+.agent-media-preview img, .agent-media-preview video { display: block; width: 100%; max-height: 300px; object-fit: contain; background: #151515; }
+.agent-media-preview audio { display: block; width: 100%; padding: 0 8px; }
+.agent-media-placeholder { display: flex; flex-direction: column; gap: 7px; padding: 18px 11px; font-size: 12px; background: var(--bg); }
+.agent-media-actions { display: flex; flex-wrap: wrap; gap: 6px; padding: 8px; }
+.agent-media-progress { display: flex; gap: 8px; align-items: center; padding: 8px 11px 0; font-size: 11px; }
+.agent-media-progress progress { min-width: 0; flex: 1; }
+.agent-media-actions button { font: inherit; font-size: 11px; border: 1px solid var(--border); border-radius: 5px; padding: 5px 8px; background: var(--bg); color: var(--fg); cursor: pointer; }
+.agent-media-actions button:disabled { opacity: .5; cursor: default; }
+.agent-media-preview p[role="alert"] { margin: 8px 11px; color: var(--fg-muted); font-size: 12px; overflow-wrap: anywhere; }
+.agent-attachments .agent-media-list { flex-basis: 100%; }
+.agent-attachments.pending .agent-media-list { grid-template-columns: repeat(auto-fit, minmax(min(160px, 100%), 1fr)); max-height: 220px; overflow: auto; align-items: start; }
+.agent-attachments.pending .agent-media-preview { margin: 0; max-width: none; }
+.agent-attachments.pending .agent-media-preview img, .agent-attachments.pending .agent-media-preview video { max-height: 120px; }

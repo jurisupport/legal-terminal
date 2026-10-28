@@ -1,3 +1,6 @@
+import type { MediaSelection } from '../../shared/media'
+import type { AgentWorkspaceContext } from '../../shared/agentWorkspaceContext'
+
 export type AgentPermissionMode = 'ask' | 'plan' | 'acceptEdits' | 'bypassPermissions' | 'dontAsk'
 
 export type AgentProvider = 'claude' | 'codex'
@@ -13,7 +16,8 @@ export interface AgentSshConn {
 }
 
 export interface AgentAttachment {
-  kind: 'file' | 'folder' | 'selection' | 'pdf-page-range' | 'terminal-snippet'
+  kind: 'file' | 'folder' | 'selection' | 'pdf-page-range' | 'terminal-snippet' | 'media-range'
+  media?: MediaSelection
   label: string
   path?: string
   origin?: 'local' | 'remote'
@@ -52,6 +56,7 @@ export interface AgentCreateOptions {
   source?: AgentSource
   ssh?: AgentSshConn
   context?: string
+  workspaceContext?: AgentWorkspaceContext
 }
 
 export interface AgentWorktreeForkInput {
@@ -69,9 +74,11 @@ export interface AgentSessionSnapshot {
   id: string
   cwd: string
   title?: string
+  sessionTitle?: string
   provider: AgentProvider
   source: AgentSource
   resumeSessionId?: string
+  workspaceContext?: AgentWorkspaceContext
 }
 
 export interface AgentSessionSnapshotResult extends AgentCommandResult {
@@ -114,6 +121,7 @@ export interface AgentSendInput {
   attachments?: AgentAttachment[]
   permissionMode?: AgentPermissionMode
   delivery?: 'normal' | 'queue' | 'steer'
+  workspaceContext?: AgentWorkspaceContext
 }
 
 export interface AgentAuthInput {
@@ -237,6 +245,7 @@ export interface AgentRateLimitUsage {
 }
 
 export type AgentEvent =
+  | { type: 'session:restored'; sessionId: string; startedAt: number }
   | {
       type: 'session:init'
       sessionId: string
@@ -259,7 +268,7 @@ export type AgentEvent =
   | { type: 'message:assistant_start'; sessionId: string; messageId: string }
   | { type: 'message:assistant_delta'; sessionId: string; messageId: string; text: string }
   | { type: 'message:assistant_replace'; sessionId: string; messageId: string; text: string }
-  | { type: 'message:assistant_done'; sessionId: string; messageId: string }
+  | { type: 'message:assistant_done'; sessionId: string; messageId: string; transcriptId?: string }
   | { type: 'process:event'; sessionId: string; processId: string; title: string; text?: string; status?: string; toolName?: string; elapsedMs?: number }
   | {
       type: 'queue:added'
@@ -275,7 +284,8 @@ export type AgentEvent =
   | { type: 'queue:promoted'; sessionId: string; queueId: string; position: number }
   | { type: 'queue:removed'; sessionId: string; queueId: string }
   | { type: 'queue:cleared'; sessionId: string; queueIds: string[] }
-  | { type: 'tool:start'; sessionId: string; toolId: string; name: string; label: string; inputPreview?: string }
+  | { type: 'tool:start'; sessionId: string; toolId: string; name: string; label: string; inputPreview?: string; description?: string }
+  | { type: 'tool:input'; sessionId: string; toolId: string; inputPreview?: string; description?: string }
   | { type: 'tool:done'; sessionId: string; toolId: string; outputPreview?: string; elapsedMs?: number; isError?: boolean }
   | { type: 'permission:request'; request: AgentPermissionRequest }
   | { type: 'permission:resolved'; sessionId: string; requestId: string; decision: 'allow' | 'reject' }

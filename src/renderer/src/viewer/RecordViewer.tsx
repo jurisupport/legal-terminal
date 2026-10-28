@@ -14,6 +14,7 @@ export interface RecordItem {
 export default function RecordViewer({
   items,
   startPath,
+  jumpTo,
   cropOn,
   cropRatio,
   onCropOn,
@@ -25,6 +26,7 @@ export default function RecordViewer({
 }: {
   items: RecordItem[]
   startPath: string
+  jumpTo?: { path: string; page: number; nonce: number }
   cropOn: boolean
   cropRatio: number
   onCropOn: (v: boolean) => void
@@ -64,6 +66,7 @@ export default function RecordViewer({
     <PdfViewer
       key={cur.path}
       path={cur.path}
+      jumpTo={jumpTo?.path === cur.path ? jumpTo : undefined}
       cropOn={cropOn}
       cropRatio={cropRatio}
       onCropOn={onCropOn}

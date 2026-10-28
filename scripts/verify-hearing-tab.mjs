@@ -58,28 +58,41 @@ const app = await _electron.launch({
 try {
   const page = await app.firstWindow()
   await page.addInitScript(() => {
-    class FakeMediaRecorder {
-      static isTypeSupported() {
-        return true
+    globalThis.__recorders = []
+    globalThis.__stoppedTracks = 0
+    class FakeAudioWorkletNode {
+      stopped = false
+      offset = 0
+      port = {
+        onmessage: null,
+        postMessage: (message) => {
+          if (message !== 'stop' || this.stopped) return
+          this.stopped = true
+          queueMicrotask(() => {
+            this.emit(true)
+            this.port.onmessage?.({ data: { stopped: true } })
+          })
+        },
+        close() {}
       }
-      state = 'inactive'
-      mimeType
-      ondataavailable = null
-      onstop = null
-      constructor(_stream, options = {}) {
-        this.mimeType = options.mimeType || 'audio/webm'
+      constructor(_context, _name, options) {
+        this.frames = options.processorOptions.segmentFrames
+        globalThis.__recorders.push(this)
       }
-      start() {
-        this.state = 'recording'
+      emit(final = false) {
+        this.port.onmessage?.({ data: {
+          audio: new TextEncoder().encode('fake-audio'), startSeconds: this.offset, final
+        } })
+        this.offset += this.frames / 16000
       }
-      stop() {
-        this.state = 'inactive'
-        this.ondataavailable?.({ data: new Blob(['fake-audio'], { type: this.mimeType }) })
-        queueMicrotask(() => this.onstop?.())
-      }
+      connect() {}
+      disconnect() {}
     }
     class FakeAudioContext {
       state = 'running'
+      sampleRate = 16000
+      destination = {}
+      audioWorklet = { addModule: async () => {} }
       createAnalyser() {
         return {
           fftSize: 256,
@@ -90,18 +103,30 @@ try {
         }
       }
       createMediaStreamSource() {
-        return { connect() {} }
+        return { connect() {}, disconnect() {} }
       }
       close() {
         this.state = 'closed'
         return Promise.resolve()
       }
     }
-    Object.defineProperty(globalThis, 'MediaRecorder', { value: FakeMediaRecorder })
+    Object.defineProperty(globalThis, 'AudioWorkletNode', { value: FakeAudioWorkletNode })
     Object.defineProperty(globalThis, 'AudioContext', { value: FakeAudioContext })
+    Object.defineProperty(globalThis, 'OfflineAudioContext', { value: class {
+      async decodeAudioData() {
+        if (globalThis.__failSpeakerDecode) throw new Error('sample decode failure')
+        const samples = new Float32Array(16_000 * 20).fill(0.2)
+        return { sampleRate: 16_000, numberOfChannels: 1, length: samples.length, getChannelData: () => samples }
+      }
+    } })
     Object.defineProperty(navigator, 'mediaDevices', {
       value: {
-        getUserMedia: async () => ({ getTracks: () => [{ stop() {} }] })
+        getUserMedia: async () => {
+          const track = { readyState: globalThis.__endNextTrack ? 'ended' : 'live',
+            stop() { globalThis.__stoppedTracks += 1 }, addEventListener() {} }
+          globalThis.__endNextTrack = false
+          return { getTracks: () => [track], getAudioTracks: () => [track] }
+        }
       }
     })
   })
@@ -116,6 +141,9 @@ try {
     replace('sessions:list', () => [])
     replace('sessions:byCase', () => ({}))
     replace('sessions:byFolder', () => [])
+    replace('workspace:autoList', () => ({ ok: true, snapshots: [] }))
+    replace('workspace:autoLoad', () => ({ ok: true }))
+    replace('workspace:autoSave', () => ({ ok: true }))
     replace('js:tokenStatus', () => 'ok')
     replace('dictation:keyStatus', () => 'ok')
     replace('dictation:setKey', () => undefined)
@@ -169,14 +197,18 @@ try {
         createdAt: '2026-07-16T04:00:00.000Z',
         updatedAt: '2026-07-16T04:01:00.000Z'
       })
-      return { ext: '.json', kind: 'text', text, size: text.length }
+      return { ext: String(targetPath).endsWith('.md') ? '.md' : '.json', kind: 'text', text, size: text.length }
     })
     replace('fs:mkdir', (_event, payload) => ({
       ok: true,
       path: `${payload.dir}/${payload.name}`
     }))
     globalThis.__hearingWrites = []
-    replace('fs:writeText', (_event, payload) => {
+    replace('fs:writeText', async (_event, payload) => {
+      if (globalThis.__holdNextHearingWrite) {
+        globalThis.__holdNextHearingWrite = false
+        await new Promise((resolve) => { globalThis.__releaseHearingWrite = resolve })
+      }
       globalThis.__hearingWrites.push(payload)
       return { ok: true }
     })
@@ -203,6 +235,8 @@ try {
   )
   await page.locator('.activity-item[title="설정"]').click()
   await page.locator('.setting-label', { hasText: 'OpenAI API 키' }).waitFor()
+  assert.match(await page.locator('.setting-row', { has: page.locator('.setting-label', { hasText: 'OpenAI API 키' }) }).textContent(),
+    /키 저장됨.*API 연결·잔액 미확인/, '키 복호화 성공을 API 연결 성공으로 표시하면 안 된다')
   await page
     .locator('[data-work-side="left"] button[title="문서를 오른쪽으로 이동"]')
     .click()
@@ -390,6 +424,27 @@ try {
   assert.ok(await dictationButton.isEnabled())
   console.log('hearing dictation handles rejected transcription requests without blocking input')
 
+  const beforePendingDelete = await messages.locator('textarea').evaluateAll(
+    (inputs) => inputs.map((input) => input.value)
+  )
+  await composer.fill('삭제할 녹음 초안')
+  await dictationButton.click()
+  await shellPanel.locator('.hearing-dictation-btn.recording').waitFor()
+  await dictationButton.click()
+  await messages.last().locator('.hearing-dictation-status[role="status"]').waitFor()
+  await composer.fill('삭제와 관계없는 새 초안')
+  await messages.last().getByRole('button', { name: '진행 메모 삭제', exact: true }).click()
+  assert.equal(await messages.count(), beforePendingDelete.length)
+  await resolveDictation(5, { ok: true, text: '늦게 도착한 삭제된 발언', corrected: false })
+  await page.waitForTimeout(1_100)
+  assert.deepEqual(await messages.locator('textarea').evaluateAll(
+    (inputs) => inputs.map((input) => input.value)
+  ), beforePendingDelete, '전사 완료 후에도 삭제한 대화가 되살아나면 안 된다')
+  assert.equal(await composer.inputValue(), '삭제와 관계없는 새 초안')
+  const afterPendingDelete = await app.evaluate(() => JSON.parse(globalThis.__hearingWrites.at(-1).content))
+  assert.deepEqual(afterPendingDelete.entries.map((entry) => entry.text), beforePendingDelete)
+  console.log('deleted pending dictation stays deleted when transcription completes')
+
   for (let index = 1; index <= 16; index += 1) {
     await composer.fill(`연속 발언 ${index}`)
     await submit.click()
@@ -434,6 +489,79 @@ try {
   )
   console.log('hearing record returns to the latest statement after tab changes')
 
+  await page.waitForTimeout(1_100)
+  const beforeDelete = await app.evaluate(() => JSON.parse(globalThis.__hearingWrites.at(-1).content))
+  await messages.nth(1).getByRole('button', { name: '진행 메모 삭제', exact: true }).click()
+  await page.waitForTimeout(1_100)
+  const afterDelete = await app.evaluate(() => JSON.parse(globalThis.__hearingWrites.at(-1).content))
+  assert.deepEqual(afterDelete.entries, beforeDelete.entries.filter((_, index) => index !== 1),
+    '선택한 대화만 삭제하고 다른 대화의 내용·화자·순서를 보존해 저장해야 한다')
+  assert.deepEqual(afterDelete.requests, beforeDelete.requests)
+  assert.deepEqual(afterDelete.result, beforeDelete.result)
+  console.log('deleting one hearing entry preserves and saves all other entries')
+
+  while (await messages.count()) {
+    await messages.last().getByRole('button', { name: '진행 메모 삭제', exact: true }).click()
+  }
+  await shellPanel.locator('.hearing-log .hearing-empty-line').waitFor()
+  await page.waitForTimeout(1_100)
+  const emptyRecord = await app.evaluate(() => JSON.parse(globalThis.__hearingWrites.at(-1).content))
+  assert.deepEqual(emptyRecord.entries, [], '마지막 대화 삭제도 자동 저장되어야 한다')
+  await shellPanel.getByRole('button', { name: '읽기', exact: true }).click()
+  await shellPanel.locator('.hearing-reader-item').first().click()
+  assert.equal(await messages.count(), 0, '저장 기록을 다시 열어도 삭제한 대화가 되살아나면 안 된다')
+  await shellPanel.locator('.hearing-log .hearing-empty-line').waitFor()
+  console.log('deleting the final hearing entry persists after reopening the saved record')
+
+  await shellPanel.getByRole('button', { name: '새 기록', exact: true }).click()
+  const writesBeforeEmptyRecord = await app.evaluate(() => globalThis.__hearingWrites.length)
+  await page.waitForTimeout(1_100)
+  assert.equal(await app.evaluate(() => globalThis.__hearingWrites.length), writesBeforeEmptyRecord,
+    '입력하지 않은 새 기록은 자동 저장하지 않아야 한다')
+  await app.evaluate(() => { globalThis.__holdNextHearingWrite = true })
+  await composer.fill('최초 저장 중 삭제할 대화')
+  await submit.click()
+  await app.evaluate(async () => {
+    const deadline = Date.now() + 5_000
+    while (!globalThis.__releaseHearingWrite && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 20))
+    }
+    if (!globalThis.__releaseHearingWrite) throw new Error('첫 저장 요청이 도착하지 않았습니다.')
+  })
+  await messages.last().getByRole('button', { name: '진행 메모 삭제', exact: true }).click()
+  await page.waitForTimeout(1_100)
+  await app.evaluate(() => { globalThis.__releaseHearingWrite() })
+  await page.waitForTimeout(1_100)
+  const deletedDuringSave = await app.evaluate(() => JSON.parse(globalThis.__hearingWrites.at(-1).content))
+  assert.deepEqual(deletedDuringSave.entries, [], '지연된 최초 저장이 삭제 결과를 덮어쓰면 안 된다')
+  console.log('deleting during the first save leaves the final saved record empty')
+
+  for (const destination of ['새 기록', '저장 기록']) {
+    await composer.fill(`전환 전에 삭제할 대화: ${destination}`)
+    await submit.click()
+    await page.waitForTimeout(1_100)
+    const originalPath = await app.evaluate(() => globalThis.__hearingWrites.at(-1).path)
+    // 저장 목록은 삭제 전 내용이어도 전환 시 최신 파일을 읽어야 한다.
+    if (destination === '저장 기록') {
+      await shellPanel.getByRole('button', { name: '읽기', exact: true }).click()
+      await shellPanel.locator('.hearing-reader-item').first().waitFor()
+    }
+    await messages.last().getByRole('button', { name: '진행 메모 삭제', exact: true }).click()
+    if (destination === '새 기록') {
+      await shellPanel.getByRole('button', { name: destination, exact: true }).click()
+    } else {
+      await shellPanel.locator('.hearing-reader-item').first().click()
+    }
+    await page.waitForTimeout(1_100)
+    const switchedRecord = await app.evaluate((_electron, originalPath) =>
+      JSON.parse(globalThis.__hearingWrites.findLast((write) => write.path === originalPath).content), originalPath)
+    assert.deepEqual(switchedRecord.entries, [], `${destination}으로 즉시 전환해도 삭제를 먼저 저장해야 한다`)
+    assert.equal(await messages.count(), 0, '전환 시 삭제 전 메모를 다시 표시하지 않아야 한다')
+  }
+  console.log('immediate new/saved record switches flush deletions and read current saved content')
+
+  await shellPanel.locator('.hearing-template-btn', { hasText: '민사' }).click()
+  const initialRosterCount = await speakerPicker.locator('option').count()
   const diarizationEntryOffset = await messages.count()
   let nextDiarizationIndex = await app.evaluate(() => globalThis.__hearingTranscriptions.length)
   const diarizeToggle = shellPanel.getByRole('checkbox', { name: '화자 자동 분리' })
@@ -451,33 +579,88 @@ try {
     ok: true,
     text: '첫 질문 첫 답변 다음 질문',
     segments: [
-      { speaker: 'A', text: '첫 질문', start: 0.5, end: 2 },
-      { speaker: 'B', text: '첫 답변', start: 2.5, end: 5 },
-      { speaker: 'A', text: '다음 질문', start: 6, end: 8 }
+      { speaker: 'A', text: '첫 질문', start: 0.5, end: 2, participantId: 'court', participantSource: 'context' },
+      { speaker: 'B', text: '첫 답변', start: 2.5, end: 5, participantId: 'plaintiff', participantSource: 'context' },
+      { speaker: 'A', text: '다음 질문', start: 6, end: 8, participantId: 'court', participantSource: 'context' }
     ]
   }
   await resolveDictation(nextDiarizationIndex++, diarizedResult)
-  await shellPanel.getByRole('combobox', { name: '화자 1 일괄 지정' }).waitFor()
+  const detectedNames = shellPanel.locator('.hearing-detected-speakers [aria-label="화자 이름 수정"]')
+  await detectedNames.first().waitFor()
   assert.equal(await app.evaluate(() => globalThis.__hearingTranscriptions.at(-1).payload.diarize), true)
   assert.deepEqual(await messages.locator('textarea').evaluateAll((inputs, offset) => inputs.slice(offset).map((input) => input.value), diarizationEntryOffset),
     ['첫 질문', '첫 답변', '다음 질문', '녹음과 별개로 작성 중인 메모'],
     '한 녹음의 발언 순서를 보존하고 전사 대기 중 작성한 메모도 유지해야 한다')
-  const firstDetectedId = await messages.nth(diarizationEntryOffset + 0).getByRole('combobox').inputValue()
-  assert.equal(await messages.nth(diarizationEntryOffset + 2).getByRole('combobox').inputValue(), firstDetectedId)
-  assert.notEqual(await messages.nth(diarizationEntryOffset + 1).getByRole('combobox').inputValue(), firstDetectedId)
+  assert.deepEqual(await detectedNames.evaluateAll((inputs) => inputs.map((input) => input.value)), ['A', 'B'],
+    '기존 참여자가 있어도 새 목소리는 A, B로 구분해야 한다')
+  assert.equal(await speakerPicker.locator('option').count(), initialRosterCount + 2)
+  const detectedAId = await messages.nth(diarizationEntryOffset).getByRole('combobox').inputValue()
+  const detectedBId = await messages.nth(diarizationEntryOffset + 1).getByRole('combobox').inputValue()
+  assert.ok(!['court', 'plaintiff', 'defendant'].includes(detectedAId), '맥락 추정을 실제 참여자 지정으로 사용하면 안 된다')
+  assert.notEqual(detectedAId, detectedBId)
+  assert.equal(await messages.nth(diarizationEntryOffset + 2).getByRole('combobox').inputValue(), detectedAId)
+  assert.equal(await messages.locator('span', { hasText: '맥락 추정·확인 필요' }).count(), 0)
+  const firstPayload = await app.evaluate(() => globalThis.__hearingTranscriptions.at(-1).payload)
+  assert.equal(firstPayload.context.participants, undefined, '화자 분리 요청에 참여자 이름을 보내지 않아야 한다')
+  assert.equal(firstPayload.context.recentDialogue, undefined, '화자 분리 요청에 이전 대화를 이름 추정용으로 보내지 않아야 한다')
+  assert.equal(firstPayload.context.speaker, undefined, 'Current UI selection cannot be used as voice identity')
+  await detectedNames.first().fill('질문자')
+  await detectedNames.first().blur()
+  for (const index of [0, 2]) {
+    assert.equal(await messages.nth(diarizationEntryOffset + index).locator('select option:checked').textContent(), '질문자',
+      '화자 이름을 한 번 수정하면 같은 화자의 모든 발언에 반영되어야 한다')
+  }
   await page.waitForTimeout(1_100)
+  const renamedRecordPath = await app.evaluate(() => globalThis.__hearingWrites.at(-1).path)
+  await shellPanel.getByRole('button', { name: '새 기록', exact: true }).click()
+  await shellPanel.locator('.hearing-log .hearing-empty-line').waitFor()
+  assert.equal(await detectedNames.count(), 0, '새 기록에는 이전 화자 이름 상태가 남아 있으면 안 된다')
+  await app.evaluate((_electron, recordPath) => {
+    const saved = globalThis.__hearingWrites.findLast((write) => write.path === recordPath)
+    const record = JSON.parse(saved.content)
+    for (const entry of record.entries) {
+      if (entry.recording) delete entry.recording.speakerKey
+    }
+    saved.content = JSON.stringify(record)
+  }, renamedRecordPath)
   await shellPanel.getByRole('button', { name: '읽기', exact: true }).click()
   await shellPanel.locator('.hearing-reader-item').first().click()
-  await shellPanel.getByRole('combobox', { name: '화자 1 일괄 지정' }).waitFor()
+  await detectedNames.first().waitFor()
+  assert.equal(await shellPanel.locator('.hearing-path').textContent(), renamedRecordPath)
+  assert.deepEqual(await detectedNames.evaluateAll((inputs) => inputs.map((input) => input.value)), ['질문자', 'B'],
+    '화자 이름 수정은 다른 기록으로 전환 후 디스크에서 다시 읽어도 유지되어야 한다')
+  const writesBeforeLegacySave = await app.evaluate(() => globalThis.__hearingWrites.length)
+  await shellPanel.getByRole('button', { name: '저장', exact: true }).click()
+  const loadedLegacyRecord = await app.evaluate(async (_electron, count) => {
+    const deadline = Date.now() + 5000
+    while (globalThis.__hearingWrites.length <= count && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 20))
+    }
+    if (globalThis.__hearingWrites.length <= count) throw new Error('불러온 기록의 저장 요청이 도착하지 않았습니다.')
+    return JSON.parse(globalThis.__hearingWrites.at(-1).content)
+  }, writesBeforeLegacySave)
+  const loadedLegacyEntries = loadedLegacyRecord.entries.filter((entry) => entry.recording)
+  assert.equal(loadedLegacyEntries.length, 3)
+  assert.ok(loadedLegacyEntries.every((entry) => !entry.recording.speakerKey),
+    '다시 저장한 현재 기록에도 speakerKey가 없어야 과거 형식의 실제 로드를 검증할 수 있다')
+  for (const index of [0, 2]) {
+    assert.equal(await messages.nth(diarizationEntryOffset + index).locator('select option:checked').textContent(), '질문자')
+    assert.equal(await messages.nth(diarizationEntryOffset + index).getByRole('combobox').getAttribute('title'), '같은 화자의 모든 발언에 적용됩니다.')
+  }
   await page.screenshot({ path: '/tmp/legal-terminal-diarization-check.png' })
+  await messages.nth(diarizationEntryOffset).getByRole('combobox').selectOption('court')
+  for (const index of [0, 2]) assert.equal(await messages.nth(diarizationEntryOffset + index).getByRole('combobox').inputValue(), 'court',
+    'speakerKey 없는 과거 녹음도 한 곳의 화자를 바꾸면 같은 화자의 다른 발언을 함께 변경해야 한다')
+  await shellPanel.locator('.hearing-detected-speakers select').first().selectOption('plaintiff')
+  assert.equal(await shellPanel.locator('.hearing-detected-speakers select').count(), 0)
+  await messages.nth(diarizationEntryOffset + 3).getByRole('combobox').selectOption('defendant')
+  assert.equal(await messages.nth(diarizationEntryOffset).getByRole('combobox').inputValue(), 'court',
+    '수동 메모의 화자 변경은 같은 화자의 녹음 발언에 영향을 주면 안 된다')
+  assert.equal(await speakerPicker.locator('option').count(), initialRosterCount, '화자를 기존 참여자에게 지정해도 참여자 목록은 보존되어야 한다')
   await shellPanel.locator('.hearing-template-btn', { hasText: '형사' }).click()
-  assert.equal(await shellPanel.locator('.hearing-detected-speakers select').count(), 2,
-    '템플릿을 바꿔도 이미 기록한 화자는 유지해야 한다')
-  assert.equal(await messages.nth(diarizationEntryOffset + 0).getByRole('combobox').inputValue(), firstDetectedId)
-  await shellPanel.getByRole('combobox', { name: '화자 1 일괄 지정' }).selectOption('court')
-  assert.equal(await messages.nth(diarizationEntryOffset + 0).getByRole('combobox').inputValue(), 'court')
-  assert.equal(await messages.nth(diarizationEntryOffset + 2).getByRole('combobox').inputValue(), 'court')
-  assert.notEqual(await messages.nth(diarizationEntryOffset + 1).getByRole('combobox').inputValue(), 'court')
+  assert.equal(await messages.nth(diarizationEntryOffset).getByRole('combobox').inputValue(), 'court')
+  assert.equal(await messages.nth(diarizationEntryOffset + 1).getByRole('combobox').inputValue(), 'plaintiff')
+  const declaredRosterCount = await speakerPicker.locator('option').count()
   await page.waitForTimeout(1_100)
   const separatedRecord = await app.evaluate(() => JSON.parse(globalThis.__hearingWrites.at(-1).content))
   const savedDiarization = separatedRecord.entries.slice(diarizationEntryOffset)
@@ -486,18 +669,23 @@ try {
     [[0.5, 2], [2.5, 5], [6, 8]], '녹음 구간은 원본 값으로 저장해야 한다')
   assert.ok(Date.parse(savedDiarization[0].createdAt) >= recordingStartedAt)
   assert.equal(Date.parse(savedDiarization[2].createdAt) - Date.parse(savedDiarization[0].createdAt), 5500)
-  console.log('one recording splits by speaker, preserves drafts and timestamps, and supports persisted bulk assignment')
+  console.log('recordings use A/B groups, persist global names and assignments, and keep manual edits individual')
+  const unknownResult = { ...diarizedResult, segments: diarizedResult.segments.map(({ participantId, participantSource, ...segment }) => segment) }
+
 
   await dictationButton.click()
   await shellPanel.locator('.hearing-dictation-btn.recording').waitFor()
   await dictationButton.click()
   await messages.last().getByRole('status').waitFor()
-  await resolveDictation(nextDiarizationIndex++, diarizedResult)
+  await resolveDictation(nextDiarizationIndex++, unknownResult)
   await page.waitForFunction((expected) => document.querySelectorAll('.hearing-message').length === expected, diarizationEntryOffset + 7)
-  assert.notEqual(await messages.nth(diarizationEntryOffset + 4).getByRole('combobox').inputValue(), 'court',
-    '새 녹음의 A 화자를 이전 녹음에서 지정한 재판부로 추정하면 안 된다')
-  assert.notEqual(await messages.nth(diarizationEntryOffset + 5).getByRole('combobox').inputValue(),
-    await messages.nth(diarizationEntryOffset + 1).getByRole('combobox').inputValue(), '화자 번호는 녹음마다 독립적이어야 한다')
+  const nextDetectedAId = await messages.nth(diarizationEntryOffset + 4).getByRole('combobox').inputValue()
+  const nextDetectedBId = await messages.nth(diarizationEntryOffset + 5).getByRole('combobox').inputValue()
+  assert.ok(nextDetectedAId && nextDetectedBId && nextDetectedAId !== nextDetectedBId,
+    'Unrecognized voices must receive distinct stable speaker IDs')
+  assert.equal(await messages.nth(diarizationEntryOffset + 6).getByRole('combobox').inputValue(), nextDetectedAId)
+  assert.equal(await speakerPicker.locator('option').count(), declaredRosterCount + 2)
+  assert.equal(await shellPanel.locator('.hearing-detected-speakers select').count(), 2)
 
   await dictationButton.click()
   await shellPanel.locator('.hearing-dictation-btn.recording').waitFor()
@@ -511,7 +699,7 @@ try {
   assert.equal(await messages.count(), diarizationEntryOffset + 8, '위쪽 방향키가 재시도할 녹음과 실패 행을 제거하면 안 된다')
   await messages.last().getByRole('button', { name: '전사 재시도', exact: true }).click()
   await messages.last().getByRole('status').waitFor()
-  await resolveDictation(nextDiarizationIndex++, diarizedResult)
+  await resolveDictation(nextDiarizationIndex++, unknownResult)
   await page.waitForFunction((expected) => document.querySelectorAll('.hearing-message').length === expected, diarizationEntryOffset + 10)
   assert.equal(await messages.count(), diarizationEntryOffset + 10, '재녹음 없이 실패한 행을 화자별 발언으로 바꿔야 한다')
   assert.equal(await app.evaluate(() => globalThis.__hearingTranscriptions.at(-1).payload.audio.byteLength), 10)
@@ -525,19 +713,421 @@ try {
   await retryButton.click()
   await dictationButton.click()
   await shellPanel.locator('.hearing-dictation-btn.recording').waitFor()
-  await resolveDictation(nextDiarizationIndex++, diarizedResult)
+  await resolveDictation(nextDiarizationIndex++, unknownResult)
   await page.waitForFunction((expected) => document.querySelectorAll('.hearing-message').length === expected, diarizationEntryOffset + 13)
   assert.equal(await dictationButton.getAttribute('aria-label'), '녹음 정지',
     '전사 재시도가 완료되어도 다른 녹음은 계속되어야 한다')
   await dictationButton.click()
   await messages.last().getByRole('status').waitFor()
-  await resolveDictation(nextDiarizationIndex++, diarizedResult)
+  await resolveDictation(nextDiarizationIndex++, unknownResult)
   await page.waitForFunction((expected) => document.querySelectorAll('.hearing-message').length === expected, diarizationEntryOffset + 16)
+
+  const detectedPickers = shellPanel.locator('.hearing-detected-speakers select')
+  const beforeMergeCount = await detectedPickers.count()
+  const beforeMergeText = await messages.locator('textarea').evaluateAll((inputs) => inputs.map((input) => input.value))
+  await detectedPickers.first().selectOption(nextDetectedBId)
+  for (const index of [4, 5, 6]) assert.equal(await messages.nth(diarizationEntryOffset + index).getByRole('combobox').inputValue(), nextDetectedBId,
+    '기존 참여자가 있어도 감지된 화자끼리 합칠 수 있어야 한다')
+  await detectedPickers.first().selectOption('court')
+  assert.equal(await detectedPickers.count(), beforeMergeCount - 2)
+  for (const index of [4, 5, 6]) assert.equal(await messages.nth(diarizationEntryOffset + index).getByRole('combobox').inputValue(), 'court')
+  assert.equal(await speakerPicker.locator('option').count(), declaredRosterCount + beforeMergeCount - 2)
+  assert.deepEqual(await messages.locator('textarea').evaluateAll((inputs) => inputs.map((input) => input.value)), beforeMergeText,
+    'Combining extra detected voices under a declared participant must preserve every transcript')
+  await page.screenshot({ path: '/tmp/legal-terminal-speaker-merge-check.png' })
+
+  const beforeReuse = await messages.count()
+  const beforeReuseSpeakers = await speakerPicker.locator('option').count()
+  const queuedIndex = nextDiarizationIndex
+  for (let index = 0; index < 2; index++) {
+    await dictationButton.click()
+    await shellPanel.locator('.hearing-dictation-btn.recording').waitFor()
+    await dictationButton.click()
+    await messages.last().getByRole('status').waitFor()
+  }
+  assert.equal(await app.evaluate(() => globalThis.__hearingTranscriptions.length), queuedIndex + 1,
+    'Later diarized requests must wait for earlier reference extraction, while recording remains available')
+  const resolveKnownDictation = (index) => app.evaluate(async (_electron, index) => {
+    const deadline = Date.now() + 5000
+    while (!globalThis.__hearingTranscriptions[index] && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 20))
+    const request = globalThis.__hearingTranscriptions[index]
+    const reference = request.payload.knownSpeakers.find(({ participantId }) => participantId === 'court')
+    if (!reference) throw new Error('Confirmed court sample missing; reference history: ' + JSON.stringify(globalThis.__hearingTranscriptions.filter(({ payload }) => payload.diarize).map(({ payload }) => payload.knownSpeakers.map(({ name, participantId }) => ({ name, participantId })))))
+    request.resolve({ ok: true, segments: [
+      { speaker: reference.name, text: '기존 재판부의 추가 질문', start: 0, end: 3, participantId: 'court', participantSource: 'voice' },
+      { speaker: reference.name, text: '기존 재판부의 다음 질문', start: 4, end: 7, participantId: 'court', participantSource: 'voice' }
+    ] })
+  }, index)
+  await resolveKnownDictation(nextDiarizationIndex++)
+  await resolveKnownDictation(nextDiarizationIndex++)
+  await page.waitForFunction((expected) => document.querySelectorAll('.hearing-message').length === expected, beforeReuse + 4)
+  assert.equal(await speakerPicker.locator('option').count(), beforeReuseSpeakers, 'Known voices should not add speakers')
+  for (let index = beforeReuse; index < beforeReuse + 4; index++) {
+    assert.equal(await messages.nth(index).getByRole('combobox').inputValue(), 'court')
+  }
+  assert.ok(await app.evaluate((_electron, index) => globalThis.__hearingTranscriptions.slice(index).every(({ payload }) =>
+    payload.knownSpeakers.length > 0 && payload.knownSpeakers.length <= 4 && payload.knownSpeakers.every(({ name, audio }) =>
+      /^speaker_[0-3]$/.test(name) && Buffer.from(audio).toString('ascii', 0, 4) === 'RIFF')), queuedIndex))
+
+  await page.evaluate(() => { globalThis.__failSpeakerDecode = true })
+  await dictationButton.click()
+  await shellPanel.locator('.hearing-dictation-btn.recording').waitFor()
+  await dictationButton.click()
+  await messages.last().getByRole('status').waitFor()
+  await resolveKnownDictation(nextDiarizationIndex++)
+  await page.waitForFunction((expected) => document.querySelectorAll('.hearing-message').length === expected, beforeReuse + 6)
+  assert.equal(await messages.last().locator('textarea').inputValue(), '기존 재판부의 다음 질문')
+  assert.equal(await messages.last().locator('.hearing-dictation-status').count(), 0,
+    'Sample extraction failure must not discard a successful transcript')
+  await page.evaluate(() => { globalThis.__failSpeakerDecode = false })
+  const rosterBeforeDeclaredAssignment = await speakerPicker.locator('option').evaluateAll((options) => options.map((option) => option.value))
+  await messages.nth(diarizationEntryOffset).getByRole('combobox').selectOption('defendant')
+  for (const index of [diarizationEntryOffset, diarizationEntryOffset + 2, beforeReuse, beforeReuse + 5]) {
+    assert.equal(await messages.nth(index).getByRole('combobox').inputValue(), 'defendant',
+      '확인된 화자를 한 곳에서 바꾸면 다른 녹음의 같은 화자도 함께 변경되어야 한다')
+  }
+  assert.deepEqual(await speakerPicker.locator('option').evaluateAll((options) => options.map((option) => option.value)), rosterBeforeDeclaredAssignment,
+    '기존 참여자의 발언을 다른 화자로 지정해도 참여자 자체를 삭제하면 안 된다')
+  await messages.nth(diarizationEntryOffset).getByRole('combobox').selectOption('court')
   await diarizeToggle.uncheck()
-  console.log('speaker groups remain distinct across recordings; failed recordings are retried without interrupting new recordings')
+  console.log('detected groups merge into any speaker, declared participants remain available, and queued recordings reuse confirmed voices')
+
+  const ordinaryRetryIndex = await app.evaluate(() => globalThis.__hearingTranscriptions.length)
+  await speakerPicker.selectOption('court')
+  await composer.fill('재시도할 초안')
+  await dictationButton.click()
+  await shellPanel.locator('.hearing-dictation-btn.recording').waitFor()
+  await dictationButton.click()
+  const ordinaryRetryRow = messages.last()
+  await ordinaryRetryRow.getByRole('status').waitFor()
+  const ordinaryRetryCount = await messages.count()
+  await resolveDictation(ordinaryRetryIndex, { ok: false, error: 'OpenAI API 크레딧이 소진되었습니다. 충전 후 다시 시도해 주세요.' })
+  await ordinaryRetryRow.getByRole('button', { name: '전사 재시도', exact: true }).click()
+  await ordinaryRetryRow.getByRole('status').waitFor()
+  await speakerPicker.selectOption('prosecutor')
+  await composer.fill('재시도 중 새 초안')
+  await resolveDictation(ordinaryRetryIndex + 1, { rejection: '재시도 중 연결 끊김' })
+  await ordinaryRetryRow.getByRole('button', { name: '전사 재시도', exact: true }).waitFor()
+  assert.match(await ordinaryRetryRow.getByRole('status').textContent(), /재시도 중 연결 끊김/)
+  assert.equal(await ordinaryRetryRow.locator('textarea').inputValue(), '재시도할 초안')
+  assert.equal(await messages.count(), ordinaryRetryCount, '재시도 실패가 대화 항목을 추가하면 안 된다')
+  await ordinaryRetryRow.getByRole('button', { name: '전사 재시도', exact: true }).evaluate((button) => {
+    button.click()
+    button.click()
+  })
+  const retryContext = await resolveDictation(ordinaryRetryIndex + 2, { ok: true, text: '복구된 발언', corrected: false })
+  await page.waitForFunction(() => document.querySelector('.hearing-message:last-child textarea')?.value === '재시도할 초안 복구된 발언')
+  assert.equal(retryContext.speaker, '재판부')
+  assert.equal(await ordinaryRetryRow.getByRole('combobox').inputValue(), 'court')
+  assert.equal(await composer.inputValue(), '재시도 중 새 초안')
+  assert.equal(await messages.count(), ordinaryRetryCount)
+  assert.equal(await app.evaluate(() => globalThis.__hearingTranscriptions.length), ordinaryRetryIndex + 3,
+    '재시도 버튼을 연속 클릭해도 같은 녹음을 중복 전송하면 안 된다')
+  assert.equal(await ordinaryRetryRow.getByRole('button', { name: '전사 재시도', exact: true }).count(), 0)
+  assert.ok(await app.evaluate((_electron, index) => {
+    const original = globalThis.__hearingTranscriptions[index].payload
+    return original.diarize === false && globalThis.__hearingTranscriptions.slice(index + 1).every(({ payload }) =>
+      payload.diarize === false && Buffer.from(original.audio).equals(Buffer.from(payload.audio)))
+  }, ordinaryRetryIndex), '일반 받아쓰기도 재녹음 없이 원래 음성으로 재시도해야 한다')
+  console.log('ordinary dictation survives quota and repeated connection failures, deduplicates retries, and preserves audio, speaker, and drafts')
+
+  await shellPanel.getByRole('button', { name: '새 기록', exact: true }).click()
+  await shellPanel.locator('.hearing-log .hearing-empty-line').waitFor()
+  await shellPanel.locator('.hearing-template-btn', { hasText: '조정·면담' }).click()
+  for (const label of ['김 변호사', '박 의뢰인']) {
+    // Template/participant actions focus the composer on the next frame.
+    await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))))
+    await shellPanel.getByPlaceholder('대화자명', { exact: true }).fill(label)
+    await shellPanel.getByPlaceholder('대화자명', { exact: true }).press('Enter')
+    await page.waitForFunction((name) => [...document.querySelectorAll('select[title="화자 선택"] option')]
+      .some((option) => option.textContent.includes(name)), label)
+  }
+  const customParticipants = await speakerPicker.locator('option').evaluateAll((options) => options.map((option) => ({
+    id: option.value, label: option.textContent.replace(/^\d+\.\s*/, '').trim()
+  })))
+  assert.deepEqual(customParticipants.map(({ label }) => label), ['김 변호사', '박 의뢰인'])
+  await speakerPicker.selectOption(customParticipants[0].id)
+  await composer.fill('앞선 상담에서 계약 해제를 논의했습니다.')
+  await submit.click()
+  await diarizeToggle.check()
+  const customRequestIndex = await app.evaluate(() => globalThis.__hearingTranscriptions.length)
+  await dictationButton.click()
+  await shellPanel.locator('.hearing-dictation-btn.recording').waitFor()
+  await dictationButton.click()
+  await messages.last().getByRole('status').waitFor()
+  const customContext = await resolveDictation(customRequestIndex, { ok: true, segments: [
+    { speaker: 'A', text: '김 변호사입니다. 지난 상담을 이어가겠습니다.', start: 0, end: 3,
+      participantId: customParticipants[0].id, participantSource: 'context' },
+    { speaker: 'B', text: '박 의뢰인입니다. 계약서를 가져왔습니다.', start: 3, end: 6,
+      participantId: customParticipants[1].id, participantSource: 'context' },
+    { speaker: 'C', text: '박 의뢰인입니다. 대금도 지급했습니다.', start: 7, end: 10,
+      participantId: customParticipants[1].id, participantSource: 'context' }
+  ] })
+  assert.equal(customContext.participants, undefined)
+  assert.equal(customContext.recentDialogue, undefined)
+  await detectedNames.first().waitFor()
+  assert.deepEqual(await detectedNames.evaluateAll((inputs) => inputs.map((input) => input.value)), ['A', 'B', 'C'])
+  assert.equal(await speakerPicker.locator('option').count(), 5)
+  const customDetectedIds = await messages.getByRole('combobox').evaluateAll((inputs) => inputs.slice(1).map((input) => input.value))
+  assert.equal(new Set(customDetectedIds).size, 3, '같은 참여자로 추정된 B와 C도 별도 화자로 유지해야 한다')
+  assert.ok(customDetectedIds.every((id) => !customParticipants.some((participant) => participant.id === id)))
+  assert.equal(await messages.first().getByRole('combobox').inputValue(), customParticipants[0].id)
+  await shellPanel.locator('.hearing-detected-speakers').scrollIntoViewIfNeeded()
+  await page.screenshot({ path: '/tmp/legal-terminal-declared-participants-check.png' })
+  await detectedPickers.first().selectOption(customParticipants[0].id)
+  await detectedPickers.first().selectOption(customDetectedIds[2])
+  await detectedNames.first().fill('상담 참석자')
+  await detectedNames.first().blur()
+  assert.deepEqual(await messages.getByRole('combobox').evaluateAll((inputs) => inputs.map((input) => input.value)),
+    [customParticipants[0].id, customParticipants[0].id, customDetectedIds[2], customDetectedIds[2]])
+  for (const index of [2, 3]) assert.equal(await messages.nth(index).locator('select option:checked').textContent(), '상담 참석자')
+  await page.waitForTimeout(1100)
+  const savedCustomRecord = await app.evaluate(() => JSON.parse(globalThis.__hearingWrites.at(-1).content))
+  assert.deepEqual(savedCustomRecord.speakers.filter((speaker) => !speaker.detected).map(({ id, label }) => ({ id, label })), customParticipants)
+  assert.deepEqual(savedCustomRecord.speakers.filter((speaker) => speaker.detected).map(({ id, label }) => ({ id, label })),
+    [{ id: customDetectedIds[2], label: '상담 참석자' }])
+  assert.ok(savedCustomRecord.entries.every((entry) => !entry.participantSource))
+  await shellPanel.getByRole('button', { name: '보고서', exact: true }).click()
+  const report = await app.evaluate(async () => {
+    const deadline = Date.now() + 5000
+    while (!globalThis.__hearingWrites.some((write) => write.path.endsWith('.md')) && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 20))
+    }
+    return globalThis.__hearingWrites.findLast((write) => write.path.endsWith('.md'))?.content
+  })
+  assert.equal((report?.match(/상담 참석자:/g) ?? []).length, 2, '보고서에도 합치고 이름을 수정한 화자를 모든 발언에 반영해야 한다')
+  assert.doesNotMatch(report, /맥락 추정|참여자 확인 필요/)
+  await page.locator('[data-work-side="right"] .tab', { hasText: '기일기록' }).click()
+  console.log('custom rosters coexist with A/B/C groups; explicit merges and names persist into saved records and reports')
+
+  await diarizeToggle.uncheck()
+  const switchRequestIndex = await app.evaluate(() => globalThis.__hearingTranscriptions.length)
+  const switchRecordPath = await shellPanel.locator('.hearing-path').textContent()
+  await composer.fill('사건 전환 전 초안')
+  await dictationButton.click()
+  await shellPanel.locator('.hearing-dictation-btn.recording').waitFor()
+  await dictationButton.click()
+  await messages.last().getByRole('status').waitFor()
+  await composer.fill('다음 메모도 유지')
+  await shellPanel.evaluate((panel) => { globalThis.__originalHearingPanel = panel })
 
   await page.locator('.activity-item[title*="새 사건 추가"]').click()
   await page.locator('.new-case-recent-row', { hasText: recent.name }).click()
+  await shellPanel.waitFor({ state: 'hidden' })
+  assert.equal(await page.evaluate(() => globalThis.__originalHearingPanel.isConnected), true,
+    '사건을 전환해도 전사 중인 기일기록 화면은 제거되면 안 된다')
+  assert.equal(await shellPanel.isVisible(), false)
+  await page.keyboard.press('Control+Shift+D')
+  assert.equal(await shellPanel.locator('.hearing-dictation-btn.recording').count(), 0,
+    '다른 사건의 단축키로 숨겨진 기일기록의 녹음이 시작되면 안 된다')
+  await resolveDictation(switchRequestIndex, { ok: true, text: '다른 사건을 보는 동안 완료' })
+  await app.evaluate(async (_electron, recordPath) => {
+    const deadline = Date.now() + 5000
+    while (Date.now() < deadline) {
+      const saved = globalThis.__hearingWrites.findLast((write) => write.path === recordPath)
+      if (saved?.content.includes('사건 전환 전 초안 다른 사건을 보는 동안 완료')) return
+      await new Promise((resolve) => setTimeout(resolve, 20))
+    }
+    throw new Error('백그라운드 전사 결과가 원래 사건에 저장되지 않았습니다.')
+  }, switchRecordPath)
+  const originalCase = page.locator('.case-sidebar-case', { hasText: dashboardCase.caseNumber })
+  const otherCase = page.locator('.case-sidebar-case', { hasText: recent.name })
+  await originalCase.click()
+  await shellPanel.waitFor({ state: 'visible' })
+  assert.equal(await messages.last().locator('textarea').inputValue(), '사건 전환 전 초안 다른 사건을 보는 동안 완료')
+  assert.equal(await composer.inputValue(), '다음 메모도 유지')
+
+  for (const side of ['right', 'left']) {
+    if (side === 'left') await page.locator('[data-work-side="right"] button[title="문서를 왼쪽으로 이동"]').click()
+    const index = await app.evaluate(() => globalThis.__hearingTranscriptions.length)
+    await dictationButton.click()
+    await shellPanel.locator('.hearing-dictation-btn.recording').waitFor()
+    await otherCase.click()
+    await shellPanel.waitFor({ state: 'hidden' })
+    assert.equal(await shellPanel.locator('.hearing-dictation-btn.recording').count(), 1,
+      `${side} 기일기록은 다른 사건을 보는 동안에도 녹음을 유지해야 한다`)
+    await page.keyboard.press('Control+Shift+D')
+    await originalCase.click()
+    await shellPanel.waitFor({ state: 'visible' })
+    assert.equal(await dictationButton.getAttribute('aria-label'), '녹음 정지')
+    await dictationButton.click()
+    await messages.last().getByRole('status').waitFor()
+    await otherCase.click()
+    await shellPanel.waitFor({ state: 'hidden' })
+    await resolveDictation(index, { ok: false, error: '탭 전환 중 연결 실패' })
+    await originalCase.click()
+    await shellPanel.waitFor({ state: 'visible' })
+    await messages.last().getByRole('button', { name: '전사 재시도', exact: true }).click()
+    await otherCase.click()
+    await shellPanel.waitFor({ state: 'hidden' })
+    await resolveDictation(index + 1, { ok: true, text: `${side} 녹음 복구` })
+    await originalCase.click()
+    await shellPanel.waitFor({ state: 'visible' })
+    await page.waitForFunction((text) => document.querySelector('.hearing-message:last-child textarea')?.value.endsWith(text), `${side} 녹음 복구`)
+    assert.equal(await messages.last().getByRole('button', { name: '전사 재시도', exact: true }).count(), 0)
+  }
+  const switchWrites = await app.evaluate(() => globalThis.__hearingWrites)
+  assert.ok(switchWrites.filter((write) => write.content.includes('다른 사건을 보는 동안 완료'))
+    .every((write) => write.path === switchRecordPath), '전사 결과가 다른 사건 폴더에 저장되면 안 된다')
+  console.log('case switches preserve recording, background transcription, unsent drafts, and retry audio in both panes')
+
+  for (const savedRow of [true, false]) {
+    const recoveryIndex = await app.evaluate(() => globalThis.__hearingTranscriptions.length)
+    await composer.fill('다시 열어도 남을 초안')
+    await dictationButton.click()
+    await shellPanel.locator('.hearing-dictation-btn.recording').waitFor()
+    await dictationButton.click()
+    await messages.last().getByRole('status').waitFor()
+    await resolveDictation(recoveryIndex, { ok: false, error: '긴 전사 시간 초과' })
+    await messages.last().getByRole('button', { name: '전사 재시도', exact: true }).waitFor()
+    const recoveryId = await app.evaluate((_electron, index) => globalThis.__hearingTranscriptions[index].payload.backupId, recoveryIndex)
+    const recoveryPath = await shellPanel.locator('.hearing-path').textContent()
+    await page.waitForTimeout(1100)
+    const backups = await page.evaluate((caseId) => window.lt.dictation.backups({ caseKey: `case:${caseId}` }), dashboardCase.id)
+    assert.ok(backups.some((backup) => backup.id === recoveryId), '실패한 음성은 디스크에 보존되어야 한다')
+    if (!savedRow) await app.evaluate((_electron, { recoveryId, recoveryPath }) => {
+      const saved = globalThis.__hearingWrites.findLast((write) => write.path === recoveryPath)
+      const data = JSON.parse(saved.content)
+      data.entries = data.entries.filter((entry) => entry.id !== recoveryId)
+      saved.content = JSON.stringify(data)
+    }, { recoveryId, recoveryPath })
+    await page.locator('.work-left .tab.active .tab-close').click()
+    await shellPanel.waitFor({ state: 'detached' })
+    await app.evaluate(({ BrowserWindow }, recordPath) => {
+      BrowserWindow.getAllWindows()[0].webContents.send('tabs:receive', {
+        kind: 'doc', tab: { id: 'reopened-hearing', kind: 'hearing', title: '복구 검증', path: recordPath, side: 'left' }
+      })
+    }, recoveryPath)
+    await shellPanel.waitFor({ state: 'visible' })
+    if (savedRow) {
+      await composer.fill('복구와 별개인 새 메모')
+      await messages.last().getByRole('button', { name: '전사 재시도', exact: true }).click()
+    } else {
+      await shellPanel.getByRole('button', { name: /음성 복구$/ }).last().click()
+    }
+    await resolveDictation(recoveryIndex + 1, { ok: true, text: '재시작 후 복구된 발언' })
+    await page.waitForFunction(() => document.querySelector('.hearing-message:last-child textarea')?.value === '다시 열어도 남을 초안 재시작 후 복구된 발언')
+    if (savedRow) assert.equal(await composer.inputValue(), '복구와 별개인 새 메모')
+    assert.equal(await app.evaluate((_electron, index) => globalThis.__hearingTranscriptions[index].payload.backupId, recoveryIndex + 1), recoveryId)
+    assert.equal(await app.evaluate((_electron, index) => globalThis.__hearingTranscriptions[index].payload.audio.byteLength, recoveryIndex + 1), 10)
+    await page.waitForFunction(async ({ id, caseId }) =>
+      !(await window.lt.dictation.backups({ caseKey: `case:${caseId}` })).some((backup) => backup.id === id),
+    { id: recoveryId, caseId: dashboardCase.id })
+  }
+  console.log('saved audio restores after closing/reopening, including a missing pending row, and is removed only after saving results')
+
+  await diarizeToggle.check()
+  await composer.fill('전사와 별개로 남길 메모')
+  const fallbackIndex = await app.evaluate(() => globalThis.__hearingTranscriptions.length)
+  await dictationButton.click()
+  await shellPanel.locator('.hearing-dictation-btn.recording').waitFor()
+  await dictationButton.click()
+  await resolveDictation(fallbackIndex, { ok: true, text: '대체 모델이 복구한 발언', corrected: false, fallback: 'whisper-1' })
+  await page.waitForFunction(() => document.querySelector('.hearing-message:last-child textarea')?.value === '대체 모델이 복구한 발언')
+  assert.equal(await composer.inputValue(), '전사와 별개로 남길 메모')
+  assert.equal(await messages.last().getByRole('combobox').inputValue(), '')
+  assert.equal(await messages.last().locator('option:checked').textContent(), '화자 미구분')
+  assert.match(await messages.last().getByRole('status').textContent(), /화자 구분 없이 대체 전사로 복구/)
+  assert.equal(await messages.last().locator('textarea').isEnabled(), true)
+  await page.waitForTimeout(1100)
+  const fallbackPath = await shellPanel.locator('.hearing-path').textContent()
+  await page.locator('.work-left .tab.active .tab-close').click()
+  await shellPanel.waitFor({ state: 'detached' })
+  await app.evaluate(({ BrowserWindow }, recordPath) => {
+    BrowserWindow.getAllWindows()[0].webContents.send('tabs:receive', {
+      kind: 'doc', tab: { id: 'fallback-reopened', kind: 'hearing', title: '복구 결과', path: recordPath, side: 'left' }
+    })
+  }, fallbackPath)
+  await shellPanel.waitFor({ state: 'visible' })
+  await messages.last().getByRole('status').waitFor()
+  assert.match(await messages.last().getByRole('status').textContent(), /화자 구분 없이 대체 전사로 복구/)
+  assert.equal(await messages.last().locator('option:checked').textContent(), '화자 미구분')
+  console.log('plain fallback is editable, leaves unrelated drafts alone, and keeps its unassigned-speaker notice after reopening')
+
+  for (const diarize of [false, true]) {
+    await diarizeToggle.setChecked(diarize)
+    await composer.fill('자동 전사 중인 초안')
+    const firstRequest = await app.evaluate(() => globalThis.__hearingTranscriptions.length)
+    const firstRow = await messages.count()
+    const existingBackupIds = await page.evaluate(async (caseId) =>
+      (await window.lt.dictation.backups({ caseKey: `case:${caseId}` })).map((backup) => backup.id), dashboardCase.id)
+    const stoppedTracks = await page.evaluate(() => globalThis.__stoppedTracks)
+    await dictationButton.click()
+    await shellPanel.locator('.hearing-dictation-btn.recording').waitFor()
+    await otherCase.click()
+    await shellPanel.waitFor({ state: 'hidden' })
+    await page.evaluate(() => {
+      const recorder = globalThis.__recorders.at(-1)
+      if (recorder.frames !== 16000 * 120) throw new Error('자동 전사 간격은 2분이어야 합니다.')
+      recorder.emit()
+      recorder.emit()
+    })
+    await originalCase.click()
+    await shellPanel.waitFor({ state: 'visible' })
+    assert.equal(await composer.inputValue(), '자동 전사 중인 초안', '자동 구간이 입력 중인 메모를 가져가면 안 된다')
+    assert.equal(await dictationButton.getAttribute('aria-label'), '녹음 정지')
+    assert.equal(await page.evaluate(() => globalThis.__stoppedTracks), stoppedTracks, '구간 경계에서 마이크가 끊기면 안 된다')
+    await dictationButton.click()
+    await page.waitForFunction((before) => globalThis.__stoppedTracks === before + 1, stoppedTracks)
+    assert.equal(await composer.inputValue(), diarize ? '자동 전사 중인 초안' : '')
+    await page.waitForFunction(async ({ caseId, existing }) =>
+      (await window.lt.dictation.backups({ caseKey: `case:${caseId}` })).filter((backup) => !existing.includes(backup.id)).length === 3,
+    { caseId: dashboardCase.id, existing: existingBackupIds })
+    const batchIds = await page.evaluate(async ({ caseId, existing }) =>
+      (await window.lt.dictation.backups({ caseKey: `case:${caseId}` })).filter((backup) => !existing.includes(backup.id)).map((backup) => backup.id),
+    { caseId: dashboardCase.id, existing: existingBackupIds })
+    const resolveBatch = (id, result) => app.evaluate(async (_electron, { id, result, from }) => {
+      const deadline = Date.now() + 5000
+      while (Date.now() < deadline) {
+        const request = globalThis.__hearingTranscriptions.slice(from).find(({ payload }) => payload.backupId === id)
+        if (request) { request.resolve(result); return }
+        await new Promise((resolve) => setTimeout(resolve, 20))
+      }
+      throw new Error(`구간 전사 요청이 도착하지 않았습니다: ${id}`)
+    }, { id, result, from: firstRequest })
+    const success = (text) => diarize
+      ? { ok: true, segments: [{ speaker: 'A', text, start: 0, end: 1 }] }
+      : { ok: true, text }
+    if (diarize) {
+      await resolveBatch(batchIds[0], success('첫 자동 구간'))
+      await resolveBatch(batchIds[1], { ok: false, error: '중간 구간 연결 실패' })
+      await resolveBatch(batchIds[2], success('마지막 짧은 구간'))
+    } else {
+      await resolveBatch(batchIds[2], success('마지막 짧은 구간'))
+      await resolveBatch(batchIds[1], { ok: false, error: '중간 구간 연결 실패' })
+      await resolveBatch(batchIds[0], success('첫 자동 구간'))
+    }
+    await messages.nth(firstRow + 1).getByRole('button', { name: '전사 재시도', exact: true }).click()
+    await resolveDictation(firstRequest + 3, success('둘째 자동 구간'))
+    const expected = ['첫 자동 구간', '둘째 자동 구간', diarize ? '마지막 짧은 구간' : '자동 전사 중인 초안 마지막 짧은 구간']
+    await page.waitForFunction(({ offset, expected }) => {
+      const values = [...document.querySelectorAll('.hearing-message textarea')].slice(offset).map((input) => input.value)
+      return JSON.stringify(values) === JSON.stringify(expected)
+    }, { offset: firstRow, expected })
+    assert.equal(await page.evaluate(() => globalThis.__stoppedTracks), stoppedTracks + 1)
+    const payloads = await app.evaluate((_electron, offset) => globalThis.__hearingTranscriptions.slice(offset).map(({ payload }) => ({
+      id: payload.backupId, mimeType: payload.mimeType, bytes: [...payload.audio]
+    })), firstRequest)
+    assert.equal(payloads.length, 4, '두 자동 구간과 마지막 구간은 각각 한 번만 요청하고 실패 구간만 재시도한다')
+    assert.equal(batchIds[1], payloads[3].id)
+    assert.ok(payloads.every((payload) => payload.mimeType === 'audio/wav'))
+    await page.waitForTimeout(1100)
+    const times = await app.evaluate((_electron, offset) => JSON.parse(globalThis.__hearingWrites.at(-1).content)
+      .entries.slice(offset).map((entry) => Date.parse(entry.createdAt)), firstRow)
+    assert.deepEqual(times.map((time) => time - times[0]), [0, 120000, 240000], '구간 시각은 응답 도착 순서가 아닌 녹음 순서여야 한다')
+  }
+  console.log('two-minute automatic batches keep capture/drafts alive across case switches, preserve order, and retry only a failed batch')
+
+  const endedRequest = await app.evaluate(() => globalThis.__hearingTranscriptions.length)
+  const endedTrackCount = await page.evaluate(() => { globalThis.__endNextTrack = true; return globalThis.__stoppedTracks })
+  await dictationButton.click()
+  await page.waitForFunction((before) => globalThis.__stoppedTracks === before + 1, endedTrackCount)
+  assert.equal(await dictationButton.getAttribute('aria-label'), '음성 받아쓰기', '준비 중 종료된 마이크가 녹음 중으로 남으면 안 된다')
+  await resolveDictation(endedRequest, { ok: true, segments: [{ speaker: 'A', text: '연결 종료 전 마지막 음성', start: 0, end: 1 }] })
+  await page.waitForFunction(() => document.querySelector('.hearing-message:last-child textarea')?.value === '연결 종료 전 마지막 음성')
+  console.log('a microphone ending during asynchronous setup flushes its tail and releases capture')
+
+  await otherCase.click()
   const menu = page.locator('[data-work-side="right"] .tab-menu-trigger', {
     has: page.locator('text=▾')
   })
@@ -547,7 +1137,7 @@ try {
     .locator('[data-work-side="right"] .tab-menu-item[title="현재 사건의 기일 진행사항 기록"]')
     .click({ force: true })
 
-  const panel = page.locator('.hearing-panel')
+  const panel = page.locator('.hearing-panel:visible')
   await panel.waitFor({ state: 'visible', timeout: 2_000 })
   assert.ok(Date.now() - start < 2_500, '원격 탭은 SSH 조회를 기다리지 않고 열려야 한다')
   assert.match(await panel.locator('.hearing-title').textContent(), /기일기록/)

@@ -270,7 +270,7 @@ function dateKey(ts) {
   assert.match(resume, /openCaseRemote\(c, profile, s\.cwd\)/)
   assert.match(resume, /openPastSession\([\s\S]*opened\.source[\s\S]*return/)
   assert.doesNotMatch(dashboard, /onResumePath && e\.cwd && !e\.profileId/)
-  assert.match(dashboard, /onResumePath\(e\.sessionId, e\.cwd, e\.title, e\.profileId, options\?\.newTab\)/)
+  assert.match(dashboard, /onResumePath\(e\.sessionId, e\.cwd, e\.title, e\.profileId, options\?\.newTab, e\.originDevice\)/)
   assert.match(workLog, /event\.ctrlKey \|\| event\.metaKey/)
   assert.match(workLog, /onContextMenu=/)
   assert.match(workLog, /새 탭으로 열기/)
@@ -284,3 +284,20 @@ function dateKey(ts) {
 }
 
 console.log('case activity ok')
+
+// Creator metadata survives every dashboard summary; legacy/invalid values stay unknown.
+for (const originDevice of ['android', 'desktop', undefined, 'unknown']) {
+  const entry = meta({ sessionId: 'origin', cwd: '/drafts/origin', sourceKey: 'local', originDevice, mtime: now })
+  const expected = originDevice === 'android' || originDevice === 'desktop' ? originDevice : undefined
+  const caseSummary = buildCaseActivity([entry], { origin: { drafts: entry.cwd } }, { cases: [{ id: 'origin' }] })
+  assert.equal(caseSummary.origin.sessions[0].originDevice, expected, 'case activity retains known creator')
+  assert.equal(buildFolderActivity([entry], {}, { cases: [] })[0].sessions[0].originDevice, expected,
+    'folder activity retains known creator')
+  const scan = [{ sourceKey: 'local', sessions: [{ sessionId: entry.sessionId, cwd: entry.cwd,
+    days: [{ date: dateKey(now), count: 1, firstText: '검토', lastTs: now }] }] }]
+  for (const scans of [scan, []]) {
+    assert.equal(mergeWorkLog(scans, [entry], now, 30)[0].items[0].originDevice, expected,
+      'both scanned and index-only work log rows retain known creator')
+  }
+}
+console.log('dashboard creator metadata: case, folder, scanned and index-only work log OK')

@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 
-const service = await readFile(new URL('../src/main/agent/agent-service.ts', import.meta.url), 'utf8')
-const panel = await readFile(new URL('../src/renderer/src/agent/AgentPanel.tsx', import.meta.url), 'utf8')
-const styles = await readFile(new URL('../src/renderer/src/styles.css', import.meta.url), 'utf8')
+const service = (await readFile(new URL('../src/main/agent/agent-service.ts', import.meta.url), 'utf8')).replace(/\r\n/g, '\n')
+const panel = (await readFile(new URL('../src/renderer/src/agent/AgentPanel.tsx', import.meta.url), 'utf8')).replace(/\r\n/g, '\n')
+const styles = (await readFile(new URL('../src/renderer/src/styles.css', import.meta.url), 'utf8')).replace(/\r\n/g, '\n')
 const remoteControl = service.match(/function handleRemoteControlRequest[\s\S]*?\n}\n\nfunction runRemoteAgentMessage/)?.[0] ?? ''
 const assistantMessage = service.match(/function handleAssistantMessage[\s\S]*?\n}\n\nfunction handleUserMessage/)?.[0] ?? ''
 const streamEvent = service.match(/function handleStreamEvent[\s\S]*?\n}\n\nfunction handleSdkMessage/)?.[0] ?? ''

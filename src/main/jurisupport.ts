@@ -11,6 +11,7 @@ import {
   type JsParty
 } from './jurisupportNormalize'
 import { parseRpc } from './mcpResponse'
+import { kstDateKey, setTodoDate } from '../shared/todoSummary'
 
 export type { JsCase, JsHearing, JsParty } from './jurisupportNormalize'
 
@@ -19,8 +20,18 @@ export type { JsCase, JsHearing, JsParty } from './jurisupportNormalize'
 // 응답은 SSE 한 건("event: message\ndata: {json}"), result.content[0].text = JSON 문자열.
 const MCP_URL = 'https://api.jurisupport.com/mcp'
 
+const agentAccountListeners = new Set<() => void>()
+export function onAgentMcpAccountChange(listener: () => void): () => void {
+  agentAccountListeners.add(listener)
+  return () => { agentAccountListeners.delete(listener) }
+}
+export function agentMcpAccountEpoch(): number { return accountEpoch }
+let accountEpoch = 0
 let sessionId: string | null = null
 let toolQueue: Promise<void> = Promise.resolve()
+// Leave headroom below the API's 100 requests/minute; the shared queue also covers detail reads.
+const MCP_REQUEST_INTERVAL_MS = 700
+let nextMcpPostAt = 0
 
 const CASES_PAGE_LIMIT = 50
 const CASES_MAX_PAGES = 40
@@ -37,6 +48,8 @@ const todoCaseCache = new Map<string, JsCase | null>()
 
 // ── 토큰 저장/조회 (safeStorage 암호화, 불가 시 평문 폴백) ──
 export async function setToken(token: string): Promise<void> {
+  accountEpoch++
+  for (const listener of agentAccountListeners) listener()
   let enc: string
   if (token && safeStorage.isEncryptionAvailable()) {
     enc = 'v1:' + safeStorage.encryptString(token).toString('base64')
@@ -44,8 +57,10 @@ export async function setToken(token: string): Promise<void> {
     enc = 'plain:' + token
   }
   await setSettings({ jurisupportTokenEnc: token ? enc : undefined })
+  accountEpoch++ // Requests begun during credential persistence also belong to the old account.
   sessionId = null // 토큰 바뀌면 세션 무효화
   toolQueue = Promise.resolve()
+  nextMcpPostAt = 0
   clearJuriSupportCaches()
 }
 
@@ -61,6 +76,21 @@ async function getToken(): Promise<string | null> {
   }
   if (enc.startsWith('plain:')) return enc.slice(6)
   return null
+}
+
+/** Main-process only; never expose this connection through IPC or renderer state. */
+export async function getAgentMcpConnection(): Promise<{ token: string; epoch: number; tools: string[] } | null> {
+  const epoch = accountEpoch
+  const token = await getToken()
+  if (!token) return null
+  if (/[\x00-\x1f\x7f]/.test(token)) throw new Error('JuriSupport 토큰 형식을 확인해 주세요.')
+  try {
+    const tools = await listMcpTools()
+    if (epoch !== accountEpoch) throw new Error('JuriSupport 계정이 변경되었습니다.')
+    return { token, epoch, tools: tools.map((tool) => tool.name) }
+  } catch (error) {
+    throw new Error(String(error instanceof Error ? error.message : error).split(token).join('[token redacted]'))
+  }
 }
 
 export async function hasToken(): Promise<boolean> {
@@ -82,7 +112,8 @@ export async function tokenStatus(): Promise<JsTokenStatus> {
 async function rawPost(
   token: string,
   body: unknown,
-  sid?: string | null
+  sid: string | null | undefined,
+  epoch: number
 ): Promise<{ status: number; sid: string | null; text: string }> {
   const headers: Record<string, string> = {
     Authorization: `Bearer ${token}`,
@@ -90,27 +121,44 @@ async function rawPost(
     Accept: 'application/json, text/event-stream'
   }
   if (sid) headers['mcp-session-id'] = sid
-  // 타임아웃: SSE 응답이 늦거나 스트림이 닫히지 않으면 무한 대기(사건목록 '불러오는 중' 멈춤) → 중단.
-  const ctrl = new AbortController()
-  const timer = setTimeout(() => ctrl.abort(), 20000)
-  try {
-    const res = await fetch(MCP_URL, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify(body),
-      signal: ctrl.signal
-    })
-    const text = await res.text()
-    return { status: res.status, sid: res.headers.get('mcp-session-id'), text }
-  } catch (e) {
-    if (ctrl.signal.aborted) throw new Error('JuriSupport 응답 시간 초과 (네트워크 확인 후 ↻ 다시 시도)')
-    throw e
-  } finally {
-    clearTimeout(timer)
+  for (let attempt = 0; ; attempt++) {
+    while (epoch === accountEpoch && Date.now() < nextMcpPostAt) {
+      await new Promise<void>((resolve) => setTimeout(resolve, Math.min(nextMcpPostAt - Date.now(), 60_000)))
+    }
+    if (epoch !== accountEpoch) throw new Error('계정이 변경되었습니다. 다시 조회해 주세요.')
+    nextMcpPostAt = Date.now() + MCP_REQUEST_INTERVAL_MS
+    // Only the network attempt has a timeout; pacing/backoff must not consume it.
+    const ctrl = new AbortController()
+    const timer = setTimeout(() => ctrl.abort(), 20000)
+    let res: Response
+    let text: string
+    try {
+      res = await fetch(MCP_URL, { method: 'POST', headers, body: JSON.stringify(body), signal: ctrl.signal })
+      text = await res.text()
+    } catch (e) {
+      if (ctrl.signal.aborted) throw new Error('JuriSupport 응답 시간 초과 (네트워크 확인 후 ↻ 다시 시도)')
+      throw e
+    } finally {
+      clearTimeout(timer)
+    }
+    if (epoch !== accountEpoch) throw new Error('계정이 변경되었습니다. 다시 조회해 주세요.')
+    const rpc = parseRpc(text)
+    const result = rpc?.result as { isError?: boolean; content?: { type: string; text: string }[] } | undefined
+    const errorText = rpc?.error?.message ?? (result?.isError ? result.content?.filter((c) => c.type === 'text').map((c) => c.text).join('\n') : '') ?? ''
+    // The MCP proxy wraps API rejections in HTTP 200 and preserves the error code in text.
+    const limited = res.status === 429 || /\b(?:RATE_LIMIT_EXCEEDED|TOO_MANY_REQUESTS|HTTP 429|rate limit exceeded)\b/i.test(errorText)
+    if (!limited) return { status: res.status, sid: res.headers.get('mcp-session-id'), text }
+
+    const retryAfter = res.headers.get('retry-after')?.trim()
+    const delay = retryAfter ? (/^\d+(?:\.\d+)?$/.test(retryAfter) ? Number(retryAfter) * 1000 : Date.parse(retryAfter) - Date.now()) : NaN
+    // The legacy MCP proxy drops Retry-After; allow its full minute window to reset.
+    const waitMs = Math.max(MCP_REQUEST_INTERVAL_MS, Number.isFinite(delay) ? delay : 60_000 * 2 ** attempt)
+    nextMcpPostAt = Math.max(nextMcpPostAt, Date.now() + waitMs)
+    if (attempt >= 2) throw new Error('JuriSupport 호출 제한이 계속되고 있습니다. 잠시 후 다시 확인해 주세요.')
   }
 }
 
-async function ensureSession(token: string): Promise<string> {
+async function ensureSession(token: string, epoch: number): Promise<void> {
   const init = await rawPost(token, {
     jsonrpc: '2.0',
     id: 1,
@@ -120,32 +168,34 @@ async function ensureSession(token: string): Promise<string> {
       capabilities: {},
       clientInfo: { name: 'legal-terminal', version: '0.0.1' }
     }
-  })
+  }, undefined, epoch)
   if (!init.sid) {
     const err = parseRpc(init.text)
     throw new Error('MCP 초기화 실패: ' + (err?.error?.message ?? `HTTP ${init.status}`))
   }
-  await rawPost(token, { jsonrpc: '2.0', method: 'notifications/initialized' }, init.sid)
-  return init.sid
+  await rawPost(token, { jsonrpc: '2.0', method: 'notifications/initialized' }, init.sid, epoch)
+  if (epoch !== accountEpoch) throw new Error('계정이 변경되었습니다. 다시 조회해 주세요.')
+  sessionId = init.sid
 }
 
 // 도구 호출 본체. 세션 만료 시 1회 재수립 후 재시도.
-async function callToolNow(name: string, args: Record<string, unknown>): Promise<unknown> {
+async function callToolNow(name: string, args: Record<string, unknown>, epoch: number): Promise<unknown> {
   const token = await getToken()
   if (!token) throw new Error('JuriSupport 토큰이 설정되지 않았습니다.')
-  if (!sessionId) sessionId = await ensureSession(token)
+  if (!sessionId) await ensureSession(token, epoch)
 
   const call = (): Promise<{ status: number; sid: string | null; text: string }> =>
     rawPost(
       token,
       { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name, arguments: args } },
-      sessionId
+      sessionId,
+      epoch
     )
 
   let resp = await call()
   let rpc = parseRpc(resp.text)
   if (rpc?.error && /session/i.test(rpc.error.message || '')) {
-    sessionId = await ensureSession(token)
+    await ensureSession(token, epoch)
     resp = await call()
     rpc = parseRpc(resp.text)
   }
@@ -155,8 +205,9 @@ async function callToolNow(name: string, args: Record<string, unknown>): Promise
   if (!('result' in rpc)) {
     throw new Error(`JuriSupport 응답에 result가 없습니다. (HTTP ${resp.status})`)
   }
-  const result = rpc.result as { content?: { type: string; text: string }[] } | undefined
+  const result = rpc.result as { isError?: boolean; content?: { type: string; text: string }[] } | undefined
   const textPart = result?.content?.find((c) => c.type === 'text')?.text
+  if (result?.isError) throw new Error(textPart || 'JuriSupport 도구 호출 실패')
   if (textPart) {
     try {
       return JSON.parse(textPart)
@@ -167,30 +218,32 @@ async function callToolNow(name: string, args: Record<string, unknown>): Promise
   return rpc?.result
 }
 
-// MCP 서버가 제공하는 도구 목록. 사무실 프로필 도구 탐색에 쓴다.
-async function listMcpToolsNow(): Promise<{ name: string; description?: string }[]> {
+type McpToolInfo = { name: string; description?: string; inputSchema?: { properties?: Record<string, unknown> } }
+
+// MCP 서버가 제공하는 도구 목록. 사무실 프로필과 지원 필드 탐색에 쓴다.
+async function listMcpToolsNow(epoch: number): Promise<McpToolInfo[]> {
   const token = await getToken()
   if (!token) throw new Error('JuriSupport 토큰이 설정되지 않았습니다.')
-  if (!sessionId) sessionId = await ensureSession(token)
+  if (!sessionId) await ensureSession(token, epoch)
 
   const call = (): Promise<{ status: number; sid: string | null; text: string }> =>
-    rawPost(token, { jsonrpc: '2.0', id: 3, method: 'tools/list', params: {} }, sessionId)
+    rawPost(token, { jsonrpc: '2.0', id: 3, method: 'tools/list', params: {} }, sessionId, epoch)
 
   let resp = await call()
   let rpc = parseRpc(resp.text)
   if (rpc?.error && /session/i.test(rpc.error.message || '')) {
-    sessionId = await ensureSession(token)
+    await ensureSession(token, epoch)
     resp = await call()
     rpc = parseRpc(resp.text)
   }
   if (!rpc || rpc.error || !('result' in rpc)) {
     throw new Error(rpc?.error?.message ?? `JuriSupport tools/list 실패 (HTTP ${resp.status})`)
   }
-  const tools = (rpc.result as { tools?: { name?: string; description?: string }[] })?.tools
+  const tools = (rpc.result as { tools?: McpToolInfo[] })?.tools
   if (!Array.isArray(tools)) return []
   return tools
-    .filter((t): t is { name: string; description?: string } => typeof t?.name === 'string')
-    .map((t) => ({ name: t.name, description: t.description }))
+    .filter((t): t is McpToolInfo => typeof t?.name === 'string')
+    .map((t) => ({ name: t.name, description: t.description, inputSchema: t.inputSchema }))
 }
 
 // 같은 MCP 세션에 동시 요청이 겹치면 서버/세션 타이밍에 따라 간헐 실패할 수 있어 순차화한다.
@@ -208,12 +261,17 @@ async function enqueueMcp<T>(run: () => Promise<T>): Promise<T> {
   }
 }
 
-async function callTool(name: string, args: Record<string, unknown>): Promise<unknown> {
-  return enqueueMcp(() => callToolNow(name, args))
+async function callTool(name: string, args: Record<string, unknown>, epoch = accountEpoch): Promise<unknown> {
+  return enqueueMcp(async () => {
+    if (epoch !== accountEpoch) throw new Error('계정이 변경되었습니다. 다시 조회해 주세요.')
+    const result = await callToolNow(name, args, epoch)
+    if (epoch !== accountEpoch) throw new Error('계정이 변경되었습니다. 다시 조회해 주세요.')
+    return result
+  })
 }
 
-async function listMcpTools(): Promise<{ name: string; description?: string }[]> {
-  return enqueueMcp(listMcpToolsNow)
+async function listMcpTools(epoch = accountEpoch): Promise<McpToolInfo[]> {
+  return enqueueMcp(() => listMcpToolsNow(epoch))
 }
 
 export interface JsTodoProgress {
@@ -224,7 +282,50 @@ export interface JsTodoProgress {
   terminalId?: string
   cwd?: string
 }
+export interface TodoEvidence {
+  kind: 'document' | 'progress' | 'event' | 'file'
+  id?: string
+  uri?: string
+  label: string
+  occurredAt?: string
+  reason?: string
+  status: 'candidate' | 'confirmed' | 'dismissed'
+}
+export interface TodoStatusOptions {
+  childDispositions?: { id: string; action: 'complete' | 'close' | 'keep'; reason?: string }[]
+  version?: number
+}
+export interface CaseTaskDisposition {
+  id: string
+  action: 'complete' | 'close' | 'keep' | 'transfer'
+  targetCaseId?: string
+  reason?: string
+  version?: number
+}
+export interface CaseClosurePreview {
+  id: string
+  version: number
+  status: string
+  engagementStatus: string
+  tasks: JsTodo[]
+  blocked: boolean
+}
+export interface TodoCapabilities {
+  queryFields: string[]
+  createFields: string[]
+  updateFields: string[]
+  statusFields: string[]
+  evidenceSuggestions: boolean
+  caseClosure: boolean
+  caseEngagement: boolean
+}
 export interface JsTodo {
+  type?: 'todo' | 'memo'
+  reviewAt?: string | null
+  parentId?: string | null
+  children?: { id: string; title: string; status: string }[]
+  evidence?: TodoEvidence[]
+  version?: number
   id: string
   title: string
   status: string
@@ -244,6 +345,17 @@ export interface JsTodo {
   completedAt?: string | null
 }
 export interface ListTodosParams {
+  openOnly?: boolean
+  enrichCaseDetails?: boolean
+  type?: 'todo' | 'memo'
+  fields?: 'compact' | 'full'
+  dueBefore?: string
+  dueAfter?: string
+  hasDueDate?: boolean
+  updatedBefore?: string
+  sortBy?: 'dueDate' | 'createdAt' | 'updatedAt'
+  sortOrder?: 'asc' | 'desc'
+  includeClosed?: boolean
   page?: number
   limit?: number
   search?: string
@@ -251,7 +363,11 @@ export interface ListTodosParams {
   caseId?: string
   includeArchived?: boolean
 }
-export interface TodoMutationInput {
+export interface TodoMutationInput extends TodoStatusOptions {
+  type?: 'todo' | 'memo'
+  reviewAt?: string | null
+  parentId?: string | null
+  evidence?: TodoEvidence[]
   title?: string
   status?: string
   priority?: string
@@ -266,6 +382,7 @@ export interface TodoMutationInput {
   notes?: string
 }
 export interface TodoTerminalContext {
+  contextKind?: 'case' | 'global' | 'folder'
   terminalId?: string
   cwd?: string
   jsId?: string
@@ -332,17 +449,12 @@ function normalizePriority(value?: string): 'low' | 'medium' | 'high' | undefine
   return undefined
 }
 
-function toMcpDateTime(value?: string | null): string | undefined {
-  if (!value) return undefined
-  const trimmed = value.trim()
-  const dateOnly = trimmed.match(/^(\d{4})-(\d{2})-(\d{2})$/)
-  if (dateOnly) {
-    const [, year, month, day] = dateOnly
-    return new Date(Number(year), Number(month) - 1, Number(day), 23, 59, 0, 0).toISOString()
-  }
-  const d = new Date(trimmed)
-  if (Number.isNaN(d.getTime())) return undefined
-  return d.toISOString()
+function toMcpDateTime(value?: string | null): string | null | undefined {
+  if (value === null) return null
+  if (value === undefined || value === '') return undefined
+  if (!kstDateKey(value)) throw new Error('날짜를 확인해 주세요.')
+  if (value.length === 10) return setTodoDate(undefined, value)
+  return new Date(/(?:Z|[+-]\d{2}:?\d{2})$/i.test(value) ? value : `${value}+09:00`).toISOString()
 }
 
 function formatProgressStamp(d = new Date()): string {
@@ -486,10 +598,19 @@ function normalizeTodoFields(value: Record<string, unknown>): JsTodo | null {
     stringFrom(value.content) ??
     stringFrom(value.summary) ??
     stringFrom(value.text)
-  if (!id && !title) return null
+  if (!id) return null
 
   return {
-    id: id ?? title ?? '',
+    id,
+    type: value.type === 'memo' ? 'memo' : 'todo',
+    reviewAt: stringFrom(value.reviewAt) ?? null,
+    parentId: stringFrom(value.parentId) ?? null,
+    children: Array.isArray(value.openDescendants ?? value.children) ? ((value.openDescendants ?? value.children) as unknown[]).flatMap((child) => {
+      const c = asObject(child)
+      return c && stringFrom(c.id) ? [{ id: String(c.id), title: stringFrom(c.title) ?? '(제목 없음)', status: toUiTodoStatus(stringFrom(c.status)) }] : []
+    }) : undefined,
+    evidence: normalizeEvidence(value.evidence),
+    version: typeof value.version === 'number' ? value.version : undefined,
     title: title ?? '(제목 없음)',
     status: toUiTodoStatus(
       stringFrom(value.status) ?? (value.completedAt || value.completed_at ? 'completed' : 'pending')
@@ -599,14 +720,6 @@ function normalizeTodoList(r: unknown): JsTodo[] {
   return single ? [single] : []
 }
 
-function caseKey(c: JsCase): string {
-  return [c.id, c.caseNumber, c.court, c.caseName].filter(Boolean).join('\0')
-}
-
-function todoKey(todo: JsTodo): string {
-  return [todo.id, todo.title, todo.caseId, todo.caseNumber].filter(Boolean).join('\0')
-}
-
 function partyNamesFromCase(c: JsCase, role: string): string {
   return c.parties
     .filter((p) => p.role === role)
@@ -617,13 +730,15 @@ function partyNamesFromCase(c: JsCase, role: string): string {
 
 async function getCaseCached(id: string): Promise<JsCase | null> {
   if (todoCaseCache.has(id)) return todoCaseCache.get(id) ?? null
+  const epoch = accountEpoch
   try {
     const c = await getCase(id)
+    if (epoch !== accountEpoch) throw new Error('계정이 변경되었습니다.')
     todoCaseCache.set(id, c)
     return c
   } catch (error) {
     console.warn('[jurisupport] failed to enrich todo case', error)
-    todoCaseCache.set(id, null)
+    if (epoch === accountEpoch) todoCaseCache.set(id, null)
     return null
   }
 }
@@ -659,34 +774,73 @@ async function enrichTodos(todos: JsTodo[]): Promise<JsTodo[]> {
   return out
 }
 
-function taskListArgs(params: ListTodosParams): Record<string, unknown> {
-  return compactRecord({
-    type: 'todo',
-    page: params.page,
-    limit: params.limit,
-    search: params.search,
-    caseId: params.caseId,
-    status: toJuriTaskStatus(params.status)
-  })
+let todoCapabilityRequest: Promise<TodoCapabilities> | null = null
+export function todoCapabilities(): Promise<TodoCapabilities> {
+  if (!todoCapabilityRequest) {
+    const epoch = accountEpoch
+    const request = listMcpTools().then((tools) => {
+      if (epoch !== accountEpoch) throw new Error('계정이 변경되었습니다.')
+      const fields = (name: string): string[] => Object.keys(tools.find((t) => t.name === name)?.inputSchema?.properties ?? {})
+      const writable = (name: string): string[] => {
+        const available = fields(name)
+        // Old MCP advertised priority while the API discarded it.
+        return available.includes('reviewAt') ? available : available.filter((field) => field !== 'priority')
+      }
+      return {
+        queryFields: fields('list_tasks'), createFields: writable('create_task'), updateFields: writable('update_task'),
+        statusFields: fields('update_task_status'),
+        evidenceSuggestions: tools.some((t) => t.name === 'get_task_evidence_suggestions'),
+        caseClosure: tools.some((t) => t.name === 'get_case_closure_preview') && ['taskDispositions', 'version'].every((field) => fields('update_case_status').includes(field)),
+        caseEngagement: ['engagementStatus', 'taskDispositions', 'version'].every((field) => fields('update_case').includes(field))
+      }
+    }).catch((error) => {
+      if (todoCapabilityRequest === request) todoCapabilityRequest = null
+      throw error
+    })
+    todoCapabilityRequest = request
+  }
+  return todoCapabilityRequest
 }
 
-function createTaskArgs(input: TodoMutationInput): Record<string, unknown> {
-  return compactRecord({
-    title: input.title,
-    type: 'todo',
-    content: mergeCaseInfoWithNotes(input),
-    dueDate: toMcpDateTime(input.dueDate),
-    caseId: input.caseId,
-    priority: normalizePriority(input.priority)
-  })
+async function taskListArgs(params: ListTodosParams): Promise<Record<string, unknown>> {
+  const args = compactRecord({ type: params.type ?? 'todo', page: params.page, limit: params.limit, search: params.search, caseId: params.caseId, status: toJuriTaskStatus(params.status) })
+  const extras = compactRecord({ fields: params.fields, dueBefore: params.dueBefore, dueAfter: params.dueAfter, hasDueDate: params.hasDueDate, updatedBefore: params.updatedBefore, sortBy: params.sortBy, sortOrder: params.sortOrder, includeClosed: params.includeClosed ?? params.includeArchived })
+  if (Object.keys(extras).length) {
+    // Optional query hints are omitted for legacy servers; full-list local classification remains available.
+    const capabilities = await todoCapabilities().catch(() => null)
+    for (const [field, value] of Object.entries(extras)) {
+      if (capabilities?.queryFields.includes(field)) args[field] = value
+      else if (['dueBefore', 'dueAfter', 'hasDueDate', 'updatedBefore'].includes(field)) throw new Error(`서버가 ${field} 조회 조건을 지원하지 않습니다. 열린 할일의 화면 필터를 사용해 주세요.`)
+    }
+  }
+  return args
 }
 
-function updateTaskArgs(input: TodoMutationInput): Record<string, unknown> {
-  return compactRecord({
-    title: input.title,
-    content: mergeCaseInfoWithNotes(input),
-    dueDate: toMcpDateTime(input.dueDate),
-    priority: normalizePriority(input.priority)
+async function taskWriteArgs(input: TodoMutationInput, create: boolean): Promise<Record<string, unknown>> {
+  const args = compactRecord({ title: input.title, content: mergeCaseInfoWithNotes(input), dueDate: toMcpDateTime(input.dueDate), type: create ? input.type ?? 'todo' : input.type, caseId: create ? input.caseId : undefined })
+  if (input.notes !== undefined && !mergeCaseInfoWithNotes(input)) args.content = ''
+  const extras = compactRecord({ reviewAt: toMcpDateTime(input.reviewAt), parentId: input.parentId, evidence: input.evidence, priority: input.priority === undefined ? undefined : normalizePriority(input.priority), version: input.version })
+  if (input.priority !== undefined && !normalizePriority(input.priority)) throw new Error('중요도를 확인해 주세요.')
+  if (Object.keys(extras).length || (!create && input.type)) {
+    const capabilities = await todoCapabilities()
+    const fields = create ? capabilities.createFields : capabilities.updateFields
+    for (const [field, value] of Object.entries(extras)) {
+      // ponytail: legacy MCP cannot enforce versions; server upgrade restores optimistic writes.
+      if (field === 'version' && !fields.includes(field)) continue
+      if (!fields.includes(field)) throw new Error(`서버가 ${field} 저장을 지원하지 않습니다. 서버 업데이트 후 다시 시도해 주세요.`)
+      args[field] = value
+    }
+    if (!create && input.type && !fields.includes('type')) throw new Error('서버가 메모 유형 변경을 지원하지 않습니다.')
+  }
+  return args
+}
+
+function normalizeEvidence(value: unknown): TodoEvidence[] {
+  if (!Array.isArray(value)) return []
+  return value.flatMap((entry) => {
+    const e = asObject(entry)
+    if (!e || !['document', 'progress', 'event', 'file'].includes(String(e.kind)) || !stringFrom(e.label) || !['candidate', 'confirmed', 'dismissed'].includes(String(e.status))) return []
+    return [{ kind: e.kind as TodoEvidence['kind'], label: String(e.label), status: e.status as TodoEvidence['status'], id: stringFrom(e.id), uri: stringFrom(e.uri), occurredAt: stringFrom(e.occurredAt), reason: stringFrom(e.reason) }]
   })
 }
 
@@ -696,6 +850,8 @@ const caseListCache = new Map<string, { fetchedAt: number; cases: JsCase[] }>()
 const caseListInflight = new Map<string, Promise<JsCase[]>>()
 
 function clearJuriSupportCaches(): void {
+  todoCapabilityRequest = null
+  todoListInflight.clear()
   todoCaseCache.clear()
   caseListCache.clear()
   caseListInflight.clear()
@@ -716,53 +872,59 @@ function caseListCacheKey(params: CaseListQuery): string {
   )
 }
 
-async function listCasePage(params: ListCasesParams): Promise<JsCase[]> {
-  return normalizeCaseList(await callTool('list_cases', params as Record<string, unknown>))
+async function listCasePage(params: ListCasesParams, strict = false): Promise<JsCase[]> {
+  const raw = await callTool('list_cases', params as Record<string, unknown>)
+  const cases = normalizeCaseList(raw)
+  if (strict) {
+    const keys = ['cases', 'caseList', 'case_list', 'items', 'data', 'results']
+    const object = asObject(raw)
+    const containers = [object, ...keys.map((key) => asObject(object?.[key]))]
+    const rows = [raw, ...containers.flatMap((container) => container ? keys.map((key) => container[key]) : [])].find(Array.isArray)
+    if (!rows || object?.error || object?.success === false || !Array.isArray(cases) || rows.length !== cases.length || cases.some((c) => !c.id)) {
+      throw new Error('사건 목록 응답을 확인할 수 없습니다. 전체 조회를 다시 시도해 주세요.')
+    }
+  }
+  return cases
 }
 
 async function listCasesFresh(params: CaseListQuery): Promise<JsCase[]> {
   const { page, limit, ...filters } = params
-  const hasExplicitPaging = page !== undefined || limit !== undefined
-
-  if (hasExplicitPaging) {
-    return listCasePage({
-      page: page ?? 1,
-      limit: limit ?? CASES_PAGE_LIMIT,
-      ...filters
-    })
+  if (page !== undefined || limit !== undefined) {
+    return listCasePage({ page: page ?? 1, limit: limit ?? CASES_PAGE_LIMIT, ...filters })
   }
-
-  const cases: JsCase[] = []
-  const seen = new Set<string>()
-
+  const cases = new Map<string, JsCase>()
   for (let pageNo = 1; pageNo <= CASES_MAX_PAGES; pageNo++) {
-    let pageCases: JsCase[]
-    try {
-      pageCases = await listCasePage({ page: pageNo, limit: CASES_PAGE_LIMIT, ...filters })
-    } catch (error) {
-      if (pageNo === 1) throw error
-      console.warn('[jurisupport] stopped paginating list_cases', error)
-      break
-    }
-
-    if (pageCases.length === 0) break
-
-    let added = 0
-    for (const c of pageCases) {
-      const key = caseKey(c)
-      if (key && seen.has(key)) continue
-      if (key) seen.add(key)
-      cases.push(c)
-      added++
-    }
-
-    if (added === 0 || pageCases.length < CASES_PAGE_LIMIT) break
+    const pageCases = await listCasePage({ page: pageNo, limit: CASES_PAGE_LIMIT, ...filters }, true)
+    const previousSize = cases.size
+    for (const c of pageCases) cases.set(c.id, c)
+    if (pageCases.length && cases.size === previousSize) throw new Error('사건 조회 페이지가 반복되었습니다. 전체 조회를 다시 시도해 주세요.')
+    if (pageCases.length < CASES_PAGE_LIMIT) return [...cases.values()]
   }
+  throw new Error('사건 전체 조회 상한에 도달했습니다. 전체 목록을 확인할 수 없습니다.')
+}
 
-  return cases
+export interface JsHearingSummary { todayCount: number; weekCount: number; fetchedAt: string }
+export async function hearingSummary(): Promise<JsHearingSummary> {
+  const epoch = accountEpoch
+  const raw = await callTool('get_dashboard', {}, epoch)
+  const response = asObject(raw)
+  const dashboard = asObject(response?.data) ?? response
+  const stats = asObject(dashboard?.stats)
+  const todayCount = stats?.todayHearingsCount
+  const weekCount = stats?.upcomingHearingsCount
+  if (response?.success === false || response?.error ||
+      stats?.hearingWindowDays !== 7 ||
+      stats?.hearingTimezone !== 'Asia/Seoul' ||
+      typeof todayCount !== 'number' || !Number.isSafeInteger(todayCount) || todayCount < 0 ||
+      typeof weekCount !== 'number' || !Number.isSafeInteger(weekCount) || weekCount < todayCount) {
+    throw new Error('서버에서 한국 시간 기준 오늘·7일 기일 집계를 확인할 수 없습니다. 서버 업데이트 후 다시 조회해 주세요.')
+  }
+  if (epoch !== accountEpoch) throw new Error('계정이 변경되었습니다. 다시 조회해 주세요.')
+  return { todayCount, weekCount, fetchedAt: new Date().toISOString() }
 }
 
 export async function listCases(params: ListCasesParams = {}): Promise<JsCase[]> {
+  const epoch = accountEpoch
   const { refresh, ...query } = params
   const key = caseListCacheKey(query)
   const cached = caseListCache.get(key)
@@ -777,6 +939,7 @@ export async function listCases(params: ListCasesParams = {}): Promise<JsCase[]>
 
   const request = listCasesFresh(query)
     .then((cases) => {
+      if (epoch !== accountEpoch) throw new Error('계정이 변경되었습니다. 다시 조회해 주세요.')
       caseListCache.set(key, { fetchedAt: Date.now(), cases })
       return cases
     })
@@ -799,50 +962,72 @@ export async function getCase(id: string): Promise<JsCase | null> {
   return normalizeCase(r)
 }
 
-async function listTodoPage(params: ListTodosParams): Promise<JsTodo[]> {
-  return enrichTodos(normalizeTodoList(await callTool('list_tasks', taskListArgs(params))))
+interface TodoPage { todos: JsTodo[]; total?: number; totalPages?: number; hasNext?: boolean }
+function normalizeTodoPage(raw: unknown): TodoPage {
+  const obj = asObject(raw)
+  const data = asObject(obj?.data)
+  const recognized = Array.isArray(raw) || [obj, data].some((container) => container && ['todos', 'tasks', 'items', 'data', 'results'].some((key) => Array.isArray(container[key])))
+  if (!recognized || obj?.error || obj?.success === false) throw new Error('할일 목록 응답을 확인할 수 없습니다.')
+  const containers = [asObject(obj?.pagination), asObject(obj?.meta), asObject(data?.pagination), asObject(data?.meta), obj, data].filter(Boolean) as Record<string, unknown>[]
+  const number = (...keys: string[]): number | undefined => {
+    for (const container of containers) for (const key of keys) if (typeof container[key] === 'number' && Number.isFinite(container[key]) && Number(container[key]) >= 0) return Number(container[key])
+    return undefined
+  }
+  const hasNext = containers.map((c) => c.hasNext ?? c.hasNextPage).find((value) => typeof value === 'boolean') as boolean | undefined
+  const todos = normalizeTodoList(raw)
+  const arrays = [raw, ...[obj, data].flatMap((c) => c ? ['todos', 'tasks', 'items', 'data', 'results'].map((key) => c[key]) : [])].filter(Array.isArray)
+  if (arrays[0] && arrays[0].length !== todos.length) throw new Error('식별자가 없는 할일 응답입니다. 다시 조회해 주세요.')
+  return { todos, total: number('total', 'totalCount'), totalPages: number('totalPages', 'pageCount'), hasNext }
 }
-
-export async function listTodos(params: ListTodosParams = {}): Promise<JsTodo[]> {
-  const { page, limit, ...filters } = params
-  const hasExplicitPaging = page !== undefined || limit !== undefined
-
-  if (hasExplicitPaging) {
-    return listTodoPage({
-      page: page ?? 1,
-      limit: limit ?? TODOS_PAGE_LIMIT,
-      ...filters
-    })
-  }
-
-  const todos: JsTodo[] = []
-  const seen = new Set<string>()
-
-  for (let pageNo = 1; pageNo <= TODOS_MAX_PAGES; pageNo++) {
-    let pageTodos: JsTodo[]
-    try {
-      pageTodos = await listTodoPage({ page: pageNo, limit: TODOS_PAGE_LIMIT, ...filters })
-    } catch (error) {
-      if (pageNo === 1) throw error
-      console.warn('[jurisupport] stopped paginating list_tasks', error)
-      break
+async function listTodoPage(params: ListTodosParams): Promise<TodoPage> {
+  return normalizeTodoPage(await callTool('list_tasks', await taskListArgs(params)))
+}
+async function listTodoStatus(params: ListTodosParams): Promise<JsTodo[]> {
+  if (params.page !== undefined || params.limit !== undefined) return (await listTodoPage({ ...params, page: params.page ?? 1, limit: params.limit ?? TODOS_PAGE_LIMIT })).todos
+  const todos = new Map<string, JsTodo>()
+  let expectedTotal: number | undefined
+  for (let page = 1; page <= TODOS_MAX_PAGES; page++) {
+    const result = await listTodoPage({ ...params, page, limit: TODOS_PAGE_LIMIT })
+    const before = todos.size
+    for (const todo of result.todos) todos.set(todo.id, todo)
+    if (result.total !== undefined) expectedTotal = result.total
+    if (result.todos.length && todos.size === before) throw new Error('할일 조회 페이지가 반복되었습니다. 전체 조회를 다시 시도해 주세요.')
+    const complete = result.hasNext === false || (result.totalPages !== undefined && page >= result.totalPages) || (expectedTotal !== undefined && todos.size >= expectedTotal)
+    const more = result.hasNext === true || (result.totalPages !== undefined && page < result.totalPages) || (expectedTotal !== undefined && todos.size < expectedTotal)
+    if (complete) {
+      if (expectedTotal !== undefined && todos.size < expectedTotal) throw new Error('할일 일부가 누락되었습니다. 전체 조회를 다시 시도해 주세요.')
+      return [...todos.values()]
     }
-
-    if (pageTodos.length === 0) break
-
-    let added = 0
-    for (const todo of pageTodos) {
-      const key = todoKey(todo)
-      if (key && seen.has(key)) continue
-      if (key) seen.add(key)
-      todos.push(todo)
-      added++
-    }
-
-    if (added === 0 || pageTodos.length < TODOS_PAGE_LIMIT) break
+    if (!result.todos.length && more) throw new Error('할일 일부가 누락되었습니다. 전체 조회를 다시 시도해 주세요.')
+    if (!more && result.todos.length < TODOS_PAGE_LIMIT) return [...todos.values()]
   }
-
-  return todos
+  throw new Error('할일 전체 조회 상한에 도달했습니다. 전체 건수를 확인할 수 없습니다.')
+}
+const todoListInflight = new Map<string, Promise<JsTodo[]>>()
+export function listTodos(params: ListTodosParams = {}): Promise<JsTodo[]> {
+  const key = JSON.stringify(params)
+  const existing = todoListInflight.get(key)
+  if (existing) return existing
+  const epoch = accountEpoch
+  const request = (async () => {
+    const statuses = params.openOnly ? ['pending', 'in_progress'] : (params.includeClosed ?? params.includeArchived) && (!params.status || params.status === 'all') && params.page === undefined && params.limit === undefined ? ['pending', 'in_progress', 'completed', 'closed'] : [params.status]
+    const unique = new Map<string, JsTodo>()
+    for (const status of statuses) {
+      for (const todo of await listTodoStatus({ ...params, status })) {
+        if (todo.type !== (params.type ?? 'todo')) continue
+        if (params.openOnly && !['pending', 'in_progress'].includes(todo.status)) continue
+        if ((params.includeClosed ?? params.includeArchived) === false && todo.status === 'closed' && toJuriTaskStatus(params.status) !== 'closed') continue
+        unique.set(todo.id, todo)
+      }
+    }
+    if (epoch !== accountEpoch) throw new Error('계정이 변경되었습니다. 다시 조회해 주세요.')
+    const result = [...unique.values()]
+    const enriched = params.enrichCaseDetails === false ? result : await enrichTodos(result)
+    if (epoch !== accountEpoch) throw new Error('계정이 변경되었습니다. 다시 조회해 주세요.')
+    return enriched
+  })().finally(() => { if (todoListInflight.get(key) === request) todoListInflight.delete(key) })
+  todoListInflight.set(key, request)
+  return request
 }
 
 export async function getTodo(id: string): Promise<JsTodo | null> {
@@ -850,22 +1035,24 @@ export async function getTodo(id: string): Promise<JsTodo | null> {
 }
 
 export async function createTodo(input: TodoMutationInput): Promise<JsTodo | null> {
-  const todo = normalizeTodo(await callTool('create_task', createTaskArgs(input)))
+  const epoch = accountEpoch
+  const todo = normalizeTodo(await callTool('create_task', await taskWriteArgs(input, true), epoch))
   const status = toJuriTaskStatus(input.status)
-  if (todo?.id && status && status !== 'pending') return updateTodo(todo.id, { status })
+  if (todo?.id && status && status !== 'pending') return changeTodoStatus(todo.id, status, undefined, epoch)
   return todo
 }
 
 export async function updateTodo(id: string, patch: TodoMutationInput): Promise<JsTodo | null> {
+  const epoch = accountEpoch
   const status = toJuriTaskStatus(patch.status)
-  const updateArgs = compactRecord({ id, ...updateTaskArgs(patch) })
+  const updateArgs = { id, ...await taskWriteArgs(patch, false) }
   let todo: JsTodo | null = null
 
-  if (Object.keys(updateArgs).length > 1) {
-    todo = normalizeTodo(await callTool('update_task', updateArgs))
+  if (Object.keys(updateArgs).some((key) => key !== 'id' && key !== 'version')) {
+    todo = normalizeTodo(await callTool('update_task', updateArgs, epoch))
   }
   if (status) {
-    todo = normalizeTodo(await callTool('update_task_status', { id, status })) ?? todo
+    todo = await changeTodoStatus(id, status, { ...patch, version: todo?.version ?? patch.version }, epoch) ?? todo
   }
 
   return todo ?? getTodo(id)
@@ -874,17 +1061,61 @@ export async function updateTodo(id: string, patch: TodoMutationInput): Promise<
 export async function completeTodo(
   id: string,
   progressText?: string,
-  context?: TodoTerminalContext
+  context?: TodoTerminalContext,
+  options?: TodoStatusOptions
 ): Promise<JsTodo | null> {
+  const epoch = accountEpoch
   let todo: JsTodo | null = null
   if (progressText?.trim()) {
     todo = await appendTodoProgress(id, progressText.trim(), context)
   }
-  return normalizeTodo(await callTool('update_task_status', { id, status: 'completed' })) ?? todo
+  return await changeTodoStatus(id, 'completed', { ...options, version: todo?.version ?? options?.version }, epoch) ?? todo
 }
 
-export async function archiveTodo(id: string): Promise<JsTodo | null> {
-  return normalizeTodo(await callTool('update_task_status', { id, status: 'closed' }))
+export async function archiveTodo(id: string, options?: TodoStatusOptions): Promise<JsTodo | null> {
+  return changeTodoStatus(id, 'closed', options)
+}
+async function changeTodoStatus(id: string, status: JuriTaskStatus, options?: TodoStatusOptions, epoch = accountEpoch): Promise<JsTodo | null> {
+  const args = compactRecord({ id, status, childDispositions: options?.childDispositions, version: options?.version })
+  if (options?.childDispositions || options?.version !== undefined) {
+    const capabilities = await todoCapabilities()
+    if (args.version !== undefined && !capabilities.statusFields.includes('version')) delete args.version
+    if (args.childDispositions !== undefined && !capabilities.statusFields.includes('childDispositions')) throw new Error('서버가 하위 할일 처리 결정을 지원하지 않습니다.')
+  }
+  return normalizeTodo(await callTool('update_task_status', args, epoch))
+}
+export async function todoEvidenceSuggestions(id: string): Promise<TodoEvidence[]> {
+  const epoch = accountEpoch
+  if (!(await todoCapabilities()).evidenceSuggestions) throw new Error('서버가 완료 근거 조회를 지원하지 않습니다.')
+  const result = await callTool('get_task_evidence_suggestions', { id }, epoch)
+  const data = asObject(result)?.data
+  if (!Array.isArray(data)) throw new Error('완료 근거 응답을 확인할 수 없습니다.')
+  return normalizeEvidence(data).map((entry) => ({ ...entry, status: 'candidate' }))
+}
+export async function caseClosurePreview(id: string): Promise<CaseClosurePreview> {
+  const epoch = accountEpoch
+  if (!(await todoCapabilities()).caseClosure) throw new Error('서버가 사건 종료 검토를 지원하지 않습니다.')
+  const result = await callTool('get_case_closure_preview', { id }, epoch)
+  const obj = asObject(result)
+  const data = asObject(obj?.data) ?? obj
+  const raw = data?.tasks ?? data?.todos ?? data?.openTasks
+  if (!Array.isArray(raw)) throw new Error('사건 종료 검토 목록을 확인할 수 없습니다.')
+  if (typeof data?.version !== 'number') throw new Error('사건 버전을 확인할 수 없습니다.')
+  return { id, version: data.version, status: String(data.status ?? ''), engagementStatus: String(data.engagementStatus ?? 'unknown'), tasks: normalizeTodoList(raw), blocked: data.blocked === true }
+}
+export async function updateCaseStatus(id: string, status: string, taskDispositions?: CaseTaskDisposition[], version?: number): Promise<JsCase | null> {
+  const epoch = accountEpoch
+  if (!(await todoCapabilities()).caseClosure) throw new Error('서버가 사건 종료 검토를 지원하지 않습니다.')
+  const result = await callTool('update_case_status', compactRecord({ id, status, taskDispositions, version }), epoch)
+  clearJuriSupportCaches()
+  return normalizeCase(asObject(result)?.data ?? result)
+}
+export async function updateCaseEngagement(id: string, engagementStatus: string, taskDispositions?: CaseTaskDisposition[], version?: number): Promise<JsCase | null> {
+  const epoch = accountEpoch
+  if (!(await todoCapabilities()).caseEngagement) throw new Error('서버가 수임 상태 변경을 지원하지 않습니다.')
+  const result = await callTool('update_case', compactRecord({ id, engagementStatus, taskDispositions, version }), epoch)
+  clearJuriSupportCaches()
+  return normalizeCase(asObject(result)?.data ?? result)
 }
 
 export async function appendTodoProgress(
@@ -892,27 +1123,22 @@ export async function appendTodoProgress(
   text: string,
   context?: TodoTerminalContext
 ): Promise<JsTodo | null> {
+  const epoch = accountEpoch
   const todo = await getTodo(id)
-  const content = appendProgressContent(todo?.notes, text, context)
-  return normalizeTodo(await callTool('update_task', { id, content }))
-}
-
-function ymd(d: Date): string {
-  const month = String(d.getMonth() + 1).padStart(2, '0')
-  const day = String(d.getDate()).padStart(2, '0')
-  return `${d.getFullYear()}-${month}-${day}`
+  if (!todo) throw new Error('할일 원문을 확인할 수 없습니다. 다시 조회해 주세요.')
+  if (epoch !== accountEpoch) throw new Error('계정이 변경되었습니다. 다시 조회해 주세요.')
+  if (todo.version === undefined || !(await todoCapabilities()).updateFields.includes('version')) throw new Error('진행 기록을 안전하게 추가하려면 서버 업데이트가 필요합니다.')
+  if (epoch !== accountEpoch) throw new Error('계정이 변경되었습니다. 다시 조회해 주세요.')
+  const content = appendProgressContent(todo.notes, text, context)
+  return updateTodo(id, { notes: content, version: todo.version })
 }
 
 function resolveDueDate(value?: string): string | undefined {
   if (!value) return undefined
   const lower = value.toLocaleLowerCase('ko-KR')
-  const d = new Date()
-  if (lower === 'today' || lower === '오늘') return toMcpDateTime(ymd(d))
-  if (lower === 'tomorrow' || lower === '내일') {
-    d.setDate(d.getDate() + 1)
-    return toMcpDateTime(ymd(d))
-  }
-  return toMcpDateTime(value)
+  if (lower === 'today' || lower === '오늘') return toMcpDateTime(kstDateKey(new Date())) ?? undefined
+  if (lower === 'tomorrow' || lower === '내일') return toMcpDateTime(kstDateKey(Date.now() + 86_400_000)) ?? undefined
+  return toMcpDateTime(value) ?? undefined
 }
 
 function parseBodyOptions(text: string): { body: string; options: Record<string, string> } {

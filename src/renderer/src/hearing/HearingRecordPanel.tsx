@@ -6,18 +6,30 @@ import {
   useState,
   type KeyboardEvent
 } from 'react'
-import type { JsHearing } from '../env'
+import type { DictationSegment, JsHearing } from '../env'
+import type { DictationBackup } from '../../../shared/dictationRecovery'
 import { isCommittedEnter, isImeComposing } from '../ime'
 import { insertDictationText, isDictationShortcut } from './dictationText'
 import { shouldKeepPendingRecord } from './loadPolicy'
+import { extractSpeakerReferences } from './speakerReferenceAudio'
+import { createSegmentedRecorder, type SegmentedRecorder } from './segmentedRecorder'
 
 type SpeakerRole = 'court' | 'plaintiff' | 'defendant' | 'preparation' | 'other'
 type SaveStatus = 'idle' | 'saving' | 'saved' | 'error'
 type JsSyncStatus = 'idle' | 'syncing' | 'synced' | 'error'
 type LoadState = 'idle' | 'loading' | 'error'
-type DictationState = 'idle' | 'starting' | 'recording'
+type DictationState = 'idle' | 'starting' | 'recording' | 'stopping'
 
 const DICTATION_MAX_MS = 80 * 60_000
+const DICTATION_SEGMENT_SECONDS = 120
+
+interface DictationClip {
+  audio: Uint8Array
+  mimeType: string
+  diarize: boolean
+  startedAt: number
+  selection: DictationBackup['selection']
+}
 
 export interface HearingRecordCase {
   jsId?: string
@@ -50,11 +62,14 @@ interface HearingRequest {
 
 interface HearingEntry {
   id: string
+  recoveryId?: string
+  transcriptionFallback?: boolean
   speakerId: string
   text: string
   createdAt: string
   important?: boolean
-  recording?: { id: string; start: number; end: number }
+  recording?: { id: string; start: number; end: number; speakerKey?: string }
+  participantSource?: 'context'
   dictation?: { status: 'transcribing' | 'error'; message: string }
 }
 
@@ -345,7 +360,7 @@ function sanitizeRecord(
   const activeSpeakerId = speakers.some((speaker) => speaker.id === rawActiveSpeakerId)
     ? rawActiveSpeakerId
     : speakers[0]?.id || 'court'
-  return {
+  return normalizeRecordedSpeakers({
     version: 1,
     id: typeof raw.id === 'string' ? raw.id : base.id,
     case: caseContext,
@@ -359,7 +374,9 @@ function sanitizeRecord(
           speakerId: normalizeSpeakerId(entry.speakerId),
           dictation:
             entry.dictation?.status === 'transcribing' && !pendingDictations.has(entry.id)
-              ? { status: 'error', message: '전사가 중단되었습니다. 다시 녹음하거나 메모를 입력하세요.' }
+              ? { status: 'error', message: entry.recoveryId
+                ? '전사가 중단되었습니다. 저장된 음성으로 재시도할 수 있습니다.'
+                : '전사가 중단되었습니다. 다시 녹음하거나 메모를 입력하세요.' }
               : entry.dictation
         }))
       : [],
@@ -367,7 +384,7 @@ function sanitizeRecord(
     createdAt: typeof raw.createdAt === 'string' ? raw.createdAt : base.createdAt,
     updatedAt: typeof raw.updatedAt === 'string' ? raw.updatedAt : base.updatedAt,
     jsSync: raw.jsSync
-  }
+  })
 }
 
 function recordHasContent(record: HearingRecordData): boolean {
@@ -382,13 +399,25 @@ function recordHasContent(record: HearingRecordData): boolean {
   )
 }
 
+function dictationBackupCaseKey(record: HearingRecordData, draftsDir?: string, path?: string): string {
+  if (record.case.jsId) return `case:${record.case.jsId}`
+  const folder = path?.replace(/[\\/][^\\/]+$/, '').replace(/[\\/]\.hearings$/, '')
+  return draftsDir || folder || record.id
+}
+
 function mergePendingRecord(
   loaded: HearingRecordData,
-  pending: HearingRecordData
+  pending: HearingRecordData,
+  removedSpeakerIds: ReadonlySet<string> = new Set(),
+  renamedSpeakerLabels: ReadonlyMap<string, string> = new Map()
 ): HearingRecordData {
-  const speakerIds = new Set(loaded.speakers.map((speaker) => speaker.id))
+  const pendingSpeakerIds = new Set(pending.speakers.map((speaker) => speaker.id))
+  const loadedSpeakers = loaded.speakers.filter((speaker) =>
+    !removedSpeakerIds.has(speaker.id) || pendingSpeakerIds.has(speaker.id))
+  const speakerIds = new Set(loadedSpeakers.map((speaker) => speaker.id))
   const speakers = withSequentialShortcuts([
-    ...loaded.speakers,
+    ...loadedSpeakers.map((speaker) => renamedSpeakerLabels.has(speaker.id)
+      ? { ...speaker, label: renamedSpeakerLabels.get(speaker.id)! } : speaker),
     ...pending.speakers.filter((speaker) => !speakerIds.has(speaker.id))
   ])
   const mergeById = <T extends { id: string },>(saved: T[], added: T[]): T[] => {
@@ -414,7 +443,7 @@ function mergePendingRecord(
     // 파일을 읽는 동안 완료된 전사문을 이전 전사 상태로 덮어쓰지 않는다.
     entries: mergeById(loaded.entries.flatMap((entry) => entry.dictation
       ? recordingEntries.get(entry.id) ?? [pendingEntries.get(entry.id) ?? entry]
-      : [entry]), pending.entries),
+      : [pendingEntries.get(entry.id) ?? entry]), pending.entries),
     result: {
       status: pending.result.status || loaded.result.status,
       nextDate: pending.result.nextDate || loaded.result.nextDate,
@@ -427,6 +456,118 @@ function mergePendingRecord(
     },
     updatedAt: new Date().toISOString(),
     jsSync: undefined
+  }
+}
+
+function selectSpeakerReferences(
+  record: HearingRecordData,
+  samples: ReadonlyMap<string, Uint8Array>,
+  includePending = false
+) {
+  const entries = new Map(record.entries.map((entry) => [entry.id, entry]))
+  const speakers = new Map(record.speakers.map((speaker) => [speaker.id, speaker]))
+  const candidates = [...samples].flatMap(([entryId, audio]) => {
+    const entry = entries.get(entryId)
+    if (!entry) return []
+    const speaker = speakers.get(entry.speakerId)
+    const pending = !speaker || entry.participantSource === 'context'
+    if (pending && (!includePending || !entry.recording?.speakerKey)) return []
+    return [{ entryId, audio, groupId: pending ? entry.recording!.speakerKey! : speaker!.id,
+      participantId: !pending && !speaker!.detected ? speaker!.id : undefined,
+      priority: pending ? 2 : speaker!.detected ? 1 : 0 }]
+  }).sort((a, b) => a.priority - b.priority || b.audio.length - a.audio.length)
+  const seen = new Set<string>()
+  return candidates.filter(({ groupId }) => {
+    if (seen.has(groupId)) return false
+    seen.add(groupId)
+    return true
+  }).slice(0, 4).map(({ entryId, audio, participantId }, index) => ({ entryId, audio, participantId, name: `speaker_${index}` }))
+}
+
+function alphabeticSpeakerLabel(index: number): string {
+  let label = ''
+  for (let value = index + 1; value > 0; value = Math.floor((value - 1) / 26)) {
+    label = String.fromCharCode(65 + (value - 1) % 26) + label
+  }
+  return label
+}
+
+function normalizeRecordedSpeakers(record: HearingRecordData): HearingRecordData {
+  const speakers = [...record.speakers]
+  const existingIds = new Set(speakers.map((speaker) => speaker.id))
+  const labels = new Set(speakers.map((speaker) => speaker.label))
+  let index = 0
+  const entries = record.entries.map((entry) => {
+    const key = entry.recording?.speakerKey
+    if (!key || (existingIds.has(entry.speakerId) && entry.participantSource !== 'context')) return entry
+    // Older provisional participant guesses must not collapse distinct voices into one person.
+    if (!existingIds.has(key)) {
+      while (labels.has(alphabeticSpeakerLabel(index))) index++
+      const label = alphabeticSpeakerLabel(index++)
+      speakers.push({ id: key, label, role: 'other', detected: true })
+      existingIds.add(key)
+      labels.add(label)
+    }
+    return { ...entry, speakerId: key, participantSource: undefined }
+  })
+  return { ...record, speakers: withSequentialShortcuts(speakers), entries }
+}
+
+function speakerAssignmentGroups(record: HearingRecordData) {
+  return record.speakers.filter((speaker) => speaker.detected)
+}
+
+function renameRecordSpeaker(current: HearingRecordData, speakerId: string, label: string): HearingRecordData {
+  const trimmed = label.trim()
+  if (!trimmed || !current.speakers.some((speaker) => speaker.id === speakerId)) return current
+  return { ...current, speakers: current.speakers.map((speaker) =>
+    speaker.id === speakerId ? { ...speaker, label: trimmed } : speaker) }
+}
+
+function applyDiarizedTranscript(
+  current: HearingRecordData,
+  entryId: string,
+  startedAt: number,
+  segments: DictationSegment[],
+  references: { name: string; entryId: string }[]
+): HearingRecordData {
+  if (!current.entries.some((item) => item.id === entryId)) return current
+  const detectedIds = [...new Set(segments.map((segment) => segment.speaker))]
+  const existingIds = new Set(current.speakers.map((speaker) => speaker.id))
+  const speakerKeys = new Map(detectedIds.map((id, index) => [id, `${entryId}-speaker-${index}`]))
+  const speakerIds = new Map(detectedIds.map((id) => {
+    const reference = references.find((item) => item.name === id)
+    // Resolve references through current entries so user corrections made while waiting win.
+    const source = reference && current.entries.find((item) => item.id === reference.entryId)
+    return [id, source && source.participantSource !== 'context' && existingIds.has(source.speakerId)
+      ? source.speakerId : speakerKeys.get(id)!]
+  }))
+  const entries: HearingEntry[] = segments.map((segment, index) => ({
+    id: index === 0 ? entryId : `${entryId}-segment-${index}`,
+    recoveryId: index === 0 ? current.entries.find((entry) => entry.id === entryId)?.recoveryId : undefined,
+    speakerId: speakerIds.get(segment.speaker)!,
+    text: segment.text,
+    createdAt: new Date(startedAt + segment.start * 1000).toISOString(),
+    recording: { id: entryId, start: segment.start, end: segment.end, speakerKey: speakerKeys.get(segment.speaker) }
+  }))
+  return normalizeRecordedSpeakers({
+    ...current,
+    activeSpeakerId: current.activeSpeakerId || entries[0]?.speakerId || '',
+    entries: current.entries.flatMap((item) => item.id === entryId ? entries : [item])
+  })
+}
+
+function assignRecordSpeaker(current: HearingRecordData, sourceId: string, targetId: string): HearingRecordData {
+  if (sourceId === targetId || !current.speakers.some((speaker) => speaker.id === targetId)) return current
+  const existingIds = new Set(current.speakers.map((speaker) => speaker.id))
+  const matches = (entry: HearingEntry): boolean => entry.speakerId === sourceId ||
+    (entry.recording?.speakerKey === sourceId && (!existingIds.has(entry.speakerId) || entry.participantSource === 'context'))
+  if (!current.speakers.some((speaker) => speaker.id === sourceId) && !current.entries.some(matches)) return current
+  return {
+    ...current,
+    speakers: withSequentialShortcuts(current.speakers.filter((speaker) => speaker.id !== sourceId || !speaker.detected)),
+    activeSpeakerId: current.activeSpeakerId === sourceId ? targetId : current.activeSpeakerId,
+    entries: current.entries.map((entry) => matches(entry) ? { ...entry, speakerId: targetId, participantSource: undefined } : entry)
   }
 }
 
@@ -471,7 +612,8 @@ function buildReport(record: HearingRecordData): string {
     ? record.entries
         .map((entry) => {
           const speaker = speakerMap.get(entry.speakerId)
-          return `- ${formatTime(entry.createdAt)} ${speaker?.label ?? '사전준비'}: ${entry.text}${entry.dictation ? ` [${entry.dictation.message}]` : ''}`
+          const label = speaker?.label ?? (entry.transcriptionFallback ? '화자 미구분' : entry.recording?.speakerKey ? '참여자 확인 필요' : '사전준비')
+          return `- ${formatTime(entry.createdAt)} ${label}${entry.participantSource === 'context' ? ' [맥락 추정·확인 필요]' : ''}: ${entry.text}${entry.transcriptionFallback ? ' [대체 전사로 복구됨]' : ''}${entry.dictation ? ` [${entry.dictation.message}]` : ''}`
         })
         .join('\n')
     : '- 기록 없음'
@@ -545,30 +687,37 @@ export default function HearingRecordPanel({
   const [dictationState, setDictationState] = useState<DictationState>('idle')
   const [dictationSeconds, setDictationSeconds] = useState(0)
   const [dictationMessage, setDictationMessage] = useState('')
+  const [dictationBackups, setDictationBackups] = useState<DictationBackup[]>([])
   const [diarize, setDiarize] = useState(false)
   const loadStateRef = useRef<LoadState>(initialPath ? 'loading' : 'idle')
   const [loadState, setLoadState] = useState<LoadState>(loadStateRef.current)
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const latestEntryRef = useRef<HTMLDivElement>(null)
   const saveTimer = useRef<number | null>(null)
+  const pendingSaveRef = useRef(Promise.resolve())
   const loadedPathRef = useRef<string | undefined>(undefined)
   const latestRecordRef = useRef(record)
   const latestDraftRef = useRef(draft)
   const hasContentRef = useRef(false)
   const lastSavedSourceStampRef = useRef('')
-  const recorderRef = useRef<MediaRecorder | null>(null)
+  const recorderRef = useRef<SegmentedRecorder | null>(null)
   const streamRef = useRef<MediaStream | null>(null)
   const audioContextRef = useRef<AudioContext | null>(null)
-  const dictationChunksRef = useRef<Blob[]>([])
   const dictationTimerRef = useRef<number | null>(null)
   const dictationMaxTimerRef = useRef<number | null>(null)
   const dictationSignalTimerRef = useRef<number | null>(null)
   const heardAudioRef = useRef(false)
   const dictationStartingRef = useRef(false)
-  const recordingSessionRef = useRef({ diarize: false, startedAt: 0 })
+  const dictationStoppingRef = useRef(false)
+  const recordingGenerationRef = useRef(0)
   const pendingDictationsRef = useRef(new Set<string>())
-  // ponytail: failed audio lives only in this record; use a sidecar file if recovery after closing is needed.
+  const diarizationQueueRef = useRef(Promise.resolve())
+  // Keep at most four short samples in memory, tied to entries so corrections follow them.
+  const speakerReferencesRef = useRef(new Map<string, Uint8Array>())
   const retryDictationsRef = useRef(new Map<string, () => Promise<void>>())
+  const deletedEntryIdsRef = useRef(new Set<string>())
+  const removedSpeakerIdsRef = useRef(new Set<string>())
+  const renamedSpeakerLabelsRef = useRef(new Map<string, string>())
   const dictationSelectionRef = useRef({ value: '', start: 0, end: 0, message: '전사 중...' })
   // onSavedPath는 부모가 인라인으로 넘겨 렌더마다 바뀌므로 ref로 받아
   // saveRecord/flushAutoSave의 useCallback 재생성(→ 렌더마다 저장 루프)을 막는다.
@@ -581,9 +730,11 @@ export default function HearingRecordPanel({
   }, [])
 
   const speakers = record.speakers
+  const assignmentGroups = speakerAssignmentGroups(record)
   const activeSpeaker =
     speakers.find((speaker) => speaker.id === record.activeSpeakerId) ?? speakers[0]
   const recordTitle = buildHearingRecordTitle(record.case, record.hearing)
+  const backupCaseKey = dictationBackupCaseKey(record, draftsDir, recordPath ?? initialPath)
   const subtitle = caseSubtitle(record.case, record.hearing)
   const hasContent = recordHasContent(record)
   const dictationBusy = dictationState !== 'idle' || record.entries.some(
@@ -595,6 +746,9 @@ export default function HearingRecordPanel({
     const entryIds = new Set(record.entries.map((entry) => entry.id))
     for (const id of retryDictationsRef.current.keys()) {
       if (!entryIds.has(id)) retryDictationsRef.current.delete(id)
+    }
+    for (const id of speakerReferencesRef.current.keys()) {
+      if (!entryIds.has(id)) speakerReferencesRef.current.delete(id)
     }
   }, [record])
 
@@ -642,102 +796,113 @@ export default function HearingRecordPanel({
   }, [])
 
   const transcribeDictation = useCallback(
-    async (mimeType: string): Promise<void> => {
-      const chunks = dictationChunksRef.current
-      const selection = dictationSelectionRef.current
-      const session = recordingSessionRef.current
-      const currentRecord = latestRecordRef.current
-      const entry: HearingEntry = {
+    async (session: DictationClip, recovered?: DictationBackup): Promise<void> => {
+      const { audio, mimeType, selection } = session
+      const currentRecord = recovered ? sanitizeRecord(JSON.parse(recovered.recordJson)) : latestRecordRef.current
+      // Keep cancellation marks even if the user switches records while this request is queued.
+      const deletedEntryIds = deletedEntryIdsRef.current
+      const entry: HearingEntry = recovered ? currentRecord.entries.find((item) => item.id === recovered.id)! : {
         id: newId('entry'),
         speakerId: currentRecord.activeSpeakerId,
         text: session.diarize ? '' : selection.value,
-        createdAt: new Date().toISOString(),
+        createdAt: new Date(session.startedAt).toISOString(),
         dictation: { status: 'transcribing', message: session.diarize ? '화자 구분하여 전사 중...' : selection.message }
       }
-      touch((current) => ({ ...current, entries: [...current.entries, entry] }))
-      if (!session.diarize) {
-        latestDraftRef.current = ''
-        setDraft('')
+      if (!entry) throw new Error('복구할 전사 기록을 찾을 수 없습니다.')
+      entry.recoveryId = entry.id
+      if (!recovered) {
+        touch((current) => ({ ...current, entries: [...current.entries, entry] }))
+        window.requestAnimationFrame(() => latestEntryRef.current?.scrollIntoView({ block: 'nearest' }))
       }
-      dictationChunksRef.current = []
-      recorderRef.current = null
-      releaseDictationMedia()
-      setDictationState('idle')
-      setDictationMessage('')
-      focusInput()
-      window.requestAnimationFrame(() => latestEntryRef.current?.scrollIntoView({ block: 'nearest' }))
       const request = async (): Promise<void> => {
         if (pendingDictationsRef.current.has(entry.id)) return
         pendingDictationsRef.current.add(entry.id)
+        const previousDiarization = diarizationQueueRef.current
+        let finishDiarization: (() => void) | undefined
+        if (session.diarize) {
+          diarizationQueueRef.current = new Promise<void>((resolve) => { finishDiarization = resolve })
+        }
         touch((current) => ({
           ...current,
           entries: current.entries.map((item) => item.id === entry.id
-            ? { ...item, dictation: entry.dictation }
+            ? { ...item, dictation: { status: 'transcribing', message: session.diarize ? '화자 구분하여 전사 중...' : selection.message } }
             : item)
         }))
         try {
-          const audio = new Uint8Array(await new Blob(chunks, { type: mimeType }).arrayBuffer())
+          // React may not have committed the new row yet; only an explicit deletion cancels it.
+          if (deletedEntryIds.has(entry.id)) return
           if (audio.byteLength === 0) throw new Error('녹음된 음성이 없습니다.')
+          // Persist before the diarization queue too; waiting recordings must survive an app exit.
+          await window.lt.dictation.backup(recovered ?? {
+            id: entry.id,
+            recordId: currentRecord.id,
+            recordPath: recordPath ?? (draftsDir ? buildHearingRecordPath(draftsDir, currentRecord.case, currentRecord.hearing) : undefined),
+            caseKey: dictationBackupCaseKey(currentRecord, draftsDir, recordPath ?? initialPath),
+            recordJson: JSON.stringify({ ...currentRecord, entries: [...currentRecord.entries, entry] }),
+            selection, startedAt: session.startedAt,
+            input: { audio, mimeType, diarize: session.diarize }
+          })
+          if (session.diarize) await previousDiarization
+          if (deletedEntryIds.has(entry.id)) {
+            await window.lt.dictation.removeBackup(entry.id)
+            return
+          }
           const speaker = currentRecord.speakers.find(
             (item) => item.id === currentRecord.activeSpeakerId
           )?.label
+          const contextRecord = session.diarize ? latestRecordRef.current : currentRecord
+          // Recovered speaker labels belong to the original request, not the latest voice samples.
+          const references = session.diarize && !recovered
+            ? selectSpeakerReferences(latestRecordRef.current, speakerReferencesRef.current)
+            : []
           const result = await window.lt.dictation.transcribe({
+            backupId: entry.id,
             audio,
             mimeType: mimeType || 'audio/webm',
             diarize: session.diarize,
+            knownSpeakers: session.diarize && !recovered ? references.map(({ name, audio, participantId }) => ({ name, audio, participantId })) : undefined,
             context: {
-              court: currentRecord.case.court,
-              caseNumber: currentRecord.case.caseNumber,
-              caseName: currentRecord.case.caseName,
-              client: currentRecord.case.client,
-              opponent: currentRecord.case.opponent,
-              partyNames: currentRecord.case.partyNames,
-              speaker
+              court: contextRecord.case.court,
+              caseNumber: contextRecord.case.caseNumber,
+              caseName: contextRecord.case.caseName,
+              client: contextRecord.case.client,
+              opponent: contextRecord.case.opponent,
+              partyNames: contextRecord.case.partyNames,
+              speaker: session.diarize ? undefined : speaker
             }
           })
           if (!result.ok) throw new Error(result.error || '전사 결과가 없습니다.')
-          if (session.diarize) {
+          if (session.diarize && !result.fallback) {
             const segments = result.segments
             if (!segments?.length) throw new Error('화자별 전사 결과가 없습니다.')
-            const detectedIds = [...new Set(segments.map((segment) => segment.speaker))]
-            const speakerIds = new Map(detectedIds.map((id, index) => [id, `${entry.id}-speaker-${index}`]))
-            const entries: HearingEntry[] = segments.map((segment, index) => ({
-              id: index === 0 ? entry.id : `${entry.id}-segment-${index}`,
-              speakerId: speakerIds.get(segment.speaker)!,
-              text: segment.text,
-              createdAt: new Date(session.startedAt + segment.start * 1000).toISOString(),
-              recording: { id: entry.id, start: segment.start, end: segment.end }
-            }))
-            touch((current) => {
-              if (!current.entries.some((item) => item.id === entry.id)) return current
-              const usedLabels = new Set(current.speakers.map((speaker) => speaker.label))
-              let nextNumber = 1
-              const detected: HearingSpeaker[] = detectedIds.map((id) => {
-                while (usedLabels.has(`화자 ${nextNumber}`)) nextNumber++
-                const label = `화자 ${nextNumber++}`
-                return { id: speakerIds.get(id)!, label, role: 'other', detected: true }
+            const samples = await extractSpeakerReferences(audio, segments)
+            // Install entries and samples together before releasing the next queued recording.
+            await new Promise<void>((resolve) => {
+              touch((current) => {
+                const next = applyDiarizedTranscript(current, entry.id, session.startedAt, segments, references)
+                const entryIds = new Set(next.entries.map((item) => item.id))
+                for (const sample of samples) {
+                  const sampleEntryId = sample.segmentIndex === 0 ? entry.id : `${entry.id}-segment-${sample.segmentIndex}`
+                  if (entryIds.has(sampleEntryId)) speakerReferencesRef.current.set(sampleEntryId, sample.audio)
+                }
+                // Keep pending samples for manual confirmation, without sending them as known voices.
+                speakerReferencesRef.current = new Map(selectSpeakerReferences(next, speakerReferencesRef.current, true)
+                  .map((reference) => [reference.entryId, reference.audio]))
+                resolve()
+                return next
               })
-              return {
-                ...current,
-                speakers: withSequentialShortcuts([...current.speakers, ...detected]),
-                activeSpeakerId: current.activeSpeakerId || detected[0].id,
-                entries: current.entries.flatMap((item) => item.id === entry.id ? entries : [item])
-              }
             })
             retryDictationsRef.current.delete(entry.id)
             return
           }
           if (!result.text?.trim()) throw new Error('전사 결과가 없습니다.')
-          const insertion = insertDictationText(
-            selection.value,
-            result.text,
-            selection.start,
-            selection.end
-          )
+          const text = session.diarize ? result.text :
+            insertDictationText(selection.value, result.text, selection.start, selection.end).value
           touch((current) => ({
             ...current,
             entries: current.entries.map((item) => item.id === entry.id
-              ? { ...item, text: insertion.value, important: insertion.value.startsWith('*'), dictation: undefined }
+              ? { ...item, text, important: text.startsWith('*'), dictation: undefined,
+                  speakerId: session.diarize ? '' : item.speakerId, transcriptionFallback: !!result.fallback }
               : item)
           }))
           retryDictationsRef.current.delete(entry.id)
@@ -751,18 +916,20 @@ export default function HearingRecordPanel({
           }))
         } finally {
           pendingDictationsRef.current.delete(entry.id)
+          finishDiarization?.()
         }
       }
-      if (session.diarize) retryDictationsRef.current.set(entry.id, request)
+      retryDictationsRef.current.set(entry.id, request)
       await request()
     },
-    [focusInput, releaseDictationMedia, touch]
+    [draftsDir, initialPath, recordPath, touch]
   )
 
   const stopDictation = useCallback(
-    (message = '전사 중...'): void => {
+    async (message = '전사 중...'): Promise<void> => {
       const recorder = recorderRef.current
-      if (!recorder || recorder.state === 'inactive') return
+      if (!recorder || dictationStoppingRef.current) return
+      dictationStoppingRef.current = true
       const value = latestDraftRef.current
       const input = inputRef.current
       dictationSelectionRef.current = {
@@ -771,10 +938,24 @@ export default function HearingRecordPanel({
         end: input?.selectionEnd ?? value.length,
         message
       }
+      setDictationState('stopping')
       clearDictationTimers()
-      recorder.stop()
+      try {
+        await recorder.stop()
+      } catch (error) {
+        setDictationMessage(`녹음 종료 오류: ${error instanceof Error ? error.message : String(error)}`)
+      } finally {
+        if (recorderRef.current === recorder) {
+          recorder.dispose()
+          recorderRef.current = null
+          dictationStoppingRef.current = false
+          releaseDictationMedia()
+          setDictationState('idle')
+          focusInput()
+        }
+      }
     },
-    [clearDictationTimers]
+    [clearDictationTimers, focusInput, releaseDictationMedia]
   )
 
   const startDictation = useCallback(async (): Promise<void> => {
@@ -785,6 +966,8 @@ export default function HearingRecordPanel({
       return
     }
     dictationStartingRef.current = true
+    dictationStoppingRef.current = false
+    const generation = ++recordingGenerationRef.current
     setDictationState('starting')
     setDictationMessage('마이크 권한 확인 중…')
     try {
@@ -798,50 +981,57 @@ export default function HearingRecordPanel({
               : '저장된 OpenAI API 키를 불러올 수 없습니다. 설정에서 다시 저장하세요.'
         )
       }
-      if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === 'undefined') {
+      if (generation !== recordingGenerationRef.current) return
+      if (!navigator.mediaDevices?.getUserMedia || typeof AudioWorkletNode === 'undefined') {
         throw new Error('이 환경에서는 마이크 녹음을 지원하지 않습니다.')
       }
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }
       })
+      if (generation !== recordingGenerationRef.current) {
+        stream.getTracks().forEach((track) => track.stop())
+        return
+      }
       streamRef.current = stream
-      const preferredMime = 'audio/webm;codecs=opus'
-      const mimeType = MediaRecorder.isTypeSupported(preferredMime) ? preferredMime : 'audio/webm'
-      const recorder = new MediaRecorder(stream, { mimeType, audioBitsPerSecond: 32_000 })
-      const audioContext = new AudioContext()
-      if (audioContext.state === 'suspended') void audioContext.resume().catch(() => {})
+      const audioContext = new AudioContext({ sampleRate: 16_000 })
+      audioContextRef.current = audioContext
+      if (audioContext.state === 'suspended') await audioContext.resume()
       const analyser = audioContext.createAnalyser()
       analyser.fftSize = 256
-      audioContext.createMediaStreamSource(stream).connect(analyser)
+      const source = audioContext.createMediaStreamSource(stream)
+      source.connect(analyser)
       const levels = new Uint8Array(analyser.fftSize)
       const startedAt = Date.now()
-      recordingSessionRef.current = { diarize, startedAt }
       let warned = false
-
-      audioContextRef.current = audioContext
-      recorderRef.current = recorder
-      dictationChunksRef.current = []
       heardAudioRef.current = false
-      let recordingError = false
       setDictationSeconds(0)
       setDictationMessage('')
-
-      recorder.ondataavailable = (event) => {
-        if (event.data.size > 0) dictationChunksRef.current.push(event.data)
-      }
-      recorder.onerror = () => {
-        recordingError = true
-        dictationChunksRef.current = []
+      const recorder = await createSegmentedRecorder(audioContext, source, DICTATION_SEGMENT_SECONDS, (segment) => {
+        const selection = segment.final ? dictationSelectionRef.current :
+          { value: '', start: 0, end: 0, message: '2분 구간 자동 전사 중...' }
+        if (segment.final && !diarize && latestDraftRef.current === selection.value) {
+          latestDraftRef.current = ''
+          setDraft('')
+        }
+        void transcribeDictation({ audio: segment.audio, mimeType: 'audio/wav', diarize,
+          startedAt: startedAt + segment.startSeconds * 1000, selection })
+      }, (error) => {
+        recorderRef.current?.dispose()
         recorderRef.current = null
         releaseDictationMedia()
         setDictationState('idle')
-        setDictationMessage('마이크 녹음 중 오류가 발생했습니다.')
+        setDictationMessage(`마이크 녹음 오류: ${error.message}`)
+      })
+      if (generation !== recordingGenerationRef.current) {
+        recorder.dispose()
+        releaseDictationMedia()
+        return
       }
-      recorder.onstop = () => {
-        if (!recordingError) void transcribeDictation(recorder.mimeType || mimeType)
-      }
-      recorder.start(1000)
+      recorderRef.current = recorder
       setDictationState('recording')
+      for (const track of stream.getAudioTracks()) {
+        track.addEventListener('ended', () => { void stopDictation('마이크 연결이 종료되어 전사 중...') }, { once: true })
+      }
 
       dictationTimerRef.current = window.setInterval(
         () => setDictationSeconds(Math.floor((Date.now() - startedAt) / 1000)),
@@ -860,13 +1050,16 @@ export default function HearingRecordPanel({
         }
       }, 250)
       dictationMaxTimerRef.current = window.setTimeout(
-        () => stopDictation('최대 녹음 시간에 도달해 전사 중...'),
+        () => { void stopDictation('최대 녹음 시간에 도달해 전사 중...') },
         DICTATION_MAX_MS
       )
+      if (stream.getAudioTracks().some((track) => track.readyState === 'ended')) {
+        void stopDictation('마이크 연결이 종료되어 전사 중...')
+      }
     } catch (error) {
+      recorderRef.current?.dispose()
       releaseDictationMedia()
       recorderRef.current = null
-      dictationChunksRef.current = []
       setDictationState('idle')
       setDictationMessage(error instanceof Error ? error.message : String(error))
     } finally {
@@ -876,9 +1069,9 @@ export default function HearingRecordPanel({
 
   useEffect(() => {
     const toggleDictation = (event: globalThis.KeyboardEvent): void => {
-      if (!visible || !isDictationShortcut(event) || dictationState === 'starting') return
+      if (!visible || !isDictationShortcut(event) || dictationState === 'starting' || dictationState === 'stopping') return
       event.preventDefault()
-      dictationState === 'recording' ? stopDictation() : void startDictation()
+      dictationState === 'recording' ? void stopDictation() : void startDictation()
     }
     window.addEventListener('keydown', toggleDictation)
     return () => window.removeEventListener('keydown', toggleDictation)
@@ -886,14 +1079,10 @@ export default function HearingRecordPanel({
 
   useEffect(
     () => () => {
+      recordingGenerationRef.current += 1
       const recorder = recorderRef.current
-      if (recorder && recorder.state !== 'inactive') {
-        recorder.onstop = null
-        recorder.stop()
-      }
-      recorderRef.current = null
-      dictationChunksRef.current = []
-      releaseDictationMedia()
+      if (recorder) void stopDictation()
+      else releaseDictationMedia()
     },
     [releaseDictationMedia]
   )
@@ -912,6 +1101,11 @@ export default function HearingRecordPanel({
 
   const saveRecord = useCallback(
     async (targetRecord = latestRecordRef.current): Promise<string> => {
+      // 늦게 끝난 이전 저장이 최신 수정·삭제 내용을 덮어쓰지 않도록 순서대로 저장한다.
+      const previousSave = pendingSaveRef.current
+      let finishSave!: () => void
+      pendingSaveRef.current = new Promise<void>((resolve) => { finishSave = resolve })
+      await previousSave
       setSaveStatus('saving')
       setSaveMessage('자동저장 중')
       try {
@@ -941,11 +1135,18 @@ export default function HearingRecordPanel({
         setSaveMessage('자동저장됨')
         setLastSavedAt(new Date().toISOString())
         onSavedPathRef.current?.(nextPath, buildHearingRecordTitle(payload.case, payload.hearing))
+        const completed = targetRecord.entries.filter((entry) => entry.recoveryId && !entry.dictation)
+          .map((entry) => entry.recoveryId!)
+        // A successful API response is not durable until the hearing file has been saved.
+        await Promise.all(completed.map((id) => window.lt.dictation.removeBackup(id).catch(() => {})))
+        setDictationBackups((backups) => backups.filter((backup) => !completed.includes(backup.id)))
         return nextPath
       } catch (error) {
         setSaveStatus('error')
         setSaveMessage(error instanceof Error ? error.message : String(error))
         throw error
+      } finally {
+        finishSave()
       }
     },
     [draftsDir, ensureRecordDir, recordPath]
@@ -955,6 +1156,12 @@ export default function HearingRecordPanel({
     async (path: string): Promise<void> => {
       const previousPath = loadedPathRef.current
       const keepPending = shouldKeepPendingRecord(previousPath, path)
+      if (!keepPending) {
+        deletedEntryIdsRef.current = new Set()
+        removedSpeakerIdsRef.current.clear()
+        renamedSpeakerLabelsRef.current.clear()
+        speakerReferencesRef.current.clear()
+      }
       loadedPathRef.current = path
       updateLoadState('loading')
       const stat = await window.lt.fs
@@ -965,7 +1172,7 @@ export default function HearingRecordPanel({
         // 파일이 아직 없다 → 새 기록으로 시작
         const pending = latestRecordRef.current
         const base = createInitialRecord(initialCase, initialHearing)
-        const hasPending = keepPending && recordHasContent(pending)
+        const hasPending = keepPending && (recordHasContent(pending) || deletedEntryIdsRef.current.size > 0)
         const next = hasPending
           ? {
               ...pending,
@@ -992,9 +1199,13 @@ export default function HearingRecordPanel({
         if (loadedPathRef.current !== path) return
         const parsed = JSON.parse(read.text) as unknown
         const loaded = sanitizeRecord(parsed, initialCase, initialHearing, pendingDictationsRef.current)
+        for (const entry of loaded.entries) {
+          if (entry.recoveryId && !entry.dictation) void window.lt.dictation.removeBackup(entry.recoveryId).catch(() => {})
+        }
+        loaded.entries = loaded.entries.filter((entry) => !deletedEntryIdsRef.current.has(entry.id))
         const pending = latestRecordRef.current
-        const hasPending = keepPending && recordHasContent(pending)
-        const next = hasPending ? mergePendingRecord(loaded, pending) : loaded
+        const hasPending = keepPending && (recordHasContent(pending) || deletedEntryIdsRef.current.size > 0)
+        const next = hasPending ? mergePendingRecord(loaded, pending, removedSpeakerIdsRef.current, renamedSpeakerLabelsRef.current) : loaded
         lastSavedSourceStampRef.current = hasPending ? '' : next.updatedAt
         latestRecordRef.current = next
         setRecord(next)
@@ -1027,6 +1238,9 @@ export default function HearingRecordPanel({
 
   useEffect(() => {
     if (initialPath || loadedPathRef.current) return
+    speakerReferencesRef.current.clear()
+    removedSpeakerIdsRef.current.clear()
+    renamedSpeakerLabelsRef.current.clear()
     setRecord(createInitialRecord(initialCase, initialHearing))
     setRecordPath(undefined)
   }, [initialCase, initialHearing, initialPath])
@@ -1039,7 +1253,7 @@ export default function HearingRecordPanel({
 
   useEffect(() => {
     if (loadState !== 'idle') return
-    if (!hasContent || (!draftsDir && !recordPath)) return
+    if ((!hasContent && deletedEntryIdsRef.current.size === 0) || (!draftsDir && !recordPath)) return
     if (lastSavedSourceStampRef.current === record.updatedAt) return
     if (saveTimer.current) window.clearTimeout(saveTimer.current)
     setSaveStatus('idle')
@@ -1053,17 +1267,69 @@ export default function HearingRecordPanel({
     }
   }, [draftsDir, hasContent, loadState, record, recordPath, saveRecord])
 
-  const flushAutoSave = useCallback((): void => {
+  const flushAutoSave = useCallback(async (): Promise<boolean> => {
     if (saveTimer.current) {
       window.clearTimeout(saveTimer.current)
       saveTimer.current = null
     }
-    if (loadStateRef.current !== 'idle') return
-    if (!hasContentRef.current || (!draftsDir && !recordPath)) return
+    if (loadStateRef.current !== 'idle') return true
+    if ((!hasContentRef.current && deletedEntryIdsRef.current.size === 0) || (!draftsDir && !recordPath)) return true
     // 변경 없으면 다시 쓰지 않는다 (렌더마다 flush가 호출되어도 무해하도록)
-    if (lastSavedSourceStampRef.current === latestRecordRef.current.updatedAt) return
-    void saveRecord(latestRecordRef.current).catch(() => {})
+    try {
+      if (lastSavedSourceStampRef.current !== latestRecordRef.current.updatedAt) {
+        await saveRecord(latestRecordRef.current)
+      }
+      await pendingSaveRef.current
+      return true
+    } catch {
+      return false
+    }
   }, [draftsDir, recordPath, saveRecord])
+
+  useEffect(() => {
+    if (loadState !== 'idle') return
+    let cancelled = false
+    void window.lt.dictation.backups({ caseKey: backupCaseKey }).then((backups) => {
+      if (!cancelled) setDictationBackups(backups)
+    }).catch(() => {
+      if (!cancelled) setDictationMessage('저장된 음성을 불러오지 못했습니다. 기록을 다시 열어 주세요.')
+    })
+    return () => { cancelled = true }
+  }, [backupCaseKey, loadState, recordPath])
+
+  const recoverDictation = async (backup: DictationBackup): Promise<void> => {
+    if (pendingDictationsRef.current.has(backup.id)) return
+    try {
+      if (!latestRecordRef.current.entries.some((entry) => entry.id === backup.id)) {
+        if (dictationBusy || !await flushAutoSave()) return
+        const snapshot = sanitizeRecord(JSON.parse(backup.recordJson))
+        const targetPath = backup.recordPath ?? (draftsDir
+          ? buildHearingRecordPath(draftsDir, snapshot.case, snapshot.hearing) : undefined)
+        if (targetPath && targetPath !== recordPath) {
+          await loadFromPath(targetPath)
+          if (loadStateRef.current !== 'idle') return
+        }
+        if (latestRecordRef.current.entries.some((entry) =>
+          (entry.id === backup.id || entry.recording?.id === backup.id) && !entry.dictation)) return
+        const entry = snapshot.entries.find((item) => item.id === backup.id)
+        if (!entry) throw new Error('복구할 전사 기록을 찾을 수 없습니다.')
+        touch((current) => {
+          if (current.entries.some((item) => item.id === backup.id)) return current
+          if (!recordHasContent(current)) return snapshot
+          return {
+            ...current,
+            speakers: [...current.speakers, ...snapshot.speakers.filter((speaker) =>
+              !current.speakers.some((item) => item.id === speaker.id))],
+            entries: [...current.entries, entry]
+          }
+        })
+      }
+      await transcribeDictation({ ...backup.input, diarize: backup.input.diarize === true,
+        startedAt: backup.startedAt, selection: backup.selection }, backup)
+    } catch (error) {
+      setDictationMessage(`전사 복구 실패: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
 
   useEffect(() => {
     const flushWhenHidden = (): void => {
@@ -1081,10 +1347,7 @@ export default function HearingRecordPanel({
   // 이어서 열린 이전 기록 대신 오늘 날짜의 새 기록을 시작한다.
   // 같은 날짜의 기록이 이미 있으면 덮어쓰지 않도록 -2, -3… 순번을 붙인다.
   const startNewRecord = useCallback(async (): Promise<void> => {
-    if (saveTimer.current) {
-      window.clearTimeout(saveTimer.current)
-      saveTimer.current = null
-    }
+    if (!await flushAutoSave()) return
     const next = createInitialRecord(initialCase, initialHearing)
     let nextPath: string | undefined
     if (draftsDir) {
@@ -1100,6 +1363,10 @@ export default function HearingRecordPanel({
         nextPath = pathJoin(dir, `${date}-${seq}_${caseNo}.hearing.json`)
       }
     }
+    deletedEntryIdsRef.current = new Set()
+    removedSpeakerIdsRef.current.clear()
+    renamedSpeakerLabelsRef.current.clear()
+    speakerReferencesRef.current.clear()
     lastSavedSourceStampRef.current = ''
     if (nextPath) loadedPathRef.current = nextPath
     setRecord(next)
@@ -1114,7 +1381,7 @@ export default function HearingRecordPanel({
       onSavedPathRef.current?.(nextPath, buildHearingRecordTitle(next.case, next.hearing))
     }
     focusInput()
-  }, [draftsDir, focusInput, initialCase, initialHearing, updateLoadState])
+  }, [draftsDir, flushAutoSave, focusInput, initialCase, initialHearing, updateLoadState])
 
   const setActiveSpeaker = (speakerId: string): void => {
     touch((current) => ({ ...current, activeSpeakerId: speakerId }))
@@ -1184,6 +1451,7 @@ export default function HearingRecordPanel({
   }
 
   const removeSpeaker = (speakerId: string): void => {
+    removedSpeakerIdsRef.current.add(speakerId)
     touch((current) => {
       const index = current.speakers.findIndex((speaker) => speaker.id === speakerId)
       if (index < 0) return current
@@ -1207,19 +1475,36 @@ export default function HearingRecordPanel({
     }))
   }
 
+  const renameSpeaker = (speakerId: string, label: string): void => {
+    if (!label.trim()) return
+    renamedSpeakerLabelsRef.current.set(speakerId, label.trim())
+    touch((current) => renameRecordSpeaker(current, speakerId, label))
+  }
+
   const assignDetectedSpeaker = (sourceId: string, targetId: string): void => {
     if (sourceId === targetId) return
-    touch((current) => {
-      if (!current.speakers.some((speaker) => speaker.id === targetId)) return current
-      return {
-        ...current,
-        speakers: withSequentialShortcuts(current.speakers.filter((speaker) => speaker.id !== sourceId)),
-        activeSpeakerId: current.activeSpeakerId === sourceId ? targetId : current.activeSpeakerId,
-        entries: current.entries.map((entry) => entry.speakerId === sourceId
-          ? { ...entry, speakerId: targetId }
-          : entry)
-      }
-    })
+    if (!latestRecordRef.current.speakers.some((speaker) => speaker.id === targetId)) return
+    if (latestRecordRef.current.speakers.find((speaker) => speaker.id === sourceId)?.detected) {
+      removedSpeakerIdsRef.current.add(sourceId)
+    }
+    touch((current) => assignRecordSpeaker(current, sourceId, targetId))
+  }
+
+  const removeEntry = (entryId: string): void => {
+    deletedEntryIdsRef.current.add(entryId)
+    const entry = latestRecordRef.current.entries.find((item) => item.id === entryId)
+    const recoveryId = entry?.recoveryId
+    const remainingSegment = entry?.recording && latestRecordRef.current.entries.find((item) =>
+      item.id !== entryId && item.recording?.id === entry.recording?.id)
+    if (recoveryId && !remainingSegment) {
+      void window.lt.dictation.removeBackup(recoveryId).catch(() => {})
+      setDictationBackups((backups) => backups.filter((backup) => backup.id !== recoveryId))
+    }
+    touch((current) => ({
+      ...current,
+      entries: current.entries.filter((entry) => entry.id !== entryId).map((item) =>
+        recoveryId && item.id === remainingSegment?.id ? { ...item, recoveryId } : item)
+    }))
   }
 
   const addRequest = (text: string): void => {
@@ -1517,6 +1802,9 @@ export default function HearingRecordPanel({
   }
 
   const sortedEntries = useMemo(() => record.entries, [record.entries])
+  const orphanedBackups = dictationBackups.filter((backup) =>
+    !record.entries.some((entry) => entry.id === backup.id || entry.recording?.id === backup.id) &&
+    !deletedEntryIdsRef.current.has(backup.id))
   const caseMemo = record.case.memo?.trim()
 
   return (
@@ -1575,6 +1863,18 @@ export default function HearingRecordPanel({
         </div>
       )}
 
+      {orphanedBackups.length > 0 && (
+        <div className="hearing-status-row" role="status">
+          <span>저장된 전사 음성 {orphanedBackups.length}개</span>
+          {orphanedBackups.map((backup) => (
+            <button key={backup.id} className="hearing-small-btn" disabled={dictationBusy}
+              onClick={() => void recoverDictation(backup)}>
+              {new Date(backup.startedAt).toLocaleString('ko-KR')} 음성 복구
+            </button>
+          ))}
+        </div>
+      )}
+
       {readerOpen && (
         <div className="hearing-reader">
           <div className="hearing-reader-head">
@@ -1594,17 +1894,10 @@ export default function HearingRecordPanel({
                   key={item.path}
                   className="hearing-reader-item"
                   disabled={dictationBusy}
-                  onClick={() => {
-                    loadedPathRef.current = item.path
-                    lastSavedSourceStampRef.current = item.data.updatedAt
-                    updateLoadState('idle')
-                    setRecord(item.data)
-                    setRecordPath(item.path)
+                  onClick={async () => {
+                    if (!await flushAutoSave()) return
+                    await loadFromPath(item.path)
                     setReaderOpen(false)
-                    setSaveStatus('saved')
-                    setSaveMessage('불러옴')
-                    setLastSavedAt(item.data.updatedAt)
-                    onSavedPath?.(item.path, item.title)
                     focusInput()
                   }}
                 >
@@ -1699,19 +1992,32 @@ export default function HearingRecordPanel({
             <span>진행 메모</span>
             <small>Enter 저장 · Tab 화자 전환 · ↑ 직전 수정</small>
           </div>
-          {speakers.some((speaker) => speaker.detected) && (
+          {assignmentGroups.length > 0 && (
             <div className="hearing-detected-speakers">
-              <small>화자 지정 · 같은 화자의 발언 전체에 적용</small>
-              {speakers.filter((speaker) => speaker.detected).map((speaker) => (
-                <label key={speaker.id}>
-                  {speaker.label}
+              <small>화자 이름을 바꾸거나 참여자를 선택하면 같은 화자의 모든 발언에 적용됩니다.</small>
+              {assignmentGroups.map((group) => (
+                <label key={group.id}>
+                  <input
+                    key={group.label}
+                    aria-label="화자 이름 수정"
+                    title="이름을 바꾸면 같은 화자의 모든 발언에 적용됩니다."
+                    defaultValue={group.label}
+                    onBlur={(event) => {
+                      const label = event.currentTarget.value.trim() || group.label
+                      event.currentTarget.value = label
+                      renameSpeaker(group.id, label)
+                    }}
+                    onKeyDown={(event) => {
+                      if (isCommittedEnter(event)) { event.preventDefault(); event.currentTarget.blur() }
+                    }}
+                  />
                   <select
-                    aria-label={`${speaker.label} 일괄 지정`}
-                    value={speaker.id}
-                    onChange={(event) => assignDetectedSpeaker(speaker.id, event.currentTarget.value)}
+                    aria-label={`${group.label} 일괄 지정`}
+                    value={group.id}
+                    onChange={(event) => assignDetectedSpeaker(group.id, event.currentTarget.value)}
                   >
-                    <option value={speaker.id}>미지정</option>
-                    {speakers.filter((target) => !target.detected).map((target) => (
+                    <option value={group.id}>참여자 선택·화자 합치기</option>
+                    {speakers.filter((target) => target.id !== group.id).map((target) => (
                       <option key={target.id} value={target.id}>{target.label}</option>
                     ))}
                   </select>
@@ -1725,6 +2031,8 @@ export default function HearingRecordPanel({
             ) : (
               sortedEntries.map((entry, index) => {
                 const speaker = speakers.find((item) => item.id === entry.speakerId)
+                const backup = dictationBackups.find((item) => item.id === entry.recoveryId)
+                const canRetry = retryDictationsRef.current.has(entry.id) || !!backup
                 return (
                   <div
                     key={entry.id}
@@ -1741,25 +2049,39 @@ export default function HearingRecordPanel({
                       <select
                         aria-label="발화자 수정"
                         value={speaker?.id ?? ''}
-                        onChange={(event) =>
-                          updateEntry(entry.id, { speakerId: event.currentTarget.value })
-                        }
+                        title={entry.recording ? '같은 화자의 모든 발언에 적용됩니다.' : '이 발언의 화자를 변경합니다.'}
+                        onChange={(event) => {
+                          if (entry.recording && speaker) {
+                            assignDetectedSpeaker(speaker.id, event.currentTarget.value)
+                          } else {
+                            updateEntry(entry.id, { speakerId: event.currentTarget.value, participantSource: undefined })
+                          }
+                        }}
                         disabled={speakers.length === 0}
                       >
-                        {!speaker && <option value="">사전준비</option>}
+                        {!speaker && <option value="">{entry.transcriptionFallback ? '화자 미구분' : entry.recording?.speakerKey ? '참여자 확인 필요' : '사전준비'}</option>}
                         {speakers.map((item) => (
                           <option key={item.id} value={item.id}>
                             {item.label}
                           </option>
                         ))}
                       </select>
+                      {entry.participantSource === 'context' && <span title="대화 내용으로 추정한 참여자입니다. 위 참여자 확인에서 확정할 수 있습니다.">맥락 추정·확인 필요</span>}
+                      <button
+                        type="button"
+                        className="hearing-small-btn"
+                        aria-label="진행 메모 삭제"
+                        onClick={() => removeEntry(entry.id)}
+                      >
+                        삭제
+                      </button>
                     </div>
                     <textarea
                       className="hearing-message-bubble"
                       aria-label="진행 메모 수정"
                       value={entry.text}
                       disabled={entry.dictation?.status === 'transcribing' ||
-                        (entry.dictation?.status === 'error' && retryDictationsRef.current.has(entry.id))}
+                        (entry.dictation?.status === 'error' && canRetry)}
                       onChange={(event) =>
                         updateEntry(entry.id, {
                           text: event.currentTarget.value,
@@ -1767,15 +2089,24 @@ export default function HearingRecordPanel({
                         })
                       }
                     />
+                    {entry.transcriptionFallback && (
+                      <div className="hearing-dictation-status" role="status">
+                        {entry.speakerId ? '대체 전사로 복구됨' : '화자 구분 없이 대체 전사로 복구됨 · 화자를 확인하세요.'}
+                      </div>
+                    )}
                     {entry.dictation && (
                       <div className="hearing-dictation-status" role="status" aria-live="polite">
                         {entry.dictation.message}
-                        {entry.dictation.status === 'error' && retryDictationsRef.current.has(entry.id) && (
+                        {entry.dictation.status === 'error' && canRetry && (
                           <button
                             type="button"
                             className="hearing-small-btn"
-                            title="이 기록을 닫기 전까지 같은 녹음으로 재시도할 수 있습니다."
-                            onClick={() => void retryDictationsRef.current.get(entry.id)?.()}
+                            title="저장된 음성으로 재시도합니다. 이미 완료된 전사는 결과를 복구합니다."
+                            onClick={() => {
+                              const retry = retryDictationsRef.current.get(entry.id)
+                              if (retry) void retry()
+                              else if (backup) void recoverDictation(backup)
+                            }}
                           >
                             전사 재시도
                           </button>
@@ -1882,16 +2213,16 @@ export default function HearingRecordPanel({
           }
           aria-label={dictationState === 'recording' ? '녹음 정지' : '음성 받아쓰기'}
           aria-pressed={dictationState === 'recording'}
-          disabled={dictationState === 'starting'}
+          disabled={dictationState === 'starting' || dictationState === 'stopping'}
           onClick={() =>
-            dictationState === 'recording' ? stopDictation() : void startDictation()
+            dictationState === 'recording' ? void stopDictation() : void startDictation()
           }
         >
           {dictationState === 'recording'
             ? `... ${formatDuration(dictationSeconds)}`
-            : dictationState === 'starting'
+            : dictationState === 'stopping' ? '정지 중…' : dictationState === 'starting'
               ? '...'
-              : diarize ? '🎙 대화 녹음' : '🎙 받아쓰기'}
+              : diarize ? '🎙 대화 전사' : '🎙 받아쓰기'}
         </button>
         <button
           className="hearing-primary-btn"
@@ -1911,8 +2242,9 @@ export default function HearingRecordPanel({
           </label>
           <span>
             {diarize
-              ? '한 번 녹음 → 정지 후 화자별 텍스트 저장 · 화자 이름은 직접 지정 · 최대 80분 · '
-              : 'Ctrl/Cmd+Shift+D: 시작·정지 · 정지 후 대화목록에서 전사 · 바로 다음 입력 가능 · '}
+              ? 'A·B·C로 화자 구분 · 이름 변경은 같은 화자의 모든 발언에 적용 · 목소리 참고는 이 기록을 열어 둔 동안 최대 4명 · '
+              : 'Ctrl/Cmd+Shift+D: 시작·정지 · '}
+            2분마다 자동 전사 · 녹음은 계속 유지 · 정지하면 남은 구간 전사 · 최대 80분 ·
             음성은 OpenAI API로 전송
             · 관련 법령·고지 절차 확인
           </span>
@@ -1943,10 +2275,20 @@ export default function HearingRecordPanel({
               <div className="hearing-speaker-list">
                 {speakers.map((speaker, index) => (
                   <div key={speaker.id} className="hearing-speaker-row">
-                    <span>
-                      {speaker.shortcut ? `${speaker.shortcut}. ` : ''}
-                      {speaker.label}
-                    </span>
+                    <input
+                      key={speaker.label}
+                      aria-label="대화자 이름 수정"
+                      title="이름을 바꾸면 같은 화자의 모든 발언에 적용됩니다."
+                      defaultValue={speaker.label}
+                      onBlur={(event) => {
+                        const label = event.currentTarget.value.trim() || speaker.label
+                        event.currentTarget.value = label
+                        renameSpeaker(speaker.id, label)
+                      }}
+                      onKeyDown={(event) => {
+                        if (isCommittedEnter(event)) { event.preventDefault(); event.currentTarget.blur() }
+                      }}
+                    />
                     <button disabled={index === 0} onClick={() => moveSpeaker(speaker.id, -1)}>
                       ↑
                     </button>

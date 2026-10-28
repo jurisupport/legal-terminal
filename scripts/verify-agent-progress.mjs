@@ -4,7 +4,9 @@ import { createRequire } from 'node:module'
 import { runInNewContext } from 'node:vm'
 import { EventEmitter } from 'node:events'
 import ts from 'typescript'
+import * as browserBridge from '../src/main/browserAgentBridge.ts'
 import { codexTurnRunStatus, codexWorkStepStatus } from '../src/main/agent/agentProgress.ts'
+import * as executionLock from '../src/main/agent/agentExecutionLock.ts'
 import { activeSubAgentCount, isSubAgentStep } from '../src/renderer/src/agent/subAgentStatus.ts'
 import * as values from '../src/renderer/src/agent/values.ts'
 
@@ -44,8 +46,14 @@ const serviceSource = readFileSync(new URL('../src/main/agent/agent-service.ts',
 const serviceModule = { exports: {} }
 let queryMessages = []
 let inputStates = []
+let contextSamples = []
+let contextReads = []
 let remoteProcess
-runInNewContext(ts.transpileModule(`${serviceSource}\nexport const progressCheck = { handleSdkMessage, handleRemoteJsonLine, currentSessionStatus, startAgentTurn, runRemoteAgentMessage };`, {
+let queryFailure
+let onQueryMessage
+const queryPrompts = []
+const queryOptions = []
+runInNewContext(ts.transpileModule(`${serviceSource}\nexport const progressCheck = { sessions, handleSdkMessage, handleRemoteJsonLine, currentSessionStatus, startAgentTurn, runRemoteAgentMessage, handleCodexNotification, handleCodexJsonLine, runCodexAgentMessage, rememberCodexTokenUsage, startCodexProcess, ensureCodexInitialized, ensureCodexThread };`, {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 }
 }).outputText, {
   exports: serviceModule.exports, process, Buffer, AbortController, setTimeout, clearTimeout, setInterval, clearInterval,
@@ -54,30 +62,51 @@ runInNewContext(ts.transpileModule(`${serviceSource}\nexport const progressCheck
       if (!remoteProcess) throw new Error('Unexpected subprocess')
       return remoteProcess
     } }
-    if (name === '@anthropic-ai/claude-agent-sdk') return { query: ({ prompt }) => {
+    if (name === '@anthropic-ai/claude-agent-sdk') return { query: ({ prompt, options }) => {
+      queryOptions.push(options)
       assert.notEqual(typeof prompt, 'string', 'single-turn SDK input closes before background results arrive')
       const input = prompt[Symbol.asyncIterator]()
       let ended = false
+      const failure = queryFailure
       return {
-        getContextUsage: async () => ({}),
+        close: () => {},
+        getContextUsage: async (options) => {
+          contextReads.push(options)
+          const sample = contextSamples.shift()
+          if (sample instanceof Error) throw sample
+          return sample ?? {}
+        },
         async *[Symbol.asyncIterator]() {
-          await input.next()
+          queryPrompts.push((await input.next()).value.message.content)
           void input.next().then(() => { ended = true })
           for (const message of queryMessages) {
+            onQueryMessage?.(message)
             yield message
             await new Promise((resolve) => setImmediate(resolve))
             inputStates.push({ subtype: message.subtype, ended })
           }
+          if (failure) throw failure
         }
       }
     } }
     if (name === './agentPrompt') return { prependAgentContext: (_context, prompt) => prompt }
+    if (name === '../jurisupport') return { onAgentMcpAccountChange: () => {} }
+    if (name === '../browserAgentBridge') return browserBridge
+    if (name === './agentMcp') return { managedToolName: () => undefined }
+    if (name === './agentProgress') return { codexTurnRunStatus, codexWorkStepStatus }
+    if (name === './agentExecutionLock') return executionLock
+    if (name === './remoteAgentTransport') return { RemoteAgentTransport: class {
+      constructor() {
+        if (!remoteProcess) throw new Error('Unexpected remote transport')
+        return remoteProcess
+      }
+    } }
     if (name === '../sshOptions') return { buildSshArgs: () => [] }
     if (name.startsWith('.')) return {}
     return require(name)
   }
 })
-const { handleSdkMessage, handleRemoteJsonLine, currentSessionStatus, startAgentTurn, runRemoteAgentMessage } = serviceModule.exports.progressCheck
+const { sessions, handleSdkMessage, handleRemoteJsonLine, currentSessionStatus, startAgentTurn, runRemoteAgentMessage, handleCodexNotification, handleCodexJsonLine, runCodexAgentMessage, rememberCodexTokenUsage } = serviceModule.exports.progressCheck
 
 const panelSource = readFileSync(new URL('../src/renderer/src/agent/AgentPanel.tsx', import.meta.url), 'utf8')
 const panelAst = ts.createSourceFile('AgentPanel.tsx', panelSource, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX)
@@ -111,6 +140,68 @@ for (const remote of [false, true]) {
     message: { content: [{ type: 'tool_result', tool_use_id: 'agent-tool', content: 'launched' }] }
   })
 
+  for (const [outcome, hookName, hookEvent] of [
+    ['success', 'SessionStart:startup', 'SessionStart'],
+    ['error', 'UserPromptSubmit', 'UserPromptSubmit'],
+    ['cancelled', 'Stop', 'Stop']
+  ]) {
+    const hookId = `hook-${outcome}`
+    const hook = (subtype, extra = {}) => send({ type: 'system', subtype, hook_id: hookId, hook_name: hookName, hook_event: hookEvent, ...extra })
+    hook('hook_started')
+    assert.equal(step(hookId).status, 'running')
+    assert.equal(step(hookId).text, hookEvent, 'hook event details must remain available even when the normal diagnostic row is collapsed')
+    hook('hook_progress', { output: 'Checking setup\nStill working', stdout: 'Checking setup\nStill working', stderr: '' })
+    assert.equal(step(hookId).status, 'running')
+    assert.equal(step(hookId).text, 'Checking setup\nStill working')
+    const detail = `${hookName}: ${outcome}\nTechnical details for troubleshooting`
+    hook('hook_response', { outcome, output: detail, stdout: outcome === 'error' ? '' : detail, stderr: outcome === 'error' ? detail : '' })
+    const event = events.filter((event) => event.type === 'process:event' && event.processId === hookId).at(-1)
+    assert.equal(event.title, `Hook · ${hookName}`, 'the wire title must remain compatible with stored process events')
+    assert.equal(event.status, outcome, 'hook success, failure, and cancellation must preserve their original severity')
+    assert.equal(event.text, detail)
+    assert.equal(step(hookId).title, event.title)
+    assert.equal(step(hookId).status, outcome)
+    assert.equal(step(hookId).text, detail)
+    assert.equal(items.flatMap((item) => item.processSteps ?? []).filter((entry) => entry.id === hookId).length, 1,
+      'hook start, progress, and response with one hook_id must update one row')
+  }
+  for (const [status, utilization] of [['allowed', 0.4], ['allowed_warning', 0.9], ['rejected', 1]]) {
+    const id = `rate-${status}`
+    send({ type: 'rate_limit_event', uuid: id, rate_limit_info: {
+      status, rateLimitType: 'five_hour', utilization, resetsAt: 1800000000, isUsingOverage: false
+    } })
+    assert.equal(step(id).title, 'Rate limit')
+    assert.equal(step(id).text, status, 'the raw rate-limit detail must remain inspectable')
+    assert.equal(step(id).status, status, 'warning and rejected events must not be downgraded to normal diagnostics')
+    const usage = events.filter((event) => event.type === 'usage:update').at(-1)
+    assert.equal(usage.rateLimit.status, status, 'diagnostic presentation must not suppress usage updates')
+    assert.equal(usage.rateLimit.utilization, utilization * 100)
+    assert.equal(usage.rateLimit.remainingPercent, 100 - utilization * 100)
+    assert.equal(usage.rateLimit.resetsAt, 1800000000000)
+    assert.equal(usage.rateLimit.isUsingOverage, false)
+    assert.equal(usage.rateLimits.length, 1)
+    assert.equal(usage.rateLimits[0].status, status)
+    assert.equal(session.rateLimitUsages.get('five_hour').status, status)
+  }
+
+  const commandInput = { command: `python3 ${'x'.repeat(1700)}`, description: '사건기록에서 쟁점 찾기' }
+  send({ type: 'stream_event', event: { type: 'content_block_start', content_block: { type: 'tool_use', id: 'shell-tool', name: 'Bash', input: {} } } })
+  send({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 'shell-tool', name: 'Bash', input: commandInput }] } })
+  assert.equal(step('shell-tool').description, commandInput.description, 'full tool input must hydrate the streamed row even when its JSON preview is truncated')
+  assert.match(step('shell-tool').input, /python3/)
+  assert.equal(events.filter((event) => event.type === 'tool:start' && event.toolId === 'shell-tool').length, 1)
+  send({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'shell-tool', content: '검토 완료' }] } })
+  send({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 'shell-tool', name: 'Bash', input: commandInput }] } })
+  assert.equal(step('shell-tool').status, 'done', 'late input hydration must not restart completed work')
+  assert.equal(items.flatMap((item) => item.processSteps ?? []).filter((entry) => entry.id === 'shell-tool').length, 1)
+  send({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 'full-tool', name: 'Bash', input: { command: 'pwd', description: '작업 폴더 확인' } }] } })
+  assert.equal(step('full-tool').description, '작업 폴더 확인', 'non-streamed tools also retain their readable description')
+  const editInput = { file_path: '/tmp/streamed-edit.md', old_string: 'old', new_string: 'new' }
+  send({ type: 'stream_event', event: { type: 'content_block_start', content_block: { type: 'tool_use', id: 'streamed-edit', name: 'Edit', input: {} } } })
+  for (let i = 0; i < 2; i++) send({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 'streamed-edit', name: 'Edit', input: editInput }] } })
+  assert.equal(events.filter((event) => event.type === 'diff:proposed' && event.proposal.toolUseId === 'streamed-edit').length, 1,
+    'hydrated edit input must produce one diff proposal, including repeated full snapshots')
+
   send({ type: 'stream_event', event: { type: 'content_block_start', content_block: { type: 'tool_use', id: 'agent-tool', name: 'Agent', input: {} } } })
   send({ type: 'tool_progress', tool_use_id: 'agent-tool', tool_name: 'Agent', elapsed_time_seconds: 12 })
   assert.equal(activeSubAgentCount(items), 1, 'heartbeat must not replace running status with elapsed seconds')
@@ -131,8 +222,11 @@ for (const remote of [false, true]) {
   send({ type: 'user', parent_tool_use_id: 'agent-tool', message: { content: [{ type: 'tool_result', tool_use_id: 'child-edit', content: 'ok' }] } })
   assert.equal(step('child-edit').status, 'done')
   items.push({ id: 'question-2', kind: 'user' })
-  taskEvent('task_progress', { description: '자료 검토 중', usage: { duration_ms: 24000 } })
+  taskEvent('task_progress', { description: '자료 검토 중', summary: '판결문에서 책임 범위를 비교하는 중', usage: { duration_ms: 24000 } })
   assert.equal(step().elapsedMs, 24000)
+  assert.equal(step().text, '판결문에서 책임 범위를 비교하는 중', 'SDK progress summaries take precedence over original task descriptions')
+  send({ type: 'tool_use_summary', uuid: 'tool-summary', summary: '관련 판례와 기록을 확인했습니다.', preceding_tool_use_ids: ['shell-tool'] })
+  assert.equal(step('tool-summary').text, '관련 판례와 기록을 확인했습니다.')
   taskEvent('task_notification', { status: 'completed', summary: '판례 확인 완료' })
   assert.equal(activeSubAgentCount(items), 0, 'completion after another question must update the original agent row')
   assert.equal(items.filter((item) => item.processSteps?.some((entry) => entry.id === 'agent-tool')).length, 1)
@@ -173,10 +267,12 @@ const endedSession = {
   assistantMessages: new Set(), assistantText: new Map(), assistantStreamed: new Set(), startedTools: new Set(),
   viewers: new Map([[1, { isDestroyed: () => false, send: (_channel, event) => endedEvents.push(event) }]])
 }
+sessions.set(endedSession.id, endedSession)
 queryMessages = [{ type: 'system', subtype: 'task_started', task_id: 'unfinished', task_type: 'local_agent' }]
 startAgentTurn(endedSession, { text: 'Track unfinished child' })
 for (let i = 0; i < 10 && endedSession.running; i++) await new Promise((resolve) => setImmediate(resolve))
 assert.equal(endedSession.running, undefined)
+assert.equal(queryOptions.at(-1).agentProgressSummaries, true, 'normal SDK queries must request readable subagent progress summaries')
 assert.equal(endedEvents.some((event) => event.type === 'process:event' && event.status === 'error'), true,
   'a closed event stream must mark unfinished work as unverified instead of leaving it running')
 assert.equal(endedEvents.filter((event) => event.type === 'status').at(-1).status, 'error')
@@ -223,10 +319,15 @@ endedSession.firstUserText = undefined
 endedSession.running = new AbortController()
 endedSession.claudeTasks = new Map()
 const remoteRun = runRemoteAgentMessage(endedSession, 'Track remote work', endedSession.running)
+assert.equal(writes.find((message) => message.request?.subtype === 'initialize').request.agentProgressSummaries, true,
+  'SSH must request the same summaries through the supported initialize control field')
 const remoteSend = (message) => remoteProcess.stdout.emit('data', Buffer.from(`${JSON.stringify(message)}\n`))
+remoteSend({ type: 'system', subtype: 'background_tasks_changed', tasks: [] })
 remoteSend({ type: 'system', subtype: 'task_started', task_id: 'remote', task_type: 'local_agent', is_backgrounded: true })
 remoteSend({ type: 'result', subtype: 'success' })
-assert.equal(writes.length, 1, 'SSH input must remain open after the parent result while a child runs')
+assert.equal(writes.filter((message) => message.type === 'user').length, 1, 'SSH must send the user prompt only once while a child runs')
+assert.equal(writes.some((message) => message.request?.subtype === 'get_context_usage'), false,
+  'SSH must not finalize the parent result while a child runs')
 assert.equal(inputEnded, false)
 remoteSend({ type: 'system', subtype: 'task_notification', task_id: 'remote', status: 'completed' })
 assert.equal(writes.at(-1).request.subtype, 'get_context_usage', 'terminal notification must finalize SSH without requiring another result')
@@ -235,4 +336,434 @@ assert.equal(inputEnded, true)
 remoteProcess.emit('close', 0)
 await remoteRun
 
-console.log('agent progress: local/SSH lifecycle, heartbeat, background launch, child output, and cross-turn completion ok')
+// An empty snapshot must not hide newer task starts, progress, or terminal events.
+for (const remote of [false, true]) {
+  endedEvents.length = 0
+  endedSession.running = undefined
+  endedSession.claudeTasks = new Map()
+  const send = (message) => remote ? handleRemoteJsonLine(endedSession, JSON.stringify(message)) : handleSdkMessage(endedSession, message)
+  const task = (subtype, extra = {}) => send({ type: 'system', subtype, task_id: 'after-empty', ...extra })
+  const snapshot = () => send({ type: 'system', subtype: 'background_tasks_changed', tasks: [] })
+  snapshot()
+  task('task_started', { tool_use_id: 'after-empty-tool', task_type: 'local_agent', is_backgrounded: true })
+  assert.equal(currentSessionStatus(endedSession), 'working', 'a new task supersedes the old empty snapshot')
+  send({ type: 'result', subtype: 'success' })
+  assert.equal(endedEvents.filter((event) => event.type === 'status').at(-1).status, 'working')
+  snapshot()
+  task('task_progress', { status: 'running' })
+  assert.equal(currentSessionStatus(endedSession), 'working', 'latest progress must refresh snapshot membership')
+  task('task_notification', { status: 'completed' })
+  assert.equal(currentSessionStatus(endedSession), 'idle')
+  assert.equal(endedSession.claudeBackgroundTasks.size, 0, 'completion removes snapshot membership')
+  task('task_started', { is_backgrounded: false })
+  send({ type: 'user', tool_use_result: { status: 'async_launched', agentId: 'after-empty' },
+    message: { content: [{ type: 'tool_result', tool_use_id: 'after-empty-tool', content: 'launched' }] } })
+  assert.equal(currentSessionStatus(endedSession), 'working', 'a launch result also refreshes snapshot membership')
+  send({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'after-empty-tool', is_error: true, content: 'failed' }] } })
+  assert.equal(currentSessionStatus(endedSession), 'idle', 'failed tool work removes snapshot membership')
+}
+
+// Exercise SDK input lifetime across the exact reported event order.
+endedSession.ssh = undefined
+endedEvents.length = 0
+inputStates = []
+queryMessages = [
+  { type: 'system', subtype: 'background_tasks_changed', tasks: [] },
+  { type: 'system', subtype: 'task_started', task_id: 'late', task_type: 'local_agent', is_backgrounded: true },
+  { type: 'result', subtype: 'success' },
+  { type: 'system', subtype: 'task_notification', task_id: 'late', status: 'completed' }
+]
+startAgentTurn(endedSession, { text: 'Snapshot followed by a child' })
+for (let i = 0; i < 30 && endedSession.running; i++) await new Promise((resolve) => setImmediate(resolve))
+clearTimeout(endedSession.workSummaryTimer)
+assert.equal(endedSession.running, undefined)
+assert.equal(inputStates.find((state) => state.subtype === 'success').ended, false)
+assert.equal(inputStates.at(-1).ended, true)
+assert.equal(endedEvents.some((event) => event.type === 'process:event' && event.status === 'error'), false)
+
+// Each PC process has one user input. Steer cancels it and starts a new process;
+// a late result must not consume or report completion of the queued instruction.
+queryMessages = [{ type: 'result', subtype: 'success' }]
+queryPrompts.length = 0
+endedEvents.length = 0
+onQueryMessage = () => {
+  onQueryMessage = undefined
+  assert.equal(serviceModule.exports.sendAgentMessage(endedSession.id, { text: 'Follow-up steer', delivery: 'steer' }).ok, true)
+}
+startAgentTurn(endedSession, { text: 'Original request' })
+for (let i = 0; i < 30 && endedSession.running; i++) await new Promise((resolve) => setImmediate(resolve))
+clearTimeout(endedSession.workSummaryTimer)
+assert.equal(endedSession.running, undefined)
+assert.equal(endedSession.queue.length, 0)
+assert.equal(queryPrompts.length, 2, 'steer must run once, without replaying the original input')
+assert.equal(queryPrompts[0], 'Original request')
+assert.match(queryPrompts[1], /Follow-up steer/)
+assert.equal(endedEvents.filter((event) => event.type === 'status' && event.status === 'done').length, 1,
+  'the cancelled request result must not complete the queued steer')
+
+endedEvents.length = 0
+endedSession.source = 'ssh'
+endedSession.ssh = { host: 'test.invalid', user: 'test' }
+const steerProcesses = Array.from({ length: 2 }, () => {
+  const sent = []
+  return Object.assign(new EventEmitter(), {
+    sent, stdout: new EventEmitter(), stderr: new EventEmitter(),
+    stdin: Object.assign(new EventEmitter(), { write: (line) => { sent.push(JSON.parse(line)); return true }, end: () => {} }),
+    kill() { this.killed = true }
+  })
+})
+remoteProcess = steerProcesses[0]
+startAgentTurn(endedSession, { text: 'Original remote request' })
+for (let i = 0; i < 10 && !endedSession.remoteProcess; i++) await new Promise((resolve) => setImmediate(resolve))
+assert.equal(serviceModule.exports.sendAgentMessage(endedSession.id, { text: 'Remote follow-up steer', delivery: 'steer' }).ok, true)
+remoteSend({ type: 'result', subtype: 'success' })
+assert.equal(endedEvents.some((event) => event.type === 'status' && event.status === 'done'), false)
+remoteProcess = steerProcesses[1]
+steerProcesses[0].emit('close', null, 'SIGTERM')
+for (let i = 0; i < 10 && endedSession.remoteProcess !== remoteProcess; i++) await new Promise((resolve) => setImmediate(resolve))
+assert.equal(endedSession.queue.length, 0)
+assert.equal(steerProcesses[0].sent.filter((message) => message.type === 'user').length, 1)
+assert.equal(steerProcesses[1].sent.filter((message) => message.type === 'user').length, 1)
+assert.match(steerProcesses[1].sent.find((message) => message.type === 'user').message.content[0].text, /Remote follow-up steer/)
+remoteSend({ type: 'result', subtype: 'success' })
+remoteProcess.emit('close', 0)
+for (let i = 0; i < 10 && endedSession.running; i++) await new Promise((resolve) => setImmediate(resolve))
+clearTimeout(endedSession.workSummaryTimer)
+assert.equal(endedSession.running, undefined)
+assert.equal(endedEvents.filter((event) => event.type === 'status' && event.status === 'done').length, 1)
+endedSession.source = 'local'
+endedSession.ssh = undefined
+
+// Explicit SDK and CLI transport failures override a previously successful result.
+endedEvents.length = 0
+queryFailure = new Error('SDK process exited with code 1')
+startAgentTurn(endedSession, { text: 'Result followed by SDK failure' })
+for (let i = 0; i < 30 && endedSession.running; i++) await new Promise((resolve) => setImmediate(resolve))
+clearTimeout(endedSession.workSummaryTimer)
+queryFailure = undefined
+assert.equal(endedEvents.filter((event) => event.type === 'status').at(-1).status, 'error')
+assert.equal(endedSession.running, undefined)
+
+for (const [code, signal] of [[1, null], [null, 'SIGTERM']]) {
+  endedEvents.length = 0
+  remoteProcess = Object.assign(new EventEmitter(), {
+    stdout: new EventEmitter(), stderr: new EventEmitter(),
+    stdin: Object.assign(new EventEmitter(), { write: () => true, end: () => {} })
+  })
+  endedSession.ssh = { host: 'test.invalid', user: 'test' }
+  endedSession.running = new AbortController()
+  endedSession.claudeTasks = new Map()
+  const failedRun = runRemoteAgentMessage(endedSession, 'Result followed by CLI failure', endedSession.running)
+  remoteSend({ type: 'result', subtype: 'success' })
+  remoteProcess.emit('close', code, signal)
+  await failedRun
+  clearTimeout(endedSession.workSummaryTimer)
+  assert.equal(endedEvents.filter((event) => event.type === 'status').at(-1).status, 'error',
+    'abnormal CLI termination must override a previous result')
+}
+endedSession.running = undefined
+endedSession.ssh = undefined
+
+// Codex notifications can share a transport with child threads. Only the matching
+// parent turn may complete its waiter, and interruption must wait for that turn.
+const codexEvents = []
+const requests = []
+const codexSession = {
+  ...endedSession, id: 'codex-check', provider: 'codex', source: 'local', ssh: undefined,
+  codexThreadId: 'parent', codexActiveWork: new Set(), claudeTasks: new Map(),
+  codexExecutionProtected: true, codexThreadReady: true,
+  codexProcess: { stdin: { write: (line) => requests.push(JSON.parse(line)) } },
+  viewers: new Map([[1, { isDestroyed: () => false, send: (_channel, event) => codexEvents.push(event) }]])
+}
+const notify = (method, params) => handleCodexNotification(codexSession, { method, params })
+notify('thread/started', { thread: { id: 'child' } })
+assert.equal(codexSession.codexThreadId, 'parent', 'a child thread notification must not replace the parent identity')
+codexSession.running = new AbortController()
+const codexRun = runCodexAgentMessage(codexSession, 'test', codexSession.running)
+await new Promise((resolve) => setImmediate(resolve))
+notify('turn/started', { threadId: 'parent', turn: { id: 'turn-1' } })
+const startRequest = requests.find((request) => request.method === 'turn/start')
+handleCodexJsonLine(codexSession, JSON.stringify({ id: startRequest.id, result: { turn: { id: 'turn-1' } } }))
+await new Promise((resolve) => setImmediate(resolve))
+notify('turn/started', { threadId: 'child', turn: { id: 'child-turn' } })
+notify('turn/completed', { threadId: 'child', turn: { id: 'child-turn', status: 'completed' } })
+assert.equal(codexSession.codexTurnWaiter?.turnId, 'turn-1')
+codexSession.running.abort()
+const interruptRequest = requests.find((request) => request.method === 'turn/interrupt')
+assert.deepEqual(interruptRequest.params, { threadId: 'parent', turnId: 'turn-1' })
+assert.ok(codexSession.codexTurnWaiter, 'do not start the next turn before the interrupted turn ends')
+notify('turn/completed', { threadId: 'parent', turn: { id: 'turn-1', status: 'interrupted' } })
+await codexRun
+for (const command of ['/compact', '/review']) {
+  codexSession.running = new AbortController()
+  const run = runCodexAgentMessage(codexSession, command, codexSession.running, command)
+  await new Promise((resolve) => setImmediate(resolve))
+  const request = requests.at(-1)
+  assert.equal(request.method, command === '/compact' ? 'thread/compact/start' : 'review/start')
+  const turnId = `slash-${command}`
+  notify('turn/started', { threadId: 'parent', turn: { id: turnId } })
+  handleCodexJsonLine(codexSession, JSON.stringify({ id: request.id, result: command === '/compact' ? {} : { turn: { id: turnId } } }))
+  notify('turn/completed', { threadId: 'parent', turn: { id: turnId, status: 'completed' } })
+  await run
+}
+let nextResolved = false
+codexSession.codexTurnWaiter = { turnId: 'turn-2', resolve: () => { nextResolved = true; codexSession.codexTurnWaiter = undefined } }
+notify('turn/completed', { threadId: 'parent', turn: { id: 'turn-1', status: 'completed' } })
+assert.equal(nextResolved, false, 'a delayed completion must not end the next turn')
+assert.equal(codexSession.codexTurnWaiter.turnId, 'turn-2')
+notify('item/started', { threadId: 'parent', turnId: 'turn-1', item: { id: 'stale', type: 'commandExecution' } })
+assert.equal(codexSession.codexActiveWork.size, 0, 'late tool starts must not reopen the old turn')
+notify('item/started', { threadId: 'parent', turnId: 'turn-2', item: { id: 'unfinished-call', type: 'dynamicToolCall', tool: 'lookup' } })
+codexSession.codexActiveWork.add('agent:live-child')
+notify('turn/completed', { threadId: 'parent', turn: { id: 'turn-2', status: 'completed', items: [] } })
+assert.equal(nextResolved, false, 'running children keep the execution lock after the parent turn completes')
+assert.deepEqual([...codexSession.codexActiveWork], ['agent:live-child'], 'only independently running children survive turn completion')
+assert.equal(codexEvents.filter((event) => event.type === 'status').at(-1).status, 'working')
+notify('item/completed', { threadId: 'parent', turnId: 'turn-2', item: {
+  id: 'child-completion', type: 'collabAgentToolCall', tool: 'wait', status: 'completed',
+  agentsStates: { 'live-child': { status: 'completed' } }
+} })
+assert.equal(codexEvents.filter((event) => event.type === 'status').at(-1).status, 'done', 'child completion before wrapper cleanup must end the spinner')
+assert.equal(nextResolved, true, 'last child completion releases the turn waiter')
+codexSession.running = undefined
+for (const kind of ['completed', 'interrupted']) {
+  notify('item/completed', { threadId: 'parent', turnId: 'turn-2', item: {
+    id: `activity-${kind}-start`, type: 'subAgentActivity', kind: 'started', agentThreadId: 'activity-child'
+  } })
+  assert.equal(currentSessionStatus(codexSession), 'working')
+  notify('item/completed', { threadId: 'parent', turnId: 'turn-2', item: {
+    id: `activity-${kind}-end`, type: 'subAgentActivity', kind, agentThreadId: 'activity-child'
+  } })
+  assert.equal(currentSessionStatus(codexSession), 'idle', `${kind} child activity must release the running flag`)
+}
+
+// Context is the latest request, while total usage remains the session aggregate.
+const tokenEvent = (last, modelContextWindow = 200000) => ({
+  turnId: 'turn-2', tokenUsage: { total: { totalTokens: 300000, outputTokens: 10000, reasoningOutputTokens: 8000 }, last: last === undefined ? undefined : { totalTokens: last }, modelContextWindow }
+})
+rememberCodexTokenUsage(codexSession, tokenEvent(35000))
+assert.equal(codexSession.tokenUsage.totalTokens, 300000)
+// Codex's FinalOutput displays output_tokens directly, with reasoning in parentheses:
+// https://github.com/openai/codex/blob/main/codex-rs/protocol/src/protocol.rs
+assert.equal(codexSession.tokenUsage.outputTokens, 10000, 'reasoning is part of output, not an additional output charge')
+assert.equal(codexSession.contextUsage.remainingTokens, 165000)
+assert.equal(codexSession.contextUsage.percentage, 17.5)
+rememberCodexTokenUsage(codexSession, tokenEvent(10000))
+assert.equal(codexSession.contextUsage.remainingTokens, 190000, 'compaction restores context capacity')
+rememberCodexTokenUsage(codexSession, tokenEvent(10000, null))
+assert.equal(codexSession.contextUsage, undefined, 'missing capacity must clear the old model limit')
+rememberCodexTokenUsage(codexSession, tokenEvent(undefined))
+assert.equal(codexSession.contextUsage, undefined, 'missing last usage must not fall back to cumulative totals')
+sessions.set(codexSession.id, codexSession)
+rememberCodexTokenUsage(codexSession, tokenEvent(35000))
+serviceModule.exports.setAgentModel(codexSession.id, 'different-model')
+assert.equal(codexSession.contextUsage, undefined, 'model changes invalidate the previous capacity')
+
+// A response shorter than the polling interval still gets a final summary sample.
+contextReads = []
+contextSamples = [{ totalTokens: 1000, maxTokens: 200000 }, { totalTokens: 30000, maxTokens: 200000 }]
+queryMessages = [{ type: 'result', subtype: 'success' }]
+startAgentTurn(endedSession, { text: 'Short response' })
+for (let i = 0; i < 20 && endedSession.running; i++) await new Promise((resolve) => setImmediate(resolve))
+clearTimeout(endedSession.workSummaryTimer)
+assert.equal(endedSession.contextUsage.remainingTokens, 170000)
+assert.equal(contextReads.length, 2, 'sample once before and once after a short response')
+assert.ok(contextReads.every((options) => options.detail === 'summary'))
+contextSamples = [{ totalTokens: 1000, maxTokens: 200000 }, new Error('context unavailable')]
+startAgentTurn(endedSession, { text: 'Unavailable final usage' })
+for (let i = 0; i < 20 && endedSession.running; i++) await new Promise((resolve) => setImmediate(resolve))
+clearTimeout(endedSession.workSummaryTimer)
+assert.equal(endedSession.contextUsage, undefined)
+assert.equal(endedSession.running, undefined, 'an unavailable context sample must not hold the turn open')
+
+// Execute the real renderer event branches to check parent-tab and snapshot updates.
+const eventBranch = (eventType, context) => {
+  let branch
+  const visit = (node) => {
+    if (ts.isIfStatement(node) && node.expression.getText(panelAst) === `event.type === '${eventType}'`
+      && node.thenStatement.getText(panelAst).includes(eventType === 'status' ? 'setStatus(' : 'setUsage(')) branch = node
+    ts.forEachChild(node, visit)
+  }
+  visit(panelAst)
+  assert.ok(branch)
+  return runInNewContext(ts.transpileModule(`(event) => { ${branch.getText(panelAst)} }`, {
+    compilerOptions: { target: ts.ScriptTarget.ES2022 }
+  }).outputText, { ...values, ...context })
+}
+let panelStatus
+let tabStatus
+const statusEvent = eventBranch('status', { setStatus: (value) => { panelStatus = value }, onStatus: (value) => { tabStatus = value } })
+statusEvent({ type: 'status', status: 'working' })
+statusEvent({ type: 'status', status: 'idle' })
+assert.equal(panelStatus, 'idle')
+assert.equal(tabStatus, 'idle', 'idle must also clear the parent tab spinner')
+let view = { tokens: {}, context: { remainingTokens: 50000 } }
+const usageEvent = eventBranch('usage:update', {
+  tokenUsageFromEvent: () => undefined, contextUsageFromEvent: (value) => value,
+  rateLimitUsageFromEvent: () => undefined, rateLimitUsagesFromEvent: () => undefined,
+  setUsage: (update) => { view = update(view) }
+})
+usageEvent({ type: 'usage:update', context: undefined })
+assert.equal(view.context, undefined, 'a full snapshot must be allowed to clear stale context')
+
+const appSource = readFileSync(new URL('../src/renderer/src/App.tsx', import.meta.url), 'utf8')
+const termStatusSource = appSource.match(/const onTermStatus = [\s\S]*?\n  }/)?.[0]
+assert.ok(termStatusSource)
+let termStatuses = new Map([['working', 'working'], ['done', 'done'], ['question', 'question']])
+let termAttention = new Set(['done', 'question'])
+const termStatusRef = { current: termStatuses }
+const statusUpdates = []
+const dismissed = []
+const onTermStatus = runInNewContext(ts.transpileModule(`${termStatusSource}\nonTermStatus`, {
+  compilerOptions: { target: ts.ScriptTarget.ES2022 }
+}).outputText, {
+  termStatusRef,
+  termTabsRef: { current: [] },
+  sharedUiRunsRef: { current: new Map() },
+  newId: () => 'test-run',
+  setTermStatus: (update) => statusUpdates.push(update),
+  setTermAttention: (update) => { termAttention = update(termAttention) },
+  dismissToastForTerm: (id) => dismissed.push(id),
+  window: { lt: { app: { dismissNotify: () => {} } } },
+  isTermVisibleInCurrentWorkspace: () => false,
+  document: { hasFocus: () => true }, notifyDone: true,
+  pushToast: () => {}, playNotificationSound: () => {}, notificationSound: '', notificationVolume: 0
+})
+const flushStatusUpdates = () => {
+  for (const update of statusUpdates.splice(0)) termStatuses = update(termStatuses)
+  termStatusRef.current = termStatuses
+}
+for (const id of termStatuses.keys()) onTermStatus(id, 'idle')
+flushStatusUpdates()
+assert.equal(termStatuses.get('working'), 'idle')
+assert.equal(termStatuses.get('done'), 'done', 'an idle snapshot must preserve a completion notice')
+assert.ok(termAttention.has('done'))
+assert.equal(termStatuses.get('question'), 'idle', 'idle resolves a pending question once the agent is no longer waiting')
+assert.ok(!termAttention.has('question'))
+assert.ok(dismissed.includes('question'))
+
+// React may batch multiple status events before it runs the state updaters.
+onTermStatus('batched', 'done')
+onTermStatus('batched', 'idle')
+assert.ok(termAttention.has('batched'), 'done then idle before rendering must preserve unread completion')
+assert.ok(!dismissed.includes('batched'), 'the unread completion toast must stay visible')
+flushStatusUpdates()
+assert.equal(termStatuses.get('batched'), 'done')
+onTermStatus('batched', 'question')
+onTermStatus('batched', 'idle')
+flushStatusUpdates()
+assert.equal(termStatuses.get('batched'), 'idle')
+assert.ok(!termAttention.has('batched'), 'a newer question then idle must clear a prior completion')
+
+onTermStatus('read-completion', 'working')
+onTermStatus('read-completion', 'done')
+flushStatusUpdates()
+termAttention.delete('read-completion')
+onTermStatus('read-completion', 'done')
+onTermStatus('read-completion', 'idle')
+flushStatusUpdates()
+assert.ok(!termAttention.has('read-completion'), 'repeated completion status must not restore a badge after reading')
+onTermStatus('read-completion', 'working')
+onTermStatus('read-completion', 'done')
+flushStatusUpdates()
+assert.ok(termAttention.has('read-completion'), 'a new turn still gets its own completion badge')
+
+// Each replacement transport must initialize anew; callbacks from the disposed
+// process cannot clear the new transport or its pending turn.
+const freshProcess = () => Object.assign(new EventEmitter(), {
+  stdout: new EventEmitter(), stderr: new EventEmitter(),
+  stdin: { write: (line) => requests.push(JSON.parse(line)) }
+})
+codexSession.codexProcess = undefined
+codexSession.codexInitialized = true
+remoteProcess = freshProcess()
+serviceModule.exports.progressCheck.startCodexProcess(codexSession)
+const previousProcess = remoteProcess
+assert.equal(codexSession.codexInitialized, false)
+codexSession.codexProcess = undefined
+remoteProcess = freshProcess()
+serviceModule.exports.progressCheck.startCodexProcess(codexSession)
+const initialized = serviceModule.exports.progressCheck.ensureCodexInitialized(codexSession)
+const initializeRequest = requests.at(-1)
+assert.equal(initializeRequest.method, 'initialize')
+handleCodexJsonLine(codexSession, JSON.stringify({ id: initializeRequest.id, result: {} }))
+await initialized
+assert.equal(requests.at(-1).method, 'initialized')
+previousProcess.emit('close', 0)
+assert.equal(codexSession.codexInitialized, true, 'old close events must not reset the new connection')
+assert.equal(codexSession.codexProcess, remoteProcess)
+codexSession.codexActiveWork.add('agent:orphaned')
+remoteProcess.emit('close', 1)
+assert.equal(currentSessionStatus(codexSession), 'idle', 'lost transports must not leave orphaned work running')
+assert.equal(codexEvents.filter((event) => event.type === 'status').at(-1).status, 'error')
+
+// A completed/aborted turn may finish cleanup after another transport appears.
+// Its finally block must close only the process captured by that turn.
+const raceProcess = (autoClose = false) => {
+  const proc = freshProcess()
+  proc.endCalls = 0
+  proc.stdin.end = () => {
+    proc.endCalls++
+    proc.stdin.writableEnded = true
+    if (autoClose) queueMicrotask(() => { proc.exitCode = 0; proc.emit('close', 0) })
+  }
+  return proc
+}
+const owned = raceProcess(true)
+const newer = raceProcess(true)
+const racingSession = {
+  ...codexSession, id: 'execution-owner-race', running: undefined, codexProcess: owned,
+  codexThreadReady: true, codexExecutionProtected: true, codexActiveWork: new Set(), codexPending: new Map(), queue: []
+}
+sessions.set(racingSession.id, racingSession)
+startAgentTurn(racingSession, { text: 'finish old turn' })
+for (let i = 0; i < 10 && !racingSession.codexTurnWaiter; i++) await new Promise((resolve) => setImmediate(resolve))
+const ownRequest = requests.at(-1)
+assert.equal(ownRequest.method, 'turn/start')
+handleCodexJsonLine(racingSession, JSON.stringify({ id: ownRequest.id, result: { turn: { id: 'old-owned-turn' } } }))
+handleCodexNotification(racingSession, { method: 'turn/started', params: { threadId: 'parent', turn: { id: 'old-owned-turn' } } })
+handleCodexNotification(racingSession, { method: 'turn/completed', params: { threadId: 'parent', turn: { id: 'old-owned-turn', status: 'completed' } } })
+racingSession.codexProcess = newer
+const newerTurn = new AbortController()
+racingSession.running = newerTurn
+await new Promise((resolve) => setImmediate(resolve))
+assert.equal(owned.endCalls, 1, 'the previous turn must close its own process')
+assert.equal(newer.endCalls, 0, 'old finally must never close the replacement process')
+assert.equal(racingSession.running, newerTurn, 'old finally must not clear the replacement turn')
+
+// A model lookup can replace an unprotected process while its close is awaited.
+// Re-check after every await and acquire a protected process before resuming.
+const firstUnprotected = raceProcess()
+const secondUnprotected = raceProcess()
+const protectedProcess = raceProcess(true)
+racingSession.codexProcess = firstUnprotected
+racingSession.codexExecutionProtected = false
+racingSession.codexThreadReady = false
+racingSession.running = undefined
+const execution = {}
+const protectedThread = serviceModule.exports.progressCheck.ensureCodexThread(racingSession, true, execution)
+assert.equal(firstUnprotected.endCalls, 1)
+racingSession.codexProcess = secondUnprotected
+firstUnprotected.emit('close', 0)
+await new Promise((resolve) => setImmediate(resolve))
+assert.equal(secondUnprotected.endCalls, 1, 'replacement unprotected process must also be stopped')
+racingSession.codexProcess = undefined
+remoteProcess = protectedProcess
+secondUnprotected.emit('close', 0)
+await new Promise((resolve) => setImmediate(resolve))
+assert.equal(racingSession.codexExecutionProtected, true)
+assert.equal(execution.process, protectedProcess)
+const protectedInitialize = requests.at(-1)
+assert.equal(protectedInitialize.method, 'initialize')
+handleCodexJsonLine(racingSession, JSON.stringify({ id: protectedInitialize.id, result: {} }))
+await new Promise((resolve) => setImmediate(resolve))
+const protectedResume = requests.at(-1)
+assert.equal(protectedResume.method, 'thread/resume')
+handleCodexJsonLine(racingSession, JSON.stringify({ id: protectedResume.id, result: { thread: { id: 'parent' } } }))
+assert.equal(await protectedThread, 'parent')
+protectedProcess.stdin.end()
+await new Promise((resolve) => setImmediate(resolve))
+clearTimeout(racingSession.workSummaryTimer)
+console.log('Codex process ownership: late turn cleanup preserves new execution, model lookup replacement cannot bypass protection')
+
+console.log('agent progress: local/SSH lifecycle, snapshot/steer/failure completion, Codex turn isolation/interruption, context capacity, and renderer state ok')

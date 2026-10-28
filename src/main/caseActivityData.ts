@@ -32,6 +32,7 @@ export interface CaseActivityQuery {
 }
 
 export interface CaseSessionSummary {
+  originDevice?: 'android' | 'desktop'
   sessionId: string
   title?: string
   mtime: number
@@ -50,6 +51,7 @@ export interface CaseActivity {
 
 // SessionMeta 중 매칭·표시에 쓰는 부분집합 (verify 스크립트에서 만들기 쉽게 분리)
 export interface CaseActivityMetaLike {
+  originDevice?: 'android' | 'desktop'
   sessionId: string
   cwd: string
   updatedAt: string
@@ -150,6 +152,7 @@ export function cleanTitle(title?: string): string | undefined {
 function toSummary(meta: CaseActivityMetaLike): CaseSessionSummary {
   return {
     sessionId: meta.sessionId,
+    originDevice: meta.originDevice === 'android' || meta.originDevice === 'desktop' ? meta.originDevice : undefined,
     title:
       cleanTitle(meta.generatedTitle) ||
       cleanTitle(meta.transcriptTitle) ||

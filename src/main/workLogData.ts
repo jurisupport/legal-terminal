@@ -40,6 +40,7 @@ export interface WorkLogScanSource {
 }
 
 export interface WorkLogItem {
+  originDevice?: 'android' | 'desktop'
   sessionId: string
   cwd?: string
   profileId?: string
@@ -212,6 +213,7 @@ export function mergeWorkLog(
       for (const day of inWindow) {
         push(day.date, {
           sessionId: s.sessionId,
+          originDevice: meta?.originDevice === 'android' || meta?.originDevice === 'desktop' ? meta.originDevice : undefined,
           cwd: s.cwd ?? meta?.cwd,
           profileId: scan.profileId,
           sshLabel: scan.sshLabel,
@@ -239,6 +241,7 @@ export function mergeWorkLog(
     if (date < cutoffKey) continue
     push(date, {
       sessionId: meta.sessionId,
+      originDevice: meta.originDevice === 'android' || meta.originDevice === 'desktop' ? meta.originDevice : undefined,
       cwd: meta.cwd,
       profileId: meta.profileId,
       sshLabel: meta.sshLabel,

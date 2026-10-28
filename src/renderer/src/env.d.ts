@@ -1,4 +1,13 @@
 /// <reference types="vite/client" />
+import type { RemotionPreviewOptions, RemotionPreviewSelection, RemotionPreviewResult } from '../../shared/remotionPreview'
+import type { MediaApi, MediaSelection, MediaViewState } from '../../shared/media'
+import type { BrowserApi } from '../../shared/browser'
+import type { ClaudeRemoteControlApi, RemoteControlConnection } from '../../shared/claudeRemoteControl'
+import type { AgentWorkspaceContext } from '../../shared/agentWorkspaceContext'
+import type { SendClaudeOptions } from '../../shared/claudeAsk'
+import type { Project, ProjectInput } from '../../shared/project'
+import type { DictationBackup, DictationBackupQuery } from '../../shared/dictationRecovery'
+import type { SharedUiOperation, SharedUiResult } from '../../shared/sharedUiState'
 
 export interface SshConn {
   host: string
@@ -80,6 +89,9 @@ export interface PtyCreateOpts {
 }
 
 export interface TerminalTabPayload {
+  contextKind?: 'case' | 'global' | 'folder' | 'project'
+  projectId?: string
+  todoManagement?: boolean
   id: string
   title: string
   kind?: 'terminal' | 'agent'
@@ -93,12 +105,14 @@ export interface TerminalTabPayload {
   agentProvider?: AgentProvider
   jsId?: string
   court?: string
+  division?: string
   caseNumber?: string
   caseName?: string
   client?: string
   opponent?: string
   partyNames?: string
   memo?: string
+  originDevice?: 'android' | 'desktop'
   sessionTitle?: string
   renamed?: boolean
   createdAt?: number
@@ -112,10 +126,12 @@ export interface TerminalTabPayload {
 export interface DocumentTabPayload {
   id?: string
   title: string
-  kind?: 'markdown' | 'mdview' | 'file' | 'pdf' | 'image' | 'hwp' | 'docx' | 'csv' | 'settings' | 'hearing'
+  kind?: 'markdown' | 'mdview' | 'file' | 'pdf' | 'image' | 'hwp' | 'docx' | 'csv' | 'settings' | 'hearing' | 'media' | 'browser'
+  browserAgentId?: string
   caseTabId?: string
   path?: string
   side?: 'left' | 'right'
+  mediaState?: MediaViewState
 }
 
 export type TabPayload =
@@ -140,13 +156,15 @@ export interface TabMoveResult {
 export interface WorkspaceDocTabPayload {
   id: string
   title: string
-  kind: 'markdown' | 'mdview' | 'file' | 'pdf' | 'image' | 'hwp' | 'docx' | 'csv' | 'settings' | 'hearing'
+  kind: 'markdown' | 'mdview' | 'file' | 'pdf' | 'image' | 'hwp' | 'docx' | 'csv' | 'settings' | 'hearing' | 'media'
   caseTabId?: string
   path?: string
   side?: 'left' | 'right'
+  mediaState?: MediaViewState
 }
 
 export interface WorkspaceCaseTabPayload {
+  contextKind?: 'case' | 'global' | 'folder' | 'project'
   id: string
   name: string
   drafts: string
@@ -154,8 +172,11 @@ export interface WorkspaceCaseTabPayload {
   suggestedRecords?: string
   suggestedRecordOptions?: FolderMatchSuggestion[]
   meta?: {
+    contextKind?: 'case' | 'global' | 'folder' | 'project'
+    projectId?: string
     jsId?: string
     court?: string
+    division?: string
     caseNumber?: string
     caseName?: string
     client?: string
@@ -171,6 +192,7 @@ export interface WorkspaceCaseTabPayload {
   activeTermId?: string
   activeWork?: { left?: string; right?: string }
   updatedAt?: number
+  workspaceOpenedAt?: string
 }
 
 export interface DocumentDraftIdentity {
@@ -203,6 +225,13 @@ export interface WorkspaceSnapshot {
   workspaceId?: string
   workspaceLabel?: string
   workspaceDevice?: string
+  workspaceOpen?: boolean
+  workspaceOpenedAt?: string
+  workspaceStateOnly?: boolean
+  workspaceReopen?: boolean
+  workspaceIntentId?: string
+  reopenAgentTabs?: TerminalTabPayload[]
+  closedAgentTabs?: import('../../shared/workspaceAgentTabs').SharedAgentTabIdentity[]
   mode: 'explorer' | 'cases' | 'viewer' | 'todos'
   docs: WorkspaceDocTabPayload[]
   terminals: TerminalTabPayload[]
@@ -228,6 +257,7 @@ export interface WorkspaceEntry {
   caseNumber?: string
   caseName?: string
   court?: string
+  division?: string
   client?: string
   recordsFolder?: string
   profileId?: string
@@ -280,13 +310,17 @@ export interface DictationContext {
   opponent?: string
   partyNames?: string
   speaker?: string
+  participants?: { id: string; label: string }[]
+  recentDialogue?: { speakerId: string; text: string }[]
 }
 
 export interface DictationTranscribeInput {
+  backupId?: string
   audio: Uint8Array
   mimeType: string
   context?: DictationContext
   diarize?: boolean
+  knownSpeakers?: { name: string; audio: Uint8Array; participantId?: string }[]
 }
 
 export interface DictationSegment {
@@ -294,6 +328,8 @@ export interface DictationSegment {
   text: string
   start: number
   end: number
+  participantId?: string
+  participantSource?: 'voice' | 'context'
 }
 
 export interface DictationTranscribeResult {
@@ -302,9 +338,11 @@ export interface DictationTranscribeResult {
   corrected?: boolean
   segments?: DictationSegment[]
   error?: string
+  fallback?: 'whisper-1'
 }
 
 export interface SessionSearchContext {
+  projectId?: string
   query?: string
   displayTitle?: string
   caseNumber?: string
@@ -318,6 +356,7 @@ export interface SessionSearchContext {
 }
 
 export interface SessionListEntry {
+  originDevice?: 'android' | 'desktop'
   sessionId: string
   title?: string
   transcriptTitle?: string
@@ -331,6 +370,7 @@ export interface SessionListEntry {
 }
 
 export interface SessionRememberInput extends SessionSearchContext {
+  originDevice?: 'android' | 'desktop'
   sessionId: string
   cwd: string
   title?: string
@@ -348,6 +388,7 @@ export interface CaseActivityQuery {
 }
 
 export interface CaseSessionSummary {
+  originDevice?: 'android' | 'desktop'
   sessionId: string
   title?: string
   mtime: number
@@ -365,6 +406,7 @@ export interface CaseActivity {
 }
 
 export interface WorkLogItem {
+  originDevice?: 'android' | 'desktop'
   sessionId: string
   cwd?: string
   profileId?: string
@@ -400,6 +442,7 @@ export interface SessionTranscriptMessage {
   id: string
   role: 'user' | 'assistant'
   text: string
+  timestamp?: number
 }
 
 export interface SessionTranscript {
@@ -425,6 +468,7 @@ export interface OfficeProfileSettings {
 }
 
 export interface AppSettings {
+  claudeRemoteConnections?: RemoteControlConnection[]
   officeProfile?: OfficeProfileSettings
   draftsRoot?: string
   recordsRoot?: string
@@ -450,7 +494,8 @@ export interface AppSettings {
 }
 
 export interface AgentAttachment {
-  kind: 'file' | 'folder' | 'selection' | 'pdf-page-range' | 'terminal-snippet'
+  kind: 'file' | 'folder' | 'selection' | 'pdf-page-range' | 'terminal-snippet' | 'media-range'
+  media?: MediaSelection
   label: string
   path?: string
   origin?: 'local' | 'remote'
@@ -476,6 +521,7 @@ export interface AgentAttachment {
 }
 
 export interface AgentCreateOptions {
+  workspaceContext?: AgentWorkspaceContext
   id: string
   cwd: string
   title?: string
@@ -503,9 +549,11 @@ export interface AgentWorktreeForkResult extends AgentCommandResult {
 }
 
 export interface AgentSessionSnapshot {
+  workspaceContext?: AgentWorkspaceContext
   id: string
   cwd: string
   title?: string
+  sessionTitle?: string
   provider: AgentProvider
   source: 'local' | 'ssh'
   resumeSessionId?: string
@@ -545,6 +593,7 @@ export interface AgentReasoningEffortOption {
 }
 
 export interface AgentSendInput {
+  workspaceContext?: AgentWorkspaceContext
   text: string
   displayText?: string
   quote?: AgentMessageQuote
@@ -621,7 +670,49 @@ export interface JsTodoProgress {
   cwd?: string
 }
 
+export interface TodoEvidence {
+  kind: 'document' | 'progress' | 'event' | 'file'
+  id?: string
+  uri?: string
+  label: string
+  occurredAt?: string
+  reason?: string
+  status: 'candidate' | 'confirmed' | 'dismissed'
+}
+export interface TodoStatusOptions {
+  childDispositions?: { id: string; action: 'complete' | 'close' | 'keep'; reason?: string }[]
+  version?: number
+}
+export interface CaseTaskDisposition {
+  id: string
+  action: 'complete' | 'close' | 'keep' | 'transfer'
+  targetCaseId?: string
+  reason?: string
+  version?: number
+}
+export interface CaseClosurePreview {
+  id: string
+  version: number
+  status: string
+  engagementStatus: string
+  tasks: JsTodo[]
+  blocked: boolean
+}
+export interface TodoCapabilities {
+  queryFields: string[]
+  createFields: string[]
+  updateFields: string[]
+  statusFields: string[]
+  evidenceSuggestions: boolean
+  caseClosure: boolean
+}
 export interface JsTodo {
+  type?: 'todo' | 'memo'
+  reviewAt?: string | null
+  parentId?: string | null
+  children?: { id: string; title: string; status: string }[]
+  evidence?: TodoEvidence[]
+  version?: number
   id: string
   title: string
   status: string
@@ -642,6 +733,17 @@ export interface JsTodo {
 }
 
 export interface ListTodosParams {
+  openOnly?: boolean
+  enrichCaseDetails?: boolean
+  type?: 'todo' | 'memo'
+  fields?: 'compact' | 'full'
+  dueBefore?: string
+  dueAfter?: string
+  hasDueDate?: boolean
+  updatedBefore?: string
+  sortBy?: 'dueDate' | 'createdAt' | 'updatedAt'
+  sortOrder?: 'asc' | 'desc'
+  includeClosed?: boolean
   page?: number
   limit?: number
   search?: string
@@ -650,7 +752,11 @@ export interface ListTodosParams {
   includeArchived?: boolean
 }
 
-export interface TodoMutationInput {
+export interface TodoMutationInput extends TodoStatusOptions {
+  type?: 'todo' | 'memo'
+  reviewAt?: string | null
+  parentId?: string | null
+  evidence?: TodoEvidence[]
   title?: string
   status?: string
   priority?: string
@@ -666,6 +772,8 @@ export interface TodoMutationInput {
 }
 
 export interface TodoTerminalContext {
+  contextKind?: 'case' | 'global' | 'folder' | 'project'
+  projectId?: string
   terminalId?: string
   cwd?: string
   jsId?: string
@@ -686,9 +794,18 @@ export interface TodoTerminalResult {
 }
 
 export interface LtApi {
+  claudeRemoteControl: ClaudeRemoteControlApi
+  browser: BrowserApi
+  remotion: {
+    open(options: RemotionPreviewOptions): Promise<RemotionPreviewResult>
+    close(sessionId: string): Promise<void>
+    onSelection(callback: (selection: RemotionPreviewSelection) => void): () => void
+  }
+  media: MediaApi
   js: {
     setToken: (token: string) => Promise<void>
     hasToken: () => Promise<boolean>
+    hearingSummary: () => Promise<{ ok: boolean; summary?: { todayCount: number; weekCount: number; fetchedAt: string }; error?: string }>
     tokenStatus: () => Promise<'ok' | 'missing' | 'locked'>
     listCases: (params?: {
       page?: number
@@ -699,8 +816,13 @@ export interface LtApi {
       refresh?: boolean
     }) => Promise<{ ok: boolean; cases?: JsCase[]; error?: string }>
     getCase: (id: string) => Promise<{ ok: boolean; case?: JsCase; error?: string }>
+    caseClosurePreview: (id: string) => Promise<{ ok: boolean; preview?: CaseClosurePreview; error?: string }>
+    updateCaseStatus: (id: string, status: string, taskDispositions?: CaseTaskDisposition[], version?: number) => Promise<{ ok: boolean; case?: JsCase | null; error?: string }>
+    updateCaseEngagement: (id: string, engagementStatus: string, taskDispositions?: CaseTaskDisposition[], version?: number) => Promise<{ ok: boolean; case?: JsCase | null; error?: string }>
   }
   todo: {
+    capabilities: () => Promise<{ ok: boolean; capabilities?: TodoCapabilities; error?: string }>
+    evidenceSuggestions: (id: string) => Promise<{ ok: boolean; candidates?: TodoEvidence[]; error?: string }>
     list: (params?: ListTodosParams) => Promise<{ ok: boolean; todos?: JsTodo[]; error?: string }>
     get: (id: string) => Promise<{ ok: boolean; todo?: JsTodo | null; error?: string }>
     create: (input: TodoMutationInput) => Promise<{ ok: boolean; todo?: JsTodo | null; error?: string }>
@@ -711,9 +833,10 @@ export interface LtApi {
     complete: (
       id: string,
       progressText?: string,
-      context?: TodoTerminalContext
+      context?: TodoTerminalContext,
+      options?: TodoStatusOptions
     ) => Promise<{ ok: boolean; todo?: JsTodo | null; error?: string }>
-    archive: (id: string) => Promise<{ ok: boolean; todo?: JsTodo | null; error?: string }>
+    archive: (id: string, options?: TodoStatusOptions) => Promise<{ ok: boolean; todo?: JsTodo | null; error?: string }>
     appendProgress: (
       id: string,
       text: string,
@@ -727,9 +850,11 @@ export interface LtApi {
   app: {
     info: () => Promise<{
       version: string
+      homeDirectory: string
       platform: string
       versions: { electron: string; node: string; chrome: string }
     }>
+    generalChatDirectory: (profileId?: string) => Promise<string>
     openExternal: (url: string) => Promise<void>
     openHtml: (path: string) => Promise<void>
     newWindow: (opts?: NewWindowOptions) => Promise<void>
@@ -770,6 +895,9 @@ export interface LtApi {
     keyStatus: () => Promise<'ok' | 'missing' | 'locked' | 'unavailable'>
     setKey: (key: string) => Promise<void>
     transcribe: (input: DictationTranscribeInput) => Promise<DictationTranscribeResult>
+    backup: (input: DictationBackup) => Promise<void>
+    backups: (query: DictationBackupQuery) => Promise<DictationBackup[]>
+    removeBackup: (id: string) => Promise<void>
   }
   export: {
     mdToPdf: (
@@ -833,6 +961,15 @@ export interface LtApi {
       content?: string
     ) => Promise<{ ok: boolean; path?: string; error?: string }>
     pathForFile: (file: File) => string
+    prepareDrag: (paths: string[]) => Promise<{
+      ok: boolean
+      id?: string
+      entries?: { source: string; file: string }[]
+      error?: string
+    }>
+    startDrag: (id: string) => void
+    dragPathsForFiles: (files: File[]) => string[]
+    onDragError: (cb: (message: string) => void) => () => void
     listPdfs: (dir: string) => Promise<{ name: string; path: string }[]>
     readText: (filePath: string) => Promise<{
       ext: string
@@ -865,6 +1002,13 @@ export interface LtApi {
       inProgress?: boolean
       error?: string
     }>
+  }
+  projects: {
+    workspace: (id: string) => Promise<{ cwd: string; project: Project }>
+    list: () => Promise<Project[]>
+    save: (input: ProjectInput) => Promise<Project>
+    remove: (id: string, expectedUpdatedAt?: string) => Promise<void>
+    onChanged: (callback: () => void) => () => void
   }
   case: {
     getPairing: (drafts: string) => Promise<string | undefined>
@@ -958,6 +1102,8 @@ export interface LtApi {
     onEvent: (cb: (event: AgentEvent) => void) => () => void
   }
   workspace: {
+    sharedUiRead: (ssh: SshConn) => Promise<SharedUiResult>
+    sharedUiApply: (ssh: SshConn, operation: SharedUiOperation) => Promise<SharedUiResult>
     save: (snapshot: WorkspaceSnapshot) => Promise<WorkspaceSaveResult>
     list: () => Promise<WorkspaceListResult>
     load: (id?: string) => Promise<WorkspaceLoadResult>
@@ -965,13 +1111,15 @@ export interface LtApi {
       snapshot: WorkspaceSnapshot,
       location: AutomaticWorkspaceLocation
     ) => Promise<WorkspaceSaveResult & { remoteError?: string }>
-    autoLoad: (location: AutomaticWorkspaceLocation) => Promise<AutomaticWorkspaceLoadResult>
+    autoLoad: (location: AutomaticWorkspaceLocation, observe?: boolean) => Promise<AutomaticWorkspaceLoadResult>
+    autoList: (ssh?: SshConn, includeClosed?: boolean) => Promise<{ ok: boolean; snapshots?: WorkspaceSnapshot[]; error?: string }>
+    autoObserve: (location: AutomaticWorkspaceLocation, snapshot: WorkspaceSnapshot) => Promise<void>
     exportFile: (snapshot: WorkspaceSnapshot) => Promise<WorkspaceSaveResult>
     importFile: () => Promise<WorkspaceLoadResult>
   }
   claude: {
-    ask: (payload: string) => Promise<void>
-    onIncoming: (cb: (payload: string) => void) => () => void
+    ask: (payload: string, opts?: SendClaudeOptions) => Promise<void>
+    onIncoming: (cb: (payload: string, opts?: SendClaudeOptions) => void) => () => void
   }
   tabs: {
     beginDrag: (payload: TabPayload) => Promise<void>
