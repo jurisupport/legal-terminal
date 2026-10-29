@@ -383,6 +383,7 @@ function runApp({ root, temp, screenshotDir, provider, mode, remote }) {
           const caseAgent = [...agents.values()].find(agent => agent.cwd === caseDir)
           assert.equal(caseAgent.workspaceContext?.kind, 'folder', 'unlinked local case keeps its folder scope')
           assert.equal(caseAgent.provider, provider)
+          assert.equal(await evaluate(`!!window.visibleComposer().closest('.agent-panel').querySelector('[aria-label="음성 입력 시작"]')`), true, 'case agents also offer dictation')
           assert.equal(await evaluate(`document.querySelector('.shell').classList.contains('general-chat')`), false, 'case work keeps the document/agent split')
           const before = agents.size
           await evaluate(`document.querySelector('.general-chat-button').click()`)
