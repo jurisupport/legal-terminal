@@ -1,6 +1,6 @@
 {
   "name": "legal-terminal",
-  "version": "0.1.318",
+  "version": "0.1.319",
   "description": "대한민국 송무 변호사를 위한 AI 통합 작업환경 — Claude Code + 준비서면 에디터 + 전자소송기록 뷰어 + 사건 대시보드 + 원격(SSH) 작업",
   "main": "./out/main/index.js",
   "author": "lawpid",
@@ -140,7 +140,7 @@
     "verify:release-new-ui": "npm run verify:agent-browser && npm run verify:agent-media && npm run verify:browser-runtime && npm run verify:browser-backend && npm run verify:browser-tabs && npm run verify:browser-ui && npm run verify:claude-remote-control && npm run verify:claude-remote-control-ui && npm run verify:markdown-outline && npm run verify:hearing-dictation-concurrency && npm run verify:project-agent-remote-runtime && npm run verify:project-remote-transport && npm run verify:agent-panel-width && npm run verify:agent-interaction && npm run verify:agent-links && npm run verify:agent-queue-ui",
     "verify:dictation-recovery": "node scripts/verify-dictation-recovery.mjs",
     "verify:segmented-recorder": "node scripts/verify-segmented-recorder.mjs",
-    "verify:transcription-safety": "npm run verify:dictation-recovery && npm run verify:segmented-recorder",
+    "verify:transcription-safety": "npm run verify:agent-dictation && npm run verify:dictation-recovery && npm run verify:segmented-recorder",
     "verify:agent-panel-width": "node scripts/verify-agent-panel-width.mjs",
     "verify:agent-interaction": "npm run verify:agent-tool-display && npm run verify:agent-dialog && node --experimental-strip-types --no-warnings scripts/verify-agent-dialog-runtime.mjs && node scripts/verify-agent-interaction-ui.mjs",
     "verify:agent-tool-display": "node --experimental-strip-types --no-warnings scripts/verify-agent-tool-display.mjs",
