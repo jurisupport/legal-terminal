@@ -439,6 +439,7 @@ interface TabPayload {
 }
 interface NewWindowOptions {
   tabs?: TabPayload[]
+  termOnly?: boolean
 }
 interface TabMoveResult {
   action: 'moved' | 'none'
@@ -468,8 +469,9 @@ const isBrowserTabPayload = (payload: TabPayload): boolean =>
 // 새 창 (새 작업환경)
 ipcMain.handle('window:new', (_e, opts?: NewWindowOptions) => {
   if (opts?.tabs?.some(isBrowserTabPayload)) return
-  const win = createWindow(false)
+  const win = createWindow(false, { termOnly: opts?.termOnly === true })
   const tabs = Array.isArray(opts?.tabs) ? opts.tabs.filter(Boolean) : []
+  tabs.forEach((tab) => recordTabTransfer(tab, win))
   if (tabs.length) pendingReceive.set(win.webContents.id, tabs)
 })
 

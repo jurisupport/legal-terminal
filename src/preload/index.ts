@@ -150,6 +150,7 @@ type TabPayload =
 
 interface NewWindowOptions {
   tabs?: TabPayload[]
+  termOnly?: boolean
 }
 
 interface TabMoveResult {

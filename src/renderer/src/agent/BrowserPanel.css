@@ -1,4 +1,4 @@
-.agent-browser-toggle {
+.agent-browser-toggle, .agent-ask-beside {
   border: 1px solid var(--border);
   border-radius: 5px;
   background: transparent;
@@ -6,9 +6,11 @@
   padding: 5px 8px;
   font-size: var(--agent-small-font-size);
   cursor: pointer;
+  white-space: nowrap;
 }
+.agent-ask-beside:disabled { opacity: .5; cursor: default; }
 .shell.general-chat .agent-head .agent-head-actions { display: flex; }
-.shell.general-chat .agent-head-actions > :not(.agent-browser-toggle) { display: none; }
+.shell.general-chat .agent-head-actions > :not(.agent-browser-toggle):not(.agent-ask-beside) { display: none; }
 .browser-workspace { display: flex; flex: 1; min-width: 0; min-height: 0; height: 100%; width: 100%; }
 .agent-browser {
   flex: 1;
@@ -43,7 +45,7 @@
 .agent-browser button { cursor: pointer; white-space: nowrap; }
 .agent-browser button:disabled, .agent-browser select:disabled, .agent-browser input:disabled { opacity: .5; cursor: default; }
 .agent-browser button:hover:not(:disabled) { background: var(--bg-hover, #333); }
-.agent-browser :focus-visible, .agent-browser-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.agent-browser :focus-visible, .agent-browser-toggle:focus-visible, .agent-ask-beside:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .agent-browser select { max-width: 100%; min-width: 0; }
 .agent-browser-tabs { flex: 1; min-width: 100px !important; }
 .agent-browser-address { flex-wrap: nowrap; }

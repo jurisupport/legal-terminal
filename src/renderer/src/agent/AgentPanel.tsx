@@ -156,6 +156,7 @@ interface AgentPanelProps {
   onDraftChange?: (draft: AgentDraftState) => void
   onStatus?: (status: AgentRunStatus) => void
   onFork?: () => void
+  onAskBeside?: () => Promise<void>
   onProviderChange?: (provider: AgentProvider, handoff?: AgentProviderHandoff) => void
   onHandoffConsumed?: () => void
   onWorktreeFork?: () => void
@@ -2012,6 +2013,7 @@ export default function AgentPanel({
   onDraftChange,
   onStatus,
   onFork,
+  onAskBeside,
   onProviderChange,
   onHandoffConsumed,
   onWorktreeFork,
@@ -2037,6 +2039,7 @@ export default function AgentPanel({
   const [mode, setMode] = useState<AgentPermissionMode>(DEFAULT_AGENT_PERMISSION_MODE)
   const [status, setStatus] = useState<AgentPanelStatus>('idle')
   const [error, setError] = useState('')
+  const [openingBeside, setOpeningBeside] = useState(false)
   const [slashIndex, setSlashIndex] = useState(0)
   const [slashCaret, setSlashCaret] = useState(() => initialDraft?.input?.length ?? 0)
   const [runtimeSlashCommands, setRuntimeSlashCommands] = useState<SlashCommand[]>([])
@@ -3940,6 +3943,22 @@ export default function AgentPanel({
           </span>
         </div>
         <div className="agent-head-actions">
+          {onAskBeside && <button
+            type="button"
+            className="agent-ask-beside"
+            title="현재 대화를 포크해 별도 창에서 질문하기"
+            disabled={openingBeside}
+            onClick={async () => {
+              setOpeningBeside(true)
+              try {
+                await onAskBeside()
+              } catch (e) {
+                setError(e instanceof Error ? e.message : String(e))
+              } finally {
+                setOpeningBeside(false)
+              }
+            }}
+          >{openingBeside ? '여는 중…' : '옆에서 물어보기'}</button>}
           {onOpenBrowser && <button
             type="button"
             className="agent-browser-toggle"

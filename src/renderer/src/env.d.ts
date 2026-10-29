@@ -171,6 +171,7 @@ export type TabPayload =
 
 export interface NewWindowOptions {
   tabs?: TabPayload[]
+  termOnly?: boolean
 }
 
 export interface TabMoveResult {

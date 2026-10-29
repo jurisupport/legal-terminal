@@ -3903,7 +3903,7 @@ export default function App(): JSX.Element {
     )
   }
 
-  const openForkedAgentTab = (
+  const openForkedAgentTab = async (
     source: TermTab,
     opts: {
       cwd: string
@@ -3915,8 +3915,9 @@ export default function App(): JSX.Element {
       profileId?: string
       provider?: AgentProvider
       handoffContext?: AgentProviderHandoff
+      newWindow?: boolean
     }
-  ): void => {
+  ): Promise<void> => {
     const tab: TermTab = {
       ...source,
       id: newId(),
@@ -3936,6 +3937,10 @@ export default function App(): JSX.Element {
       sshLabel: opts.sshLabel,
       profileId: opts.profileId,
       side: opts.side
+    }
+    if (opts.newWindow) {
+      await window.lt.app.newWindow({ termOnly: true, tabs: [{ kind: 'terminal', tab }] })
+      return
     }
     setTermTabs((tabs) => [...tabs, tab])
     moveAgentDraft(source.id, tab.id)
@@ -3974,15 +3979,16 @@ export default function App(): JSX.Element {
     return sessionId
   }
 
-  const forkAgentTab = async (sourceTermId: string, preferredSide?: DockSide): Promise<void> => {
+  const forkAgentTab = async (sourceTermId: string, preferredSide?: DockSide, newWindow = false): Promise<void> => {
     const source = termTabsRef.current.find((t) => t.id === sourceTermId)
     if (!source || !isAgentTab(source)) return
     const side = preferredSide ?? termSide(source)
     const forkFromSessionId = await resolveForkSourceSessionId(source)
-    openForkedAgentTab(source, {
+    await openForkedAgentTab(source, {
       cwd: source.cwd,
-      title: `${source.title} · fork`,
+      title: `${source.title} · ${newWindow ? '옆에서 물어보기' : 'fork'}`,
       side,
+      newWindow,
       forkFromSessionId,
       ssh: source.ssh,
       sshLabel: source.sshLabel,
@@ -9021,6 +9027,7 @@ export default function App(): JSX.Element {
                 }
                 onStatus={(s) => onTermStatus(t.id, s)}
                 onFork={() => void forkAgentTab(t.id, termSide(t))}
+                onAskBeside={() => forkAgentTab(t.id, termSide(t), true)}
                 onProviderChange={(provider, handoff) => changeAgentProvider(t.id, provider, handoff)}
                 onHandoffConsumed={() => consumeAgentHandoff(t.id)}
                 onWorktreeFork={() => void forkAgentWorktreeTab(t.id, termSide(t))}
@@ -9437,6 +9444,7 @@ export default function App(): JSX.Element {
                   }
                   onStatus={(s) => onTermStatus(t.id, s)}
                   onFork={() => void forkAgentTab(t.id, side)}
+                  onAskBeside={() => forkAgentTab(t.id, side, true)}
                   onProviderChange={(provider, handoff) => changeAgentProvider(t.id, provider, handoff)}
                   onHandoffConsumed={() => consumeAgentHandoff(t.id)}
                   onWorktreeFork={() => void forkAgentWorktreeTab(t.id, side)}

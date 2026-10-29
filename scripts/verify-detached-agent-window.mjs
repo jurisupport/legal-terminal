@@ -23,6 +23,8 @@ function runApp({ root, temp, closeMode }) {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 }
   }).outputText
   require('node:vm').runInNewContext(code, { module: sharedUiModule, exports: sharedUiModule.exports })
+  const isFork = closeMode.startsWith('fork')
+  const provider = closeMode === 'fork-codex' ? 'codex' : 'claude'
   const movedAgentOwners = new Map()
   let draggedAgentId
   const profile = { id: 'detached-test', label: '검증 서버', host: 'example.invalid', user: 'test' }
@@ -32,11 +34,12 @@ function runApp({ root, temp, closeMode }) {
     version: 1, savedAt: new Date().toISOString(), mode: 'explorer', workspaceOpen: true,
     currentCase: { drafts: cwd, name: recent.name }, activeTerm: 'moved-agent', docs: [],
     terminals: [
-      { id: 'moved-agent', title: '이동할 대화', kind: 'agent', agentProvider: 'claude', cwd, resumeSessionId: 'moved-session' },
+      { id: 'moved-agent', title: '이동할 대화', renamed: true, kind: 'agent', agentProvider: provider, cwd, resumeSessionId: 'moved-session' },
       { id: 'retained-agent', title: '남아 있을 대화', kind: 'agent', agentProvider: 'claude', cwd, resumeSessionId: 'retained-session' }
     ]
   }
   let blockedSaveWindow = null
+  let failNewWindow = false
   app.setPath('userData', require('node:path').join(temp, closeMode))
   const home = require('node:path').join(temp, closeMode, 'home')
   require('node:fs').mkdirSync(home, { recursive: true })
@@ -53,13 +56,14 @@ function runApp({ root, temp, closeMode }) {
   ipcMain.on = (channel, callback) => on(channel, channel.startsWith('fs:') || channel.startsWith('pty:') ? () => {} : callback)
   const real = new Set([
     'app:info', 'app:generalChatDirectory', 'app:setWindowTitle', 'tabs:ready', 'tabs:beginDrag', 'tabs:endDrag',
-    'tabs:dropOnTabBar', 'window:close', 'window:forceClose',
+    'tabs:dropOnTabBar', 'window:close', 'window:forceClose', 'window:new',
     'caseManagement:get', 'caseManagement:update'
   ])
   ipcMain.handle = (channel, handler) => handle(channel, async (event, ...args) => {
     const windowId = BrowserWindow.fromWebContents(event.sender)?.id
     calls.push({ channel, windowId, args, at: Date.now() })
     if (real.has(channel)) {
+      if (channel === 'window:new' && failNewWindow) throw Error('새 창 열기 실패 검증')
       if (channel === 'tabs:beginDrag') draggedAgentId = args[0]?.kind === 'terminal' && args[0].tab?.kind === 'agent' ? args[0].tab.id : undefined
       const windowCount = windows.length
       const result = await handler(event, ...args)
@@ -83,7 +87,8 @@ function runApp({ root, temp, closeMode }) {
     if (channel === 'fs:listDocumentDrafts') return { ok: true, entries: [] }
     if (['case:getPairing', 'case:getJsPairing', 'sessions:current'].includes(channel)) return null
     if (channel === 'sessions:remember') return undefined
-    if (channel === 'sessions:transcript') return { sessionId: args[0], messages: [] }
+    if (channel === 'sessions:transcript') return { sessionId: args[0].sessionId, messages: isFork
+      ? [{ role: 'user', text: '진행 중인 원본 질문' }, { role: 'assistant', text: '원본 답변 맥락' }] : [] }
     if (channel === 'workspace:autoList') return { ok: true, snapshots: args[0] ? [snapshot] : [] }
     if (channel === 'workspace:list') return { ok: true, entries: [] }
     // Match workspaceForWindow: moved conversations belong to their receiving window.
@@ -106,6 +111,7 @@ function runApp({ root, temp, closeMode }) {
     if (channel === 'agent:create') { sessions.set(args[0].id, args[0]); return { ok: true } }
     if (channel === 'agent:snapshot') return { ok: true, session: sessions.get(args[0]) }
     if (channel === 'agent:models') return { ok: true, models: [] }
+    if (channel === 'agent:send') return { ok: true }
     if (channel === 'agent:close') return { ok: true }
     throw Error(`Unexpected IPC: ${channel}`)
   })
@@ -167,6 +173,73 @@ function runApp({ root, temp, closeMode }) {
       await wait('two source conversations', async () => (await tabTitles(source)).filter((title) => title.includes('대화')).length === 2)
       await wait('initial source workspace save', () => saves(source).length > 0)
 
+      if (isFork) {
+        const button = `document.querySelector('.agent-panel[data-visible="true"] .agent-ask-beside')`
+        const input = `document.querySelector('.agent-panel[data-visible="true"] textarea')`
+        const sourceTitles = await tabTitles(source)
+        await evaluate(source, `(() => {
+          const input = ${input};
+          Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set.call(input, '원본에 남길 입력');
+          input.dispatchEvent(new Event('input', { bubbles: true }));
+        })()`)
+        source.webContents.send('agent:event', { type: 'status', sessionId: 'moved-agent', status: 'working' })
+        await wait('source is working', () => evaluate(source, `!!document.querySelector('.tab.working')`))
+        await evaluate(source, `${button}.click()`)
+        await wait('fork window', () => windows.length === 2)
+        const detached = windows.at(-1)
+        await wait('fork context sent', () => calls.some(call => call.channel === 'agent:send' && call.windowId === detached.id))
+        const payload = calls.find(call => call.channel === 'window:new').args[0]
+        const fork = payload.tabs[0].tab
+        assert.equal(payload.termOnly, true)
+        assert.notEqual(fork.id, 'moved-agent')
+        assert.equal(fork.resumeSessionId, undefined)
+        assert.equal(fork.forkFromSessionId, 'moved-session')
+        assert.equal(fork.agentProvider, provider)
+        assert.equal(fork.cwd, cwd)
+        assert.equal(fork.ssh.host, profile.host)
+        assert.equal(await evaluate(detached, 'location.hash'), '#termOnly')
+        assert.deepEqual(await tabTitles(detached), ['이동할 대화 · 옆에서 물어보기'])
+        assert.deepEqual(await tabTitles(source), sourceTitles)
+        assert.equal(await evaluate(source, `${input}.value`), '원본에 남길 입력')
+        assert.equal(await evaluate(detached, `${input}.value`), '')
+        assert.equal(await evaluate(source, `!!document.querySelector('.tab.active.working')`), true)
+        const send = calls.find(call => call.channel === 'agent:send' && call.windowId === detached.id)
+        assert.equal(send.args[0].sessionId, fork.id)
+        assert.match(send.args[0].input.text, /진행 중인 원본 질문/)
+        assert.match(send.args[0].input.text, /원본 답변 맥락/)
+        assert.match(send.args[0].input.text, /아직 새 작업을 시작하지 말고/)
+        assert.equal(calls.some(call => call.channel === 'agent:send' && call.windowId === source.id), false)
+        await wait('fork saves only itself', () => saves(detached).length > 0)
+        assert.deepEqual(saves(detached).at(-1).args[0].snapshot.terminals.map(tab => tab.id), [fork.id])
+        if (process.env.AGENT_FORK_SCREENSHOT_DIR) {
+          const dir = process.env.AGENT_FORK_SCREENSHOT_DIR
+          require('node:fs').mkdirSync(dir, { recursive: true })
+          for (const [name, win] of [['source', source], ['fork', detached]]) {
+            require('node:fs').writeFileSync(require('node:path').join(dir, `${name}.png`), (await win.webContents.capturePage()).toPNG())
+          }
+        }
+        detached.close()
+        await wait('fork closes', () => detached.isDestroyed())
+        assert.equal(calls.some(call => call.channel === 'agent:close' && call.args[0] === 'moved-agent'), false)
+        assert.equal(source.isDestroyed(), false)
+        failNewWindow = true
+        await evaluate(source, `${button}.click()`)
+        await wait('window failure shown and retry enabled', () => evaluate(source,
+          `document.body.innerText.includes('새 창 열기 실패 검증') && !${button}.disabled`))
+        assert.deepEqual(await tabTitles(source), sourceTitles)
+        assert.equal(await evaluate(source, `${input}.value`), '원본에 남길 입력')
+        failNewWindow = false
+        await evaluate(source, `document.querySelector('.agent-panel[data-visible="true"] button[aria-label="Fork"]').click()`)
+        await wait('existing fork stays in source window', async () => (await tabTitles(source)).includes('이동할 대화 · fork'))
+        await wait('existing fork receives context', () => calls.some(call => call.channel === 'agent:send' && call.windowId === source.id))
+        assert.equal(windows.length, 2, 'the original Fork action does not open another window')
+        assert.equal(await evaluate(source, `${input}.value`), '원본에 남길 입력', 'the original Fork action still transfers its draft')
+        assert.deepEqual(errors, [])
+        console.log(`PASS: ${provider} side question preserves context, running source and draft; failure handling and original Fork still work`)
+        app.exit(0)
+        return
+      }
+
       if (closeMode === 'native') {
         const detached = await tearOut(source)
         console.log('PASS: dragging one conversation keeps the other in the source and saves only the moved tab')
@@ -218,7 +291,7 @@ function runApp({ root, temp, closeMode }) {
 const env = { ...process.env }
 delete env.ELECTRON_RUN_AS_NODE
 try {
-  for (const closeMode of ['native', 'tab']) {
+  for (const closeMode of ['native', 'tab', 'fork', 'fork-codex']) {
     const entry = path.join(temp, `${closeMode}.cjs`)
     await fs.writeFile(entry, `(${runApp.toString()})(${JSON.stringify({ root, temp, closeMode })})`)
     const code = await new Promise((resolve, reject) => {
