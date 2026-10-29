@@ -170,7 +170,7 @@ for (const [ssh, clockOffset, failHistory, cancelHistory] of [
     invalidateSessionTranscript: () => {}, rememberPrompts: () => {}, setResumedModel: () => {},
     setItems: (update) => { items = update(items) },
     input: '반복 질문', attachments: [], slashCommandName: () => undefined, sendBlockedReason: '',
-    expandSlashInput: (text) => ({ text }), allSlashCommands: [], scrollTimelineToBottom: () => {},
+    expandSlashInput: (text) => ({ text }), allSlashCommands: [], scrollTimelineToBottom: () => {}, focusPrompt: () => {},
     mode: 'default', setInput: () => {}, setAttachments: () => {}, setMentionState: () => {}, setError: () => {},
     queuesNewInput: false, pendingHandoff: null, quotedMessage: null, onPrepareAttachment: undefined
   }
