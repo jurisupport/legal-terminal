@@ -16,6 +16,7 @@ function runApp({ root, temp, screenshotDir, provider, mode, remote }) {
   const { app, BrowserWindow, ipcMain, session } = require('electron')
   const fs = require('node:fs'), path = require('node:path'), assert = require('node:assert/strict')
   const calls = [], errors = [], unexpected = [], agents = new Map()
+  let dictationKey = 'missing'
   const caseDir = path.join(temp, 'existing-case')
   const homeDir = path.join(temp, 'home')
   fs.mkdirSync(caseDir, { recursive: true })
@@ -31,6 +32,12 @@ function runApp({ root, temp, screenshotDir, provider, mode, remote }) {
     activeTerm: 'mobile-shared', activeWork: { right: 'terminal:mobile-shared' }
   }
   const settings = { sshProfiles: remote ? [phoneProfile] : [], caseOpenTarget: remote ? 'remote:phone-host' : 'local', notifyDone: false, agentDefaultProvider: provider }
+  const sharedUiModule = { exports: {} }
+  const sharedUiCode = require(path.join(root, 'node_modules/typescript')).transpileModule(
+    fs.readFileSync(path.join(root, 'src/shared/sharedUiState.ts'), 'utf8'),
+    { compilerOptions: { module: 1, target: 9 } }).outputText
+  require('node:vm').runInNewContext(sharedUiCode, { module: sharedUiModule, exports: sharedUiModule.exports })
+  const sharedUiState = sharedUiModule.exports.emptySharedUiState()
   let releaseSettings
   const settingsReady = new Promise(resolve => { releaseSettings = resolve })
   app.setPath('userData', path.join(temp, 'profile'))
@@ -55,6 +62,13 @@ function runApp({ root, temp, screenshotDir, provider, mode, remote }) {
     if (channel === 'case:history' || channel === 'case:addHistory') return history
     if (channel === 'js:tokenStatus') return 'missing'
     if (channel === 'js:hasToken') return false
+    if (channel === 'dictation:keyStatus') return dictationKey
+    if (channel === 'dictation:transcribe') {
+      assert.equal(args[0].mimeType, 'audio/wav')
+      assert.equal(Buffer.from(args[0].audio).subarray(0, 4).toString(), 'RIFF')
+      assert.equal(args[0].context, undefined, 'general questions do not inherit hearing context')
+      return { ok: true, text: '음성 질문' }
+    }
     if (channel === 'js:listCases') return { ok: true, cases: [] }
     if (channel === 'js:hearingSummary') return { ok: true, summary: { todayCount: 0, weekCount: 0 } }
     if (channel === 'todo:list') return { ok: true, todos: [] }
@@ -69,6 +83,10 @@ function runApp({ root, temp, screenshotDir, provider, mode, remote }) {
     if (channel === 'workspace:autoLoad') return { ok: true, remote: { ok: true, snapshot: remote && args[0].cwd === remoteCwd ? mobileSnapshot : null } }
     if (channel === 'workspace:autoSave') return { ok: true }
     if (channel === 'workspace:autoObserve') return
+    if (channel === 'workspace:sharedUiRead' || channel === 'workspace:sharedUiApply') {
+      if (channel === 'workspace:sharedUiApply') sharedUiModule.exports.applySharedUiOperation(sharedUiState, args[1])
+      return { ok: true, state: structuredClone(sharedUiState) }
+    }
     if (channel === 'workspace:list') return { ok: true, entries: [] }
     if (channel === 'agent:models') return { ok: true, models: [] }
     if (channel === 'agent:create') {
@@ -116,6 +134,54 @@ function runApp({ root, temp, screenshotDir, provider, mode, remote }) {
   }
   const capture = async name => fs.writeFileSync(path.join(screenshotDir, `${name}.png`), (await win.webContents.capturePage()).toPNG())
   const test = async (name, callback) => { await callback(); console.log(`PASS ${remote ? 'remote' : provider}${mode ? `/${mode}` : ''}: ${name}`) }
+  const checkDictation = async () => {
+    await test('shows missing-key guidance without recording or changing the draft', async () => {
+      await evaluate(`window.dictationButton = () => window.visibleComposer().closest('.agent-panel').querySelector('.agent-dictation .agent-icon-btn'); void 0`)
+      assert.equal(await evaluate(`!!window.dictationButton()`), true)
+      await evaluate(`window.dictationButton().click()`)
+      await wait(() => evaluate(`window.visibleComposer().closest('.agent-panel').textContent.includes('API 키')`), 'missing API key guidance')
+      assert.equal(calls.some(call => call.channel === 'dictation:transcribe'), false)
+      assert.equal(await evaluate(`window.visibleComposer().value`), '')
+    })
+    await test('records through the shared WAV recorder and inserts speech without sending', async () => {
+      dictationKey = 'ok'
+      const sendsBefore = calls.filter(call => call.channel === 'agent:send').length
+      await evaluate(`(async () => {
+        const input = window.visibleComposer();
+        Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set.call(input, '앞 뒤');
+        input.dispatchEvent(new Event('input', { bubbles: true })); input.setSelectionRange(2, 2);
+        window.testAudio = new AudioContext(); await window.testAudio.resume();
+        const tone = window.testAudio.createOscillator();
+        const output = window.testAudio.createMediaStreamDestination(); tone.connect(output); tone.start();
+        window.testMicStream = output.stream;
+        window.originalGetUserMedia = navigator.mediaDevices.getUserMedia;
+        navigator.mediaDevices.getUserMedia = async () => output.stream;
+      })()`)
+      await evaluate(`window.dictationButton().click()`)
+      await wait(() => evaluate(`window.dictationButton().getAttribute('aria-pressed') === 'true'`), 'recording started')
+      assert.equal(await evaluate(`window.visibleComposer().closest('.agent-panel').querySelector('.agent-send-btn').disabled`), true)
+      assert.equal(await evaluate(`window.visibleComposer().closest('.agent-panel').querySelector('.agent-provider-select').disabled`), true)
+      await evaluate(`new Promise(resolve => setTimeout(resolve, 350))`)
+      assert.equal(await evaluate(`(() => {
+        const input = window.visibleComposer();
+        const notice = input.closest('.agent-panel').querySelector('.agent-dictation-status');
+        return notice.getBoundingClientRect().bottom <= input.getBoundingClientRect().top;
+      })()`), true, 'recording notice does not cover the draft')
+      await capture(`dictation-recording-${remote ? 'remote' : provider}`)
+      await evaluate(`window.dictationButton().click()`)
+      await wait(() => evaluate(`window.visibleComposer().value === '앞 음성 질문 뒤'`), 'speech inserted at the caret')
+      await wait(() => evaluate(`document.activeElement === window.visibleComposer()`), 'dictated draft focused')
+      assert.equal(calls.filter(call => call.channel === 'agent:send').length, sendsBefore)
+      assert.equal(await evaluate(`window.testMicStream.getTracks().every(track => track.readyState === 'ended')`), true)
+      await evaluate(`(async () => {
+        navigator.mediaDevices.getUserMedia = window.originalGetUserMedia;
+        await window.testAudio.close();
+        const input = window.visibleComposer();
+        Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set.call(input, '');
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+      })()`)
+    })
+  }
   const checkUnifiedChat = async () => {
     const layout = await evaluate(`(() => {
       const shell = document.querySelector('.shell');
@@ -194,10 +260,12 @@ function runApp({ root, temp, screenshotDir, provider, mode, remote }) {
           await wait(() => evaluate(`!!document.querySelector('.case-sidebar-task-origin[title="폰에서 시작한 작업"]')`), 'phone origin label')
           await wait(() => evaluate(`window.visibleComposer()?.closest('.agent-panel').textContent.includes('휴대폰에서 먼저 물어본 질문입니다.')`), 'phone transcript shown')
         })
+        await checkDictation()
         await test('continues the phone conversation through its restored session', async () => {
           await evaluate(`(() => { const el = window.visibleComposer(); Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set.call(el, '컴퓨터에서 이어서 질문합니다.'); el.dispatchEvent(new Event('input', { bubbles: true })) })()`)
           await wait(() => evaluate(`!window.visibleComposer().closest('.agent-panel').querySelector('.agent-send-btn').disabled`), 'phone conversation ready')
-          await evaluate(`window.visibleComposer().closest('.agent-panel').querySelector('.agent-send-btn').click()`)
+          await evaluate(`(() => { const button = window.visibleComposer().closest('.agent-panel').querySelector('.agent-send-btn'); button.focus(); button.click() })()`)
+          await wait(() => evaluate(`document.activeElement === window.visibleComposer()`), 'composer refocused after clicking send for macOS Dictation')
           await wait(() => evaluate(`window.visibleComposer().closest('.agent-panel').textContent.includes('안녕하세요. 사건을 선택하지 않아도')`), 'continued response shown')
           const sent = calls.find(call => call.channel === 'agent:send').args[0]
           assert.equal(sent.sessionId, 'mobile-shared')
@@ -251,6 +319,7 @@ function runApp({ root, temp, screenshotDir, provider, mode, remote }) {
           await checkUnifiedChat()
           await capture(`initial-${provider}`)
         })
+        await checkDictation()
         await test('keeps one input and preserves its draft in a narrow window', async () => {
           await evaluate(`(() => { const input = window.visibleComposer(); Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set.call(input, '아직 전송하지 않은 일반 질문'); input.dispatchEvent(new Event('input', { bubbles: true })) })()`)
           win.setMinimumSize(680, 480)
@@ -283,7 +352,8 @@ function runApp({ root, temp, screenshotDir, provider, mode, remote }) {
         await test('sends a question and displays a response without selecting a case or folder', async () => {
           await evaluate(`(() => { const el = window.visibleComposer(); Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set.call(el, '일반 질문은 어떻게 시작하나요?'); el.dispatchEvent(new Event('input', { bubbles: true })) })()`)
           await wait(() => evaluate(`!window.visibleComposer().closest('.agent-panel').querySelector('.agent-send-btn').disabled`), 'composer ready')
-          await evaluate(`window.visibleComposer().closest('.agent-panel').querySelector('.agent-send-btn').click()`)
+          await evaluate(`(() => { const button = window.visibleComposer().closest('.agent-panel').querySelector('.agent-send-btn'); button.focus(); button.click() })()`)
+          await wait(() => evaluate(`document.activeElement === window.visibleComposer()`), 'composer refocused after clicking send for macOS Dictation')
           await wait(() => evaluate(`window.visibleComposer().closest('.agent-panel').textContent.includes('안녕하세요. 사건을 선택하지 않아도')`), 'mocked answer rendered')
           const sent = calls.find(call => call.channel === 'agent:send').args[0]
           assert.equal(sent.sessionId, first.id)

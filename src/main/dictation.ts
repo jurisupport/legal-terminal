@@ -126,7 +126,7 @@ function contextSummary(context?: DictationContext): string {
 function transcriptionPrompt(context?: DictationContext): string {
   const contextText = contextSummary(context)
   return cleanPrompt(
-    '대한민국 법정 기일기록 진행 메모를 전사한다.',
+    context ? '대한민국 법정 기일기록 진행 메모를 전사한다.' : '사용자의 음성 질문을 전사한다.',
     '발언을 요약하지 말고 그대로 옮긴다.',
     '숫자, 날짜, 금액, 부정 표현, 고유명사는 함부로 바꾸지 않는다.',
     contextText ? `문맥: ${contextText}` : ''
@@ -273,7 +273,7 @@ async function correctTranscript(
   context?: DictationContext
 ): Promise<{ ok: true; text: string } | { ok: false; error: string }> {
   const system = [
-    '너는 법정 음성 전사문 교정기다.',
+    context ? '너는 법정 음성 전사문 교정기다.' : '너는 음성 전사문 교정기다.',
     '띄어쓰기와 문장부호만 고친다.',
     '단어 추가·삭제·요약·순서 변경을 하지 않는다.',
     '숫자, 날짜, 금액, 인명, 긍정/부정 표현을 추정하지 않는다.',

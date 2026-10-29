@@ -63,6 +63,7 @@
     "verify:agent-auth-queue": "node scripts/verify-agent-auth-queue.mjs",
     "verify:agent-case-context": "node --experimental-strip-types --no-warnings scripts/verify-agent-case-context.mjs",
     "verify:general-chat": "node --experimental-strip-types --no-warnings scripts/verify-general-chat.mjs",
+    "verify:agent-dictation": "node scripts/verify-agent-dictation.mjs",
     "verify:general-chat-ui": "electron-vite build && node scripts/verify-general-chat-ui.mjs && node scripts/verify-general-chat-ui.mjs --remote",
     "verify:agent-session-search": "node --experimental-strip-types --no-warnings scripts/verify-agent-session-search.mjs",
     "verify:agent-quote": "node --experimental-strip-types --no-warnings scripts/verify-agent-quote.mjs",

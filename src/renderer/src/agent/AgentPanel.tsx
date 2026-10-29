@@ -49,6 +49,8 @@ import {
 import { DiffPreview } from './DiffPreview'
 import { MarkdownMessage } from './MarkdownMessage'
 import { AgentAttachmentMedia } from './AgentMediaPreview'
+import { AgentDictationButton } from './AgentDictationButton'
+import { insertDictationText } from '../hearing/dictationText'
 import { htmlToPlainText } from '../markdownClipboard'
 import { isCommittedEnter } from '../ime'
 import { ToolRow, isDiagnosticStep, toolDisplayName, toolStepDisplay, type ProcessStep } from './ToolRow'
@@ -2022,6 +2024,7 @@ export default function AgentPanel({
   const changedTaskCalls = useRef(new Set<string>())
   const taskTurnRunning = useRef(false)
   const [input, setInput] = useState(() => initialDraft?.input ?? '')
+  const [dictationBusy, setDictationBusy] = useState(false)
   const [quotedMessage, setQuotedMessage] = useState<PendingAgentQuote | null>(null)
   const [mode, setMode] = useState<AgentPermissionMode>(DEFAULT_AGENT_PERMISSION_MODE)
   const [status, setStatus] = useState<AgentPanelStatus>('idle')
@@ -2701,7 +2704,9 @@ export default function AgentPanel({
   const authChecking = usesAgentAuth && authStatus === 'checking'
   const needsLogin = usesAgentAuth && authStatus !== 'authenticated' && (authStatus === 'unauthenticated' || needsAuth)
   const sendBlockedReason =
-    workspaceContext?.todoManagement === false
+    dictationBusy
+      ? '음성 입력이 끝난 뒤 전송해 주세요.'
+      : workspaceContext?.todoManagement === false
       ? '연결이 변경된 이전 할일 대화입니다. 할일 화면에서 새 대화를 열어주세요.'
       : !settingsLoaded
       ? 'Agent 설정 로드 중'
@@ -3183,6 +3188,8 @@ export default function AgentPanel({
     setAttachments([])
     setMentionState(null)
     setError('')
+    // macOS 받아쓰기가 다음 질문을 입력할 수 있도록 전송 버튼에서 포커스를 돌린다.
+    focusPrompt()
     const nextDelivery = delivery ?? (queuesNewInput ? 'queue' : 'normal')
     const handoff = pendingHandoff
     const quote = quotedMessage
@@ -4922,6 +4929,23 @@ export default function AgentPanel({
         )}
         <div className="agent-composer-bar">
           <div className="agent-composer-left">
+            {isGeneralChat && (
+              <AgentDictationButton
+                active={visible && !authActive}
+                onBusyChange={setDictationBusy}
+                onText={(text) => {
+                  const textarea = textareaRef.current
+                  if (!textarea) return
+                  const next = insertDictationText(textarea.value, text, textarea.selectionStart, textarea.selectionEnd)
+                  resetPromptHistoryCursor()
+                  setInput(next.value)
+                  setError('')
+                  setMentionState(null)
+                  setSlashCaret(next.caret)
+                  if (visible) focusPrompt(next.caret)
+                }}
+              />
+            )}
             <button
               type="button"
               className="agent-icon-btn agent-mention-btn"
@@ -4971,7 +4995,7 @@ export default function AgentPanel({
             <select
               className="agent-provider-select"
               value={provider}
-              disabled={queuesNewInput || authActive}
+              disabled={queuesNewInput || authActive || dictationBusy}
               title="이 탭에서 사용할 AI"
               onChange={(e) =>
                 onProviderChange?.(
