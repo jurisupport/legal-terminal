@@ -515,6 +515,7 @@ function runApp({ root, temp, screenshotDir, agentSmoke, claudeAuthSmoke, remote
       if (agentSmoke) {
         await evaluate(`document.querySelector('[aria-label="프로젝트 AI 작업"]').click(); document.querySelector('[aria-label="프로젝트 AI 작업"]').click()`)
         await wait(() => agents.size === 1 && evaluate(`!!document.querySelector('.work-right .agent-composer textarea')`), 'project agent created once')
+        assert.equal(await evaluate(`!!document.querySelector('.work-right .agent-panel[data-visible="true"] [aria-label="음성 입력 시작"]')`), true, 'project agents also offer dictation')
         const first = [...agents.values()][0]
         assert.equal(first.workspaceContext.kind, 'project')
         assert.equal(first.workspaceContext.projectId, id)

@@ -101,6 +101,16 @@ async function checkLayout({ root, temp, output, channels }) {
     await measure('baseline')
     await resize('.pane-resizer-work', 'ArrowRight', 60)
     await measure('resized')
+    await run(`document.querySelector('.agent-panel[data-visible=true] [aria-label="음성 입력 시작"]').click()`)
+    await wait("!!document.querySelector('.agent-panel[data-visible=true] .agent-dictation-status')")
+    await measure('dictation-narrow')
+    const dictationFits = await run(`const panel = document.querySelector('.agent-panel[data-visible=true]');
+      const notice = panel.querySelector('.agent-dictation-status').getBoundingClientRect();
+      const bounds = panel.getBoundingClientRect();
+      return notice.left >= bounds.left && notice.right <= bounds.right;`)
+    if (!dictationFits) errors.push('Dictation guidance must fit a narrow agent panel')
+    await run(`document.querySelector('.agent-panel[data-visible=true] [aria-label="음성 입력 안내 닫기"]').click()`)
+
     await setSize(1280, 900)
     await pause()
     await measure('window-shrunk')

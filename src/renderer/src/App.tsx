@@ -13468,7 +13468,7 @@ function SettingsView({ onSync }: { onSync: (init: SyncModalInit) => void }): JS
 
       <section className="setting-row">
         <div className="setting-label">
-          OpenAI API 키 <span className="muted small">— 일반 질문·기일기록 음성 받아쓰기·AI 보정</span>
+          OpenAI API 키 <span className="muted small">— 에이전트·기일기록 음성 받아쓰기·AI 보정</span>
         </div>
         <div className="setting-value">
           <code>
