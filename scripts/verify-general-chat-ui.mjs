@@ -168,7 +168,7 @@ function runApp({ root, temp, screenshotDir, provider, mode, remote }) {
       await evaluate(`(async () => {
         const input = window.visibleComposer();
         Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set.call(input, '앞 뒤');
-        input.dispatchEvent(new Event('input', { bubbles: true })); input.setSelectionRange(2, 2);
+        input.dispatchEvent(new Event('input', { bubbles: true }));
         window.testAudio = new AudioContext(); await window.testAudio.resume();
         const tone = window.testAudio.createOscillator();
         const output = window.testAudio.createMediaStreamDestination(); tone.connect(output); tone.start();
@@ -176,7 +176,8 @@ function runApp({ root, temp, screenshotDir, provider, mode, remote }) {
         window.originalGetUserMedia = navigator.mediaDevices.getUserMedia;
         navigator.mediaDevices.getUserMedia = async () => output.stream;
       })()`)
-      await evaluate(`window.dictationButton().click()`)
+      await evaluate(`new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))`)
+      await evaluate(`(() => { const input = window.visibleComposer(); input.focus(); input.setSelectionRange(2, 2); window.dictationButton().click() })()`)
       await wait(() => evaluate(`window.dictationButton().getAttribute('aria-pressed') === 'true'`), 'recording started')
       assert.equal(await evaluate(`window.visibleComposer().closest('.agent-panel').querySelector('.agent-send-btn').disabled`), true)
       assert.equal(await evaluate(`window.visibleComposer().closest('.agent-panel').querySelector('.agent-provider-select').disabled`), true)
@@ -188,7 +189,8 @@ function runApp({ root, temp, screenshotDir, provider, mode, remote }) {
       })()`), true, 'recording notice does not cover the draft')
       await capture(`dictation-recording-${remote ? 'remote' : provider}`)
       await evaluate(`window.dictationButton().click()`)
-      await wait(() => evaluate(`window.visibleComposer().value === '앞 음성 질문 뒤'`), 'speech inserted at the caret')
+      await wait(() => evaluate(`window.visibleComposer().closest('.agent-panel').querySelector('.agent-dictation-status')?.textContent.includes('음성을 입력했습니다')`), 'transcription completed')
+      assert.equal(await evaluate(`window.visibleComposer().value`), '앞 음성 질문 뒤', 'speech is inserted at the selected caret')
       await wait(() => evaluate(`document.activeElement === window.visibleComposer()`), 'dictated draft focused')
       assert.equal(calls.filter(call => call.channel === 'agent:send').length, sendsBefore)
       assert.equal(await evaluate(`window.testMicStream.getTracks().every(track => track.readyState === 'ended')`), true)
