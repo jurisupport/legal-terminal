@@ -4929,21 +4929,6 @@ export default function AgentPanel({
         )}
         <div className="agent-composer-bar">
           <div className="agent-composer-left">
-            <AgentDictationButton
-              active={visible && !authActive}
-              onBusyChange={setDictationBusy}
-              onText={(text) => {
-                const textarea = textareaRef.current
-                if (!textarea) return
-                const next = insertDictationText(textarea.value, text, textarea.selectionStart, textarea.selectionEnd)
-                resetPromptHistoryCursor()
-                setInput(next.value)
-                setError('')
-                setMentionState(null)
-                setSlashCaret(next.caret)
-                if (visible) focusPrompt(next.caret)
-              }}
-            />
             <button
               type="button"
               className="agent-icon-btn agent-mention-btn"
@@ -5026,6 +5011,21 @@ export default function AgentPanel({
             )}
           </div>
           <div className="agent-composer-right">
+            <AgentDictationButton
+              active={visible && !authActive}
+              onBusyChange={setDictationBusy}
+              onText={(text) => {
+                const textarea = textareaRef.current
+                if (!textarea) return
+                const next = insertDictationText(textarea.value, text, textarea.selectionStart, textarea.selectionEnd)
+                resetPromptHistoryCursor()
+                setInput(next.value)
+                setError('')
+                setMentionState(null)
+                setSlashCaret(next.caret)
+                if (visible) focusPrompt(next.caret)
+              }}
+            />
             {queuesNewInput ? (
               <>
                 <button
