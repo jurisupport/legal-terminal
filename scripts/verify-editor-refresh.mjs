@@ -278,7 +278,10 @@ window.uiCheck = async () => {
   const tableGeometry = () => ({ scrollTop: tableView.scrollDOM.scrollTop, scrollHeight: tableView.scrollDOM.scrollHeight,
     viewport: tableView.scrollDOM.getBoundingClientRect().toJSON(), cell: cell.getBoundingClientRect().toJSON(),
     focusedCell: document.activeElement === cell, activeTag: document.activeElement?.tagName,
-    fonts: document.fonts.status, selection: tableView.state.selection.toJSON() })
+    fonts: document.fonts.status, documentFocused: document.hasFocus(), selection: tableView.state.selection.toJSON(),
+    content: tableView.contentDOM.getBoundingClientRect().toJSON(), table: cell.closest('table').getBoundingClientRect().toJSON(),
+    defaultLineHeight: tableView.defaultLineHeight, defaultCharacterWidth: tableView.defaultCharacterWidth,
+    viewportRange: tableView.viewport, visibleRanges: tableView.visibleRanges })
   const beforeClick = tableGeometry()
   const focusEvents = []
   for (const type of ['mousedown', 'focus', 'mouseup']) cell.addEventListener(type, () => focusEvents.push({ type, ...tableGeometry() }))
@@ -287,7 +290,8 @@ window.uiCheck = async () => {
     { type: 'mouseUp', x: Math.round(cellBox.left + 4), y: Math.round(cellBox.top + 8), button: 'left', clickCount: 1 }
   ])
   await pause(150)
-  check(Math.abs(tableView.scrollDOM.scrollTop - tableTop) < 3, 'Clicking table cell keeps scroll position', JSON.stringify({ beforeClick, afterClick: tableGeometry(), focusEvents }))
+  const afterClick = tableGeometry()
+  check(Math.abs(tableView.scrollDOM.scrollTop - tableTop) < 3, 'Clicking table cell keeps scroll position', JSON.stringify({ beforeClick, afterClick, focusEvents }))
   check(document.activeElement === cell, 'Native click focuses table cell')
   await window.testInput([
     { type: 'mouseDown', x: Math.round(cellBox.left + 4), y: Math.round(cellBox.top + 8), button: 'left', clickCount: 1 },
@@ -336,7 +340,7 @@ window.uiCheck = async () => {
     check(browserErrors.length === 0, close ? 'Deferred viewport restore ignores closed editor' : 'Deferred viewport restore ignores replaced document', JSON.stringify(browserErrors))
   }
   check(browserErrors.length === 0, 'No browser errors during editor refresh', JSON.stringify(browserErrors))
-  return { checks: checks.length, scenarios: checks }
+  return { checks: checks.length, scenarios: checks, tableClickGeometry: { beforeClick, afterClick } }
 }
 `
 
@@ -364,6 +368,8 @@ try {
       w.webContents.on('console-message', (event) => { if (event.level === 'error') errors.push(event.message) })
       try {
         await w.loadFile(${JSON.stringify(path.join(temp, 'index.html'))})
+        // Native input must not be the first time Windows activates the editor's host.
+        w.webContents.focus()
         const result = await w.webContents.executeJavaScript('window.uiCheck()')
         if (errors.length) throw Error(errors.join('\n'))
         console.log('EDITOR_REFRESH_RESULT ' + JSON.stringify(result))
