@@ -74,8 +74,16 @@ async function mount(plainText = false, text = original) {
     const dom = document.querySelector('.cm-editor')
     return dom && EditorView.findFromDOM(dom)?.state.doc.toString() === text && !!save
   })
-  await pause(100)
-  return EditorView.findFromDOM(document.querySelector('.cm-editor'))
+  const view = EditorView.findFromDOM(document.querySelector('.cm-editor'))
+  view.dom.getBoundingClientRect()
+  await document.fonts.ready
+  // Native pointer assertions need measured line metrics, not CodeMirror's initial estimates.
+  const measured = await new Promise(resolve => view.requestMeasure({
+    read: () => ({ actual: view.defaultLineHeight, expected: parseFloat(getComputedStyle(view.contentDOM).lineHeight) }),
+    write: resolve
+  }))
+  check(Math.abs(measured.actual - measured.expected) < 0.3, 'Fresh editor completes layout measurement before calibration', JSON.stringify(measured))
+  return view
 }
 function visible(view) {
   const rect = view.scrollDOM.getBoundingClientRect()
