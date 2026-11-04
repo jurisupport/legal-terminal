@@ -31,7 +31,7 @@ const root = createRoot(document.getElementById('root'))
 const fixturePath = 'ssh://fixture/case/document.html'
 const original = '<html><head><style>body{width:1800px;max-width:none}p{height:40px;margin:0}</style></head><body>' +
   Array.from({ length: 150 }, (_, i) => '<p>문단 ' + i + '</p>').join('') + '</body></html>'
-let disk = original, version = 1, saved, generation = 0
+let disk = original, version = 1, saved, generation = 0, loadedDocument, stage = 'initial mount'
 window.lt = { fs: {
   readText: async () => { await new Promise(resolve => setTimeout(resolve, 30)); return { kind: 'text', text: disk } },
   stat: async () => ({ ok: true, size: disk.length, mtimeMs: version })
@@ -44,51 +44,74 @@ const wait = async fn => {
 const checks = []
 const check = (value, label, detail = '') => { if (!value) throw Error(label + ': ' + detail); checks.push(label) }
 const frame = () => document.querySelector('iframe')
-const pos = () => ({ top: frame().contentWindow.scrollY, left: frame().contentWindow.scrollX })
+const pos = () => {
+  const view = frame()?.contentWindow
+  if (!view) throw Error('Expected a loaded iframe during ' + stage)
+  return { top: view.scrollY, left: view.scrollX }
+}
+const nextPaint = () => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))
+async function waitForFrame(previous, text) {
+  await wait(() => {
+    const current = frame(), doc = current?.contentDocument
+    return doc && doc !== previous && doc === loadedDocument && doc.readyState === 'complete' &&
+      doc.body?.textContent.includes(text)
+  })
+  await nextPaint()
+  return frame()
+}
 const same = (expected, label) => {
   const actual = pos()
   check(Math.abs(actual.top - expected.top) < 2 && Math.abs(actual.left - expected.left) < 2,
     label, JSON.stringify({ actual, expected }))
 }
 async function mount() {
+  const previous = frame()?.contentDocument
+  stage = 'mount generation ' + (generation + 1)
   root.render(<HtmlView key={++generation} path={fixturePath} onAsk={() => {}}
-    scrollKey={fixturePath} initialScroll={saved} onScrollPosition={value => saved = value} />)
-  await wait(() => frame()?.contentDocument?.body?.textContent.includes('문단 0'))
-  await pause(100)
+    scrollKey={fixturePath} initialScroll={saved} onScrollPosition={value => {
+      saved = value
+      loadedDocument = frame()?.contentDocument
+    }} />)
+  return waitForFrame(previous, '문단 0')
 }
-async function refresh(text) {
-  const previous = frame().contentDocument
+async function refresh(text, expectedText) {
+  stage = 'refresh: ' + expectedText
+  const previous = frame()?.contentDocument
   disk = text; version++
   window.dispatchEvent(new CustomEvent(REMOTE_FILE_CHANGED_EVENT, { detail: { paths: [fixturePath] } }))
-  await wait(() => frame()?.contentDocument?.body && frame().contentDocument !== previous && frame().contentDocument.body.textContent)
-  await pause(100)
+  return waitForFrame(previous, expectedText)
 }
 window.uiCheck = async (crossOriginUrl) => {
+  try {
   await mount()
   frame().contentWindow.scrollTo(230, 2400)
   await wait(() => saved?.top === 2400 && saved?.left === 230)
   const before = pos()
   check(frame().getAttribute('sandbox') === 'allow-same-origin', 'Iframe remains script-disabled')
-  await refresh(original.replace('문단 149', '수정된 문단 149'))
+  await refresh(original.replace('문단 149', '수정된 문단 149'), '수정된 문단 149')
   same(before, 'Remote refresh preserves vertical and horizontal offsets')
+  stage = 'switch to source mode'
+  const renderedDocument = frame()?.contentDocument
   document.querySelector('[title="HTML 코드 보기"]').click()
   await wait(() => document.querySelector('.html-source'))
+  stage = 'return from source mode'
   document.querySelector('[title="HTML 렌더링 보기"]').click()
-  await wait(() => frame()?.contentDocument?.body?.textContent.includes('문단 0'))
-  await pause(100)
+  await waitForFrame(renderedDocument, '문단 0')
   same(before, 'Returning from source mode preserves rendered position')
+  stage = 'unmount'
   root.render(null)
   await wait(() => !frame())
   await mount()
   same(before, 'Remount restores parent saved position')
-  await refresh('<html><body>짧은 문서</body></html>')
+  await refresh('<html><body>짧은 문서</body></html>', '짧은 문서')
   same({ top: 0, left: 0 }, 'Shorter document clamps both offsets')
   check(saved.top === 0 && saved.left === 0, 'Clamped offsets replace saved position')
-  await refresh(original)
+  await refresh(original, '문단 149')
   same({ top: 0, left: 0 }, 'Growing document does not restore stale out-of-range offsets')
   saved = { key: '/different/document.html', top: 1200, left: 100 }
   await mount()
   same({ top: 0, left: 0 }, 'Position from another document is ignored')
+  stage = 'follow cross-origin link'
   const errors = []
   const captureError = event => errors.push(event.message)
   window.addEventListener('error', captureError)
@@ -99,12 +122,18 @@ window.uiCheck = async (crossOriginUrl) => {
   frame().contentDocument.body.append(link)
   link.click()
   await loaded
-  await pause(100)
+  await nextPaint()
   check(frame().contentDocument === null, 'Following a link can load a different origin')
   check(errors.length === 0, 'Cross-origin load does not read protected scroll properties', JSON.stringify(errors))
   check(frame().getAttribute('sandbox') === 'allow-same-origin', 'Cross-origin navigation keeps scripts disabled')
   window.removeEventListener('error', captureError)
   return { checks: checks.length, scenarios: checks }
+  } catch (error) {
+    const current = frame(), doc = current?.contentDocument
+    throw Error(JSON.stringify({ stage, error: error.message, stack: error.stack, completed: checks,
+      frame: Boolean(current), readyState: doc?.readyState, loadedCurrentDocument: doc === loadedDocument,
+      sourceMode: Boolean(document.querySelector('.html-source')), saved }))
+  }
 }
 `
 

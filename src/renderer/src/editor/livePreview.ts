@@ -311,7 +311,7 @@ function makeCellContent(markdown: string): HTMLElement {
     e.stopPropagation()
     if (document.activeElement === el) return
     e.preventDefault()
-    el.focus()
+    el.focus({ preventScroll: true })
     placeCaretFromPoint(el, e.clientX, e.clientY)
   })
   el.addEventListener('mouseup', (e) => e.stopPropagation())

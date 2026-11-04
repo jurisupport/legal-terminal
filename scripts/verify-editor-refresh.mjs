@@ -275,12 +275,19 @@ window.uiCheck = async () => {
   await pause(150)
   const tableTop = tableView.scrollDOM.scrollTop
   const cellBox = cell.getBoundingClientRect()
+  const tableGeometry = () => ({ scrollTop: tableView.scrollDOM.scrollTop, scrollHeight: tableView.scrollDOM.scrollHeight,
+    viewport: tableView.scrollDOM.getBoundingClientRect().toJSON(), cell: cell.getBoundingClientRect().toJSON(),
+    focusedCell: document.activeElement === cell, activeTag: document.activeElement?.tagName,
+    fonts: document.fonts.status, selection: tableView.state.selection.toJSON() })
+  const beforeClick = tableGeometry()
+  const focusEvents = []
+  for (const type of ['mousedown', 'focus', 'mouseup']) cell.addEventListener(type, () => focusEvents.push({ type, ...tableGeometry() }))
   await window.testInput([
     { type: 'mouseDown', x: Math.round(cellBox.left + 4), y: Math.round(cellBox.top + 8), button: 'left', clickCount: 1 },
     { type: 'mouseUp', x: Math.round(cellBox.left + 4), y: Math.round(cellBox.top + 8), button: 'left', clickCount: 1 }
   ])
   await pause(150)
-  check(Math.abs(tableView.scrollDOM.scrollTop - tableTop) < 3, 'Clicking table cell keeps scroll position', tableView.scrollDOM.scrollTop + ' vs ' + tableTop)
+  check(Math.abs(tableView.scrollDOM.scrollTop - tableTop) < 3, 'Clicking table cell keeps scroll position', JSON.stringify({ beforeClick, afterClick: tableGeometry(), focusEvents }))
   check(document.activeElement === cell, 'Native click focuses table cell')
   await window.testInput([
     { type: 'mouseDown', x: Math.round(cellBox.left + 4), y: Math.round(cellBox.top + 8), button: 'left', clickCount: 1 },
