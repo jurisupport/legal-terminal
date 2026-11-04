@@ -59,8 +59,8 @@ async function checkInteraction({ root, temp, output, channels }) {
   const pause = () => new Promise(resolve => setTimeout(resolve, 60))
   const wait = async condition => {
     for (let i = 0; i < 120; i++) { if (await run(`return (${condition})`)) return; await pause() }
-    const geometry = await run("return Object.fromEntries(['.agent-card.dialog.waiting', '.agent-timeline'].map(selector => { const e = document.querySelector(selector); const r = e?.getBoundingClientRect(); return [selector, r ? { top: r.top, bottom: r.bottom, height: r.height, scrollTop: e.scrollTop } : null] }))")
-    throw Error('Timed out: ' + condition + '\n' + JSON.stringify(geometry))
+    const state = await run("return { geometry: Object.fromEntries(['.agent-card.dialog.waiting', '.agent-timeline'].map(selector => { const e = document.querySelector(selector); const r = e?.getBoundingClientRect(); return [selector, r ? { top: r.top, bottom: r.bottom, height: r.height, scrollTop: e.scrollTop } : null] })), status: document.querySelector('.agent-status-line')?.innerText, reply: document.getElementById('agent-message-interaction-agent-test-reply')?.innerText, logs: [...document.querySelectorAll('.agent-system-log')].map(log => ({ summary: log.querySelector('summary')?.textContent, open: log.open, visible: log.innerText })) }")
+    throw Error('Timed out: ' + condition + '\n' + JSON.stringify(state))
   }
   const check = (value, message) => { if (!value) throw Error(message) }
   const capture = async name => {
@@ -193,7 +193,7 @@ async function checkInteraction({ root, temp, output, channels }) {
     send({ type: 'message:assistant_delta', messageId: 'test-reply', text: '알겠습니다. 테스트 세션으로 진행할게요.' })
     send({ type: 'message:assistant_done', messageId: 'test-reply' })
     send({ type: 'status', status: 'done' })
-    await wait("document.querySelector('.agent-system-log summary')?.textContent === '시스템 기록 6개'")
+    await wait("document.querySelector('.agent-system-log summary')?.textContent === '시스템 기록 6개' && document.getElementById('agent-message-interaction-agent-test-reply')?.innerText.includes('테스트 세션으로 진행할게요')")
     check(await run("const log = document.querySelector('.agent-system-log'); const visible = document.querySelector('.agent-panel[data-visible=true]').innerText; return !log.open && !visible.includes('RAW_HOOK_OUTPUT') && !visible.includes('SessionStart:startup') && !visible.includes('allowed') && visible.includes('테스트 세션으로 진행할게요')"), 'the reported remote transcript must show the reply and one collapsed diagnostic group')
     await capture('system-logs-collapsed')
     await run("document.querySelector('.agent-system-log summary').click(); document.querySelector('.agent-system-log .agent-tool-line').click()")
