@@ -238,8 +238,7 @@ body {
 .shell.general-chat-left > .work-left { grid-area: chat; border: 0; }
 .shell.general-chat .agent-panel { --agent-input-min-height: 96px; }
 .shell.general-chat .agent-head { padding: 12px 24px; background: transparent; border-bottom: 0; }
-.shell.general-chat .agent-head-actions { display: flex; }
-.shell.general-chat .agent-head-actions > :not(.agent-ask-beside) { display: none; }
+.shell.general-chat .agent-head-actions { display: none; }
 .shell.general-chat .agent-timeline { padding: 24px max(24px, calc((100% - 880px) / 2)); }
 .shell.general-chat .agent-prompt { width: min(100%, 928px); justify-self: center; padding: 16px 24px 24px; }
 .shell.general-chat .agent-empty { gap: 12px; }
@@ -2898,18 +2897,6 @@ body {
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.agent-ask-beside {
-  border: 1px solid var(--border);
-  border-radius: 5px;
-  background: transparent;
-  color: var(--fg-muted);
-  padding: 5px 8px;
-  font-size: var(--agent-small-font-size);
-  cursor: pointer;
-  white-space: nowrap;
-}
-.agent-ask-beside:disabled { opacity: .5; cursor: default; }
-.agent-ask-beside:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .agent-head-actions {
   min-width: 0;
   flex: 0 1 auto;

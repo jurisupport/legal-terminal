@@ -178,6 +178,7 @@ function runApp({ root, temp, closeMode }) {
       await evaluate(source, `[...document.querySelectorAll('.case-sidebar-case')].find(tab => tab.textContent.includes(${JSON.stringify(recent.name)})).click()`)
       await wait('two source conversations', async () => (await tabTitles(source)).filter((title) => title.includes('대화')).length === 2)
       await wait('initial source workspace save', () => saves(source).length > 0)
+      assert.equal(await evaluate(source, `document.querySelector('.agent-ask-beside') !== null || [...document.querySelectorAll('button')].some(button => button.textContent.includes('옆에서 물어보기'))`), false, 'removed side-question action is absent')
 
       if (isFork) {
         const panel = `document.querySelector('.agent-panel[data-visible="true"]')`
