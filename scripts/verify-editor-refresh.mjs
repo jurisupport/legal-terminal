@@ -283,9 +283,12 @@ window.uiCheck = async () => {
   await pause(150)
   const tableTop = tableView.scrollDOM.scrollTop
   const cellBox = cell.getBoundingClientRect()
+  const clickPoint = { x: Math.round(cellBox.left + 4), y: Math.round(cellBox.top + 8) }
+  const elementInfo = element => element ? { tag: element.tagName, className: element.className, text: element.textContent?.slice(0, 80) } : null
   const tableGeometry = () => ({ scrollTop: tableView.scrollDOM.scrollTop, scrollHeight: tableView.scrollDOM.scrollHeight,
     viewport: tableView.scrollDOM.getBoundingClientRect().toJSON(), cell: cell.getBoundingClientRect().toJSON(),
-    focusedCell: document.activeElement === cell, activeTag: document.activeElement?.tagName,
+    focusedCell: document.activeElement === cell, activeElement: elementInfo(document.activeElement), connected: cell.isConnected,
+    clickPoint, hit: elementInfo(document.elementFromPoint(clickPoint.x, clickPoint.y)), hitInsideCell: cell.contains(document.elementFromPoint(clickPoint.x, clickPoint.y)),
     fonts: document.fonts.status, documentFocused: document.hasFocus(), selection: tableView.state.selection.toJSON(),
     content: tableView.contentDOM.getBoundingClientRect().toJSON(), table: cell.closest('table').getBoundingClientRect().toJSON(),
     defaultLineHeight: tableView.defaultLineHeight, defaultCharacterWidth: tableView.defaultCharacterWidth,
@@ -300,7 +303,7 @@ window.uiCheck = async () => {
   await pause(150)
   const afterClick = tableGeometry()
   check(Math.abs(tableView.scrollDOM.scrollTop - tableTop) < 3, 'Clicking table cell keeps scroll position', JSON.stringify({ beforeClick, afterClick, focusEvents }))
-  check(document.activeElement === cell, 'Native click focuses table cell')
+  check(document.activeElement === cell, 'Native click focuses table cell', JSON.stringify({ beforeClick, afterClick, focusEvents }))
   await window.testInput([
     { type: 'mouseDown', x: Math.round(cellBox.left + 4), y: Math.round(cellBox.top + 8), button: 'left', clickCount: 1 },
     { type: 'mouseMove', x: Math.round(cellBox.right - 4), y: Math.round(cellBox.top + 8), button: 'left', modifiers: ['leftButtonDown'] },
@@ -376,7 +379,9 @@ try {
       w.webContents.on('console-message', (event) => { if (event.level === 'error') errors.push(event.message) })
       try {
         await w.loadFile(${JSON.stringify(path.join(temp, 'index.html'))})
-        // Native input must not be the first time Windows activates the editor's host.
+        // Native pointer input requires a real visible, focused host on Windows.
+        w.showInactive()
+        w.focus()
         w.webContents.focus()
         const result = await w.webContents.executeJavaScript('window.uiCheck()')
         if (errors.length) throw Error(errors.join('\n'))
