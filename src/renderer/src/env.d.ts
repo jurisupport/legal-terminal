@@ -1,7 +1,6 @@
 /// <reference types="vite/client" />
 import type { RemotionPreviewOptions, RemotionPreviewSelection, RemotionPreviewResult } from '../../shared/remotionPreview'
 import type { MediaApi, MediaSelection, MediaViewState } from '../../shared/media'
-import type { BrowserApi } from '../../shared/browser'
 import type { ClaudeRemoteControlApi, RemoteControlConnection } from '../../shared/claudeRemoteControl'
 import type { AgentWorkspaceContext } from '../../shared/agentWorkspaceContext'
 import type { SendClaudeOptions } from '../../shared/claudeAsk'
@@ -126,8 +125,7 @@ export interface TerminalTabPayload {
 export interface DocumentTabPayload {
   id?: string
   title: string
-  kind?: 'markdown' | 'mdview' | 'file' | 'pdf' | 'image' | 'hwp' | 'docx' | 'csv' | 'settings' | 'hearing' | 'media' | 'browser'
-  browserAgentId?: string
+  kind?: 'markdown' | 'mdview' | 'file' | 'pdf' | 'image' | 'hwp' | 'docx' | 'csv' | 'settings' | 'hearing' | 'media'
   caseTabId?: string
   path?: string
   side?: 'left' | 'right'
@@ -146,6 +144,7 @@ export type TabPayload =
 
 export interface NewWindowOptions {
   tabs?: TabPayload[]
+  termOnly?: boolean
 }
 
 export interface TabMoveResult {
@@ -795,7 +794,6 @@ export interface TodoTerminalResult {
 
 export interface LtApi {
   claudeRemoteControl: ClaudeRemoteControlApi
-  browser: BrowserApi
   remotion: {
     open(options: RemotionPreviewOptions): Promise<RemotionPreviewResult>
     close(sessionId: string): Promise<void>

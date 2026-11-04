@@ -6,7 +6,7 @@ import { Transform } from 'stream'
 import { pipeline } from 'stream/promises'
 import { homedir } from 'os'
 import { join, posix } from 'path'
-import { createConnection, createServer, type Socket } from 'net'
+import { createConnection, type Socket } from 'net'
 import { getSettings, type SshProfile } from './settings'
 import {
   invalidateRemoteDirListCache,
@@ -437,66 +437,6 @@ async function getSftp(profileId: string): Promise<SFTPWrapper> {
 
 function getConnection(profileId: string): Promise<SshConnection> {
   return connectionPool.get(profileId)
-}
-
-/** Browser traffic gets its own loopback forward, so its byte meter excludes file transfers. */
-export async function rfsForwardRemotePort(profileId: string, remotePort: number): Promise<{
-  port: number
-  isAlive: () => boolean
-  traffic: () => { receivedBytes: number; sentBytes: number }
-  close: () => void
-}> {
-  if (!Number.isInteger(remotePort) || remotePort < 1 || remotePort > 65535) throw new Error('원격 브라우저 포트가 올바르지 않습니다.')
-  const { client } = await getConnection(profileId)
-  let closed = false
-  let receivedBytes = 0
-  let sentBytes = 0
-  const sockets = new Set<Socket>()
-  const channels = new Set<ClientChannel>()
-  const server = createServer(socket => {
-    if (closed || sockets.size >= 16) { socket.destroy(); return }
-    sockets.add(socket)
-    socket.on('error', () => socket.destroy())
-    socket.once('close', () => sockets.delete(socket))
-    client.forwardOut('127.0.0.1', 0, '127.0.0.1', remotePort, (error, channel) => {
-      if (error || closed || socket.destroyed) { channel?.destroy(); socket.destroy(); return }
-      channels.add(channel)
-      const closePair = (): void => { channels.delete(channel); channel.destroy(); socket.destroy() }
-      channel.on('error', closePair).once('close', closePair)
-      socket.once('close', closePair)
-      channel.on('data', (data: Buffer) => { receivedBytes += data.length })
-      socket.on('data', (data: Buffer) => { sentBytes += data.length })
-      socket.pipe(channel).pipe(socket)
-    })
-  })
-  const close = (): void => {
-    if (closed) return
-    closed = true
-    client.removeListener('close', close).removeListener('end', close).removeListener('error', close)
-    for (const socket of sockets) socket.destroy()
-    for (const channel of channels) channel.destroy()
-    server.close()
-  }
-  client.on('close', close).on('end', close).on('error', close)
-  try {
-    const port = await new Promise<number>((resolve, reject) => {
-      server.once('error', reject)
-      server.listen(0, '127.0.0.1', () => {
-        const address = server.address()
-        if (closed || !address || typeof address === 'string') { reject(new Error('브라우저 연결이 종료되었습니다.')); return }
-        resolve(address.port)
-      })
-    })
-    server.on('error', close)
-    return { port, close, isAlive: () => !closed, traffic: () => ({ receivedBytes, sentBytes }) }
-  } catch (error) { close(); throw error }
-}
-
-export async function rfsBrowserExec(profileId: string, command: string): Promise<string> {
-  const result = await execRemoteCommand(profileId, command, { timeoutMs: 60_000, timeoutMessage: '원격 브라우저 준비 시간이 초과되었습니다.' })
-  if (result.code !== 0) throw new Error(result.stderr.toString('utf8').trim().slice(-2000) || '원격 브라우저를 준비할 수 없습니다.')
-  if (result.stdout.length > 128_000) throw new Error('원격 브라우저 응답이 너무 큽니다.')
-  return result.stdout.toString('utf8')
 }
 
 interface RemotePortForward {

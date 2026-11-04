@@ -6,7 +6,6 @@ import { join } from 'node:path'
 import { EventEmitter } from 'node:events'
 import { runInNewContext } from 'node:vm'
 import ts from 'typescript'
-import * as browserBridge from '../src/main/browserAgentBridge.ts'
 import { RemoteAgentTransport, probeRemoteAgentRun } from '../src/main/agent/remoteAgentTransport.ts'
 import * as execution from '../src/main/agent/agentExecutionLock.ts'
 import * as progress from '../src/main/agent/agentProgress.ts'
@@ -121,7 +120,9 @@ class TestTransport extends RemoteAgentTransport {
     args[2] = args[2].replaceAll("os.path.expanduser('~')", JSON.stringify(root))
     const command = ['python3', ...args, 'python3', '-u', fakeProvider, opts.identity.provider, opts.identity.id, root]
       .map(quote).join(' ')
-    super({ ...opts, ...options(opts.identity), ...(opts.command ? { command } : {}) })
+    super({ ...opts, ...options(opts.identity), ...(opts.command ? { command } : {}),
+      ...(opts.command && opts.identity.id.endsWith('-retired-browser')
+        ? { metadata: { ...opts.metadata, browserFingerprint: 'legacy-fingerprint' } } : {}) })
     clients.push(this)
   }
 }
@@ -145,7 +146,6 @@ function freshApp(usageHydration) {
         probeRemoteAgentRun: (opts) => probeRemoteAgentRun({ ...opts, ...options(opts.identity) }) }
       if (name === './agentExecutionLock') return execution
       if (name === './agentProgress') return progress
-      if (name === '../browserAgentBridge') return browserBridge
       if (name === './agentMcp') return mcp
       if (name === './projectMcpConfig') return projectMcp
       if (name === '../projectAgent') return { releaseProjectMcp: () => {}, disposeProjectMcp: () => {} }
@@ -275,7 +275,26 @@ try {
     await until(async () => !(await probe(childStop)).running, `${provider}: Stop terminates background child despite EOF tolerance`)
     await until(() => !childSession.running, `${provider}: child-stop cleanup finishes`)
     childApp.disposeAgentSessions()
-    console.log(`${provider}: approval recovery, stable replay, detached child completion, completed run, explicit Stop verified`)
+    const legacy = { id: `${provider}-retired-browser`, provider }
+    identities.push(legacy)
+    const oldApp = freshApp()
+    const oldSession = await create(oldApp, legacy.id, provider)
+    oldApp.sendAgentMessage(legacy.id, { text: 'legacy browser-backed turn' })
+    await until(() => oldSession.pendingPermissions.has('901'), `${provider}: legacy browser run started`)
+    oldApp.disposeAgentSessions()
+    const upgradedApp = freshApp()
+    const retired = await create(upgradedApp, legacy.id, provider)
+    await until(async () => !(await probe(legacy)).running, `${provider}: removed browser run stopped`)
+    await until(() => !retired.running, `${provider}: removed browser cleanup finishes`)
+    assert.equal(retired.pendingPermissions.size, 0)
+    assert.ok(upgradedApp.events.some(event => event.type === 'error' && event.message.includes('브라우저 기능이 제거')))
+    const retiredRun = await probe(legacy)
+    const journal = await readFile(join(root, '.legal-terminal', 'agent-runs', retiredRun.runId, 'events'), 'utf8')
+    const recordedOutput = journal.trim().split('\n').map(JSON.parse)
+      .filter(event => event.type === 'stdout').map(event => Buffer.from(event.data, 'base64').toString()).join('')
+    assert.ok(recordedOutput.includes('started once'), 'partial assistant output must remain in the original journal')
+    upgradedApp.disposeAgentSessions()
+    console.log(`${provider}: approval recovery, stable replay, detached child completion, completed run, explicit Stop and retired browser worker shutdown verified`)
   }
 
   for (const [provider, failure] of [['claude', 'exit-error'], ['claude', 'result-error'], ['codex', 'exit-error']]) {

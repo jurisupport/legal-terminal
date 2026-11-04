@@ -1,6 +1,5 @@
 import type { RemotionPreviewOptions, RemotionPreviewSelection, RemotionPreviewResult } from '../shared/remotionPreview'
 import type { MediaApi, MediaSelection, MediaViewState } from '../shared/media'
-import type { BrowserApi } from '../shared/browser'
 import type { ClaudeRemoteControlApi, RemoteControlConnection } from '../shared/claudeRemoteControl'
 import type { AgentWorkspaceContext } from '../shared/agentWorkspaceContext'
 import type { SendClaudeOptions } from '../shared/claudeAsk'
@@ -126,8 +125,7 @@ interface TerminalTabPayload {
 interface DocumentTabPayload {
   id?: string
   title: string
-  kind?: 'markdown' | 'mdview' | 'file' | 'pdf' | 'image' | 'hwp' | 'docx' | 'csv' | 'settings' | 'hearing' | 'media' | 'browser'
-  browserAgentId?: string
+  kind?: 'markdown' | 'mdview' | 'file' | 'pdf' | 'image' | 'hwp' | 'docx' | 'csv' | 'settings' | 'hearing' | 'media'
   caseTabId?: string
   path?: string
   side?: 'left' | 'right'
@@ -146,6 +144,7 @@ type TabPayload =
 
 interface NewWindowOptions {
   tabs?: TabPayload[]
+  termOnly?: boolean
 }
 
 interface TabMoveResult {
@@ -784,22 +783,12 @@ const media: MediaApi = {
   }
 }
 
-const browser: BrowserApi = {
-  open: (input) => ipcRenderer.invoke('browser:open', input),
-  state: (id) => ipcRenderer.invoke('browser:state', id),
-  command: (id, command) => ipcRenderer.invoke('browser:command', id, command),
-  frame: (id, quality, etag) => ipcRenderer.invoke('browser:frame', id, quality, etag),
-  bounds: (id, bounds) => ipcRenderer.invoke('browser:bounds', id, bounds),
-  close: (id) => ipcRenderer.invoke('browser:close', id)
-}
-
 const api = {
   claudeRemoteControl: {
     open: (input) => ipcRenderer.invoke('claudeRemoteControl:open', input),
     bounds: (id, bounds) => ipcRenderer.invoke('claudeRemoteControl:bounds', id, bounds),
     close: (id) => ipcRenderer.invoke('claudeRemoteControl:close', id)
   } satisfies ClaudeRemoteControlApi,
-  browser,
   media,
   remotion: {
     open: (options: RemotionPreviewOptions): Promise<RemotionPreviewResult> => ipcRenderer.invoke('remotion:open', options),

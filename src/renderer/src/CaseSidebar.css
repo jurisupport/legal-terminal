@@ -124,6 +124,37 @@
   background: color-mix(in srgb, var(--fg) 7%, transparent);
 }
 
+.case-sidebar-group.drag-over > .case-sidebar-case-row {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.case-sidebar-case[draggable="true"] { cursor: grab; }
+.case-sidebar-case[draggable="true"]:active { cursor: grabbing; }
+
+.case-sidebar-recent {
+  display: flex;
+  flex-direction: column;
+  flex: 0 1 auto;
+  min-height: 70px;
+  max-height: 40%;
+  border-top: 1px solid var(--border);
+}
+
+.case-sidebar-recent .case-sidebar-heading { flex-shrink: 0; padding: 10px 12px 6px; }
+.case-sidebar-recent-list { min-height: 0; overflow-y: auto; padding: 0 8px 4px; }
+.case-sidebar-recent-task .case-sidebar-task-title { font-weight: 500; }
+.case-sidebar-task-divider { flex-shrink: 0; color: var(--fg-muted); }
+.case-sidebar-task-case {
+  flex: 0 1 40%;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--fg-muted);
+  font-size: 10px;
+}
+
 .case-sidebar-toggle {
   flex: 0 0 20px;
   align-self: stretch;

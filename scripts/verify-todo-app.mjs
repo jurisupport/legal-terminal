@@ -20,8 +20,6 @@ function runApp({ root, temp, chosenDir, screenshot }) {
   const fs = require('node:fs')
   const assert = require('node:assert/strict')
   const calls = [], rendererErrors = [], unexpected = [], sessions = new Map()
-  let heldChannel
-  let heldRequests = []
   const rows = [
     { id: 'overdue', type: 'todo', title: '통합 검증 도과 할일', status: 'pending', dueDate: '2020-01-01', createdAt: '2019-01-01', version: 1 },
     { id: 'undated', type: 'todo', title: '통합 검증 기한 없는 할일', status: 'in_progress', createdAt: '2020-01-01', updatedAt: '2020-01-01', version: 1 },
@@ -38,7 +36,6 @@ function runApp({ root, temp, chosenDir, screenshot }) {
   ipcMain.handle = (channel, handler) => register(channel, async (event, ...args) => {
     const call = { channel, args }
     calls.push(call)
-    if (channel === heldChannel) await new Promise((resolve) => heldRequests.push(resolve))
     if (realChannels.has(channel)) {
       const result = await handler(event, ...args)
       call.result = result
@@ -122,182 +119,33 @@ function runApp({ root, temp, chosenDir, screenshot }) {
       await capture()
       await wait(() => evaluate(`Array.from(document.querySelectorAll('.welcome .todo-metric strong')).some(node => node.textContent === '27')`), 'Complete hearing aggregate ready')
       await evaluate(`smoke.check(Array.from(document.querySelectorAll('.welcome .todo-metric strong')).some(node => node.textContent === '27'), 'Today count is independent of case/list caps'); smoke.check(Array.from(document.querySelectorAll('.welcome .todo-metric strong')).some(node => node.textContent === '42'), 'Seven-day count is complete')`)
-      const checkDelayedTodoNavigation = async (channel, explicit = false) => {
-        const before = calls.filter(call => call.channel === 'agent:create').length
-        heldChannel = channel
-        await evaluate(explicit
-          ? `smoke.textButton('전체 할일 정리 시작', document.querySelector('.welcome'))`
-          : `smoke.click('.activity-item[title="할일"]')`)
-        await wait(() => heldRequests.length > 0, `Todo opening waits for ${channel}`)
-        await evaluate(`smoke.click('.activity-item[title="사건"]')`)
-        await wait(() => evaluate(`document.querySelector('.activity-item[title="사건"]').getAttribute('aria-pressed') === 'true'`), 'Cases selected during todo loading')
-        heldChannel = undefined
-        const waiting = heldRequests
-        heldRequests = []
-        for (const resolve of waiting) resolve()
-        await evaluate(`new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))`)
-        assert.equal(await evaluate(`document.querySelector('.activity-item[title="사건"]').getAttribute('aria-pressed') === 'true'`), true, `Late ${channel} must preserve the Cases screen`)
-        assert.equal(calls.filter(call => call.channel === 'agent:create').length, before, 'Canceled todo opening must not create or select an agent')
-        await evaluate(`smoke.click('.activity-item[title^="탐색기 표시"]')`)
-        await wait(() => evaluate(`!!document.querySelector('.welcome .todo-summary')`), 'Welcome restored after canceled todo opening')
-      }
-      await checkDelayedTodoNavigation('settings:get')
-      await checkDelayedTodoNavigation('settings:get', true)
-      settings.sshProfiles = [{ id: 'delayed-remote', label: '지연 검증 원격', host: 'delayed.example.invalid', user: 'tester' }]
-      settings.caseOpenTarget = 'remote:delayed-remote'
-      await checkDelayedTodoNavigation('ssh:listDir')
-      settings.sshProfiles = []
-      settings.caseOpenTarget = 'local'
       await evaluate(`smoke.check(document.querySelector('.welcome .todo-summary').textContent.includes('통합 검증 도과 할일'), 'Welcome overdue item'); smoke.click('.workspace-todo-header .header-btn')`)
       await wait(() => evaluate(`document.querySelectorAll('.todo-card').length === 1 && document.querySelector('.todo-card').textContent.includes('통합 검증 도과 할일')`), 'Header opens overdue filter')
       await evaluate(`smoke.textButton('기한 없음')`)
       await wait(() => evaluate(`document.querySelectorAll('.todo-card').length === 1 && document.querySelector('.todo-card').textContent.includes('통합 검증 기한 없는 할일')`), 'Undated filter')
       await evaluate(`smoke.textButton('전체 열린 할일')`)
       await wait(() => evaluate(`document.querySelectorAll('.todo-card').length === 3`), 'All open todos')
-      await evaluate(`smoke.textButton('전체 할일 정리 시작')`)
-      await wait(() => calls.some((call) => call.channel === 'agent:create'), 'Global Agent creation')
-      const created = calls.find((call) => call.channel === 'agent:create').args[0]
-      assert.equal(created.cwd, chosenDir)
-      assert.equal(created.workspaceContext?.kind, 'global')
-      assert.equal(created.workspaceContext?.todoManagement, true)
-      assert.equal(calls.filter(call => call.channel === 'agent:create').length, 1, 'task view and open button reuse the same right agent')
-      assert.match(created.context, /"contextKind": "global"/)
-      assert.equal(calls.filter((call) => call.channel === 'dialog:pickFolder').length, 0)
-      assert.equal(calls.some((call) => call.channel === 'fs:mkdir'), false)
+      const checkRemovedActions = async () => {
+        assert.equal(await evaluate(`!!document.querySelector('.project-open-button, .case-management-nav, .projects-dashboard')`), false, 'Project management is absent')
+        assert.equal(await evaluate(`Array.from(document.querySelectorAll('button')).some(button => /전체 할일 정리|에이전트로 정리/.test(button.textContent))`), false, 'Todo AI actions are absent')
+        assert.equal(calls.filter(call => call.channel === 'agent:create').length, 0, 'Opening todos does not start an AI agent')
+        assert.equal(calls.some(call => call.channel.startsWith('projects:')), false, 'Navigation does not load projects')
+      }
+      await checkRemovedActions()
+      await evaluate(`smoke.click('.activity-item[title="사건"]')`)
+      await wait(() => evaluate(`!!document.querySelector('.cases-dashboard') || document.querySelector('.activity-item[title="사건"]')?.getAttribute('aria-pressed') === 'true'`), 'Cases remain accessible')
+      await checkRemovedActions()
+      await evaluate(`smoke.click('.activity-item[title="할일"]')`)
+      await wait(() => evaluate(`document.querySelectorAll('.todo-card').length === 1`), 'Todo dashboard restores the summary filter')
+      await evaluate(`smoke.textButton('전체 열린 할일')`)
+      await wait(() => evaluate(`document.querySelectorAll('.todo-card').length === 3`), 'Todo dashboard remains accessible')
+      await checkRemovedActions()
+      assert.equal(calls.some(call => call.channel === 'fs:mkdir'), false)
       assert.deepEqual(fs.readdirSync(chosenDir), ['existing.txt'])
-      await evaluate(`smoke.textButton('오른쪽 에이전트로 정리')`)
-      await wait(() => evaluate(`document.querySelector('.agent-composer textarea')?.value.includes('첨부한 선택 할일')`), 'Selected tasks reach right composer')
-      await wait(() => evaluate(`!!document.querySelector('.agent-send-btn:not([disabled])')`), 'Global prompt ready')
-      await evaluate(`smoke.check(document.querySelector('.workspace-todo-header').textContent.includes('기한 도과 1'), 'Header remains after global task'); smoke.click('.agent-send-btn')`)
-      await wait(() => calls.some((call) => call.channel === 'agent:send'), 'Global Agent send')
-      const sent = calls.find((call) => call.channel === 'agent:send').args[0]
-      assert.equal(sent.input.workspaceContext?.kind, 'global')
-      assert.match(sent.input.text, /첨부한 선택 할일/)
-      assert.equal(sent.input.workspaceContext.todoManagement, true)
-      assert.equal(sent.input.attachments.length, 1)
-      const selected = JSON.parse(sent.input.attachments[0].text.match(/<selected-tasks>(.*)<\/selected-tasks>/s)[1])
-      assert.deepEqual([...selected.taskIds].sort(), ['overdue','review','undated'])
-      assert.equal(calls.filter(call => call.channel === 'agent:create').length, 1)
-      await evaluate(`smoke.click('button[title="현재 작업환경 저장"]')`)
-      await wait(() => calls.some((call) => call.channel === 'workspace:save' && call.result?.ok), 'Actual workspace save')
-      const saved = calls.find((call) => call.channel === 'workspace:save').result
-      assert.ok(saved.path.startsWith(app.getPath('userData')))
-      const snapshot = JSON.parse(fs.readFileSync(saved.path, 'utf8'))
-      assert.equal(snapshot.terminals[0].contextKind, 'global')
-      assert.equal(snapshot.terminals[0].todoManagement, true)
-      assert.equal(snapshot.terminals[0].cwd, chosenDir)
-      assert.equal(snapshot.caseTabs[0].meta.contextKind, 'global')
-      const beforeReload = calls.filter((call) => call.channel === 'agent:create').length
-      const reloadReady = new Promise((resolve) => win.webContents.once('did-finish-load', resolve))
-      win.webContents.reload()
-      await reloadReady
-      await wait(() => evaluate(`!!document.querySelector('button[title="저장된 작업환경 불러오기"]')`), 'Reloaded App')
-      await evaluate(`document.querySelector('button[title="저장된 작업환경 불러오기"]').click()`)
-      await wait(() => evaluate(`!!document.querySelector('.workspace-row')`), 'Saved workspace picker')
-      await evaluate(`document.querySelector('.workspace-row').click()`)
-      await wait(() => calls.filter((call) => call.channel === 'agent:create').length > beforeReload, 'Restored global Agent')
-      const restored = calls.filter((call) => call.channel === 'agent:create').at(-1).args[0]
-      assert.equal(restored.workspaceContext?.kind, 'global')
-      assert.equal(restored.workspaceContext?.todoManagement, true)
-      assert.equal(restored.cwd, chosenDir)
-      await evaluate(`const input = document.querySelector('.agent-panel textarea') || document.querySelector('.term-pane textarea'); if (!input) throw Error('Restored Agent input missing'); Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set.call(input, '복원된 전체 할일 검토'); input.dispatchEvent(new Event('input', { bubbles: true }));`)
-      await wait(() => evaluate(`!!document.querySelector('.agent-send-btn:not([disabled])')`), 'Restored global prompt ready')
-      const beforeRestoredSend = calls.filter((call) => call.channel === 'agent:send').length
-      await evaluate(`document.querySelector('.agent-send-btn:not([disabled])').click()`)
-      await wait(() => calls.filter((call) => call.channel === 'agent:send').length > beforeRestoredSend, 'Restored global send')
-      assert.equal(calls.filter((call) => call.channel === 'agent:send').at(-1).args[0].input.workspaceContext?.kind, 'global')
-      await wait(() => evaluate(`document.querySelector('.term-pane textarea')?.value === ''`), 'Restored send clears input')
-      assert.equal(await evaluate(`document.querySelector('.workspace-todo-header')?.textContent.includes('기한 도과 1')`), true)
-      const readsBeforeMutation = calls.filter(call => call.channel === 'todo:list').length
-      await evaluate(`const box=document.querySelector('.agent-composer textarea');Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value').set.call(box,'도과 할일 완료');box.dispatchEvent(new Event('input',{bubbles:true}))`)
-      await wait(() => evaluate(`!!document.querySelector('.agent-send-btn:not([disabled])')`), 'Mutation prompt ready')
-      await evaluate(`document.querySelector('.agent-send-btn').click()`)
-      await wait(() => evaluate(`document.querySelector('.workspace-todo-header').textContent.includes('기한 도과 0')`), 'Managed write refreshes header')
-      assert.ok(calls.filter(call => call.channel === 'todo:list').length > readsBeforeMutation)
-      assert.equal(await evaluate(`document.body.innerText.includes('클코 응답 JSON') || !!document.querySelector('.todo-patch-input')`), false)
-      assert.equal(calls.filter((call) => call.channel === 'dialog:pickFolder').length, 0)
-      assert.deepEqual(fs.readdirSync(chosenDir), ['existing.txt'])
-      // A token change in another window retires the native session even before this renderer hears it.
-      sessions.get(restored.id).workspaceContext.todoManagement = false
-      const savesBeforeRetirement = calls.filter(call => call.channel === 'workspace:save').length
-      await evaluate(`document.querySelector('button[title="현재 작업환경 저장"]').click()`)
-      await wait(() => calls.filter(call => call.channel === 'workspace:save' && call.result?.ok).length > savesBeforeRetirement, 'Retired native snapshot saved')
-      const retired = calls.filter(call => call.channel === 'workspace:save').at(-1).result
-      assert.equal(JSON.parse(fs.readFileSync(retired.path,'utf8')).terminals[0].todoManagement, false, 'runtime retirement must survive stale renderer snapshots')
-      // Change backend settings without a renderer event: every open must read the current default.
-      const creates = () => calls.filter(call => call.channel === 'agent:create')
-      const closedBeforeRemote = calls.filter(call => call.channel === 'agent:close').length
-      const beforeRemoteIds = creates().map(call => call.args[0].id)
-      const profileA = { id: 'remote-a', label: '합성 원격 A', host: 'a.example.invalid', user: 'tester', draftsRoot: '/srv/legal-a' }
-      const profileB = { id: 'remote-b', label: '합성 원격 B', host: 'b.example.invalid', user: 'tester', draftsRoot: '/srv/legal-b' }
-      const openManager = async (twice = false) => {
-        const reads = calls.filter(call => call.channel === 'settings:get').length
-        await evaluate(`{ const button = Array.from(document.querySelectorAll('button')).find(button => button.textContent.trim() === '전체 할일 정리 시작'); button.click(); if (${twice}) button.click(); }`)
-        await wait(() => calls.filter(call => call.channel === 'settings:get').length > reads, 'Each task-manager open reads fresh default settings')
-      }
-      const remoteCreated = async (profile, cwd, twice = false) => {
-        const before = creates().length
-        settings.sshProfiles = [profileA, profileB, profile].filter((p, i, all) => all.findIndex(other => other.id === p.id) === i)
-        settings.caseOpenTarget = `remote:${profile.id}`
-        await openManager(twice)
-        await wait(() => creates().length > before, `Default ${profile.id} creates the correct remote manager`)
-        await evaluate(`new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))`)
-        assert.equal(creates().length, before + 1, 'one remote agent is created even for rapid repeated clicks')
-        const remote = creates().at(-1).args[0]
-        assert.equal(remote.source, 'ssh', 'remote default must not reuse a local manager')
-        assert.equal(remote.cwd, cwd, 'remote task manager uses the exact configured/resolved root')
-        assert.equal(remote.ssh?.host, profile.host)
-        assert.equal(remote.workspaceContext?.kind, 'global')
-        assert.equal(remote.workspaceContext?.todoManagement, true)
-        assert.match(remote.context, /"contextKind": "global"/)
-        return remote
-      }
-      const remoteA = await remoteCreated(profileA, profileA.draftsRoot, true)
-      const afterRemoteA = creates().length
-      await openManager()
-      await evaluate(`new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))`)
-      assert.equal(creates().length, afterRemoteA, 'same remote setting reuses its task manager')
-      assert.equal(await evaluate(`document.querySelector('.term-pane[data-term-id="${remoteA.id}"]')?.style.display !== 'none'`), true)
-      const remoteB = await remoteCreated(profileB, profileB.draftsRoot)
-      profileA.draftsRoot = '/srv/legal-a-next'
-      const movedA = await remoteCreated(profileA, profileA.draftsRoot)
-      const homeProfile = { id: 'remote-home', label: '합성 원격 홈', host: 'home.example.invalid', user: 'tester' }
-      const remoteHome = await remoteCreated(homeProfile, '/home/remote-home')
-      assert.ok(calls.some(call => call.channel === 'ssh:listDir' && call.args[0].profile.id === homeProfile.id && call.args[0].path === '~'), 'missing remote root resolves remote home')
-      const tildeProfile = { id: 'remote-tilde', label: '합성 원격 상대 경로', host: 'tilde.example.invalid', user: 'tester', draftsRoot: '~/drafts' }
-      const remoteTilde = await remoteCreated(tildeProfile, '/home/remote-tilde/drafts')
-      assert.ok(calls.some(call => call.channel === 'ssh:listDir' && call.args[0].profile.id === tildeProfile.id && call.args[0].path === '~/drafts'), 'tilde remote root resolves through SSH')
-      const errorProfile = { id: 'remote-error', label: '합성 실패 원격', host: 'error.example.invalid', user: 'tester' }
-      settings.sshProfiles = [errorProfile]
-      settings.caseOpenTarget = `remote:${errorProfile.id}`
-      const beforeRemoteError = creates().length
-      await openManager()
-      await wait(() => calls.some(call => call.channel === 'ssh:listDir' && call.args[0].profile.id === errorProfile.id), 'Remote error resolution attempted')
-      await wait(() => calls.some(call => call.channel === 'dialog:message' && call.args[0] === 'alert' && String(call.args[1]).includes('합성 원격 경로 조회 실패')), 'Remote path failure is shown to the user')
-      assert.equal(creates().length, beforeRemoteError, 'remote resolution failure never falls back to a local agent')
-      settings.caseOpenTarget = 'remote:missing-profile'
-      await openManager()
-      await wait(() => calls.some(call => call.channel === 'dialog:message' && call.args[0] === 'alert' && String(call.args[1]).includes('기본 원격 연결을 찾을 수 없습니다')), 'Missing default profile is shown to the user')
-      assert.equal(creates().length, beforeRemoteError, 'missing remote profile never falls back to local')
-      assert.equal(calls.filter(call => call.channel === 'agent:close').length, closedBeforeRemote, 'changing defaults keeps previous conversations')
-      const saveCount = calls.filter(call => call.channel === 'workspace:save' && call.result?.ok).length
-      await evaluate(`document.querySelector('button[title="현재 작업환경 저장"]').click()`)
-      await wait(() => calls.filter(call => call.channel === 'workspace:save' && call.result?.ok).length > saveCount, 'Remote task conversations persisted')
-      const remoteWorkspace = JSON.parse(fs.readFileSync(calls.filter(call => call.channel === 'workspace:save').at(-1).result.path, 'utf8'))
-      for (const [remote, profile] of [[remoteA, profileA], [remoteB, profileB], [movedA, profileA], [remoteHome, homeProfile], [remoteTilde, tildeProfile]]) {
-        const terminal = remoteWorkspace.terminals.find(item => item.id === remote.id)
-        assert.ok(terminal, 'all remote conversations stay in the workspace')
-        assert.equal(terminal.profileId, profile.id)
-        assert.equal(terminal.cwd, remote.cwd)
-        assert.equal(terminal.contextKind, 'global')
-        assert.equal(terminal.todoManagement, true)
-      }
-      assert.ok(beforeRemoteIds.some(id => remoteWorkspace.terminals.some(item => item.id === id)), 'the original local conversation is retained')
-      assert.equal(calls.filter(call => call.channel === 'dialog:pickFolder').length, 0, 'remote defaults never open a local folder picker')
       assert.deepEqual([...new Set(unexpected)], [])
       assert.deepEqual(rendererErrors, [])
       await capture()
-      console.log('TODO_APP_RESULT ' + JSON.stringify({ checks: 47, staleNavigationChecks: 3, remoteDefaults: true, ipcCalls: calls.length, actualWorkspaceSaveReload: true, rendererErrors, screenshot }))
+      console.log('TODO_APP_RESULT ' + JSON.stringify({ summaryAndFilters: true, removedActions: true, noAutomaticAgent: true, ipcCalls: calls.length, rendererErrors, screenshot }))
       app.exit(0)
     } catch (error) {
       await capture()

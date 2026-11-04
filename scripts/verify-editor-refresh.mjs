@@ -8,16 +8,25 @@ import { build } from 'esbuild'
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const temp = await fs.mkdtemp(path.join(os.tmpdir(), 'editor-refresh-'))
+const appSource = await fs.readFile(path.join(root, 'src/renderer/src/App.tsx'), 'utf8')
+const selectionActions = appSource.slice(appSource.indexOf('const SELECTION_ACTION_TARGET_SELECTOR ='), appSource.indexOf('function modeLabel('))
 const source = String.raw`
-import React from 'react'
+import React, { useState, useEffect, useRef } from 'react'
 import { createRoot } from 'react-dom/client'
 import { EditorView } from '@codemirror/view'
 import { EditorState } from '@codemirror/state'
-import MarkdownEditor from './src/renderer/src/editor/MarkdownEditor'
+import MarkdownEditor, { TEXT_SELECTION_OVERLAY_EVENT, MARKDOWN_CENTER_SELECTION_EVENT } from './src/renderer/src/editor/MarkdownEditor'
+import { markdownToPlainText, writeMarkdownClipboard } from './src/renderer/src/markdownClipboard'
 import { findTextChanges, mergeTextAgainstBase } from './src/renderer/src/editor/threeWayMerge'
 import './src/renderer/src/styles.css'
 
-let disk = '', version = 1, save, dirty = false, historyText = ''
+const closestHTMLElement = (element, selector) => element?.closest(selector) ?? null
+${selectionActions}
+let disk = '', version = 1, save, dirty = false, historyText = '', askedText = ''
+const ask = text => {
+  askedText = text
+  requestAnimationFrame(() => document.getElementById('agent-prompt')?.focus({ preventScroll: true }))
+}
 const ok = async () => ({ ok: true })
 window.lt = {
   settings: { get: async () => ({ mdFontSize: 14 }) },
@@ -46,9 +55,9 @@ const original = Array.from({ length: 240 }, (_, i) =>
 let generation = 0
 async function mount(plainText = false, text = original) {
   disk = text; version++
-  root.render(<MarkdownEditor key={++generation} path='/fixture/검토.claude-draft.md'
+  root.render(<React.Fragment><MarkdownEditor key={++generation} path='/fixture/검토.claude-draft.md'
     draftId={'fixture-' + generation} plainText={plainText}
-    onSaveHandler={handler => save = handler} onDirty={value => dirty = value} />)
+    onSaveHandler={handler => save = handler} onDirty={value => dirty = value} /><SelectionAsk onAsk={ask} /></React.Fragment>)
   await wait(() => {
     const dom = document.querySelector('.cm-editor')
     return dom && EditorView.findFromDOM(dom)?.state.doc.toString() === text && !!save
@@ -138,6 +147,60 @@ window.uiCheck = async () => {
   unchanged(longView, longBefore, 'Large document external refresh')
   await refresh(longView, '')
   check(longView.scrollDOM.scrollTop === 0 && longView.state.selection.main.to === 0, 'Empty document clamps viewport and selection')
+  const tableText = original.slice(0, original.indexOf('문단 040:')) +
+    '| 항목    | 내용    |\n| -------- | -------- |\n' +
+    Array.from({ length: 60 }, (_, i) => '| 항목 ' + i + ' | 선택해서 복사할 표 내용 ' + i + ' |\n').join('') +
+    '\n' + original
+  const tableView = await mount(false, tableText)
+  tableView.dispatch({ effects: EditorView.scrollIntoView(tableText.indexOf('| 항목 '), { y: 'start' }) })
+  await pause(150)
+  const cell = tableView.dom.querySelectorAll('tbody .cm-md-cell-content')[41]
+  check(!!cell, 'Table fixture renders editable cells')
+  tableView.scrollDOM.scrollTop += cell.getBoundingClientRect().top - tableView.scrollDOM.getBoundingClientRect().top - 100
+  await pause(150)
+  const tableTop = tableView.scrollDOM.scrollTop
+  const cellBox = cell.getBoundingClientRect()
+  await window.testInput([
+    { type: 'mouseDown', x: Math.round(cellBox.left + 4), y: Math.round(cellBox.top + 8), button: 'left', clickCount: 1 },
+    { type: 'mouseUp', x: Math.round(cellBox.left + 4), y: Math.round(cellBox.top + 8), button: 'left', clickCount: 1 }
+  ])
+  await pause(150)
+  check(Math.abs(tableView.scrollDOM.scrollTop - tableTop) < 3, 'Clicking table cell keeps scroll position', tableView.scrollDOM.scrollTop + ' vs ' + tableTop)
+  check(document.activeElement === cell, 'Native click focuses table cell')
+  await window.testInput([
+    { type: 'mouseDown', x: Math.round(cellBox.left + 4), y: Math.round(cellBox.top + 8), button: 'left', clickCount: 1 },
+    { type: 'mouseMove', x: Math.round(cellBox.right - 4), y: Math.round(cellBox.top + 8), button: 'left', modifiers: ['leftButtonDown'] },
+    { type: 'mouseUp', x: Math.round(cellBox.right - 4), y: Math.round(cellBox.top + 8), button: 'left', clickCount: 1 }
+  ])
+  check(!!document.getSelection().toString().trim(), 'Native drag selects table text')
+  await pause(150)
+  check(Math.abs(tableView.scrollDOM.scrollTop - tableTop) < 3, 'Selecting table cell keeps scroll position', tableView.scrollDOM.scrollTop + ' vs ' + tableTop)
+  const commandTarget = document.createElement('textarea')
+  document.body.appendChild(commandTarget)
+  commandTarget.id = 'agent-prompt'
+  commandTarget.style.cssText = 'position:fixed;bottom:0;right:0'
+  await wait(() => document.querySelector('.sel-actions button'))
+  const askBox = document.querySelector('.sel-actions button').getBoundingClientRect()
+  await window.testInput([
+    { type: 'mouseDown', x: Math.round(askBox.left + askBox.width / 2), y: Math.round(askBox.top + askBox.height / 2), button: 'left', clickCount: 1 },
+    { type: 'mouseUp', x: Math.round(askBox.left + askBox.width / 2), y: Math.round(askBox.top + askBox.height / 2), button: 'left', clickCount: 1 }
+  ])
+  await wait(() => document.activeElement === commandTarget)
+  check(askedText.includes('선택해서'), 'Ask Claude receives selected table text')
+  await pause(150)
+  check(Math.abs(tableView.scrollDOM.scrollTop - tableTop) < 3, 'Leaving table selection for a command keeps scroll position', tableView.scrollDOM.scrollTop + ' vs ' + tableTop)
+  check(!dirty && tableView.state.doc.toString() === tableText, 'Selecting table text without edits keeps document unchanged')
+  const edited = cell.dataset.markdown + ' 수정'
+  cell.focus({ preventScroll: true })
+  cell.textContent = edited
+  cell.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: ' 수정' }))
+  commandTarget.focus({ preventScroll: true })
+  await pause(150)
+  check(dirty && tableView.state.doc.toString().includes(edited), 'Actual table edits still commit on focus transfer')
+  check(Math.abs(tableView.scrollDOM.scrollTop - tableTop) < 3, 'Committing table edits keeps scroll position')
+  await save()
+  check(disk.includes(edited), 'Table edits remain saved')
+  commandTarget.remove()
   return { checks: checks.length, scenarios: checks }
 }
 `
@@ -149,11 +212,19 @@ try {
     loader: { '.ttf': 'file' }, define: { 'process.env.NODE_ENV': '"production"' }
   })
   await fs.writeFile(path.join(temp, 'index.html'), '<html><head><meta charset="utf-8"><link rel="stylesheet" href="ui.css"><style>#root{height:100vh;display:flex;flex-direction:column}</style></head><body><div id="root"></div><script src="ui.js"></script></body></html>')
+  await fs.writeFile(path.join(temp, 'preload.cjs'), `const { contextBridge, ipcRenderer } = require('electron'); contextBridge.exposeInMainWorld('testInput', events => ipcRenderer.invoke('test-input', events))`)
   await fs.writeFile(path.join(temp, 'main.cjs'), String.raw`
-    const { app, BrowserWindow } = require('electron')
+    const { app, BrowserWindow, ipcMain } = require('electron')
     app.setPath('userData', ${JSON.stringify(path.join(temp, 'profile'))})
     app.whenReady().then(async () => {
-      const w = new BrowserWindow({ width: 1100, height: 800, show: false, webPreferences: { backgroundThrottling: false, contextIsolation: true, nodeIntegration: false } })
+      const w = new BrowserWindow({ width: 1100, height: 800, show: false, webPreferences: { preload: ${JSON.stringify(path.join(temp, 'preload.cjs'))}, backgroundThrottling: false, contextIsolation: true, nodeIntegration: false } })
+      ipcMain.handle('test-input', async (_event, events) => {
+        w.webContents.focus()
+        for (const event of events) {
+          w.webContents.sendInputEvent(event)
+          await new Promise(resolve => setTimeout(resolve, 20))
+        }
+      })
       const errors = []
       w.webContents.on('console-message', (_event, level, message) => { if (level >= 3) errors.push(message) })
       try {

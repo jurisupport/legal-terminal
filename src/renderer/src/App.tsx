@@ -23,7 +23,6 @@ import AgentPanel, {
   type AgentProviderHandoff
 } from './agent/AgentPanel'
 import { preloadSessionTranscripts } from './agent/transcriptCache'
-import { BrowserPanel } from './agent/BrowserPanel'
 import { ClaudeRemoteControlPanel } from './agent/ClaudeRemoteControlPanel'
 import type { RemoteControlConnection } from '../../shared/claudeRemoteControl'
 import {
@@ -66,8 +65,6 @@ import MarkdownEditor, {
 import { markdownToPlainText, writeMarkdownClipboard } from './markdownClipboard'
 import FindBar from './search/FindBar'
 import CasesDashboard, { JS_TOKEN_UPDATED_EVENT } from './dashboard/CasesDashboard'
-import ProjectsDashboard from './dashboard/ProjectsDashboard'
-import type { Project, ProjectCaseLink, ProjectFolderLink } from '../../shared/project'
 import type { ClaudeAskOptions, ClaudeSelectionSource, SendClaudeOptions } from '../../shared/claudeAsk'
 import { clearCaseListCache } from './dashboard/caseListCache'
 import UpcomingHearings from './dashboard/UpcomingHearings'
@@ -75,10 +72,8 @@ import { isActiveHearing } from './dashboard/hearings'
 import TodosDashboard from './dashboard/TodosDashboard'
 import TodayTodos from './dashboard/TodayTodos'
 import TodoSummary, { TodoHeaderBadge } from './dashboard/TodoSummary'
-import { todoAgentPrompt } from '../../shared/agentTodo'
 import { useTodoSnapshot, type TodoSnapshot } from './dashboard/useTodoSnapshot'
 import type { TodoFilter } from '../../shared/todoSummary'
-import type { JsTodo } from './env'
 import { buildAgentWorkspaceContext, resolveAgentContextKind, type AgentContextKind, type AgentWorkspaceContext } from '../../shared/agentWorkspaceContext'
 import HearingRecordPanel, {
   buildHearingRecordTitle,
@@ -103,6 +98,7 @@ import {
   type FolderMatchSuggestion
 } from './caseFolderMatch'
 import { mergeWorkspaceSessions } from './workspaceSessions'
+import { CASE_ORDER_KEY, SESSION_VISITS_KEY, readCaseOrder, orderCaseTabs, moveCaseTab, readSessionVisits, recordSessionVisit } from './sidebarNavigation'
 import { agentTabsOnly, isAgentTabClosed } from '../../shared/workspaceAgentTabs'
 import type { SharedUiActivity, SharedUiOperation, SharedUiState, SharedUiTab } from '../../shared/sharedUiState'
 import { isGeneralChatDirectory } from '../../shared/generalChat'
@@ -325,7 +321,6 @@ const sshConnFromProfile = (profile: SshProfile): SshConn => ({
 interface DocTab {
   remoteControlConnection?: RemoteControlConnection
   mediaState?: MediaViewState
-  browserAgentId?: string
   id: string
   title: string
   kind:
@@ -336,7 +331,6 @@ interface DocTab {
     | 'pdf'
     | 'image'
     | 'media'
-    | 'browser'
     | 'remote-control'
     | 'hwp'
     | 'docx'
@@ -700,8 +694,6 @@ const docKindStatus = (kind: DocTab['kind']): string | undefined => {
       return 'PDF'
     case 'image':
       return '이미지'
-    case 'browser':
-      return '브라우저'
     case 'hwp':
       return 'HWP'
     case 'docx':
@@ -1219,9 +1211,6 @@ const toDocTab = (tab: WorkspaceDocTabPayload): DocTab | null => {
 }
 
 const docTabDragPayload = (tab: DocTab, side: DockSide = docSide(tab)): TabPayload | undefined => {
-  if (tab.kind === 'browser' && tab.browserAgentId) return {
-    kind: 'doc', side, tab: { id: tab.id, title: tab.title, kind: 'browser', browserAgentId: tab.browserAgentId, caseTabId: tab.caseTabId, side }
-  }
   if (!tab.path || !RESTORABLE_DOC_KINDS.has(tab.kind) || tab.kind === 'settings') return undefined
   const doc: DocumentTabPayload = {
     id: tab.id,
@@ -1586,7 +1575,7 @@ const hasAgentDraft = (draft?: AgentDraftState): draft is AgentDraftState =>
   !!draft && (draft.input.trim().length > 0 || draft.attachments.length > 0)
 
 const sameAgentDraft = (a: AgentDraftState | undefined, b: AgentDraftState): boolean =>
-  !!a && a.input === b.input && a.attachments === b.attachments
+  !!a && a.input === b.input && a.attachments === b.attachments && a.quote === b.quote
 
 const agentAttachmentKey = (attachment: AgentAttachment): string =>
   attachment.kind === 'media-range' && attachment.media
@@ -1601,15 +1590,6 @@ export default function App(): JSX.Element {
   const [mode, setMode] = useState<Mode>('explorer')
   const modeRef = useRef(mode)
   modeRef.current = mode
-  const [caseDashboardView, setCaseDashboardView] = useState<'cases' | 'projects'>('cases')
-  const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null)
-  const [projectWorkspacePaths, setProjectWorkspacePaths] = useState(new Map<string, string | undefined>())
-  const openedProjectWorkspacesRef = useRef(new Map<string, { cwd: string; configuredPath?: string }>())
-  const rememberProjectWorkspaces = useCallback((projects: Project[]): void => {
-    setProjectWorkspacePaths(new Map(projects.map((project) => [project.id, project.workspacePath])))
-  }, [])
-  const projectOpeningRef = useRef(new Map<string, Promise<void>>())
-  const projectManagementVisible = mode === 'cases' && caseDashboardView === 'projects'
   const [explorerVisible, setExplorerVisible] = useState(true)
   const [paneWidths, setPaneWidths] = useState<{
     side: number
@@ -1654,6 +1634,9 @@ export default function App(): JSX.Element {
   const [activeTerm, setActiveTerm] = useState<string>('')
   const [mountedTermIds, setMountedTermIds] = useState<Set<string>>(new Set())
   const [caseTabs, setCaseTabs] = useState<CaseWorkspaceTab[]>([])
+  const [caseOrder, setCaseOrder] = useState(readCaseOrder)
+  const [sessionVisits, setSessionVisits] = useState(readSessionVisits)
+  const lastViewedSessionRef = useRef({ key: '', openedAt: 0 })
   const [discoveredCaseTabs, setDiscoveredCaseTabs] = useState<CaseWorkspaceTab[]>([])
   const [savedCaseLabels, setSavedCaseLabels] = useState<WorkspaceEntry[]>([])
   const [activeCaseTabId, setActiveCaseTabId] = useState<string>('')
@@ -1678,14 +1661,24 @@ export default function App(): JSX.Element {
   termBracketedPasteModeRef.current = termBracketedPasteMode
 
   useEffect(() => {
-    const ids = [...caseTabs].sort(compareCaseTabOrder).map((tab) => tab.id)
+    const ids = orderCaseTabs([...caseTabs].sort(compareCaseTabOrder), caseOrder).map((tab) => tab.id)
+    setCaseOrder((order) => {
+      const added = ids.filter((id) => !order.includes(id))
+      return added.length ? [...order, ...added] : order
+    })
     const liveIds = new Set(ids)
     caseTabCycleOrderRef.current = ids
     setCaseDocumentUpdates((updates) => {
       const next = Object.fromEntries(Object.entries(updates).filter(([id]) => liveIds.has(id)))
       return Object.keys(next).length === Object.keys(updates).length ? updates : next
     })
-  }, [caseTabs])
+  }, [caseTabs, caseOrder])
+  useEffect(() => {
+    try { localStorage.setItem(CASE_ORDER_KEY, JSON.stringify(caseOrder)) } catch { /* Keep the order for this window. */ }
+  }, [caseOrder])
+  useEffect(() => {
+    try { localStorage.setItem(SESSION_VISITS_KEY, JSON.stringify(sessionVisits)) } catch { /* Keep recent sessions for this window. */ }
+  }, [sessionVisits])
   const termTabsRef = useRef<TermTab[]>([])
   const caseTabsRef = useRef<CaseWorkspaceTab[]>([])
   const autoRestoreWorkspaceRef = useRef<(source: CurrentCase) => void>(() => {})
@@ -1789,13 +1782,6 @@ export default function App(): JSX.Element {
   const [connMenu, setConnMenu] = useState(false)
   const [newCaseOpen, setNewCaseOpen] = useState(false)
   const [remotePick, setRemotePick] = useState<SshProfile | null>(null)
-  const [projectFolderPick, setProjectFolderPick] = useState<{
-    kind: 'reference' | 'workspace'
-    currentPath?: string
-    profile?: SshProfile
-    resolve: (folder: ProjectFolderLink | null) => void
-    reject: (error: unknown) => void
-  } | null>(null)
   const [draftsPick, setDraftsPick] = useState<{
     profile: SshProfile
     startPath?: string
@@ -2137,17 +2123,6 @@ export default function App(): JSX.Element {
       activeTermId: id,
       activeWork: { ...activeWork, [side]: key }
     })
-  }
-  const openAgentBrowser = (agent: TermTab): void => {
-    const existing = docTabsRef.current.find(tab => tab.kind === 'browser' && tab.browserAgentId === agent.id)
-    const side = existing ? docSide(existing) : otherSide(termSide(agent))
-    const id = existing?.id ?? `browser-${agent.id}`
-    if (!existing) setDocTabs(tabs => tabs.some(tab => tab.id === id) ? tabs : [...tabs, { id, title: `브라우저 · ${agent.title}`, kind: 'browser', browserAgentId: agent.id, caseTabId: agent.caseTabId, side }])
-    if (agent.caseTabId) setActiveCaseTabId(agent.caseTabId)
-    setMode('explorer')
-    if (termOnly) setExplorerVisible(false)
-    setActiveDoc(id)
-    setWorkActive(side, docKey(id))
   }
   const openClaudeRemoteControl = (connection?: RemoteControlConnection): void => {
     const id = connection ? `claude-remote-${connection.id}` : 'claude-remote-connections'
@@ -2895,12 +2870,6 @@ export default function App(): JSX.Element {
       return
     }
     const payload = p.tab
-    if (payload?.kind === 'browser') {
-      // Browser views share the linked agent's ownership; only move an existing tab in this window.
-      const existing = docTabsRef.current.find(tab => tab.id === payload.id && tab.kind === 'browser' && tab.browserAgentId === payload.browserAgentId)
-      if (existing && termTabsRef.current.some(term => term.id === existing.browserAgentId && isAgentTab(term))) moveDocToSide(existing.id, payload.side ?? p.side ?? docSide(existing))
-      return
-    }
     const path = payload?.path ?? p.path
     const side = payload?.side ?? p.side ?? 'left'
     const rawKind = isRestorableDocKind(payload?.kind)
@@ -3873,6 +3842,7 @@ export default function App(): JSX.Element {
       profileId?: string
       provider?: AgentProvider
       handoffContext?: AgentProviderHandoff
+      sendDraft?: boolean
     }
   ): void => {
     const tab: TermTab = {
@@ -3896,7 +3866,7 @@ export default function App(): JSX.Element {
       side: opts.side
     }
     setTermTabs((tabs) => [...tabs, tab])
-    moveAgentDraft(source.id, tab.id)
+    moveAgentDraft(source.id, tab.id, opts.sendDraft)
     setActiveTerm(tab.id)
     setWorkActive(opts.side, termKeyOf(tab.id))
     registerCaseTabFromTerm(tab, true)
@@ -3932,15 +3902,17 @@ export default function App(): JSX.Element {
     return sessionId
   }
 
-  const forkAgentTab = async (sourceTermId: string, preferredSide?: DockSide): Promise<void> => {
+  const forkAgentTab = async (sourceTermId: string, preferredSide?: DockSide, request?: { handoff?: AgentProviderHandoff }): Promise<void> => {
     const source = termTabsRef.current.find((t) => t.id === sourceTermId)
     if (!source || !isAgentTab(source)) return
     const side = preferredSide ?? termSide(source)
-    const forkFromSessionId = await resolveForkSourceSessionId(source)
+    const forkFromSessionId = request ? undefined : await resolveForkSourceSessionId(source)
     openForkedAgentTab(source, {
       cwd: source.cwd,
       title: `${source.title} · fork`,
       side,
+      sendDraft: Boolean(request),
+      handoffContext: request?.handoff,
       forkFromSessionId,
       ssh: source.ssh,
       sshLabel: source.sshLabel,
@@ -4034,8 +4006,7 @@ export default function App(): JSX.Element {
       docOnly || termOnly || (caseId ?? '') === activeCaseTabIdRef.current
     const visibleTerms = termTabsRef.current.filter((term) => inActiveCase(caseIdForTerm(term)))
     const visibleDocs = docTabsRef.current.filter((doc) => isSharedDocTab(doc) || inActiveCase(caseIdForDoc(doc)))
-    const linkedBrowserIds = new Set(docTabsRef.current.filter(doc => doc.kind === 'browser' && doc.browserAgentId && ids.has(doc.browserAgentId)).map(doc => doc.id))
-    const closingKeys = new Set<WorkTabKey>([...[...ids].map(termKeyOf), ...[...linkedBrowserIds].map(docKey)])
+    const closingKeys = new Set<WorkTabKey>([...ids].map(termKeyOf))
     const nextWork: Partial<Record<DockSide, WorkTabKey | ''>> = {}
     for (const side of ['left', 'right'] as const) {
       const sideKeys = workKeysForSide(visibleDocs, visibleTerms, side)
@@ -4062,7 +4033,6 @@ export default function App(): JSX.Element {
       return next
     })
     setTermTabs((tabs) => tabs.filter((tab) => !ids.has(tab.id)))
-    if (linkedBrowserIds.size) setDocTabs(tabs => closeTabs(tabs, linkedBrowserIds, activeDoc, setActiveDoc, visibleDocs))
     setDocumentAgentTabs((links) => Object.fromEntries(Object.entries(links).filter(([, agentId]) => !ids.has(agentId))))
     setTermBracketedPasteMode((m) => {
       const n = { ...m }
@@ -4603,7 +4573,7 @@ export default function App(): JSX.Element {
     doc && visibleTermTabs.find((term): term is TermTab & { kind: 'agent' } =>
       term.id === documentAgentTabs[documentAgentKey(doc)] && isAgentTab(term))
   const documentLinkForAgent = (term: TermTab) =>
-    activeDocTab && !['welcome', 'settings', 'diff', 'browser', 'remote-control'].includes(activeDocTab.kind)
+    activeDocTab && !['welcome', 'settings', 'diff', 'remote-control'].includes(activeDocTab.kind)
       ? {
           title: activeDocTab.title,
           checked: documentAgentTabs[documentAgentKey(activeDocTab)] === term.id,
@@ -4724,14 +4694,14 @@ export default function App(): JSX.Element {
     })
   }
 
-  const moveAgentDraft = (fromId: string | undefined, toId: string): void => {
+  const moveAgentDraft = (fromId: string | undefined, toId: string, sendImmediately = false): void => {
     if (!fromId || fromId === toId) return
     const draft = agentDraftsRef.current[fromId]
     const pendingRequests = agentAttachmentRequestsRef.current[fromId] ?? []
     if (!hasAgentDraft(draft) && pendingRequests.length === 0) return
     if (hasAgentDraft(draft)) {
       setAgentDrafts((current) => {
-        const next = { ...current, [toId]: { input: draft.input, attachments: [...draft.attachments] } }
+        const next = { ...current, [toId]: { ...draft, attachments: [...draft.attachments], sendImmediately } }
         delete next[fromId]
         return next
       })
@@ -5904,7 +5874,6 @@ export default function App(): JSX.Element {
 
   const openCaseListFromLauncher = (): void => {
     setNewCaseOpen(false)
-    setCaseDashboardView('cases')
     setMode('cases')
   }
 
@@ -6710,9 +6679,6 @@ export default function App(): JSX.Element {
   // 토큰 변경 등으로 좌측 '다가오는 기일' 패널을 새로고침하기 위한 nonce
   const [jsNonce, setJsNonce] = useState(0)
   const [todoNonce, setTodoNonce] = useState(0)
-  const todoManagerPendingRender = useRef(false)
-  const todoManagerTab = useRef<TermTab | null>(null)
-  const todoAccountGeneration = useRef(0)
   const todoSnapshot = useTodoSnapshot(todoNonce)
   const [todoFilter, setTodoFilter] = useState<TodoFilter>('open')
   const [todoFilterNonce, setTodoFilterNonce] = useState(0)
@@ -6742,83 +6708,13 @@ export default function App(): JSX.Element {
     setTodoFilterNonce((value) => value + 1)
     setMode('todos')
   }
-  const openGlobalTodoWork = async (rows?: JsTodo[], isCancelled = (): boolean => false): Promise<void> => {
-    modeRef.current = 'todos'
-    setMode('todos')
-    const accountGeneration = todoAccountGeneration.current
-    const isCurrent = (): boolean =>
-      !isCancelled() && modeRef.current === 'todos' && accountGeneration === todoAccountGeneration.current
-    try {
-      const settings = await window.lt.settings.get()
-      if (!isCurrent()) return
-      const profileId = caseOpenProfileId(settings.caseOpenTarget)
-      const profile = settings.sshProfiles?.find((item) => item.id === profileId)
-      if (profileId && !profile) throw new Error('기본 원격 연결을 찾을 수 없습니다. 설정에서 연결을 확인해 주세요.')
-      let cwd = profile ? profile.draftsRoot?.trim() : settings.draftsRoot
-      if (profile && (!cwd || !cwd.startsWith('/'))) {
-        const resolved = await window.lt.ssh.listDir(profile, cwd || '~')
-        if (!resolved.ok) throw new Error(resolved.error)
-        cwd = resolved.cwd
-      } else if (!profile && (!cwd || parseRemoteUri(cwd))) {
-        cwd = (await window.lt.app.info()).homeDirectory
-      }
-      if (!cwd) throw new Error('할일 대화의 작업 위치를 확인하지 못했습니다.')
-      if (!isCurrent()) return
-      const atLocation = (term: TermTab): boolean =>
-        normalizedCasePathKey(term.cwd) === normalizedCasePathKey(cwd) && (profile
-          ? term.profileId === profile.id && term.ssh?.host === profile.host && term.ssh?.user === profile.user &&
-            (term.ssh?.port ?? 22) === (profile.port ?? 22) && term.ssh?.identityFile === profile.identityFile &&
-            Boolean(term.ssh?.remoteControl) === Boolean(profile.remoteControl)
-          : !term.ssh)
-      const manager = termTabsRef.current.find((term) => isAgentTab(term) && term.contextKind === 'global' && atLocation(term) &&
-        (term.todoManagement === true || (term.todoManagement === undefined && term.title === '전체 할일 정리')))
-      let tab = manager ?? (todoManagerTab.current && atLocation(todoManagerTab.current) ? todoManagerTab.current : null)
-      if (tab && !termTabsRef.current.some((term) => term.id === tab!.id) && !todoManagerPendingRender.current) tab = null
-      if (!tab) {
-        // Resolve the destination before this synchronous creation, so rapid clicks reuse the pending tab.
-        tab = profile
-          ? createRemoteCase(profile, cwd, '전체 할일 정리', { contextKind: 'global' }, undefined, 'right')
-          : createCase(cwd, '전체 할일 정리', undefined, undefined, { contextKind: 'global' }, 'right')
-        todoManagerPendingRender.current = true
-      }
-      const selected = { ...tab, todoManagement: true, side: 'right' as const }
-      todoManagerTab.current = selected
-      setTermTabs((tabs) => tabs.map((item) => item.id === selected.id ? selected : item))
-      registerCaseTabFromTerm(selected, true)
-      setActiveTerm(selected.id)
-      setWorkActive('right', termKeyOf(selected.id))
-      if (rows?.length) {
-        const prompt = todoAgentPrompt(rows)
-        queueAgentAttachment(selected, { kind: 'selection', label: `선택한 할일 ${rows.length}건`, text: prompt }, '첨부한 선택 할일만 정리해줘.')
-      }
-      setTermFocusNonce((current) => ({ ...current, [selected.id]: (current[selected.id] ?? 0) + 1 }))
-    } catch (error) {
-      if (isCurrent()) {
-        await window.lt.dialog.alert('할일 에이전트를 열지 못했습니다: ' + (error instanceof Error ? error.message : String(error)))
-      }
-    }
-  }
-  useEffect(() => {
-    if (todoManagerTab.current && termTabs.some((term) => term.id === todoManagerTab.current!.id)) todoManagerPendingRender.current = false
-    else if (!todoManagerPendingRender.current) todoManagerTab.current = null
-  }, [termTabs])
-  useEffect(() => {
-    let cancelled = false
-    if (mode === 'todos' && todoSnapshot.hasToken === true) {
-      void openGlobalTodoWork(undefined, () => cancelled).catch((error) => console.warn('할일 에이전트를 열지 못했습니다.', error))
-    }
-    return () => { cancelled = true }
-  }, [mode, todoSnapshot.hasToken])
-
   const todoSummary = <TodoSummary snapshot={todoSnapshot} onFilter={openTodoSummary}
-    onGlobalWork={() => void openGlobalTodoWork()} hearingSummary={hearingSummary}
+    hearingSummary={hearingSummary}
     hearingsLoading={summaryHearingsLoading} hearingsError={summaryHearingsError} />
 
   // 설정창에서 JuriSupport 토큰을 바꾸면 기일·할 일 패널도 새로고침한다.
   useEffect(() => {
     const onTokenUpdated = (): void => {
-      todoAccountGeneration.current++
-      todoManagerTab.current = null
       setTermTabs((tabs) => tabs.map((term) => term.contextKind === 'global' && (term.todoManagement || term.title === '전체 할일 정리') ? { ...term, todoManagement: false } : term))
       setJsNonce((n) => n + 1)
       setTodoNonce((n) => n + 1)
@@ -6890,7 +6786,11 @@ export default function App(): JSX.Element {
     termTabs.filter((term) => caseIdForTerm(term) === tab.id)
   const docsForCaseTab = (tab: CaseWorkspaceTab): DocTab[] =>
     docTabs.filter((doc) => !isSharedDocTab(doc) && caseIdForDoc(doc) === tab.id)
-  const orderedCaseTabs = [...caseTabs].sort(compareCaseTabOrder)
+  const orderedCaseTabs = orderCaseTabs([...caseTabs].sort(compareCaseTabOrder), caseOrder)
+  const reorderCaseTabs = (from: string, to: string): void => {
+    if (!caseTabs.some((tab) => tab.id === from) || !caseTabs.some((tab) => tab.id === to)) return
+    setCaseOrder((order) => moveCaseTab([...new Set([...order, ...orderedCaseTabs.map((tab) => tab.id)])], from, to))
+  }
   const caseTabRows = orderedCaseTabs.map((tab) => {
     const terms = termsForCaseTab(tab)
     const docs = docsForCaseTab(tab)
@@ -7028,167 +6928,19 @@ export default function App(): JSX.Element {
       }))
     }
   })
-  const projectCaseChoices: ProjectCaseLink[] = sidebarCaseTabs
-    .filter((tab) => tab.meta?.contextKind !== 'global' && tab.meta?.contextKind !== 'folder' && tab.meta?.contextKind !== 'project')
-    .map((tab) => ({
-      key: tab.meta?.jsId ? `js:${tab.meta.jsId}` : `folder:${tab.profileId ?? 'local'}:${normalizedCasePathKey(tab.remotePath ?? tab.drafts)}`,
-      name: sidebarCases.find((item) => item.id === tab.id)?.title ?? tab.name,
-      jsId: tab.meta?.jsId,
-      caseNumber: tab.meta?.caseNumber,
-      court: tab.meta?.court,
-      drafts: tab.drafts,
-      records: tab.records,
-      profileId: tab.profileId,
-      remotePath: tab.remotePath
-    }))
-  const openedProjectWorkspace = selectedProjectId ? openedProjectWorkspacesRef.current.get(selectedProjectId) : undefined
-  const projectAgentVisible = projectManagementVisible && !!selectedProjectId && !!openedProjectWorkspace &&
-    projectWorkspacePaths.has(selectedProjectId) && openedProjectWorkspace.configuredPath === projectWorkspacePaths.get(selectedProjectId) &&
-    openedProjectWorkspace.cwd === currentCase?.drafts &&
-    currentCase?.meta?.projectId === selectedProjectId && termTabs.some((term) =>
-      isAgentTab(term) && term.contextKind === 'project' && term.projectId === selectedProjectId &&
-      term.cwd === (currentCase.remotePath ?? currentCase.drafts) && term.profileId === currentCase.profileId && termSide(term) === 'right'
-    )
-  const resolveProjectSource = async (projectId: string): Promise<{ cwd: string; project: Project; source: CurrentCase; profile?: SshProfile }> => {
-    const { cwd, project } = await window.lt.projects.workspace(projectId)
-    const remote = parseRemoteUri(cwd)
-    const profile = remote ? (await window.lt.settings.get()).sshProfiles?.find((item) => item.id === remote.profileId) : undefined
-    if (remote && !profile) throw new Error('프로젝트 작업 폴더의 SSH 연결 설정을 찾을 수 없습니다. 설정에서 서버를 확인해 주세요.')
-    return { cwd, project, profile, source: {
-      drafts: cwd, name: `프로젝트 · ${project.name}`, meta: { contextKind: 'project', projectId: project.id },
-      ...(remote && profile ? { remotePath: remote.path, profileId: profile.id, ssh: sshConnFromProfile(profile), sshLabel: profile.label } : {})
-    } }
-  }
-  const openProjectWork = (project: Project, newConversation = false): Promise<void> => {
-    const pending = projectOpeningRef.current.get(project.id)
-    if (pending) return pending
-    const operation = (async (): Promise<void> => {
-      const { cwd, project: latest, source, profile } = await resolveProjectSource(project.id)
-      markWorkspaceReopened(source)
-      const workspace = registerCaseTab(source)
-      setCurrentCase(source)
-      activeCaseTabIdRef.current = workspace.id
-      if (!(await restoreAutomaticWorkspace(source))) throw new Error('프로젝트 대화를 복원하지 못했습니다. 다시 시도해 주세요.')
-      const conversations = termTabsRef.current.filter((term) => isAgentTab(term) &&
-        term.contextKind === 'project' && term.projectId === latest.id && term.cwd === (source.remotePath ?? cwd) &&
-        term.profileId === source.profileId && sessionListKey('', term.ssh) === sessionListKey('', source.ssh))
-      let tab = !newConversation
-        ? conversations.find((term) => term.id === activeTerm) ?? conversations.find((term) => term.id === workspace.activeTermId) ?? conversations[0]
-        : undefined
-      if (!tab) {
-        tab = profile ? createRemoteCase(profile, source.remotePath!, source.name, source.meta, undefined, 'right')
-          : createCase(cwd, source.name, undefined, undefined, source.meta, 'right')
-        // Keep rapid navigation and workspace persistence aware of a newly queued React tab.
-        termTabsRef.current = [...termTabsRef.current, tab]
-      }
-      const selected = { ...tab, side: 'right' as const }
-      setTermTabs((tabs) => tabs.map((item) => item.id === selected.id ? selected : item))
-      registerCaseTabFromTerm(selected, true)
-      setCurrentCase(source)
-      setActiveTerm(selected.id)
-      setWorkActive('right', termKeyOf(selected.id))
-      setTermFocusNonce((current) => bumpFocusNonce(current, selected.id))
-      setSelectedProjectId(latest.id)
-      openedProjectWorkspacesRef.current.set(latest.id, { cwd, configuredPath: latest.workspacePath })
-      setCaseDashboardView('projects')
-      setMode('cases')
-    })().finally(() => { projectOpeningRef.current.delete(project.id) })
-    projectOpeningRef.current.set(project.id, operation)
-    return operation
-  }
-  const openProjectWorkspace = async (project: Project): Promise<void> => {
-    const { source } = await resolveProjectSource(project.id)
-    openCaseContext(source)
-    setSidebarView('files')
-    setExplorerVisible(true)
-    setMode('explorer')
-  }
-  const showProjects = (): void => {
-    setCaseDashboardView('projects')
-    setMode('cases')
-    setExplorerVisible(true)
-  }
-  const pickProjectFolder = async (kind: 'reference' | 'workspace' = 'reference', currentPath?: string): Promise<ProjectFolderLink | null> => {
-    const settings = await window.lt.settings.get()
-    const profiles = settings.sshProfiles ?? []
-    setSshProfiles(profiles)
-    if (!profiles.length && !currentPath?.startsWith('ssh://')) return window.lt.dialog.pickFolder({
-      title: kind === 'workspace' ? '프로젝트 작업 폴더 선택' : 'AI가 참고할 자료 폴더 선택',
-      ...(currentPath ? { defaultPath: currentPath } : {})
-    })
-    return new Promise((resolve, reject) => setProjectFolderPick({ kind, currentPath, resolve, reject }))
-  }
-  const openProjectFolder = async (folder: ProjectFolderLink): Promise<void> => {
-    const remote = parseRemoteUri(folder.path)
-    const existing = sidebarCaseTabs.find((tab) =>
-      tab.meta?.contextKind !== 'global' && tab.profileId === remote?.profileId &&
-      normalizedCasePathKey(tab.remotePath ?? tab.drafts) === normalizedCasePathKey(remote?.path ?? folder.path)
-    )
-    // A reference can point at an existing case folder; preserve its known case identity.
-    if (existing && (!remote || existing.ssh)) {
-      if (caseTabs.some((tab) => tab.id === existing.id)) openCaseTab(existing)
-      else openCaseContext(currentCaseFromCaseTab(existing))
-      setSidebarView('files')
-      setMode('explorer')
+  const viewedCase = sidebarCases.find((item) => item.id === activeCaseTabId)
+  const viewedTask = mode === 'explorer' ? viewedCase?.tasks.find((task) => task.id === activeTerm && task.active) : undefined
+  const viewedScope = viewedCase?.historyKey ?? viewedCase?.id ?? ''
+  useEffect(() => {
+    if (!viewedTask || docOnly || termOnly) {
+      lastViewedSessionRef.current.key = ''
       return
     }
-    if (remote) {
-      const settings = await window.lt.settings.get()
-      const profile = settings.sshProfiles?.find((item) => item.id === remote.profileId)
-      if (!profile) throw new Error('참고 폴더의 SSH 연결 설정을 찾을 수 없습니다. 설정에서 연결을 확인해 주세요.')
-      openRemoteCaseContext(profile, remote.path, folder.name, existing?.meta ?? { contextKind: 'folder' })
-    } else {
-      const result = await window.lt.fs.stat(folder.path)
-      if (!result.ok || !result.isDir) throw new Error('참고 폴더를 찾을 수 없습니다. 이동하거나 삭제되었는지 확인해 주세요.')
-      openCaseContext({ drafts: folder.path, name: folder.name, meta: { contextKind: 'folder' } })
-    }
-    setSidebarView('files')
-    setMode('explorer')
-  }
-  const openProjectCase = async (item: ProjectCaseLink): Promise<void> => {
-    const tab = sidebarCaseTabs.find((candidate) =>
-      candidate.profileId === item.profileId &&
-      (item.jsId ? candidate.meta?.jsId === item.jsId :
-        !!item.drafts && normalizedCasePathKey(candidate.drafts) === normalizedCasePathKey(item.drafts))
-    )
-    if (tab && (!tab.profileId || tab.ssh)) {
-      if (caseTabs.some((entry) => entry.id === tab.id)) openCaseTab(tab)
-      else {
-        openCaseContext(currentCaseFromCaseTab(tab))
-        setMode('explorer')
-      }
-      return
-    }
-    if (item.drafts || (item.profileId && item.remotePath)) {
-      const remote = item.drafts ? parseRemoteUri(item.drafts) : null
-      const profileId = item.profileId ?? remote?.profileId
-      const meta: CaseMeta = { jsId: item.jsId, caseNumber: item.caseNumber, court: item.court, caseName: item.name }
-      if (profileId) {
-        const settings = await window.lt.settings.get()
-        const profile = settings.sshProfiles?.find((entry) => entry.id === profileId)
-        if (!profile) throw new Error('이 사건의 SSH 연결 설정을 찾을 수 없습니다. 설정에서 연결을 확인해 주세요.')
-        const path = item.remotePath ?? remote?.path
-        if (!path) throw new Error('원격 사건의 작성서류 폴더를 확인해 주세요.')
-        openRemoteCaseContext(profile, path, item.name, meta, item.records)
-      } else {
-        if (!item.drafts) throw new Error('사건의 작성서류 폴더를 확인해 주세요.')
-        const result = await window.lt.fs.stat(item.drafts)
-        if (!result.ok || !result.isDir) throw new Error('사건 폴더를 찾을 수 없습니다. 사건을 다시 열고 프로젝트 연결을 수정해 주세요.')
-        openCaseContext({ drafts: item.drafts, records: item.records, name: item.name, meta })
-      }
-      setMode('explorer')
-      return
-    }
-    if (!item.jsId) throw new Error('열 수 있는 사건 정보가 없습니다. 프로젝트의 사건 연결을 수정해 주세요.')
-    const result = await window.lt.js.getCase(item.jsId)
-    if (!result.ok || !result.case) throw new Error(result.error || '사건을 불러오지 못했습니다. JuriSupport 연결을 확인해 주세요.')
-    const settings = await window.lt.settings.get()
-    const profiles = settings.sshProfiles ?? []
-    const profileId = caseOpenProfileId(resolveCaseOpenTarget(settings.caseOpenTarget, profiles))
-    const profile = profiles.find((entry) => entry.id === profileId)
-    if (profile) await openCaseRemote(result.case, profile)
-    else await openCaseWorkspace(result.case, true)
-  }
+    const key = JSON.stringify([viewedScope, viewedTask.id])
+    if (lastViewedSessionRef.current.key !== key) lastViewedSessionRef.current = { key, openedAt: Date.now() }
+    setSessionVisits((visits) => recordSessionVisit(visits, viewedScope, viewedTask, lastViewedSessionRef.current.openedAt))
+  }, [viewedScope, viewedTask?.id, viewedTask?.sessionId, viewedTask?.title, viewedTask?.originDevice, docOnly, termOnly])
+
   const sidebarSessionSource = (id: string): TermTab | undefined => {
     const tab = sidebarCaseTabs.find((item) => item.id === id)
     if (!tab || (tab.profileId && !tab.ssh)) return undefined
@@ -8179,21 +7931,20 @@ export default function App(): JSX.Element {
       {tab?.kind === 'remote-control' && <ClaudeRemoteControlPanel
         key={tab.id}
         connection={tab.remoteControlConnection}
-        visible={visibleDocTabs.some(doc => doc.id === tab.id) && activeWorkKeyForSide(docSide(tab)) === docKey(tab.id) && (!projectManagementVisible || projectAgentVisible)}
+        visible={visibleDocTabs.some(doc => doc.id === tab.id) && activeWorkKeyForSide(docSide(tab)) === docKey(tab.id)}
         onOpen={openClaudeRemoteControl}
         onRemove={(id) => { void closeDoc(`claude-remote-${id}`) }}
       />}
-      {tab?.kind === 'browser' && (() => {
-        const agent = termTabs.find(term => term.id === tab.browserAgentId && isAgentTab(term))
-        return agent ? <div className="browser-workspace" data-browser-agent-id={agent.id}>
-          <BrowserPanel agentSessionId={agent.id} profileId={agent.profileId} ssh={agent.ssh}
-            visible={visibleDocTabs.some(doc => doc.id === tab.id) && activeWorkKeyForSide(docSide(tab)) === docKey(tab.id) && (!projectManagementVisible || projectAgentVisible)}
-            onClose={() => { void closeDoc(tab.id) }} />
-        </div> : <Empty label="연결된 대화가 닫혔습니다" actionLabel="브라우저 탭 닫기" onAction={() => { void closeDoc(tab.id) }} />
-      })()}
       {tab?.kind === 'file' && tab.path && (
         isHtmlPath(tab.path) ? (
-          <HtmlView key={tab.path} path={tab.path} onAsk={askClaude} />
+          <HtmlView
+            key={tab.path}
+            path={tab.path}
+            onAsk={askClaude}
+            scrollKey={docScrollKey(tab)}
+            initialScroll={scrollPositionForDoc(tab)}
+            onScrollPosition={(position) => updateDocScrollPosition(tab.id, position)}
+          />
         ) : (
           <FileView
             key={tab.path}
@@ -8595,13 +8346,13 @@ export default function App(): JSX.Element {
                 }
                 onStatus={(s) => onTermStatus(t.id, s)}
                 onFork={() => void forkAgentTab(t.id, termSide(t))}
+                onForkAndSend={(handoff) => forkAgentTab(t.id, termSide(t), { handoff })}
                 onProviderChange={(provider, handoff) => changeAgentProvider(t.id, provider, handoff)}
                 onHandoffConsumed={() => consumeAgentHandoff(t.id)}
                 onWorktreeFork={() => void forkAgentWorktreeTab(t.id, termSide(t))}
                 onOpenTerminal={() => addTermSame(termSide(t), t.id, { reuseAgentTab: true })}
                 onOpenDiff={(request) => openAgentDiff(request, caseIdForTerm(t))}
                 onOpenFile={(path, title) => openFile(path, title ?? fileNameFromPath(path), 'left', t.caseTabId)}
-                onOpenBrowser={() => openAgentBrowser(t)}
                 onOpenAttachmentSource={openAgentAttachmentSource}
                 onPrepareAttachment={prepareAgentAttachmentForSend}
               />
@@ -8639,26 +8390,6 @@ export default function App(): JSX.Element {
     if (side === 'left' && mode === 'cases') {
       return (
         <div className="work-pane work-left" key="cases" data-work-side="left">
-          <div className="case-management-nav" role="group" aria-label="사건 관리 보기">
-            <button type="button" aria-pressed={caseDashboardView === 'cases'} onClick={() => setCaseDashboardView('cases')}>개별 사건</button>
-            <button type="button" aria-pressed={caseDashboardView === 'projects'} onClick={() => setCaseDashboardView('projects')}>프로젝트</button>
-          </div>
-          {caseDashboardView === 'projects' ? (
-            <ProjectsDashboard
-              cases={projectCaseChoices}
-              onOpenCase={openProjectCase}
-              onPickFolder={pickProjectFolder}
-              onPickWorkspace={(path) => pickProjectFolder('workspace', path)}
-              onOpenFolder={openProjectFolder}
-              onOpenWorkspace={openProjectWorkspace}
-              onProjectsLoaded={rememberProjectWorkspaces}
-              onOpenWork={openProjectWork}
-              workOpen={projectAgentVisible}
-              onAddCase={openNewCaseLauncher}
-              selectedId={selectedProjectId}
-              onSelect={setSelectedProjectId}
-            />
-          ) : (
           <CasesDashboard
             onOpenWorkspace={openCaseWorkspace}
             onOpenDefault={openCaseDefault}
@@ -8674,7 +8405,6 @@ export default function App(): JSX.Element {
             }
             onChanged={() => setJsNonce((n) => n + 1)}
           />
-          )}
         </div>
       )
     }
@@ -8688,7 +8418,6 @@ export default function App(): JSX.Element {
             onOpenEvidenceFile={(path, label) => { openFile(path, label ?? fileNameFromPath(path)) }}
             initialFilter={todoFilter}
             filterNonce={todoFilterNonce}
-            onGlobalWork={() => void openGlobalTodoWork()}
             nonce={todoNonce}
             onChanged={() => setTodoNonce((n) => n + 1)}
             onOpenWorkspace={openCaseWorkspace}
@@ -8698,7 +8427,6 @@ export default function App(): JSX.Element {
             defaultOpenProfileId={defaultCaseOpenProfileId}
             onPickRecords={pickRecordsForCase}
             onBrief={briefCaseToClaude}
-            onManageTodos={(rows) => void openGlobalTodoWork(rows)}
           />
         </div>
       )
@@ -8711,7 +8439,7 @@ export default function App(): JSX.Element {
       ...docs.map((t) => ({
         id: docKey(t.id),
         title: t.title,
-        tooltip: t.kind === 'browser' ? '연결된 대화의 브라우저 · 이 창 안에서 좌우로 이동할 수 있습니다.' : t.path,
+        tooltip: t.path,
         path: t.path,
         dirty: dirtyDocs.has(t.id),
         renamable: t.kind === 'mdview' || t.kind === 'markdown',
@@ -8749,14 +8477,13 @@ export default function App(): JSX.Element {
     const activeDocForPane =
       activeParsed?.kind === 'doc' ? docs.find((t) => t.id === activeParsed.id) : undefined
     const mountedDocs = [...docs, ...docTabs.filter((tab) =>
-      (tab.kind === 'media' || tab.kind === 'browser' || tab.kind === 'remote-control' || tab.kind === 'hearing') && docSide(tab) === side && !docs.some((item) => item.id === tab.id)
+      (tab.kind === 'media' || tab.kind === 'remote-control' || tab.kind === 'hearing') && docSide(tab) === side && !docs.some((item) => item.id === tab.id)
     )].filter(
       (t) =>
         t.id === activeDocForPane?.id ||
         t.kind === 'mdview' ||
         t.kind === 'markdown' ||
         t.kind === 'media' ||
-        t.kind === 'browser' ||
         t.kind === 'remote-control' ||
         t.kind === 'hearing'
     )
@@ -8991,7 +8718,7 @@ export default function App(): JSX.Element {
                   caseContext={agentCaseContextForTerm(t)}
                 workspaceContext={agentWorkspaceContextForTerm(t, contextAppVersion)}
                 onTasksChanged={() => setTodoNonce((value) => value + 1)}
-                  visible={t.id === visibleTermId && (!projectManagementVisible || projectAgentVisible)}
+                  visible={t.id === visibleTermId}
                   focusNonce={termFocusNonce[t.id] ?? 0}
                   initialDraft={agentDrafts[t.id]}
                   clearDraftNonce={agentDraftClearNonce[t.id]}
@@ -9002,13 +8729,13 @@ export default function App(): JSX.Element {
                   }
                   onStatus={(s) => onTermStatus(t.id, s)}
                   onFork={() => void forkAgentTab(t.id, side)}
+                  onForkAndSend={(handoff) => forkAgentTab(t.id, side, { handoff })}
                   onProviderChange={(provider, handoff) => changeAgentProvider(t.id, provider, handoff)}
                   onHandoffConsumed={() => consumeAgentHandoff(t.id)}
                   onWorktreeFork={() => void forkAgentWorktreeTab(t.id, side)}
                   onOpenTerminal={() => addTermSame(side, t.id, { reuseAgentTab: true })}
                   onOpenDiff={(request) => openAgentDiff(request, caseIdForTerm(t))}
                   onOpenFile={(path, title) => openFile(path, title ?? fileNameFromPath(path), 'left', t.caseTabId)}
-                  onOpenBrowser={() => openAgentBrowser(t)}
                   onOpenAttachmentSource={openAgentAttachmentSource}
                   onPrepareAttachment={prepareAgentAttachmentForSend}
                 />
@@ -9020,7 +8747,7 @@ export default function App(): JSX.Element {
                   autoAgent={t.autoAgent}
                   resumeSessionId={t.resumeSessionId}
                   ssh={t.ssh}
-                  visible={t.id === visibleTermId && (!projectManagementVisible || projectAgentVisible)}
+                  visible={t.id === visibleTermId}
                   focusNonce={termFocusNonce[t.id] ?? 0}
                   todoContext={todoContextForTerm(t)}
                   onDropPaths={(paths) => dropFilesToTerm(t.id, paths)}
@@ -9120,7 +8847,7 @@ export default function App(): JSX.Element {
     const observer = new ResizeObserver(fitPanes)
     observer.observe(shell)
     return () => observer.disconnect()
-  }, [explorerVisible, isViewer, generalChatSide, projectManagementVisible, projectAgentVisible])
+  }, [explorerVisible, isViewer, generalChatSide])
   const setPaneWidth = (pane: ResizablePane, width: number): void => {
     const nextWidth = Math.round(Math.max(paneMinimum(pane), Math.min(width, paneMaximum(pane))))
     shellRef.current?.style.setProperty(paneCssVariable(pane), `${nextWidth}px`)
@@ -9365,7 +9092,7 @@ export default function App(): JSX.Element {
     )
   }
 
-  if (termOnly && !docTabs.some(tab => tab.kind === 'browser' || tab.kind === 'remote-control')) {
+  if (termOnly && !docTabs.some(tab => tab.kind === 'remote-control')) {
     return (
       <div className="shell-terminalonly" {...shellDragProps}>
         {terminalPanel}
@@ -9382,7 +9109,7 @@ export default function App(): JSX.Element {
   return (
     <div
       ref={shellRef}
-      className={`shell ${isViewer ? 'mode-viewer' : 'mode-default'} ${explorerVisible ? '' : 'explorer-hidden'} ${projectManagementVisible && !projectAgentVisible ? 'project-management' : ''} ${generalChatSide ? `general-chat general-chat-${generalChatSide}` : ''}`}
+      className={`shell ${isViewer ? 'mode-viewer' : 'mode-default'} ${explorerVisible ? '' : 'explorer-hidden'} ${generalChatSide ? `general-chat general-chat-${generalChatSide}` : ''}`}
       style={shellStyle}
       {...shellDragProps}
     >
@@ -9530,9 +9257,6 @@ export default function App(): JSX.Element {
               <IconExplorer size={15} /> 파일
             </button>
           </div>
-          <button className="project-open-button" type="button" aria-pressed={projectManagementVisible} onClick={showProjects}>
-            <IconWorkspace size={15} /> 프로젝트 관리
-          </button>
           <button className="general-chat-button" type="button" disabled={!generalChatDirectory && !generalChatError} title={generalChatError || undefined} onClick={openGeneralChat}>
             일반 질문
           </button>
@@ -9542,6 +9266,8 @@ export default function App(): JSX.Element {
           {sidebarView === 'cases' ? (
             <CaseSidebar
               cases={sidebarCases}
+              sessionVisits={sessionVisits}
+              onReorderCase={reorderCaseTabs}
               attentionOnly={caseAttentionOnly}
               onAttentionOnlyChange={setCaseAttentionOnly}
               noticeCount={totalCaseNoticeCount}
@@ -9627,7 +9353,7 @@ export default function App(): JSX.Element {
       {renderWorkPane('right')}
 
       <div className="statusbar" key="status">
-        <span className="status-left">legal-terminal · {projectManagementVisible ? '프로젝트' : modeLabel(mode)}</span>
+        <span className="status-left">legal-terminal · {modeLabel(mode)}</span>
         <span className="status-right">{statusInfo}</span>
       </div>
 
@@ -9681,46 +9407,6 @@ export default function App(): JSX.Element {
       )}
 
       {/* 원격 사건(작성서류) 폴더 선택 */}
-      {projectFolderPick && (projectFolderPick.profile ? (
-        <RemoteFolderPicker
-          profile={projectFolderPick.profile}
-          title={projectFolderPick.kind === 'workspace' ? '프로젝트 작업 폴더 선택' : 'AI가 참고할 자료 폴더 선택'}
-          confirmLabel={projectFolderPick.kind === 'workspace' ? '이 폴더에서 작업' : '참고 자료로 연결'}
-          startPath={projectFolderPick.currentPath && parseRemoteUri(projectFolderPick.currentPath)?.profileId === projectFolderPick.profile.id ? parseRemoteUri(projectFolderPick.currentPath)?.path : undefined}
-          onSync={showSync}
-          onCancel={() => { projectFolderPick.resolve(null); setProjectFolderPick(null) }}
-          onPick={async (path) => {
-            const request = projectFolderPick
-            const profile = request.profile!
-            try {
-              if (!path.startsWith('/')) {
-                const result = await window.lt.ssh.listDir(profile, path)
-                if (!result.ok || !result.cwd?.startsWith('/')) throw new Error('원격 폴더의 전체 경로를 확인하지 못했습니다. 연결 상태와 경로를 확인해 주세요.')
-                path = result.cwd
-              }
-              request.resolve({ path: remoteUri(profile.id, path), name: pathLeaf(path) || profile.label })
-            } catch (error) { request.reject(error) }
-            finally { setProjectFolderPick((current) => current?.resolve === request.resolve ? null : current) }
-          }}
-        />
-      ) : (
-        <ConnMenu
-          title={projectFolderPick.kind === 'workspace' ? '프로젝트 작업 폴더 — 위치 선택' : '참고 자료 폴더 — 자료가 있는 위치'}
-          localDescription={projectFolderPick.kind === 'workspace' ? '이 컴퓨터에서 AI와 작업할 폴더 선택' : '이 컴퓨터에 있는 자료를 프로젝트에 연결'}
-          profiles={sshProfiles}
-          onLocal={() => {
-            const request = projectFolderPick
-            setProjectFolderPick(null)
-            void window.lt.dialog.pickFolder({
-              title: request.kind === 'workspace' ? '프로젝트 작업 폴더 선택' : 'AI가 참고할 자료 폴더 선택',
-              ...(request.currentPath && !request.currentPath.startsWith('ssh://') ? { defaultPath: request.currentPath } : {})
-            }).then(request.resolve, request.reject)
-          }}
-          onRemote={(profile) => setProjectFolderPick({ ...projectFolderPick, profile })}
-          onManage={() => { projectFolderPick.resolve(null); setProjectFolderPick(null); openSettings() }}
-          onClose={() => { projectFolderPick.resolve(null); setProjectFolderPick(null) }}
-        />
-      ))}
       {remotePick && (
         <RemoteFolderPicker
           profile={remotePick}
@@ -12178,8 +11864,18 @@ function htmlWithLocalBase(html: string, path: string): string {
     : tags + html
 }
 
-function HtmlView({ path, onAsk }: { path: string; onAsk: SelectionAskHandler }): JSX.Element {
+function HtmlView({ path, onAsk, scrollKey = path, initialScroll, onScrollPosition }: {
+  path: string
+  onAsk: SelectionAskHandler
+  scrollKey?: string
+  initialScroll?: DocScrollPosition
+  onScrollPosition?: (position: DocScrollPosition) => void
+}): JSX.Element {
   const remoteVersion = useRemoteFileVersion(path)
+  const frameRef = useRef<HTMLIFrameElement>(null)
+  const scrollPositionRef = useRef(initialScroll)
+  const onScrollPositionRef = useRef(onScrollPosition)
+  onScrollPositionRef.current = onScrollPosition
   const [selectionDocument, setSelectionDocument] = useState<Document | null>(null)
   const [mode, setMode] = useState<'render' | 'code'>('render')
   const [state, setState] = useState<{ loading: boolean; text: string; truncated: boolean; err: string }>({
@@ -12208,6 +11904,20 @@ function HtmlView({ path, onAsk }: { path: string; onAsk: SelectionAskHandler })
       alive = false
     }
   }, [path, remoteVersion])
+
+  useEffect(() => {
+    if (!selectionDocument) return
+    const saveScroll = (): void => {
+      if (frameRef.current?.contentDocument !== selectionDocument) return
+      const view = selectionDocument.defaultView
+      if (!view) return
+      const position = { key: scrollKey, top: view.scrollY, left: view.scrollX }
+      scrollPositionRef.current = position
+      onScrollPositionRef.current?.(position)
+    }
+    selectionDocument.addEventListener('scroll', saveScroll)
+    return () => selectionDocument.removeEventListener('scroll', saveScroll)
+  }, [selectionDocument, scrollKey])
 
   if (state.loading) return <div className="welcome"><p className="muted">불러오는 중…</p></div>
   if (state.err) return <div className="welcome"><p className="muted">열기 실패: {state.err}</p></div>
@@ -12248,12 +11958,23 @@ function HtmlView({ path, onAsk }: { path: string; onAsk: SelectionAskHandler })
         <span className="muted small">스크립트는 미리보기에서 실행되지 않습니다.</span>
       </div>
       <iframe
+        ref={frameRef}
         className="html-frame"
         title={fileNameFromPath(path)}
         sandbox="allow-same-origin"
         referrerPolicy="no-referrer"
         srcDoc={htmlWithLocalBase(state.text, path)}
-        onLoad={(event) => setSelectionDocument(event.currentTarget.contentDocument)}
+        onLoad={(event) => {
+          const frame = event.currentTarget
+          const position = scrollPositionRef.current
+          if (position?.key === scrollKey) frame.contentWindow?.scrollTo(position.left, position.top)
+          if (frame.contentWindow) {
+            const restored = { key: scrollKey, top: frame.contentWindow.scrollY, left: frame.contentWindow.scrollX }
+            scrollPositionRef.current = restored
+            onScrollPositionRef.current?.(restored)
+          }
+          setSelectionDocument(frame.contentDocument)
+        }}
       />
       {selectionDocument && <SelectionAsk onAsk={onAsk} selectionDocument={selectionDocument} />}
       {selectionDocument && <SelectionMenu onAsk={onAsk} selectionDocument={selectionDocument} />}

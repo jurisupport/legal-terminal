@@ -8,6 +8,7 @@ import {
   SESSION_SEARCH_RECENT_LIMIT
 } from './search/sessionSearch'
 import './CaseSidebar.css'
+import { recentSidebarTasks, type SessionVisit } from './sidebarNavigation'
 
 export interface SidebarTask {
   id: string
@@ -39,6 +40,8 @@ export interface SidebarCase {
 
 interface CaseSidebarProps {
   cases: SidebarCase[]
+  sessionVisits: SessionVisit[]
+  onReorderCase: (from: string, to: string) => void
   onOpenCase: (id: string) => void
   onOpenTask: (caseId: string, task: SidebarTask) => void
   onNewTask: (caseId: string) => void
@@ -70,10 +73,15 @@ function CaseGroup({
   onOpenTask,
   onNewTask,
   onManageCase,
-  loadSessions
-}: Pick<CaseSidebarProps, 'onOpenCase' | 'onOpenTask' | 'onNewTask' | 'onManageCase' | 'loadSessions'> & {
+  loadSessions,
+  onReorderCase,
+  previousCaseId,
+  nextCaseId
+}: Pick<CaseSidebarProps, 'onOpenCase' | 'onOpenTask' | 'onNewTask' | 'onManageCase' | 'loadSessions' | 'onReorderCase'> & {
   item: SidebarCase
   days: number
+  previousCaseId?: string
+  nextCaseId?: string
 }): JSX.Element {
   const listId = useId()
   const [expanded, setExpanded] = useState(false)
@@ -86,6 +94,7 @@ function CaseGroup({
   const [visibleCount, setVisibleCount] = useState(5)
   const [showOlder, setShowOlder] = useState(false)
   const [now, setNow] = useState(Date.now)
+  const [dragOver, setDragOver] = useState(false)
   const wasActive = useRef(item.active)
   const handledRefresh = useRef(0)
   const loader = useRef(loadSessions)
@@ -179,7 +188,7 @@ function CaseGroup({
   }
 
   return (
-    <section className={`case-sidebar-group${item.active ? ' active' : ''}`} data-case-id={item.id} data-open={item.open}>
+    <section className={`case-sidebar-group${item.active ? ' active' : ''}${dragOver ? ' drag-over' : ''}`} data-case-id={item.id} data-open={item.open}>
       <div className="case-sidebar-case-row">
         <button
           type="button"
@@ -194,8 +203,39 @@ function CaseGroup({
         <button
           type="button"
           className={`case-sidebar-case${item.active ? ' active' : ''}`}
-          title={[item.title, item.participants, item.court, item.division, item.status, item.subtitle].filter(Boolean).join('\n')}
+          title={[item.title, item.participants, item.court, item.division, item.status, item.subtitle, item.open ? '드래그 또는 Alt+↑/↓로 순서 변경' : undefined].filter(Boolean).join('\n')}
           aria-current={item.active ? 'page' : undefined}
+          draggable={item.open}
+          aria-keyshortcuts={item.open ? 'Alt+ArrowUp Alt+ArrowDown' : undefined}
+          onDragStart={(event) => {
+            if (!item.open) return
+            event.stopPropagation()
+            event.dataTransfer.setData('application/x-lt-case-tab', item.id)
+            event.dataTransfer.effectAllowed = 'move'
+          }}
+          onDragOver={(event) => {
+            if (!item.open || !event.dataTransfer.types.includes('application/x-lt-case-tab')) return
+            event.preventDefault()
+            event.stopPropagation()
+            event.dataTransfer.dropEffect = 'move'
+            setDragOver(true)
+          }}
+          onDragLeave={() => setDragOver(false)}
+          onDragEnd={() => setDragOver(false)}
+          onDrop={(event) => {
+            setDragOver(false)
+            if (!item.open || !event.dataTransfer.types.includes('application/x-lt-case-tab')) return
+            event.preventDefault()
+            event.stopPropagation()
+            onReorderCase(event.dataTransfer.getData('application/x-lt-case-tab'), item.id)
+          }}
+          onKeyDown={(event) => {
+            if (!item.open || !event.altKey || !['ArrowUp', 'ArrowDown'].includes(event.key)) return
+            event.preventDefault()
+            event.stopPropagation()
+            const target = event.key === 'ArrowUp' ? previousCaseId : nextCaseId
+            if (target) onReorderCase(item.id, target)
+          }}
           onClick={() => { setExpanded(true); onOpenCase(item.id) }}
           onContextMenu={item.open ? (event) => {
             event.preventDefault()
@@ -297,16 +337,20 @@ function CaseGroup({
   )
 }
 
-export default function CaseSidebar({ cases, onAddCase, attentionOnly, onAttentionOnlyChange, noticeCount, onNextAttention, ...callbacks }: CaseSidebarProps): JSX.Element {
+export default function CaseSidebar({ cases, sessionVisits, onAddCase, attentionOnly, onAttentionOnlyChange, noticeCount, onNextAttention, ...callbacks }: CaseSidebarProps): JSX.Element {
   const [days, setDays] = useState(readPeriod)
   const [visibleCases, setVisibleCases] = useState(6)
   const [search, setSearch] = useState('')
+  const [visibleSessions, setVisibleSessions] = useState(8)
   const orderedCases = cases
     .filter((item) => !attentionOnly || item.noticeCount > 0)
     .filter((item) => matchesSearch([item.title, item.participants, item.court, item.division, item.subtitle], search))
     .sort((a, b) => Number(b.open) - Number(a.open) ||
       (a.open && b.open ? (a.openOrder ?? 0) - (b.openOrder ?? 0) : b.updatedAt - a.updatedAt))
   const count = Math.max(visibleCases, orderedCases.filter((item) => item.open).length)
+  const recentTasks = recentSidebarTasks(cases, sessionVisits)
+    .filter(({ item, task }) => (!attentionOnly || item.noticeCount > 0) &&
+      matchesSearch([task.title, item.title, item.participants, item.court, item.division, item.subtitle], search))
 
   return (
     <nav id="case-sidebar" className="case-sidebar" aria-label="사건별 작업">
@@ -352,7 +396,9 @@ export default function CaseSidebar({ cases, onAddCase, attentionOnly, onAttenti
         </button>
       </div>
       <div className="case-sidebar-list">
-        {orderedCases.slice(0, count).map((item) => <CaseGroup key={`${item.id}:${item.historyKey ?? ''}`} item={item} days={days} {...callbacks} />)}
+        {orderedCases.slice(0, count).map((item, index) => <CaseGroup key={`${item.id}:${item.historyKey ?? ''}`} item={item} days={days}
+          previousCaseId={orderedCases[index - 1]?.open ? orderedCases[index - 1].id : undefined}
+          nextCaseId={orderedCases[index + 1]?.open ? orderedCases[index + 1].id : undefined} {...callbacks} />)}
         {orderedCases.length === 0 && <p className="case-sidebar-empty" role="status">{search.trim() ? (attentionOnly ? '확인이 필요한 사건 중 검색 결과가 없습니다.' : '검색 결과가 없습니다.') : attentionOnly ? '확인이 필요한 작업 없음' : '사건을 열면 최근 작업이 여기에 표시됩니다.'}</p>}
         {orderedCases.length > count && (
           <button type="button" className="case-sidebar-more-cases" onClick={() => setVisibleCases(count + 6)}>
@@ -360,6 +406,25 @@ export default function CaseSidebar({ cases, onAddCase, attentionOnly, onAttenti
           </button>
         )}
       </div>
+      <section className="case-sidebar-recent" aria-label="최근 세션">
+        <div className="case-sidebar-heading" title="마지막으로 열어본 순서">최근 세션</div>
+        <div className="case-sidebar-recent-list">
+          {recentTasks.slice(0, visibleSessions).map(({ item, task }) => (
+            <button type="button" key={`${item.id}:${task.id}`}
+              className={`case-sidebar-task case-sidebar-recent-task${task.active ? ' active' : ''}`}
+              title={`${task.title} | ${[item.title, item.participants].filter(Boolean).join(' · ')}`}
+              aria-current={task.active ? 'page' : undefined} disabled={item.unavailable}
+              onClick={() => callbacks.onOpenTask(item.id, task)}>
+              <span className="case-sidebar-task-title">{task.title}</span>
+              <span className="case-sidebar-task-divider" aria-hidden="true">|</span>
+              <span className="case-sidebar-task-case">{item.title}</span>
+            </button>
+          ))}
+          {recentTasks.length === 0 && <p className="case-sidebar-message">{search.trim() ? '검색 결과가 없습니다.' : '세션을 열면 여기에 표시됩니다.'}</p>}
+          {recentTasks.length > visibleSessions && <button type="button" className="case-sidebar-more-tasks"
+            onClick={() => setVisibleSessions((count) => count + 8)}>세션 더 보기</button>}
+        </div>
+      </section>
       <button type="button" className="case-sidebar-add-case" onClick={onAddCase}>
         <span aria-hidden="true">+</span> 사건 추가
       </button>

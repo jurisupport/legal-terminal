@@ -8,7 +8,6 @@ import { createRequire } from 'node:module'
 import { EventEmitter } from 'node:events'
 import vm from 'node:vm'
 import ts from 'typescript'
-import * as browserBridge from '../src/main/browserAgentBridge.ts'
 import * as managed from '../src/main/agent/agentMcp.ts'
 import * as projectMcp from '../src/main/agent/projectMcpConfig.ts'
 import * as executionLock from '../src/main/agent/agentExecutionLock.ts'
@@ -110,7 +109,6 @@ vm.runInNewContext(ts.transpileModule(source, { compilerOptions: { module: ts.Mo
       }
     }
     if (name === './projectMcpConfig') return projectMcp
-    if (name === '../browserAgentBridge') return browserBridge
     if (name === './agentMcp') return managed
     if (name === './agentExecutionLock') return executionLock
     if (name === './remoteAgentTransport') return { RemoteAgentTransport: class { constructor() { throw new Error('Project must not create durable remote transport') } }, probeRemoteAgentRun: () => { throw new Error('Project must not restore or replay durable runs') } }

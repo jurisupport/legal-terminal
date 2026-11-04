@@ -196,16 +196,7 @@ body {
   background: var(--bg);
   position: relative;
 }
-.case-management-nav {
-  display: flex;
-  flex-shrink: 0;
-  gap: 4px;
-  padding: 10px 16px;
-  border-bottom: 1px solid var(--border);
-  background: var(--bg-alt);
-}
-.case-management-nav button,
-.project-open-button, .general-chat-button {
+.general-chat-button {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -217,19 +208,9 @@ body {
   font: inherit;
   cursor: pointer;
 }
-.case-management-nav button[aria-pressed='true'],
-.project-open-button[aria-pressed='true'] {
-  color: var(--fg);
-  background: color-mix(in srgb, var(--accent) 22%, transparent);
-}
-.case-management-nav button:hover,
-.project-open-button:hover, .general-chat-button:hover { color: var(--fg); background: var(--bg-activity); }
-.case-management-nav button:focus-visible,
-.project-open-button:focus-visible, .general-chat-button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
-.project-open-button, .general-chat-button { flex-shrink: 0; margin: 0 8px 6px; }
-.shell.project-management > .work-left { grid-column: workleft-start / workright-end; }
-.shell.project-management > .work-right,
-.shell.project-management > .pane-resizer-work { display: none; }
+.general-chat-button:hover { color: var(--fg); background: var(--bg-activity); }
+.general-chat-button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.general-chat-button { flex-shrink: 0; margin: 0 8px 6px; }
 .work-left {
   grid-area: workleft;
   border-right: 1px solid var(--border);
