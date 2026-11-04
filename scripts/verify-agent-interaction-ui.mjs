@@ -140,7 +140,8 @@ async function checkInteraction({ root, temp, output, channels }) {
     send({ type: 'message:assistant_delta', messageId: 'reply', text: '검토할 자료를 확인했습니다.' })
     await wait("document.querySelector('.agent-status-text').textContent.includes('답변 작성 중')")
     send({ type: 'message:assistant_done', messageId: 'reply' })
-    question('narrow', true)
+    // Two questions stay oversized even when header actions are removed.
+    question('narrow', true, 2)
     w.setContentSize(900, 760)
     await wait('innerWidth === 900')
     check(await run("const p = document.querySelector('.agent-panel[data-visible=true]'); return p.scrollWidth <= p.clientWidth + 1"), 'narrow panels must not overflow')
@@ -154,6 +155,7 @@ async function checkInteraction({ root, temp, output, channels }) {
     await run("document.activeElement.click()")
     await wait("!document.querySelector('.agent-card.dialog.waiting')")
     check(answers[5].answers['어떤 범위로 검토할까요?'] === '핵심 쟁점 먼저, 전체 기록 검토', 'scrolling keeps narrow question choices and submit operable')
+    check(answers[5].answers['어떤 형식으로 정리할까요?'] === '핵심 쟁점 먼저, 전체 기록 검토', 'scrolling submits choices from the entire oversized card')
     send({ type: 'status', status: 'error' })
     await wait("!document.querySelector('.agent-status-line')")
     send({ type: 'message:user', messageId: 'progress-user', text: '관련 판례를 확인하고 검토 결과를 정리해 주세요.' })
