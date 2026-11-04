@@ -97,7 +97,7 @@ jobs:
       - name: Verify projects and unreleased desktop additions
         run: npm run verify:release-additions
 
-      - name: Verify browser tabs, inline media, and current workspace additions
+      - name: Verify browser removal, navigation, inline media, and workspace additions
         run: npm run verify:release-new-ui
 
       - name: Verify cross-computer handover
@@ -139,7 +139,6 @@ jobs:
             output/playwright/html-quote/**
             output/playwright/document-agent-memory/**
             output/playwright/inline-selection/**
-            output/playwright/browser/**
             output/playwright/agent-media/**
             output/playwright/agent-panel-width/**
             output/playwright/agent-interaction/**
@@ -210,7 +209,7 @@ jobs:
       - name: Verify projects and unreleased desktop additions
         run: npm run verify:release-additions
 
-      - name: Verify browser tabs, inline media, and current workspace additions
+      - name: Verify browser removal, navigation, inline media, and workspace additions
         run: npm run verify:release-new-ui
 
       - name: Verify restored Agent history
@@ -247,7 +246,6 @@ jobs:
             output/playwright/html-quote/**
             output/playwright/document-agent-memory/**
             output/playwright/inline-selection/**
-            output/playwright/browser/**
             output/playwright/agent-media/**
             output/playwright/agent-panel-width/**
             output/playwright/agent-interaction/**

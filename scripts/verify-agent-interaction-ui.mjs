@@ -59,7 +59,8 @@ async function checkInteraction({ root, temp, output, channels }) {
   const pause = () => new Promise(resolve => setTimeout(resolve, 60))
   const wait = async condition => {
     for (let i = 0; i < 120; i++) { if (await run(`return (${condition})`)) return; await pause() }
-    throw Error('Timed out: ' + condition)
+    const geometry = await run("return Object.fromEntries(['.agent-card.dialog.waiting', '.agent-timeline'].map(selector => { const e = document.querySelector(selector); const r = e?.getBoundingClientRect(); return [selector, r ? { top: r.top, bottom: r.bottom, height: r.height, scrollTop: e.scrollTop } : null] }))")
+    throw Error('Timed out: ' + condition + '\n' + JSON.stringify(geometry))
   }
   const check = (value, message) => { if (!value) throw Error(message) }
   const capture = async name => {
@@ -147,6 +148,12 @@ async function checkInteraction({ root, temp, output, channels }) {
     await wait("(() => { const r = document.querySelector('.agent-card.dialog.waiting').getBoundingClientRect(); const p = document.querySelector('.agent-timeline').getBoundingClientRect(); return r.bottom <= p.bottom + 1 && r.top >= p.top - 1 })()")
     check(await run("return document.querySelector('.agent-card.dialog.waiting .agent-option') === document.activeElement"), 'jump must focus the first choice')
     await capture('narrow-question')
+    check(await run("const card = document.querySelector('.agent-card.dialog.waiting'); return card.scrollHeight > card.clientHeight"), 'oversized questions scroll inside their visible card')
+    await run("const card = document.querySelector('.agent-card.dialog.waiting'); card.querySelectorAll('.agent-option').forEach(button => button.click()); card.querySelector('.agent-dialog-actions button').focus()")
+    await wait("(() => { const b = document.activeElement.getBoundingClientRect(); const r = document.querySelector('.agent-card.dialog.waiting').getBoundingClientRect(); return b.top >= r.top && b.bottom <= r.bottom })()")
+    await run("document.activeElement.click()")
+    await wait("!document.querySelector('.agent-card.dialog.waiting')")
+    check(answers[5].answers['어떤 범위로 검토할까요?'] === '핵심 쟁점 먼저, 전체 기록 검토', 'scrolling keeps narrow question choices and submit operable')
     send({ type: 'status', status: 'error' })
     await wait("!document.querySelector('.agent-status-line')")
     send({ type: 'message:user', messageId: 'progress-user', text: '관련 판례를 확인하고 검토 결과를 정리해 주세요.' })

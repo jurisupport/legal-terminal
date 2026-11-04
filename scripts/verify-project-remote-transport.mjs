@@ -168,22 +168,28 @@ try {
   assert.equal(fs.readdirSync(fixture).length, 0, 'canonical path checks never create a probe file')
 
   const baseline = new Map(['tcp connection', 'end', 'close', 'error'].map(event => [event, client.listenerCount(event)]))
+  const localUrl = `http://127.0.0.1:${httpPort}/project`
+  const disconnects = []
   const [first, second] = await Promise.all([
-    remote.rfsForwardLocalPort('fixture', httpPort), remote.rfsForwardLocalPort('fixture', httpPort)
+    remote.rfsForwardLocal('fixture', localUrl, () => disconnects.push('first')),
+    remote.rfsForwardLocal('fixture', localUrl, () => disconnects.push('second'))
   ])
+  const firstPort = Number(new URL(first.url).port), secondPort = Number(new URL(second.url).port)
+  assert.equal(new URL(first.url).pathname, '/project')
+  assert.equal(new URL(second.url).pathname, '/project')
   assert.equal(client.listenerCount('tcp connection'), baseline.get('tcp connection') + 1)
-  assert.equal(await request(first.port), 'echo:/project')
-  assert.equal(await request(second.port), 'echo:/project')
+  assert.equal(await request(firstPort), 'echo:/project')
+  assert.equal(await request(secondPort), 'echo:/project')
   for (const details of [
     { destIP: '0.0.0.0' }, { srcIP: '192.0.2.1' }, { destPort: 1 }, { srcPort: 0 }
   ]) {
     let rejected = 0
-    client.emit('tcp connection', { destIP: '127.0.0.1', srcIP: '127.0.0.1', srcPort: 1234, destPort: first.port, ...details },
+    client.emit('tcp connection', { destIP: '127.0.0.1', srcIP: '127.0.0.1', srcPort: 1234, destPort: firstPort, ...details },
       () => assert.fail('unexpected remote source/destination must not reach local service'), () => { rejected++ })
     assert.equal(rejected, 1)
   }
   const heldResponse = await new Promise((resolve, reject) => {
-    get({ hostname: '127.0.0.1', port: first.port, path: '/hold', agent: false }, response => {
+    get({ hostname: '127.0.0.1', port: firstPort, path: '/hold', agent: false }, response => {
       response.on('error', () => {})
       response.once('data', () => resolve(response))
     }).on('error', reject)
@@ -191,12 +197,11 @@ try {
   const heldClosed = new Promise(resolve => heldResponse.once('close', resolve))
   first.close(); first.close()
   await heldClosed
-  assert.equal(first.isAlive(), false)
-  assert.equal(second.isAlive(), true)
-  await eventually(() => !bindings.has(first.port))
-  assert.equal(await request(second.port), 'echo:/project', 'closing one tunnel must preserve another on the shared client')
+  assert.deepEqual(disconnects, [], 'explicit tunnel close does not report a connection failure')
+  await eventually(() => !bindings.has(firstPort))
+  assert.equal(await request(secondPort), 'echo:/project', 'closing one tunnel must preserve another on the shared client')
   remote.disposeRemote('fixture')
-  assert.equal(second.isAlive(), false)
+  assert.deepEqual(disconnects, ['second'], 'only the remaining tunnel reports a disconnect')
   await eventually(() => bindings.size === 0)
   for (const [event, count] of baseline) assert.equal(client.listenerCount(event), count, `listener leak: ${event}`)
 
@@ -204,12 +209,15 @@ try {
     const fake = new FakeClient()
     fake.on('error', () => {})
     connection = { client: fake, sftp }
-    const pending = remote.rfsForwardLocalPort('fixture', httpPort)
+    let disconnectCount = 0
+    const pending = remote.rfsForwardLocal('fixture', localUrl, () => disconnectCount++)
     await eventually(() => typeof fake.ready === 'function')
     fake.ready(null, 20000)
     const tunnel = await pending
     fake.emit(event, new Error('simulated disconnect'))
-    assert.equal(tunnel.isAlive(), false)
+    assert.equal(disconnectCount, 1)
+    tunnel.close()
+    assert.equal(disconnectCount, 1, 'close after disconnect does not duplicate notification')
     assert.equal(fake.listenerCount('tcp connection'), 0)
     assert.deepEqual(fake.cancelled, [['127.0.0.1', 20000]])
   }
@@ -217,19 +225,21 @@ try {
     const fake = new FakeClient()
     connection = { client: fake, sftp }
     fastTimeout = true
-    const pending = remote.rfsForwardLocalPort('fixture', httpPort)
+    const pending = remote.rfsForwardLocal('fixture', localUrl, () => assert.fail('unestablished tunnel must reject'))
     await assert.rejects(pending, /연결이 종료/)
     fastTimeout = false
     assert.equal(fake.listenerCount('tcp connection'), 0)
     fake.ready(null, 21000)
     assert.deepEqual(fake.cancelled, [['127.0.0.1', 21000]], 'late setup success must be unbound')
     fake.ready = undefined
-    const denied = remote.rfsForwardLocalPort('fixture', httpPort)
+    const denied = remote.rfsForwardLocal('fixture', localUrl, () => assert.fail('unestablished tunnel must reject'))
     await eventually(() => typeof fake.ready === 'function')
     fake.ready(new Error('forwarding denied'))
     await assert.rejects(denied, /forwarding denied/)
     assert.equal(fake.listenerCount('tcp connection'), 0)
-    for (const port of [0, -1, 65536, 1.5, NaN]) await assert.rejects(remote.rfsForwardLocalPort('fixture', port), /유효한 로컬 포트/)
+    for (const port of [0, -1, 65536, 1.5, NaN]) {
+      await assert.rejects(remote.rfsForwardLocal('fixture', `http://127.0.0.1:${port}/project`, () => {}))
+    }
   }
   await eventually(() => sockets.size === 0)
   console.log('verify-project-remote-transport: OK (portable POSIX/SFTP paths, Windows drive/UNC mapping, literal metacharacters, real SSH forwarding, concurrent tunnels, rejection, timeout, disconnect and cleanup)')

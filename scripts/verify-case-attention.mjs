@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import vm from 'node:vm'
 import ts from 'typescript'
+import { orderCaseTabs } from '../src/renderer/src/sidebarNavigation.ts'
 import { matchesSearch } from '../src/renderer/src/search/sessionSearch.ts'
 
 const source = readFileSync(new URL('../src/renderer/src/App.tsx', import.meta.url), 'utf8')
@@ -42,7 +43,7 @@ const state = {
 }
 const focus = []
 const context = {
-  ...state,
+  ...state, orderCaseTabs, caseOrder: [],
   docOnly: false, termOnly: false, documentAgentTabs: {},
   activeCaseTabIdRef: { current: state.activeCaseTabId }, unloadedSharedCasesRef: { current: new Set() },
   autoRestoreWorkspaceRef: { current: async () => {} },

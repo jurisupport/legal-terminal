@@ -48,6 +48,7 @@ const fixture = (createPromise = Promise.resolve({ ok: true })) => {
     codexPanelSlashCommandNames: new Set(['/compact', '/model', '/permissions']),
     claudeTerminalOnlySlashCommandNames: new Set(['/permissions', '/exit']),
     setError: (error) => errors.push(error),
+    sessionReady: false, setSessionReady: (ready) => { ctx.sessionReady = ready },
     setPendingHandoff: (update) => { ctx.inlineStateRef.current.pendingHandoff = update(ctx.inlineStateRef.current.pendingHandoff) },
     onInlineActions: (id, actions) => registrations.push({ id, actions }),
     window: { lt: { agent: {
@@ -80,6 +81,7 @@ fresh.api.create()
 assert.equal(fresh.creates(), 1, 'rerendering must not create a second session')
 creating.resolve({ ok: true })
 assert.equal((await waiting).ok, true)
+assert.equal(fresh.ctx.sessionReady, true, 'successful creation enables draft sending without replacing inline submission')
 assert.equal(fresh.sent[0].id, 'agent-1')
 assert.equal(fresh.sent[0].payload.text, request.text.trim())
 assert.equal(fresh.sent[0].payload.attachments.length, 1)
@@ -95,6 +97,7 @@ for (const result of [{ ok: false, error: '생성 실패' }, Promise.reject(new 
   assert.equal(response.ok, false)
   assert.match(response.error, /실패/)
   assert.equal(failed.sent.length, 0)
+  assert.equal(failed.ctx.sessionReady, false, 'failed creation must not enable automatic draft sending')
   assert.equal(failed.ctx.promptHistoryRef.current.length, 0)
 }
 for (const reason of ['로그인 필요', '로그인 진행 중', 'CLI 없음', '이전 할일 연결']) {

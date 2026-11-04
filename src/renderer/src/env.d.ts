@@ -1,7 +1,6 @@
 /// <reference types="vite/client" />
 import type { SharedUiOperation, SharedUiResult } from '../../shared/sharedUiState'
 import type { DictationBackup, DictationBackupQuery } from '../../shared/dictationRecovery'
-import type { BrowserApi } from '../../shared/browser'
 import type { ClaudeRemoteControlApi, RemoteControlConnection } from '../../shared/claudeRemoteControl'
 import type { CaseManagementState, CaseManagementPatch } from '../../shared/caseManagement'
 import type { RemotionPreviewOptions, RemotionPreviewSelection, RemotionPreviewResult } from '../../shared/remotionPreview'
@@ -151,8 +150,7 @@ export interface TerminalTabPayload {
 export interface DocumentTabPayload {
   id?: string
   title: string
-  kind?: 'markdown' | 'mdview' | 'file' | 'pdf' | 'image' | 'hwp' | 'docx' | 'csv' | 'settings' | 'hearing' | 'media' | 'browser'
-  browserAgentId?: string
+  kind?: 'markdown' | 'mdview' | 'file' | 'pdf' | 'image' | 'hwp' | 'docx' | 'csv' | 'settings' | 'hearing' | 'media'
   caseTabId?: string
   path?: string
   side?: 'left' | 'right'
@@ -837,7 +835,6 @@ export interface TodoTerminalResult {
 
 export interface LtApi {
   claudeRemoteControl: ClaudeRemoteControlApi
-  browser: BrowserApi
   remotion: {
     open(options: RemotionPreviewOptions): Promise<RemotionPreviewResult>
     close(sessionId: string): Promise<void>

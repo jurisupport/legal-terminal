@@ -157,11 +157,11 @@ interface AgentPanelProps {
   onStatus?: (status: AgentRunStatus) => void
   onFork?: () => void
   onAskBeside?: () => Promise<void>
+  onForkAndSend?: (handoff?: AgentProviderHandoff) => Promise<void>
   onProviderChange?: (provider: AgentProvider, handoff?: AgentProviderHandoff) => void
   onHandoffConsumed?: () => void
   onWorktreeFork?: () => void
   onOpenTerminal?: () => void
-  onOpenBrowser?: () => void
   onOpenDiff?: (request: AgentDiffOpenRequest) => void
   onOpenFile?: (path: string, title?: string) => void
   onOpenAttachmentSource?: (attachment: AgentAttachment) => void
@@ -180,6 +180,8 @@ export interface AgentAttachmentRequest {
 export interface AgentDraftState {
   input: string
   attachments: AgentAttachment[]
+  quote?: PendingAgentQuote | null
+  sendImmediately?: boolean
 }
 
 interface TimelineItem {
@@ -309,10 +311,6 @@ const emptyStateSuggestions: { label: string; prompt: string }[] = [
   {
     label: '반박 논점',
     prompt: '상대방의 최근 서면을 읽고 반박 가능한 논점과 뒷받침할 증거를 정리해줘.'
-  },
-  {
-    label: '다음 할 일',
-    prompt: '사건 진행 상황을 검토하고 다음 기일까지 준비할 일 목록을 만들어줘.'
   }
 ]
 
@@ -327,14 +325,12 @@ const generalSuggestions = [
   { label: '아이디어 정리', prompt: '생각을 정리하고 싶어. 어떤 주제인지 먼저 물어봐 줘.' }
 ]
 const folderSuggestions = [
-  { label: '폴더 내용 정리', prompt: '현재 폴더의 자료를 살펴보고 확인된 내용과 아직 확인할 내용을 정리해줘.' },
-  { label: '다음 작업', prompt: '현재 폴더에서 진행하던 작업과 다음 할 일을 정리해줘.' }
+  { label: '폴더 내용 정리', prompt: '현재 폴더의 자료를 살펴보고 확인된 내용과 아직 확인할 내용을 정리해줘.' }
 ]
 
 const projectSuggestions = [
   { label: '프로젝트 현황', prompt: '프로젝트의 목표와 메모, 연결된 사건과 폴더를 검토해 현재 상황을 요약해줘. 확인한 근거는 출처별로 표시하고 접근하지 못한 자료도 알려줘.' },
-  { label: '자료 비교·모순 확인', prompt: '프로젝트에 연결된 사건과 폴더의 자료를 비교해 공통 사실, 서로 다른 주장과 모순을 정리해줘. 각 항목의 근거 출처를 구분하고 확인하지 못한 부분도 밝혀줘.' },
-  { label: '다음 행동 정리', prompt: '프로젝트의 목표와 진행 상황을 바탕으로 다음 행동과 우선순위를 정리해줘. 사건과 자료 사이의 관계, 먼저 확인해야 할 내용을 출처와 함께 알려줘.' }
+  { label: '자료 비교·모순 확인', prompt: '프로젝트에 연결된 사건과 폴더의 자료를 비교해 공통 사실, 서로 다른 주장과 모순을 정리해줘. 각 항목의 근거 출처를 구분하고 확인하지 못한 부분도 밝혀줘.' }
 ]
 
 const isAgentPermissionMode = (value: unknown): value is AgentPermissionMode =>
@@ -1944,11 +1940,11 @@ function forkContextPrompt(transcript: SessionTranscript): string {
   ].join('\n')
 }
 
-// 프로바이더 전환용: 핸드셰이크 턴 없이 첫 지시에 합쳐 보내는 맥락 프리앰블.
+// 새 세션의 첫 지시에 이전 대화 맥락을 합쳐 별도 확인 턴을 생략한다.
 function handoffContextPreamble(transcriptBody: string): string {
   return [
-    '다음은 사용자가 이 탭에서 다른 AI 어시스턴트와 진행하던 대화 transcript입니다.',
-    '사용자가 어시스턴트를 전환했으므로, 이 대화의 맥락(사실관계, 요청, 이미 오간 답변과 제안)을 이어받으세요.',
+    '다음은 사용자가 이전 세션에서 진행하던 대화 transcript입니다.',
+    '새 독립 세션에서 이 대화의 맥락(사실관계, 요청, 이미 오간 답변과 제안)을 이어받으세요. 원본 세션은 수정하지 마세요.',
     'transcript는 배경 맥락입니다. 다시 요약하거나 이어받았다고 따로 알릴 필요 없이, 마지막 흐름을 아는 상태에서 아래 사용자 지시를 바로 수행하세요.',
     '',
     transcriptBody,
@@ -2014,11 +2010,11 @@ export default function AgentPanel({
   onStatus,
   onFork,
   onAskBeside,
+  onForkAndSend,
   onProviderChange,
   onHandoffConsumed,
   onWorktreeFork,
   onOpenTerminal,
-  onOpenBrowser,
   onOpenDiff,
   onOpenFile,
   onOpenAttachmentSource,
@@ -2035,11 +2031,14 @@ export default function AgentPanel({
   const taskTurnRunning = useRef(false)
   const [input, setInput] = useState(() => initialDraft?.input ?? '')
   const [dictationBusy, setDictationBusy] = useState(false)
-  const [quotedMessage, setQuotedMessage] = useState<PendingAgentQuote | null>(null)
+  const [quotedMessage, setQuotedMessage] = useState<PendingAgentQuote | null>(() => initialDraft?.quote ?? null)
   const [mode, setMode] = useState<AgentPermissionMode>(DEFAULT_AGENT_PERMISSION_MODE)
   const [status, setStatus] = useState<AgentPanelStatus>('idle')
   const [error, setError] = useState('')
   const [openingBeside, setOpeningBeside] = useState(false)
+  const [forking, setForking] = useState(false)
+  const [sessionReady, setSessionReady] = useState(false)
+  const autoSendDraftRef = useRef(initialDraft?.sendImmediately ?? false)
   const [slashIndex, setSlashIndex] = useState(0)
   const [slashCaret, setSlashCaret] = useState(() => initialDraft?.input?.length ?? 0)
   const [runtimeSlashCommands, setRuntimeSlashCommands] = useState<SlashCommand[]>([])
@@ -2225,8 +2224,8 @@ export default function AgentPanel({
   }, [onDraftChange])
 
   useEffect(() => {
-    onDraftChangeRef.current?.({ input, attachments })
-  }, [attachments, input])
+    onDraftChangeRef.current?.({ input, attachments, quote: quotedMessage })
+  }, [attachments, input, quotedMessage])
 
   useEffect(() => {
     if (clearDraftNonceRef.current === clearDraftNonce) return
@@ -2481,6 +2480,7 @@ export default function AgentPanel({
       })
       .then(async (result) => {
         if (!inlineSession.active) return { ok: false, error: 'Agent 대화가 변경되거나 닫혔습니다.' }
+        setSessionReady(result.ok)
         if (!result.ok) setError(result.error ?? 'Agent 세션을 만들 수 없습니다.')
         if (!result.ok || !forkFromSessionId || resumeSessionId) return result
         const transcript = await loadSessionTranscript(forkFromSessionId, ssh, { refresh: true }).catch(() => null)
@@ -3193,7 +3193,7 @@ export default function AgentPanel({
     }
   }, [id, onInlineActions])
 
-  const send = async (delivery?: AgentSendDelivery): Promise<void> => {
+  const send = async (delivery?: AgentSendDelivery, restoreOnFailure = false): Promise<void> => {
     const rawText = input.trim()
     const sendAttachments = attachments
     const commandName = rawText ? slashCommandName(rawText) : undefined
@@ -3336,8 +3336,12 @@ export default function AgentPanel({
       attachments: outgoingAttachments,
       permissionMode: nextMode,
       delivery: nextDelivery
-    })
+    }).catch((error) => ({ ok: false, error: error instanceof Error ? error.message : String(error) }))
     if (!result.ok) {
+      if (restoreOnFailure) {
+        setInput((current) => current ? `${input}\n\n${current}` : input)
+        setAttachments((current) => appendUniqueAttachments(sendAttachments, current))
+      }
       setError(result.error ?? 'Agent 요청을 보낼 수 없습니다.')
       setStatus('error')
       return
@@ -3348,6 +3352,12 @@ export default function AgentPanel({
       onHandoffConsumed?.()
     }
   }
+
+  useEffect(() => {
+    if (!autoSendDraftRef.current || !sessionReady || !canSubmit || (initialHandoff && !pendingHandoff)) return
+    autoSendDraftRef.current = false
+    void send('normal', true)
+  }, [sessionReady, canSubmit, initialHandoff, pendingHandoff])
 
   const promoteQueuedMessage = async (queueId: string): Promise<void> => {
     setError('')
@@ -3959,12 +3969,6 @@ export default function AgentPanel({
               }
             }}
           >{openingBeside ? '여는 중…' : '옆에서 물어보기'}</button>}
-          {onOpenBrowser && <button
-            type="button"
-            className="agent-browser-toggle"
-            title="작업 영역에서 브라우저 열기"
-            onClick={onOpenBrowser}
-          >브라우저</button>}
           {onFork && (
             <button
               className="agent-icon-btn"
@@ -5152,6 +5156,26 @@ export default function AgentPanel({
                 if (visible) focusPrompt(next.caret)
               }}
             />
+            {onForkAndSend && queuesNewInput && (
+              <button
+                type="button"
+                disabled={!canSubmit || forking}
+                title="작성한 질문과 첨부를 대화 맥락과 함께 새 에이전트 탭에서 바로 전송합니다"
+                onClick={async () => {
+                  setForking(true)
+                  setError('')
+                  try {
+                    await onForkAndSend(providerHandoffFromTimeline(items))
+                  } catch (error) {
+                    setError(error instanceof Error ? error.message : String(error))
+                  } finally {
+                    setForking(false)
+                  }
+                }}
+              >
+                <IconFork size={13} /> {forking ? '여는 중…' : '같은 맥락으로 질문'}
+              </button>
+            )}
             {queuesNewInput ? (
               <>
                 <button

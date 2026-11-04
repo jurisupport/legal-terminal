@@ -20,13 +20,12 @@ export function TodoHeaderBadge({ snapshot, onOpen }: { snapshot: TodoSnapshot; 
   </button>
 }
 
-export default function TodoSummary({ snapshot, onFilter, onGlobalWork, hearingSummary, hearingsLoading, hearingsError, upcomingHearings, hearingsComplete, onOpenCase }: {
+export default function TodoSummary({ snapshot, onFilter, hearingSummary, hearingsLoading, hearingsError, upcomingHearings, hearingsComplete, onOpenCase }: {
   snapshot: TodoSnapshot
   upcomingHearings?: JsUpcomingHearing[]
   hearingsComplete?: boolean
   onOpenCase?: (c: JsCase) => void
   onFilter?: (filter: TodoFilter) => void
-  onGlobalWork?: () => void
   hearingSummary?: { todayCount: number; weekCount: number; fetchedAt: string } | null
   hearingsLoading?: boolean
   hearingsError?: string
@@ -41,7 +40,7 @@ export default function TodoSummary({ snapshot, onFilter, onGlobalWork, hearingS
   ]
   const overdue = snapshot.todos ? filterTodos(snapshot.todos, 'overdue') : []
   return <section className="todo-summary" aria-label="오늘 업무 요약">
-    <div className="todo-summary-heading"><h2>오늘 요약</h2>{onGlobalWork && <button className="todo-primary" onClick={onGlobalWork}>AI와 전체 할일 정리</button>}</div>
+    <div className="todo-summary-heading"><h2>오늘 요약</h2></div>
     <div className="todo-summary-grid">{metrics.map(({label, value, filter}) => <button key={label} className="todo-metric" disabled={!filter || !onFilter || value === null} onClick={() => filter && onFilter?.(filter)}><span>{label}</span><strong>{value ?? '—'}</strong></button>)}</div>
     {hearingsError && <p className="dash-err">기일 조회 실패: {hearingsError}{hearingSummary ? ' · 이전 조회 결과입니다.' : ''}</p>}
     {hearingSummary && <p className="muted small">기일 조회 {new Date(hearingSummary.fetchedAt).toLocaleString('ko-KR', { timeZone: 'Asia/Seoul' })} (한국 시간)</p>}

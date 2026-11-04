@@ -122,9 +122,8 @@ function TodosDashboardContent({
   defaultOpenProfileId,
   onPickRecords,
   onBrief,
-  onManageTodos,
   onOpenEvidenceFile,
-  snapshot, initialCaseId, onStartTask, onAskNextAction, initialFilter = 'open', filterNonce = 0, onGlobalWork
+  snapshot, initialCaseId, onStartTask, onAskNextAction, initialFilter = 'open', filterNonce = 0
 }: {
   initialCaseId?: string
   onStartTask?: (todo: JsTodo) => void | Promise<void>
@@ -132,7 +131,6 @@ function TodosDashboardContent({
   snapshot: SharedTodoSnapshot
   initialFilter?: TodoFilter
   filterNonce?: number
-  onGlobalWork?: () => void
   nonce?: number
   onChanged?: () => void
   onOpenWorkspace?: (c: JsCase) => void
@@ -142,7 +140,6 @@ function TodosDashboardContent({
   defaultOpenProfileId?: string
   onPickRecords?: (c: JsCase) => void | Promise<void>
   onBrief?: (c: JsCase) => void
-  onManageTodos?: (todos: JsTodo[]) => void
   onOpenEvidenceFile?: (path: string, label?: string) => void | Promise<void>
 }): JSX.Element {
   const tokenReady = snapshot.hasToken
@@ -326,9 +323,6 @@ function TodosDashboardContent({
         <button className="dash-btn todo-refresh" title="검색" onClick={() => load()}>
           검색
         </button>
-        {onManageTodos && <button className="todo-primary" title={`표시된 ${filteredTodos.length}개 할일을 오른쪽 에이전트로 전달`} onClick={() => onManageTodos(filteredTodos)} disabled={!filteredTodos.length || !!busyId}>
-          오른쪽 에이전트로 정리
-        </button>}
       </div>
 
       {caseFilter && <p className="todo-filter-count">선택한 사건의 업무 <button className="todo-small" onClick={() => setCaseFilter('')}>모든 사건 보기</button></p>}
@@ -379,7 +373,7 @@ function TodosDashboardContent({
       </div>}
 
       {['open', 'pending', 'in_progress'].includes(status) && <div className="todo-filters" aria-label="열린 할일 필터">{FILTERS.map((option) => <button key={option.value} className={`todo-tab ${filter === option.value ? 'on' : ''}`} aria-pressed={filter === option.value} onClick={() => setFilter(option.value)}>{option.label}</button>)}</div>}
-      <div className="todo-filter-count">표시 {filteredTodos.length}건 {onGlobalWork && <button className="todo-small" onClick={onGlobalWork}>전체 할일 정리 시작</button>}</div>
+      <div className="todo-filter-count">표시 {filteredTodos.length}건</div>
       <TodoSnapshotState snapshot={snapshot} />
       {tokenReady === false && (
         <p className="dash-err pad">오류: {err || 'JuriSupport 연결이 필요합니다.'}</p>
@@ -468,7 +462,6 @@ function TodosDashboardContent({
               <TodoDetails todo={todo} parentTitle={snapshot.todos?.find((parent) => parent.id === todo.parentId)?.title} capabilities={capabilities} onOpenEvidenceFile={onOpenEvidenceFile} onChanged={changed} onComplete={() => completeTodo(todo)} />
               <div className="todo-actions" onClick={(e) => e.stopPropagation()}>
                 {onAskNextAction && <button className="todo-small" onClick={() => onAskNextAction(todo)}>AI에게 다음 행동 제안받기</button>}
-                {onManageTodos && <button className="todo-small" onClick={() => onManageTodos([todo])}>에이전트로 정리</button>}
                 {todo.status === 'completed' || todo.status === 'done' ? (
                   <button className="todo-small" onClick={() => reopenTodo(todo)}>
                     예정으로

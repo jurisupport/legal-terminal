@@ -224,6 +224,8 @@ function runApp({ root, temp, screenshotDir, provider, mode, remote }) {
     assert.equal(layout.divider, false, 'no divider splits the general conversation')
     assert.ok(Math.abs(layout.right - layout.edge) < 2, 'conversation reaches the work-area edge')
     assert.equal(layout.overflow, false, 'unified conversation fits the window')
+    assert.equal(await evaluate(`document.querySelectorAll('.agent-browser-toggle, .browser-workspace, .agent-browser').length`), 0, 'removed browser UI is absent in local and remote conversations')
+    assert.equal(await evaluate(`typeof window.lt.browser`), 'undefined', 'removed browser API is not exposed')
     return layout
   }
   const checkScope = (agent, profile = phoneProfile) => {
@@ -251,13 +253,13 @@ function runApp({ root, temp, screenshotDir, provider, mode, remote }) {
         await new Promise(resolve => setTimeout(resolve, 120))
         assert.equal(agents.size, 0)
       })
-      if (mode === 'navigate') await evaluate(`document.querySelector('.project-open-button').click()`)
+      if (mode === 'navigate') await evaluate(`document.querySelector('.activity-item[title="할일"]').click()`)
       releaseSettings()
       if (mode === 'navigate') {
         await test('does not replace a view chosen while startup is still loading', async () => {
           await wait(() => evaluate(`!document.querySelector('.general-chat-button').disabled`), 'general chat directory ready')
           await evaluate(`new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))`)
-          assert.equal(await evaluate(`!!document.querySelector('.project-dashboard')`), true)
+          assert.equal(await evaluate(`!!document.querySelector('.todo-dash')`), true)
           assert.equal(agents.size, 0, 'background preparation must not steal the selected view')
         })
       } else if (remote) {
@@ -457,6 +459,7 @@ function runApp({ root, temp, screenshotDir, provider, mode, remote }) {
           const caseAgent = [...agents.values()].find(agent => agent.cwd === caseDir)
           assert.equal(caseAgent.workspaceContext?.kind, 'folder', 'unlinked local case keeps its folder scope')
           assert.equal(caseAgent.provider, provider)
+          assert.equal(await evaluate(`document.querySelectorAll('.agent-browser-toggle, .browser-workspace, .agent-browser').length`), 0, 'case agents no longer offer a browser')
           assert.equal(await evaluate(`!!window.visibleComposer().closest('.agent-panel').querySelector('[aria-label="음성 입력 시작"]')`), true, 'case agents also offer dictation')
           assert.equal(await evaluate(`document.querySelector('.shell').classList.contains('general-chat')`), false, 'case work keeps the document/agent split')
           const before = agents.size

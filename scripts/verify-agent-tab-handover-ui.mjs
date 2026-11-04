@@ -279,7 +279,9 @@ function runApp({ root, temp, appMain, syncBaseline }) {
       snapshot.workspaceOpen = false
       await evaluate(`window.dispatchEvent(new Event('focus'))`)
       releaseCloseObservation()
-      await wait(() => evaluate(`!document.body.innerText.includes('폰에서 열린 대화')`))
+      await wait(() => evaluate(`![...document.querySelectorAll('.tab')].some(tab => tab.innerText.includes('폰에서 열린 대화'))`))
+      assert.ok(calls.some(call => call.channel === 'agent:close' && call.args[0] === 'mobile-agent'),
+        'remote case closure releases the live conversation even while recent history retains its title')
       assert.equal(snapshot.workspaceOpen, false, 'background flush preserves the other computer’s case close')
       assert.equal(await evaluate(`document.querySelectorAll('.case-sidebar-group[data-open="true"]').length`), 1)
       snapshot.workspaceOpen = true

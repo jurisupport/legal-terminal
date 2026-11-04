@@ -39,7 +39,7 @@ function runApp({ root, temp, closeMode }) {
     ]
   }
   let blockedSaveWindow = null
-  let failNewWindow = false
+  let failSend = closeMode === 'fork-failure'
   app.setPath('userData', require('node:path').join(temp, closeMode))
   const home = require('node:path').join(temp, closeMode, 'home')
   require('node:fs').mkdirSync(home, { recursive: true })
@@ -63,7 +63,6 @@ function runApp({ root, temp, closeMode }) {
     const windowId = BrowserWindow.fromWebContents(event.sender)?.id
     calls.push({ channel, windowId, args, at: Date.now() })
     if (real.has(channel)) {
-      if (channel === 'window:new' && failNewWindow) throw Error('새 창 열기 실패 검증')
       if (channel === 'tabs:beginDrag') draggedAgentId = args[0]?.kind === 'terminal' && args[0].tab?.kind === 'agent' ? args[0].tab.id : undefined
       const windowCount = windows.length
       const result = await handler(event, ...args)
@@ -109,9 +108,16 @@ function runApp({ root, temp, closeMode }) {
       return { ok: true }
     }
     if (channel === 'agent:create') { sessions.set(args[0].id, args[0]); return { ok: true } }
-    if (channel === 'agent:snapshot') return { ok: true, session: sessions.get(args[0]) }
+    if (channel === 'agent:snapshot') {
+      if (isFork) event.sender.send('agent:event', { type: 'auth:status', sessionId: args[0], state: 'authenticated' })
+      return { ok: true, session: sessions.get(args[0]) }
+    }
     if (channel === 'agent:models') return { ok: true, models: [] }
-    if (channel === 'agent:send') return { ok: true }
+    if (channel === 'fs:stat') return { ok: true, isDir: false }
+    if (channel === 'agent:send') {
+      if (failSend) { failSend = false; return { ok: false, error: '포크 질문 전송 실패 검증' } }
+      return { ok: true }
+    }
     if (channel === 'agent:close') return { ok: true }
     throw Error(`Unexpected IPC: ${channel}`)
   })
@@ -174,68 +180,100 @@ function runApp({ root, temp, closeMode }) {
       await wait('initial source workspace save', () => saves(source).length > 0)
 
       if (isFork) {
-        const button = `document.querySelector('.agent-panel[data-visible="true"] .agent-ask-beside')`
-        const input = `document.querySelector('.agent-panel[data-visible="true"] textarea')`
+        const panel = `document.querySelector('.agent-panel[data-visible="true"]')`
+        const button = `[...${panel}.querySelectorAll('button')].find(button => button.textContent.includes('같은 맥락으로 질문'))`
+        const input = `${panel}.querySelector('textarea')`
+        const pending = `${panel}.querySelectorAll('.agent-attachments.pending .agent-attachment-pending')`
         const sourceTitles = await tabTitles(source)
-        await evaluate(source, `(() => {
+        const draft = '새 탭에서 바로 물어볼 질문\n작성해 둔 자세한 내용'
+        const writeDraft = (text) => evaluate(source, `(() => {
           const input = ${input};
-          Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set.call(input, '원본에 남길 입력');
+          Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set.call(input, ${JSON.stringify(text)});
           input.dispatchEvent(new Event('input', { bubbles: true }));
         })()`)
+        const attach = async () => {
+          await evaluate(source, `(() => {
+            const dataTransfer = new DataTransfer();
+            dataTransfer.setData('application/x-lt-path', ${JSON.stringify(`ssh://${profile.id}${cwd}/참고자료.md`)});
+            ${panel}.dispatchEvent(new DragEvent('drop', { bubbles: true, cancelable: true, dataTransfer }));
+          })()`)
+          await wait('draft attachment', () => evaluate(source, `${pending}.length === 1`))
+        }
+        const selectSource = () => evaluate(source,
+          `[...document.querySelectorAll('.tab')].find(tab => tab.querySelector('.tab-title')?.textContent.replace(/^Agent · /, '') === '이동할 대화').click()`)
+        const sends = () => calls.filter(call => call.channel === 'agent:send')
+        if (provider === 'codex') {
+          source.webContents.send('agent:event', { type: 'message:user', sessionId: 'moved-agent', messageId: 'restored-user', text: '진행 중인 원본 질문' })
+          source.webContents.send('agent:event', { type: 'message:assistant_delta', sessionId: 'moved-agent', messageId: 'restored-answer', text: '원본 답변 맥락' })
+          source.webContents.send('agent:event', { type: 'message:assistant_done', sessionId: 'moved-agent', messageId: 'restored-answer' })
+        }
+        await wait('source transcript loaded', () => evaluate(source, `${panel}.innerText.includes('원본 답변 맥락')`))
+        assert.equal(await evaluate(source, `Boolean(${button})`), false, 'fork-and-send is only shown while the source is busy')
         source.webContents.send('agent:event', { type: 'status', sessionId: 'moved-agent', status: 'working' })
-        await wait('source is working', () => evaluate(source, `!!document.querySelector('.tab.working')`))
-        await evaluate(source, `${button}.click()`)
-        await wait('fork window', () => windows.length === 2)
-        const detached = windows.at(-1)
-        await wait('fork context sent', () => calls.some(call => call.channel === 'agent:send' && call.windowId === detached.id))
-        const payload = calls.find(call => call.channel === 'window:new').args[0]
-        const fork = payload.tabs[0].tab
-        assert.equal(payload.termOnly, true)
-        assert.notEqual(fork.id, 'moved-agent')
-        assert.equal(fork.resumeSessionId, undefined)
-        assert.equal(fork.forkFromSessionId, 'moved-session')
-        assert.equal(fork.agentProvider, provider)
-        assert.equal(fork.cwd, cwd)
-        assert.equal(fork.ssh.host, profile.host)
-        assert.equal(await evaluate(detached, 'location.hash'), '#termOnly')
-        assert.deepEqual(await tabTitles(detached), ['이동할 대화 · 옆에서 물어보기'])
-        assert.deepEqual(await tabTitles(source), sourceTitles)
-        assert.equal(await evaluate(source, `${input}.value`), '원본에 남길 입력')
-        assert.equal(await evaluate(detached, `${input}.value`), '')
-        assert.equal(await evaluate(source, `!!document.querySelector('.tab.active.working')`), true)
-        const send = calls.find(call => call.channel === 'agent:send' && call.windowId === detached.id)
-        assert.equal(send.args[0].sessionId, fork.id)
-        assert.match(send.args[0].input.text, /진행 중인 원본 질문/)
-        assert.match(send.args[0].input.text, /원본 답변 맥락/)
-        assert.match(send.args[0].input.text, /아직 새 작업을 시작하지 말고/)
-        assert.equal(calls.some(call => call.channel === 'agent:send' && call.windowId === source.id), false)
-        await wait('fork saves only itself', () => saves(detached).length > 0)
-        assert.deepEqual(saves(detached).at(-1).args[0].snapshot.terminals.map(tab => tab.id), [fork.id])
-        if (process.env.AGENT_FORK_SCREENSHOT_DIR) {
+        source.webContents.send('agent:event', { type: 'message:assistant_delta', sessionId: 'moved-agent', messageId: 'live-reply', text: '아직 저장되지 않은 진행 중 답변' })
+        await wait('source is working', () => evaluate(source, `!!document.querySelector('.tab.working') && Boolean(${button})`))
+        assert.equal(await evaluate(source, `${button}.disabled`), true, 'empty draft cannot create and send a fork')
+        await writeDraft(draft)
+        await attach()
+        await wait('fork question enabled', () => evaluate(source, `!${button}.disabled`))
+        const screenshot = async (name) => {
+          if (!process.env.AGENT_FORK_SCREENSHOT_DIR) return
           const dir = process.env.AGENT_FORK_SCREENSHOT_DIR
           require('node:fs').mkdirSync(dir, { recursive: true })
-          for (const [name, win] of [['source', source], ['fork', detached]]) {
-            require('node:fs').writeFileSync(require('node:path').join(dir, `${name}.png`), (await win.webContents.capturePage()).toPNG())
-          }
+          require('node:fs').writeFileSync(require('node:path').join(dir, `${closeMode}-${name}.png`), (await source.webContents.capturePage()).toPNG())
         }
-        detached.close()
-        await wait('fork closes', () => detached.isDestroyed())
-        assert.equal(calls.some(call => call.channel === 'agent:close' && call.args[0] === 'moved-agent'), false)
-        assert.equal(source.isDestroyed(), false)
-        failNewWindow = true
+        await screenshot('source')
         await evaluate(source, `${button}.click()`)
-        await wait('window failure shown and retry enabled', () => evaluate(source,
-          `document.body.innerText.includes('새 창 열기 실패 검증') && !${button}.disabled`))
-        assert.deepEqual(await tabTitles(source), sourceTitles)
-        assert.equal(await evaluate(source, `${input}.value`), '원본에 남길 입력')
-        failNewWindow = false
-        await evaluate(source, `document.querySelector('.agent-panel[data-visible="true"] button[aria-label="Fork"]').click()`)
-        await wait('existing fork stays in source window', async () => (await tabTitles(source)).includes('이동할 대화 · fork'))
-        await wait('existing fork receives context', () => calls.some(call => call.channel === 'agent:send' && call.windowId === source.id))
-        assert.equal(windows.length, 2, 'the original Fork action does not open another window')
-        assert.equal(await evaluate(source, `${input}.value`), '원본에 남길 입력', 'the original Fork action still transfers its draft')
+        await wait('fork question sent', () => sends().length === 1)
+        const send = sends()[0]
+        const fork = sessions.get(send.args[0].sessionId)
+        assert.ok(fork)
+        assert.notEqual(fork.id, 'moved-agent')
+        assert.equal(fork.resumeSessionId, undefined)
+        assert.equal(fork.provider, provider)
+        assert.equal(fork.cwd, cwd)
+        assert.equal(fork.ssh.host, profile.host)
+        assert.equal(send.windowId, source.id)
+        assert.equal(send.args[0].input.delivery, 'normal')
+        for (const text of ['진행 중인 원본 질문', '원본 답변 맥락', '아직 저장되지 않은 진행 중 답변', draft]) {
+          assert.ok(send.args[0].input.text.includes(text), `fork request includes ${text}`)
+        }
+        assert.doesNotMatch(send.args[0].input.text, /아직 새 작업을 시작하지 말고/)
+        assert.equal(send.args[0].input.attachments.length, 1)
+        assert.equal(send.args[0].input.attachments[0].path, `${cwd}/참고자료.md`)
+        assert.equal(windows.length, 1)
+        assert.equal(calls.some(call => call.channel === 'window:new'), false)
+        assert.deepEqual(await tabTitles(source), [...sourceTitles, '이동할 대화 · fork'])
+        assert.equal(await evaluate(source, `document.querySelector('.tab.active .tab-title').textContent.includes('fork')`), true)
+        if (closeMode === 'fork-failure') {
+          await wait('failed send restores draft and attachment', () => evaluate(source,
+            `${panel}.innerText.includes('포크 질문 전송 실패 검증') && ${input}.value === ${JSON.stringify(draft)} && ${pending}.length === 1`))
+          await evaluate(source, `${panel}.querySelector('.agent-send-btn').click()`)
+          await wait('retry sends in same fork', () => sends().length === 2)
+          assert.deepEqual(sends()[1].args[0], send.args[0], 'retry retains context, question and attachment')
+        }
+        await wait('sent fork draft clears', () => evaluate(source, `${input}.value === '' && ${pending}.length === 0`))
+        await screenshot('fork')
+        await selectSource()
+        assert.equal(await evaluate(source, `${input}.value`), '', 'the source draft moves instead of duplicating')
+        assert.equal(await evaluate(source, `${pending}.length`), 0)
+        assert.equal(await evaluate(source, `!!document.querySelector('.tab.active.working')`), true)
+        assert.equal(calls.some(call => ['agent:interrupt', 'agent:close'].includes(call.channel) && call.args[0] === 'moved-agent'), false)
+        assert.equal(sends().some(call => call.args[0].sessionId === 'moved-agent'), false)
+
+        const sendCount = sends().length
+        await writeDraft('일반 Fork에서 이어서 쓸 입력')
+        await attach()
+        await evaluate(source, `${panel}.querySelector('button[aria-label="Fork"]').click()`)
+        await wait('original Fork primes context', () => sends().length === sendCount + 1)
+        assert.equal(windows.length, 1)
+        assert.equal(await evaluate(source, `${input}.value`), '일반 Fork에서 이어서 쓸 입력')
+        assert.equal(await evaluate(source, `${pending}.length`), 1)
+        assert.match(sends().at(-1).args[0].input.text, /진행 중인 원본 질문/)
+        assert.match(sends().at(-1).args[0].input.text, /아직 새 작업을 시작하지 말고/)
+        assert.ok(!sends().at(-1).args[0].input.text.includes('일반 Fork에서 이어서 쓸 입력'))
         assert.deepEqual(errors, [])
-        console.log(`PASS: ${provider} side question preserves context, running source and draft; failure handling and original Fork still work`)
+        console.log(`PASS: ${provider} fork sends draft, attachment and live context once in a new tab; source keeps running; original Fork preserves draft${closeMode === 'fork-failure' ? '; failed send restores draft for retry' : ''}`)
         app.exit(0)
         return
       }
@@ -291,7 +329,7 @@ function runApp({ root, temp, closeMode }) {
 const env = { ...process.env }
 delete env.ELECTRON_RUN_AS_NODE
 try {
-  for (const closeMode of ['native', 'tab', 'fork', 'fork-codex']) {
+  for (const closeMode of ['native', 'tab', 'fork', 'fork-codex', 'fork-failure']) {
     const entry = path.join(temp, `${closeMode}.cjs`)
     await fs.writeFile(entry, `(${runApp.toString()})(${JSON.stringify({ root, temp, closeMode })})`)
     const code = await new Promise((resolve, reject) => {

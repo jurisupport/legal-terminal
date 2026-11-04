@@ -466,7 +466,9 @@ class TableWidget extends WidgetType {
     wrap.addEventListener('focusout', (ev) => {
       if (resizing) return
       if (wrap.contains(ev.relatedTarget as Node)) return
-      applyAll(readModel(), widths)
+      const next = readModel()
+      // Selecting text to ask Claude must not replace the table when focus leaves it.
+      if (JSON.stringify(next) !== JSON.stringify(model)) applyAll(next, widths)
     })
 
     const bar = document.createElement('div')

@@ -107,7 +107,16 @@ function runApp({ root, temp, screenshot }) {
       ? args[0].cwd === '/cases/phone-only' ? phoneSnapshot : remoteSnapshot
       : snapshots.find((s) => s.currentCase.drafts === args[0].cwd &&
         (!args[0].caseId || s.currentCase.meta?.jsId === args[0].caseId)) } }
-    if (channel === 'workspace:autoSave') return { ok: true }
+    if (channel === 'workspace:autoSave') {
+      const { location, snapshot } = args[0]
+      if (!location.ssh) {
+        const index = snapshots.findIndex((saved) => saved.currentCase.drafts === location.cwd &&
+          (saved.currentCase.meta?.jsId ?? '') === (location.caseId ?? ''))
+        if (index < 0) snapshots.push(structuredClone(snapshot))
+        else snapshots[index] = structuredClone(snapshot)
+      }
+      return { ok: true }
+    }
     if (channel === 'workspace:sharedUiRead' || channel === 'workspace:sharedUiApply') {
       const host = `${args[0].user}@${args[0].host}:${args[0].port ?? 22}`
       const state = uiStates.get(host) ?? sharedUiModule.exports.emptySharedUiState()
@@ -139,6 +148,8 @@ function runApp({ root, temp, screenshot }) {
   }
   const group = (title) => `[...document.querySelectorAll('.case-sidebar-group')].find(el => el.querySelector('.case-sidebar-case')?.textContent.includes(${JSON.stringify(title)}))`
   const clickText = (title, text) => evaluate(`[...${group(title)}.querySelectorAll('button')].find(el => el.textContent.includes(${JSON.stringify(text)})).click()`)
+  const openCaseOrder = () => evaluate(`[...document.querySelectorAll('.case-sidebar-group[data-open="true"]')].map(el => el.dataset.caseId)`)
+  const recentTask = (title) => `[...document.querySelectorAll('.case-sidebar-recent-task')].find(el => el.querySelector('.case-sidebar-task-title')?.textContent === ${JSON.stringify(title)})`
   const searchCases = (query) => evaluate(`{
     const input = document.querySelector('.case-sidebar-search');
     Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(input, ${JSON.stringify(query)});
@@ -277,6 +288,51 @@ function runApp({ root, temp, screenshot }) {
       await evaluate(`${group('이서연')}.querySelector('.case-sidebar-new-task').click()`)
       await wait(() => [...agents.values()].some((agent) => agent.cwd === '/cases/lee' && agent.id !== 'agent-1'))
       assert.equal(calls.some((call) => call.channel === 'agent:send'), false, 'navigation does not submit prompts')
+      const fixedCaseOrder = await openCaseOrder()
+      const leeCaseId = await evaluate(`${group('이서연')}.dataset.caseId`)
+      const kimCaseId = await evaluate(`${group('김민수')}.dataset.caseId`)
+      const leeTaskId = await evaluate(`[...document.querySelectorAll('.term-pane')].find(el => el.getClientRects().length)?.dataset.termId`)
+      await evaluate(`${group('김민수')}.querySelector('.case-sidebar-case').click()`)
+      await wait(() => evaluate(`document.querySelector('.case-sidebar-group.active')?.dataset.caseId === ${JSON.stringify(kimCaseId)}`))
+      assert.deepEqual(await openCaseOrder(), fixedCaseOrder, 'selecting a case keeps the case tab order fixed')
+      await wait(() => evaluate(`!!${recentTask('증거목록 검토')}`))
+      assert.equal(await evaluate(`${recentTask('증거목록 검토')}.textContent.includes('|') && ${recentTask('증거목록 검토')}.querySelector('.case-sidebar-task-case').textContent.includes('2026가단12345')`), true,
+        'recent rows show session title followed by case information')
+      assert.equal(await evaluate(`!!document.querySelector('.case-sidebar-recent') && !!(document.querySelector('.case-sidebar-group').compareDocumentPosition(document.querySelector('.case-sidebar-recent')) & Node.DOCUMENT_POSITION_FOLLOWING)`), true,
+        'recent sessions appear below the case tabs')
+      await evaluate(`${group('이서연')}.querySelector('.case-sidebar-case').click()`)
+      await wait(() => evaluate(`document.querySelector('.case-sidebar-group.active')?.dataset.caseId === ${JSON.stringify(leeCaseId)}`))
+      const agentsBeforeRecent = agents.size
+      await evaluate(`${recentTask('증거목록 검토')}.click()`)
+      await wait(() => evaluate(`document.querySelector('.case-sidebar-group.active')?.dataset.caseId === ${JSON.stringify(kimCaseId)}`))
+      assert.equal(await evaluate(`document.querySelector('.case-sidebar-recent-task .case-sidebar-task-title').textContent`), '증거목록 검토',
+        'selecting a recent session moves that session to the top')
+      assert.equal(await evaluate(`[...document.querySelectorAll('.term-pane')].find(el => el.getClientRects().length)?.dataset.termId`), resumed.id,
+        'a recent session opens its corresponding conversation')
+      assert.equal(agents.size, agentsBeforeRecent, 'recent navigation reuses an open agent')
+      assert.deepEqual(await openCaseOrder(), fixedCaseOrder, 'recent session navigation does not reorder case tabs')
+      await evaluate(`{
+        const source = ${group('이서연')}.querySelector('.case-sidebar-case');
+        const target = document.querySelector('.case-sidebar-group[data-open="true"] .case-sidebar-case');
+        const dataTransfer = new DataTransfer();
+        source.dispatchEvent(new DragEvent('dragstart', { bubbles: true, dataTransfer }));
+        if (!dataTransfer.types.includes('application/x-lt-case-tab')) throw Error('Case drag must identify its own payload');
+        const rect = target.getBoundingClientRect();
+        target.dispatchEvent(new DragEvent('dragover', { bubbles: true, cancelable: true, dataTransfer, clientY: rect.top + 1 }));
+        target.dispatchEvent(new DragEvent('drop', { bubbles: true, cancelable: true, dataTransfer, clientY: rect.top + 1 }));
+        source.dispatchEvent(new DragEvent('dragend', { bubbles: true, dataTransfer }));
+      }`)
+      const draggedCaseOrder = [leeCaseId, ...fixedCaseOrder.filter((id) => id !== leeCaseId)]
+      assert.deepEqual(await openCaseOrder(), draggedCaseOrder, 'dragging a case changes its position')
+      assert.deepEqual(await evaluate(`JSON.parse(localStorage.getItem('lt:case-tab-order'))`), draggedCaseOrder,
+        'dragged case order is saved for the next launch')
+      await evaluate(`${group('이서연')}.querySelector('.case-sidebar-case').dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', altKey: true, bubbles: true }))`)
+      assert.deepEqual(await openCaseOrder(), [draggedCaseOrder[1], draggedCaseOrder[0], ...draggedCaseOrder.slice(2)],
+        'Alt+ArrowDown provides keyboard case reordering')
+      await evaluate(`${group('이서연')}.querySelector('.case-sidebar-case').dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowUp', altKey: true, bubbles: true }))`)
+      assert.deepEqual(await openCaseOrder(), draggedCaseOrder, 'Alt+ArrowUp restores the previous case position')
+      await evaluate(`${group('이서연')}.querySelector('.case-sidebar-case').click()`)
+      await wait(() => evaluate(`[...document.querySelectorAll('.term-pane')].find(el => el.getClientRects().length)?.dataset.termId === ${JSON.stringify(leeTaskId)}`))
       await evaluate(`[...document.querySelectorAll('.side-view-switch button')].find(el => el.textContent.includes('파일')).click()`)
       await wait(() => evaluate(`!!document.querySelector('.tree')`))
       const selectedTask = await evaluate(`[...document.querySelectorAll('.term-pane')].find(el => el.getClientRects().length)?.dataset.termId`)
@@ -291,6 +347,7 @@ function runApp({ root, temp, screenshot }) {
       await wait(() => evaluate(`!!document.querySelector('.side-col > .sidebar')`))
       await evaluate(`document.querySelector('.case-sidebar-trigger').click()`)
       await wait(() => evaluate(`!!document.querySelector('.case-sidebar')`))
+      assert.deepEqual(await openCaseOrder(), draggedCaseOrder, 'manual case order survives sidebar remount')
       await evaluate(`document.querySelector('.case-sidebar-trigger').click()`)
       assert.equal(await evaluate(`document.querySelectorAll('#case-sidebar').length === 1 && !document.querySelector('.case-tabs-flyout')`), true, 'repeated case navigation keeps one sidebar visible')
       await evaluate(`document.querySelector('.activity-item[title^="탐색기 표시"]').click()`)
@@ -317,6 +374,8 @@ function runApp({ root, temp, screenshot }) {
       await evaluate(`document.querySelector('.shell').style.setProperty('--side-pane-width', '160px')`)
       assert.equal(await evaluate(`document.querySelector('.case-sidebar').scrollWidth <= document.querySelector('.side-col').clientWidth`), true, 'minimum width does not overflow')
       assert.equal(await evaluate(`document.querySelector('.case-sidebar-search').getBoundingClientRect().right <= document.querySelector('.side-col').getBoundingClientRect().right`), true, 'search field fits the minimum sidebar width')
+      assert.equal(await evaluate(`[...document.querySelectorAll('.case-sidebar-recent-task')].every(el => el.getBoundingClientRect().right <= document.querySelector('.side-col').getBoundingClientRect().right && el.scrollWidth <= el.clientWidth)`), true,
+        'recent session names and case information fit the minimum sidebar width')
       await evaluate(`document.querySelector('.shell').style.setProperty('--side-pane-width', '272px')`)
       await clickText('김민수', '증거목록 검토')
       await evaluate('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))')
@@ -425,8 +484,49 @@ function runApp({ root, temp, screenshot }) {
       await searchCases('등록 사건 유지')
       assert.equal(await evaluate(`document.querySelector('.case-sidebar-group.active')?.dataset.caseId`), registeredId,
         'returning from files keeps the original case selected through repeated shared refreshes')
+      const savedCaseOrder = await evaluate(`JSON.parse(localStorage.getItem('lt:case-tab-order'))`)
+      const savedVisits = await evaluate(`JSON.parse(localStorage.getItem('lt:session-visits'))`)
+      const savedEvidenceVisit = savedVisits.find((visit) => visit.task.sessionId === 'past-session-0')
+      assert.ok(savedEvidenceVisit, 'the previously viewed history session has a saved visit')
+      const reloaded = new Promise((resolve) => win.webContents.once('did-finish-load', resolve))
+      win.webContents.reload()
+      await reloaded
+      await wait(() => evaluate(`!!document.querySelector('.case-sidebar-trigger')`))
+      if (!await evaluate(`!!document.querySelector('.case-sidebar')`)) await evaluate(`document.querySelector('.case-sidebar-trigger').click()`)
+      await wait(() => evaluate(`!!${group('김민수')} && !!${group('이서연')}`))
+      assert.deepEqual(await evaluate(`JSON.parse(localStorage.getItem('lt:case-tab-order'))`), savedCaseOrder,
+        'saved manual order survives a full renderer reload')
+      await wait(() => evaluate(`!!${recentTask('증거목록 검토')}`))
+      assert.equal(await evaluate(`JSON.parse(localStorage.getItem('lt:session-visits')).find(visit => visit.task.sessionId === 'past-session-0')?.openedAt`), savedEvidenceVisit.openedAt,
+        'reload retains the saved visit time without treating discovery as a session selection')
+      assert.equal(await evaluate(`${recentTask('증거목록 검토')}.querySelector('.case-sidebar-task-case').textContent.includes('2026가단12345')`), true,
+        'a saved recent history session renders before opening its case after reload')
+      await evaluate(`${group('김민수')}.querySelector('.case-sidebar-case').click()`)
+      await wait(() => evaluate(`document.querySelector('.case-sidebar-group.active')?.dataset.caseId === ${JSON.stringify(kimCaseId)}`))
+      assert.equal(await evaluate(`!!document.querySelector('[data-term-id="agent-0"]')`), false, 'reload does not reopen an agent closed before saving')
+      await evaluate(`${group('이서연')}.querySelector('.case-sidebar-case').click()`)
+      await wait(() => evaluate(`document.querySelector('.case-sidebar-group.active')?.dataset.caseId === ${JSON.stringify(leeCaseId)}`))
+      await wait(() => evaluate(`[...document.querySelectorAll('.term-pane')].some(el => el.getClientRects().length)`))
+      const restoredLeeAgentId = await evaluate(`[...document.querySelectorAll('.term-pane')].find(el => el.getClientRects().length)?.dataset.termId`)
+      assert.deepEqual((await openCaseOrder()).filter((id) => id === kimCaseId || id === leeCaseId), savedCaseOrder.filter((id) => id === kimCaseId || id === leeCaseId),
+        'reopened cases honor saved ordering rather than opening order after reload')
+      await evaluate(`${recentTask('증거목록 검토')}.click()`)
+      await wait(() => evaluate(`document.querySelector('.case-sidebar-group.active')?.dataset.caseId === ${JSON.stringify(kimCaseId)}`))
+      await wait(async () => {
+        const activeId = await evaluate(`[...document.querySelectorAll('.term-pane')].find(el => el.getClientRects().length)?.dataset.termId`)
+        return agents.get(activeId)?.resumeSessionId === 'past-session-0'
+      })
+      assert.equal(await evaluate(`document.querySelector('.case-sidebar-recent-task .case-sidebar-task-title').textContent`), '증거목록 검토',
+        'a saved recent session resumes and becomes most recent after reload')
+      const recentOrderBeforeStatus = await evaluate(`[...document.querySelectorAll('.case-sidebar-recent-task')].map(el => el.title)`)
+      win.webContents.send('agent:event', { type: 'status', sessionId: restoredLeeAgentId, status: 'working' })
+      await wait(() => evaluate(`${group('이서연')}.querySelector('.case-sidebar-case-status')?.textContent.includes('작업 중')`))
+      assert.deepEqual(await evaluate(`[...document.querySelectorAll('.case-sidebar-recent-task')].map(el => el.title)`), recentOrderBeforeStatus,
+        'background agent status updates do not reorder recent sessions')
+      win.webContents.send('agent:event', { type: 'status', sessionId: restoredLeeAgentId, status: 'idle' })
+      await wait(() => evaluate(`!${group('이서연')}.querySelector('.case-sidebar-case-status')?.textContent.includes('작업 중')`))
       assert.deepEqual(errors, [])
-      console.log('case sidebar UI: case/party/folder search, hidden history search, attention filter, IME/Escape, lazy startup, pagination, retry and SSH resume isolation OK')
+      console.log('case sidebar UI: fixed case order, drag/keyboard reorder, reload persistence, recent session resume, background status stability, narrow layout, search, attention filter, IME/Escape, lazy startup, pagination, retry and SSH resume isolation OK')
       console.log(`Screenshot: ${screenshot}`)
       app.exit(0)
     } catch (error) {

@@ -4,7 +4,6 @@ import { EventEmitter } from 'node:events'
 import { createRequire } from 'node:module'
 import { runInNewContext } from 'node:vm'
 import ts from 'typescript'
-import * as browser from '../src/main/browserAgentBridge.ts'
 import * as managed from '../src/main/agent/agentMcp.ts'
 import * as project from '../src/main/agent/projectMcpConfig.ts'
 import * as execution from '../src/main/agent/agentExecutionLock.ts'
@@ -23,7 +22,7 @@ class FakeProcess extends EventEmitter {
       queueMicrotask(() => {
         if (message.type === 'control_request') {
           const response = message.request.subtype === 'mcp_status'
-            ? { mcpServers: [{ name: browser.BROWSER_MCP, status: 'connected' }] } : { errors: {} }
+            ? { mcpServers: [{ name: managed.MANAGED_MCP, status: 'connected' }] } : { errors: {} }
           this.stdout.emit('data', Buffer.from(JSON.stringify({ type: 'control_response', response: {
             subtype: 'success', request_id: message.request_id, response
           } }) + '\n'))
@@ -50,7 +49,6 @@ export const check = { sessions, requestUserDialog, requestPermission, handleRem
     } }
     if (name === '../jurisupport') return { onAgentMcpAccountChange() {}, agentMcpAccountEpoch: () => 1 }
     if (name === '../sessions') return { readSessionTokenUsage: async () => undefined, rememberSessionMeta: async () => {} }
-    if (name === '../browserAgentBridge') return { ...browser, getBrowserAgentConnection: async () => undefined }
     if (name === './agentMcp') return managed
     if (name === './projectMcpConfig') return project
     if (name === './agentExecutionLock') return execution
@@ -174,7 +172,7 @@ assert.equal(legacyPackets[0].response.response.behavior, 'allow')
 for (const withMcp of [false, true]) {
   const s = session(`remote-init-${withMcp}`, 'ssh'), controller = new AbortController()
   s.running = controller
-  if (withMcp) s.browserMcp = { url: 'http://127.0.0.1:1234/mcp', token: 'synthetic', location: 'remote' }
+  if (withMcp) s.managedMcp = { token: 'synthetic', epoch: 1, tools: ['list_tasks', 'get_task'] }
   await check.runRemoteAgentMessage(s, '검토해 주세요.', controller)
   const packets = launches.at(-1).packets
   assert.equal(packets[0].request.subtype, 'initialize')
