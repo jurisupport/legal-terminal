@@ -71,6 +71,20 @@ try {
   const backup = await api.loadWorkspaceSnapshot(saved.entry.id)
   assert.equal(backup.snapshot.docs.length, 1, 'local manual backup still retains documents')
 
+  for (const ssh of [location.ssh, undefined]) {
+    await writeFile(saved.path, '')
+    const recovered = await api.loadAutomaticWorkspace({ ...location, ssh })
+    assert.equal(recovered.ok, true, 'valid shared snapshot recovers a corrupt local backup')
+    assert.equal(recovered.local.ok, false)
+    assert.equal(recovered.remote.snapshot.terminals[0].id, 'pc')
+    assert.equal(await readFile(saved.path, 'utf8'), '', 'restore does not overwrite damaged evidence')
+  }
+  const sharedText = await readFile(file, 'utf8')
+  await rm(file)
+  assert.equal((await api.loadAutomaticWorkspace(location)).ok, false, 'no shared snapshot cannot mask local corruption')
+  await writeFile(file, sharedText)
+  await api.saveWorkspaceSnapshot(backup.snapshot)
+
   const phone = { ...term('mobile'), originDevice: 'android' }
   await writeFile(file, JSON.stringify({ ...published, terminals: [...published.terminals, phone] }))
   await api.saveAutomaticWorkspace(snapshot([term('pc')]), location)

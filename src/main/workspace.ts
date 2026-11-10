@@ -1011,10 +1011,10 @@ async function loadAutomaticWorkspaceNow(
     if (shared.snapshot) shared.snapshot = workspaceForWindow(shared.snapshot, observerId)
     if (observe && shared.ok && shared.snapshot) knownSharedWorkspaces.set(sharedLocationKey(location, observerId), shared.snapshot)
     return {
-      ok: local.ok && shared.ok,
+      ok: shared.ok && (local.ok || !!shared.snapshot),
       local,
       remote: shared,
-      error: local.error || shared.error
+      error: shared.error || (!shared.snapshot ? local.error : undefined)
     }
   }
   const remote = await loadScopedWorkspace(
@@ -1023,10 +1023,10 @@ async function loadAutomaticWorkspaceNow(
   if (remote.snapshot) remote.snapshot = workspaceForWindow(remote.snapshot, observerId)
   if (observe && remote.ok && remote.snapshot) knownSharedWorkspaces.set(sharedLocationKey(location, observerId), remote.snapshot)
   return {
-    ok: local.ok && remote.ok,
+    ok: remote.ok && (local.ok || !!remote.snapshot),
     local,
     remote,
-    error: local.error || remote.error
+    error: remote.error || (!remote.snapshot ? local.error : undefined)
   }
 }
 
