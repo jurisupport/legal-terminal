@@ -147,7 +147,10 @@ try {
   assert.equal(mismatch.ok, false)
   assert.equal(mismatch.local.snapshot, undefined)
   await fs.writeFile(savedA.path, '{broken')
-  assert.equal((await api.loadAutomaticWorkspace({ ...location, caseId: 'A' })).ok, false, 'corrupt exact files must not silently fall back')
+  const recovered = await api.loadAutomaticWorkspace({ ...location, caseId: 'A' })
+  assert.equal(recovered.ok, true, 'corrupt local JSON can recover from a validated shared snapshot')
+  assert.equal(recovered.local.invalidJson, true)
+  assertSnapshot(recovered.remote.snapshot, 'A', true)
 
   // SSH uses the same scope separation and legacy guard without touching real hosts.
   const sshLocation = { cwd: '/remote/same-folder', profileId: 'ssh-1', ssh: { host: 'synthetic' } }

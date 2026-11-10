@@ -46,6 +46,7 @@ export interface WorkspaceSaveResult {
 
 export interface WorkspaceLoadResult {
   ok: boolean
+  invalidJson?: boolean
   path?: string
   snapshot?: WorkspaceSnapshot | null
   entry?: WorkspaceEntry
@@ -724,7 +725,7 @@ export async function loadWorkspaceSnapshot(
   } catch (e) {
     const code = (e as NodeJS.ErrnoException).code
     if (code === 'ENOENT') return { ok: true, path: filePath, snapshot: null }
-    return { ok: false, path: filePath, error: String(e) }
+    return { ok: false, path: filePath, error: String(e), invalidJson: e instanceof SyntaxError }
   }
 }
 
@@ -1011,10 +1012,10 @@ async function loadAutomaticWorkspaceNow(
     if (shared.snapshot) shared.snapshot = workspaceForWindow(shared.snapshot, observerId)
     if (observe && shared.ok && shared.snapshot) knownSharedWorkspaces.set(sharedLocationKey(location, observerId), shared.snapshot)
     return {
-      ok: shared.ok && (local.ok || !!shared.snapshot),
+      ok: shared.ok && (local.ok || (local.invalidJson === true && !!shared.snapshot)),
       local,
       remote: shared,
-      error: shared.error || (!shared.snapshot ? local.error : undefined)
+      error: shared.error || (local.invalidJson && shared.snapshot ? undefined : local.error)
     }
   }
   const remote = await loadScopedWorkspace(
@@ -1023,10 +1024,10 @@ async function loadAutomaticWorkspaceNow(
   if (remote.snapshot) remote.snapshot = workspaceForWindow(remote.snapshot, observerId)
   if (observe && remote.ok && remote.snapshot) knownSharedWorkspaces.set(sharedLocationKey(location, observerId), remote.snapshot)
   return {
-    ok: remote.ok && (local.ok || !!remote.snapshot),
+    ok: remote.ok && (local.ok || (local.invalidJson === true && !!remote.snapshot)),
     local,
     remote,
-    error: remote.error || (!remote.snapshot ? local.error : undefined)
+    error: remote.error || (local.invalidJson && remote.snapshot ? undefined : local.error)
   }
 }
 
