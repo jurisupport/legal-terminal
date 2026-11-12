@@ -303,7 +303,46 @@ closeTab(
   },
   [first, middle, last]
 )
-assert.equal(active, last.id, 'closing an agent must still activate its same-case neighbor')
+assert.equal(active, first.id, 'closing a document selects the preceding visible document')
+
+const workSelection = loadHandlers(['docSide', 'termSide', 'docKey', 'termKeyOf',
+  'workKeysForSide', 'nextWorkKeyAfterClose'])
+for (const side of ['left', 'right']) {
+  for (const kind of ['pdf', 'hwp', 'hwpx', 'mdview', 'markdown', 'media']) {
+    const docs = [
+      { id: 'before', kind, side },
+      { id: 'closing', kind, side },
+      { id: 'opposite', kind, side: side === 'left' ? 'right' : 'left' },
+      { id: 'after', kind, side }
+    ]
+    const terms = [{ id: 'agent', side }]
+    for (const [remainingIds, expected] of [
+      [['before', 'closing', 'opposite', 'after'], 'doc:before'],
+      [['before', 'closing', 'opposite'], 'doc:before'],
+      [['closing', 'opposite', 'after'], 'doc:after'],
+      [['closing', 'opposite'], 'terminal:agent']
+    ]) {
+      const visible = docs.filter((doc) => remainingIds.includes(doc.id))
+      const keys = workSelection.workKeysForSide(visible, terms, side)
+      assert.equal(workSelection.nextWorkKeyAfterClose(keys, 'doc:closing'), expected,
+        `${kind}/${side}: prefer a document on the same side before an agent`)
+      let selected = 'closing'
+      closeTab(visible, 'closing', selected, (id) => { selected = id }, visible.filter((doc) => doc.side === side))
+      assert.equal(selected, expected.startsWith('doc:') ? expected.slice(4) : '')
+    }
+  }
+}
+assert.equal(workSelection.nextWorkKeyAfterClose(['doc:closing'], 'doc:closing'), '')
+assert.equal(workSelection.nextWorkKeyAfterClose(['terminal:a', 'terminal:b', 'terminal:c'], 'terminal:b'), 'terminal:c',
+  'agent closing retains its existing selection order')
+const focusCalls = []
+const focusAfterClose = loadHandlers(['parseWorkKey', 'activateWorkKeyAfterClose'], {
+  useCallback: (fn) => fn, setActiveWork: () => {}, setActiveDoc: () => {},
+  focusWorkTargetSoon: (...args) => focusCalls.push(args)
+})
+focusAfterClose.activateWorkKeyAfterClose('left', 'doc:before')
+assert.deepEqual(focusCalls, [['left', 'doc:before', true]],
+  'closing explicitly focuses the selected document even if focus remains inside its pane')
 
 for (const scenario of ['active', 'active-middle', 'active-end', 'empty-neighbor', 'last', 'background', 'cancel-dirty', 'cancel-working', 'switch-during-save', 'remove-neighbor-during-save',
   'remote-idle', 'remote-project', 'remote-todo', 'remote-dirty', 'remote-working', 'remote-question', 'remote-draft', 'remote-attachment', 'remote-inline']) {

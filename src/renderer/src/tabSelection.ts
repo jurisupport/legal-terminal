@@ -5,7 +5,12 @@ export function closeTab<T extends { id: string }>(
   setActive: (id: string) => void,
   visibleTabs: readonly T[]
 ): T[] {
-  return closeTabs(tabs, new Set([id]), activeId, setActive, visibleTabs)
+  if (id === activeId) {
+    const idx = visibleTabs.findIndex((tab) => tab.id === id)
+    const next = visibleTabs[idx - 1] ?? visibleTabs[idx + 1]
+    setActive(next?.id ?? '')
+  }
+  return tabs.filter((tab) => tab.id !== id)
 }
 
 export function closeTabs<T extends { id: string }>(

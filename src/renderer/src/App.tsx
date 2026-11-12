@@ -468,6 +468,11 @@ const nextWorkKeyAfterClose = (
   closedKey: WorkTabKey
 ): WorkTabKey | '' => {
   const idx = keys.findIndex((key) => key === closedKey)
+  if (closedKey.startsWith('doc:')) {
+    const nextDoc = keys.slice(0, Math.max(idx, 0)).reverse().find((key) => key.startsWith('doc:')) ??
+      keys.slice(idx + 1).find((key) => key !== closedKey && key.startsWith('doc:'))
+    if (nextDoc) return nextDoc
+  }
   const next = keys.filter((key) => key !== closedKey)
   if (next.length === 0) return ''
   return next[Math.min(idx < 0 ? 0 : idx, next.length - 1)]
@@ -2086,7 +2091,7 @@ export default function App(): JSX.Element {
       const parsed = parseWorkKey(key)
       if (parsed?.kind === 'doc') {
         setActiveDoc(parsed.id)
-        focusWorkTargetSoon(side, key)
+        focusWorkTargetSoon(side, key, true)
         return
       }
       if (parsed?.kind === 'terminal') {
@@ -2433,7 +2438,7 @@ export default function App(): JSX.Element {
       delete n[id]
       return n
     })
-    setDocTabs((tabs) => closeTab(tabs, id, activeDoc, setActiveDoc, visibleDocTabs))
+    setDocTabs((tabs) => closeTab(tabs, id, activeDoc, setActiveDoc, visibleDocTabs.filter((doc) => docSide(doc) === side)))
     if (nextKey !== undefined) activateWorkKeyAfterClose(side, nextKey)
     return true
   }
