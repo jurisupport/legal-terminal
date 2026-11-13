@@ -305,6 +305,7 @@ function runApp({ root, temp, screenshot }) {
       const agentsBeforeRecent = agents.size
       await evaluate(`${recentTask('증거목록 검토')}.click()`)
       await wait(() => evaluate(`document.querySelector('.case-sidebar-group.active')?.dataset.caseId === ${JSON.stringify(kimCaseId)}`))
+      await wait(() => evaluate(`document.querySelector('.case-sidebar-recent-task .case-sidebar-task-title')?.textContent === '증거목록 검토'`))
       assert.equal(await evaluate(`document.querySelector('.case-sidebar-recent-task .case-sidebar-task-title').textContent`), '증거목록 검토',
         'selecting a recent session moves that session to the top')
       assert.equal(await evaluate(`[...document.querySelectorAll('.term-pane')].find(el => el.getClientRects().length)?.dataset.termId`), resumed.id,
@@ -516,6 +517,7 @@ function runApp({ root, temp, screenshot }) {
         const activeId = await evaluate(`[...document.querySelectorAll('.term-pane')].find(el => el.getClientRects().length)?.dataset.termId`)
         return agents.get(activeId)?.resumeSessionId === 'past-session-0'
       })
+      await wait(() => evaluate(`document.querySelector('.case-sidebar-recent-task .case-sidebar-task-title')?.textContent === '증거목록 검토'`))
       assert.equal(await evaluate(`document.querySelector('.case-sidebar-recent-task .case-sidebar-task-title').textContent`), '증거목록 검토',
         'a saved recent session resumes and becomes most recent after reload')
       const recentOrderBeforeStatus = await evaluate(`[...document.querySelectorAll('.case-sidebar-recent-task')].map(el => el.title)`)

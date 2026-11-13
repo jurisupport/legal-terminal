@@ -296,6 +296,8 @@ try {
     autoRestoreDoneRef: { current: new Set() }, autoRestoreInFlightRef: { current: new Map() },
     autoSaveEligibleRef: { current: new Set() }, todoAccountGeneration: { current: 0 }, caseTabsRef: { current: [{ id: 'case' }] },
     termTabsRef: { current: [term('live-pc', 'pc')] }, activeCaseTabIdRef: { current: 'case' },
+    sharedUiCase: () => undefined,
+    setWorkspaceSyncError: (message) => { throw new Error(message) },
     caseIdForTerm: () => 'case', rebaseRemoteWorkspace: (s) => s,
     agentTabsOnly: shared.agentTabsOnly, isAgentTabClosed: shared.isAgentTabClosed, mergeWorkspaceSessions,
     pendingWorkspaceReopensRef: { current: new Map() }, pendingAgentClosesRef: { current: new Map() }, hasLocalTermWork: () => false,
