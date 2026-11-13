@@ -14,6 +14,8 @@ import {
   type ReactNode
 } from 'react'
 import Terminal from './terminal/Terminal'
+import NotificationHistory from './NotificationHistory'
+import { NOTIFICATION_HISTORY_KEY, limitNotificationHistory, notificationEventId, readNotificationHistory, writeNotificationHistory, readNotificationOutbox, saveNotificationOperation, removeNotificationOperation, type NotificationEntry } from './notificationHistoryStore'
 import CaseSidebar, { type SidebarCase, type SidebarTask } from './CaseSidebar'
 import AgentPanel, {
   DiffPreview,
@@ -4277,13 +4279,39 @@ export default function App(): JSX.Element {
 
   // 질문/완료 팝업(토스트). 질문 대기는 사용자 행동이 필요하므로 처리할 때까지 유지, 완료만 자동 소멸.
   const toastSeq = useRef(0)
-  const pushToast = (termId: string, status: 'done' | 'question'): void => {
-    const t = termTabs.find((x) => x.id === termId)
+  const updateNotificationHistory = (entries: NotificationEntry[]): void => {
+    let next = limitNotificationHistory(entries)
+    try {
+      next = writeNotificationHistory(localStorage, next, notificationHistoryRef.current)
+      setNotificationHistoryError('')
+    } catch { setNotificationHistoryError('알림을 이 기기에 저장하지 못했습니다. 저장 공간을 확인해 주세요.') }
+    notificationHistoryRef.current = next
+    setNotificationHistory(next)
+  }
+  const recordNotification = (
+    notice: { termId: string; title: string; status: 'done' | 'question' | 'synced'; count?: number },
+    tab?: CaseWorkspaceTab,
+    run?: { runId: string; sequence: number }
+  ): void => {
+    const profiles = [...new Map(sshProfiles.map((profile) => [workspaceHostKey(profile), profile])).values()]
+    const defaultProfile = profiles.find((profile) => profile.id === caseOpenProfileId(caseOpenTarget)) ?? (profiles.length === 1 ? profiles[0] : undefined)
+    const host = workspaceHostKey(tab?.ssh ?? defaultProfile)
+    const caseKey = tab ? sharedUiCaseKey(tab) : undefined
+    const id = run && caseKey ? notificationEventId(caseKey, notice.termId, run, notice.status) : newId()
+    if (notificationHistoryRef.current.some((entry) => entry.host === host && entry.id === id)) return
+    const entry = { ...notice, id, createdAt: Date.now(), caseKey }
+    updateNotificationHistory([{ ...entry, host }, ...notificationHistoryRef.current])
+    if (host !== 'local') enqueueSharedUiOperation(host, { id, type: 'notification', entry })
+  }
+  const pushToast = (termId: string, status: 'done' | 'question', title?: string, fromShared?: { tab: CaseWorkspaceTab; activity: SharedUiActivity; recorded: boolean }): void => {
+    const t = termTabsRef.current.find((x) => x.id === termId)
     const key = ++toastSeq.current
-    setToasts((ts) => [
-      ...ts.filter((x) => x.termId !== termId),
-      { key, termId, title: t?.title ?? '세션', status }
-    ])
+    const notice = { key, termId, title: title ?? t?.title ?? '세션', status }
+    if (!fromShared?.recorded) {
+      const tab = fromShared?.tab ?? (t ? sharedUiCase(caseIdForTerm(t)) : undefined)
+      recordNotification({ title: notice.title, status, termId: t ? sharedUiActivityId(t) : termId }, tab, fromShared?.activity ?? sharedUiRunsRef.current.get(termId))
+    }
+    setToasts((ts) => [...ts.filter((x) => x.termId !== termId), notice])
     if (status === 'done') {
       setTimeout(() => setToasts((ts) => ts.filter((x) => x.key !== key)), 12000)
     }
@@ -4292,8 +4320,9 @@ export default function App(): JSX.Element {
     setToasts((ts) => ts.filter((x) => x.termId !== termId))
   const dismissToast = (key: number): void => setToasts((ts) => ts.filter((x) => x.key !== key))
 
-  const pushSyncedTabsToast = (count: number): void => {
+  const pushSyncedTabsToast = (count: number, tab?: CaseWorkspaceTab): void => {
     const key = ++toastSeq.current
+    recordNotification({ termId: '', title: `새 탭 ${count}개를 가져왔습니다`, status: 'synced', count }, tab)
     setToasts((current) => {
       const total = count + (current.find((toast) => toast.status === 'synced')?.count ?? 0)
       return [...current.filter((toast) => toast.status !== 'synced'), {
@@ -5613,7 +5642,7 @@ export default function App(): JSX.Element {
             )
             autoSaveEligibleRef.current.add(id)
             if (refresh && observedWorkspaceHostsRef.current.has(workspaceHostKey(source.ssh))) {
-              pushSyncedTabsToast(added.length)
+              pushSyncedTabsToast(added.length, sharedUiCase(id))
             }
           }
         }
@@ -5643,9 +5672,17 @@ export default function App(): JSX.Element {
   }
 
   const persistSharedUiQueue = (): void => {
-    try { localStorage.setItem('shared-ui-pending', JSON.stringify(sharedUiQueueRef.current)) } catch { /* retry remains in memory */ }
+    try { localStorage.setItem('shared-ui-pending', JSON.stringify(sharedUiQueueRef.current.filter((item) => item.operation.type !== 'notification' && item.operation.type !== 'notification-clear'))) }
+    catch { setNotificationHistoryError('동기화 대기 기록을 저장하지 못했습니다. 연결될 때까지 앱을 열어 두세요.') }
+  }
+  const pendingNotificationOperations = (): { host: string; operation: SharedUiOperation }[] => {
+    let stored: { host: string; operation: SharedUiOperation }[] = []
+    try { stored = readNotificationOutbox(localStorage) }
+    catch { setNotificationHistoryError('동기화 대기 기록을 읽지 못했습니다. 저장 공간을 확인해 주세요.') }
+    return [...new Map([...stored, ...sharedUiQueueRef.current].map((item) => [JSON.stringify([item.host, item.operation.id]), item])).values()]
   }
   const flushSharedUiQueue = async (): Promise<void> => {
+    sharedUiQueueRef.current = pendingNotificationOperations()
     for (const item of [...sharedUiQueueRef.current]) {
       const profile = sshProfiles.find((entry) => workspaceHostKey(entry) === item.host)
       if (!profile) continue
@@ -5655,15 +5692,20 @@ export default function App(): JSX.Element {
         const accepted = result.state.cases[item.operation.caseKey]?.activity[item.operation.agentId]?.runId === item.operation.runId
         setSharedUiConflict(accepted ? '' : '작업 상태 공유 충돌 · 다른 기기의 상태를 유지했습니다')
       }
-      sharedUiQueueRef.current = sharedUiQueueRef.current.filter((pending) => pending.operation.id !== item.operation.id)
+      if (item.operation.type === 'notification' || item.operation.type === 'notification-clear') {
+        removeNotificationOperation(localStorage, item.host, item.operation.id)
+      }
+      sharedUiQueueRef.current = sharedUiQueueRef.current.filter((pending) => pending.host !== item.host || pending.operation.id !== item.operation.id)
       persistSharedUiQueue()
     }
   }
-  sharedUiSendRef.current = (tab, operation) => {
-    if (!tab?.ssh) return
+  const enqueueSharedUiOperation = (host: string, operation: SharedUiOperation): void => {
     sharedUiSequenceRef.current += 1
-    const host = workspaceHostKey(tab.ssh)
     sharedUiQueueRef.current.push({ host, operation })
+    if (operation.type === 'notification' || operation.type === 'notification-clear') {
+      try { saveNotificationOperation(localStorage, host, operation) }
+      catch { setNotificationHistoryError('동기화 대기 기록을 저장하지 못했습니다. 연결될 때까지 앱을 열어 두세요.') }
+    }
     persistSharedUiQueue()
     const send = async (): Promise<void> => {
       await flushSharedUiQueue()
@@ -5672,8 +5714,20 @@ export default function App(): JSX.Element {
       setWorkspaceSyncError('화면 공유 실패 · 연결 후 다시 시도합니다')
     })
   }
+  sharedUiSendRef.current = (tab, operation) => {
+    if (tab?.ssh) enqueueSharedUiOperation(workspaceHostKey(tab.ssh), operation)
+  }
   const applySharedUi = (profile: SshProfile, state: SharedUiState): void => {
     const host = workspaceHostKey(profile)
+    if (state.notifications) {
+      const pending = pendingNotificationOperations().filter((item) => item.host === host)
+      const cleared = new Set(pending.flatMap(({ operation }) => operation.type === 'notification-clear' ? operation.entryIds : []))
+      const additions = pending.flatMap(({ operation }) => operation.type === 'notification' && !state.appliedOperationIds.includes(operation.id) ? [operation.entry] : [])
+      updateNotificationHistory([
+        ...notificationHistoryRef.current.filter((entry) => entry.host !== host),
+        ...[...state.notifications, ...additions].filter((entry) => !cleared.has(entry.id)).map((entry) => ({ ...entry, host }))
+      ])
+    }
     const tabs = caseTabsRef.current.filter((tab) => tab.ssh && workspaceHostKey(tab.ssh) === host)
     const activities = new Map(sharedUiActivitiesRef.current)
     for (const tab of tabs) {
@@ -5697,12 +5751,7 @@ export default function App(): JSX.Element {
             sharedUiRunsRef.current.get(term?.id ?? id)?.runId === activity.runId ||
             (activity.status === 'done' && !notifyDone) ||
             (term && isTermVisibleInCurrentWorkspace(term.id) && document.hasFocus())) continue
-          if (term) pushToast(term.id, activity.status)
-          else {
-            const key = ++toastSeq.current
-            setToasts((current) => [...current.filter((item) => item.termId !== id), { key, termId: id, title: tab.name, status: activity.status as 'done' | 'question' }])
-            if (activity.status === 'done') setTimeout(() => setToasts((current) => current.filter((item) => item.key !== key)), 12000)
-          }
+          pushToast(term?.id ?? id, activity.status, term?.title ?? tab.name, { tab, activity, recorded: state.appliedOperationIds.includes(notificationEventId(sharedUiCaseKey(tab), id, activity, activity.status)) })
           if (document.hasFocus()) playNotificationSound(notificationSound, notificationVolume)
           else {
             window.lt.app.requestAttention(activity.status)
@@ -5928,7 +5977,7 @@ export default function App(): JSX.Element {
               setCaseTabs(next)
               sharedUiOpenAgentsRef.current.set(next[0].id, new Set((snapshot.terminals ?? []).map((term) => term.id)))
               expectedCases = next
-              if (observedWorkspaceHostsRef.current.has(workspaceHostKey(profile))) pushSyncedTabsToast(1)
+              if (observedWorkspaceHostsRef.current.has(workspaceHostKey(profile))) pushSyncedTabsToast(1, next[0])
             }
             continue
           }
@@ -7072,6 +7121,51 @@ export default function App(): JSX.Element {
   const [termStatus, setTermStatus] = useState<Map<string, TermRunStatus>>(new Map())
   const termStatusRef = useRef(termStatus)
   termStatusRef.current = termStatus
+  const [notificationHistoryInitial] = useState(() => {
+    try { return { entries: readNotificationHistory(localStorage), error: '' } }
+    catch { return { entries: [] as NotificationEntry[], error: '저장된 알림 기록을 불러오지 못했습니다. 서버 연결 후 다시 확인합니다.' } }
+  })
+  const [notificationHistory, setNotificationHistory] = useState(notificationHistoryInitial.entries)
+  const notificationHistoryRef = useRef(notificationHistory)
+  const [notificationHistoryError, setNotificationHistoryError] = useState(notificationHistoryInitial.error)
+  useEffect(() => {
+    const refreshHistory = (event: StorageEvent): void => {
+      if (event.key !== null && !event.key.startsWith(NOTIFICATION_HISTORY_KEY)) return
+      try {
+        const entries = readNotificationHistory(localStorage)
+        notificationHistoryRef.current = entries
+        setNotificationHistory(entries)
+      } catch { setNotificationHistoryError('저장된 알림 기록을 불러오지 못했습니다.') }
+    }
+    window.addEventListener('storage', refreshHistory)
+    return () => window.removeEventListener('storage', refreshHistory)
+  }, [])
+  const clearNotificationHistory = (): void => {
+    const entries = notificationHistoryRef.current
+    updateNotificationHistory([])
+    for (const host of new Set(entries.map((entry) => entry.host))) {
+      if (host === 'local') continue
+      enqueueSharedUiOperation(host, { id: newId(), type: 'notification-clear', entryIds: entries.filter((entry) => entry.host === host).map((entry) => entry.id) })
+    }
+  }
+  const selectNotification = (entry: NotificationEntry): void => {
+    if (entry.host === 'local' || !entry.caseKey) {
+      if (termTabsRef.current.some((term) => sharedUiActivityId(term) === entry.termId)) selectTermRef.current(entry.termId)
+      else void window.lt.dialog.alert('이 알림의 작업이 닫혀 있거나 다른 기기에만 열려 있습니다.')
+      return
+    }
+    const tab = caseTabsRef.current.find((item) => workspaceHostKey(item.ssh) === entry.host && sharedUiCaseKey(item) === entry.caseKey)
+    if (!tab) {
+      void window.lt.dialog.alert('이 알림의 사건이 닫혀 있습니다. 사건을 다시 연 뒤 확인해 주세요.')
+      return
+    }
+    const term = termTabsRef.current.find((item) => caseIdForTerm(item) === tab.id && sharedUiActivityId(item) === entry.termId)
+    if (term) selectTerm(term.id)
+    else {
+      openCaseTab(tab, undefined, true)
+      if (entry.termId && !entry.termId.startsWith('terminal:')) shareSelection(tab, { kind: 'agent', id: entry.termId })
+    }
+  }
   const [toasts, setToasts] = useState<{
     key: number
     termId: string
@@ -9597,6 +9691,7 @@ export default function App(): JSX.Element {
         {nextActionRequest && <NextActionProposal key={nextActionRequest.id} request={nextActionRequest}
           activeCaseId={currentCase?.meta?.jsId} onClose={() => setNextActionRequest(null)}
           onSaved={() => setTodoNonce((value) => value + 1)} />}
+        <NotificationHistory entries={notificationHistory} error={notificationHistoryError} onSelect={selectNotification} onClear={clearNotificationHistory} />
       </div>
       {/* ── 액티비티바 (모드 전환) ── */}
       <div className="activitybar" key="activity">

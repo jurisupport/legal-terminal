@@ -123,14 +123,17 @@ assert.deepEqual(h.state.notices, [1, 1], 'new cases are noticed after reconnect
 
 let toasts = [{ key: 1, termId: 'pending-question', status: 'question' }]
 const timers = []
+const history = []
 const notify = vm.runInNewContext(ts.transpileModule(`(${declarations.get('pushSyncedTabsToast')})`, {
   compilerOptions: { target: ts.ScriptTarget.ES2022 }
 }).outputText, {
+  recordNotification: entry => history.push(entry),
   toastSeq: { current: 1 }, setToasts: update => { toasts = update(toasts) },
   setTimeout: (callback, delay) => { assert.equal(delay, 4000); timers.push(callback) }
 })
 notify(1)
 notify(2)
+assert.deepEqual(history.map(entry => entry.count), [1, 2], 'history keeps each arrival while popups coalesce')
 assert.equal(toasts.length, 2, 'sync notices coalesce while keeping pending questions')
 assert.equal(toasts.at(-1).count, 3)
 assert.equal(toasts.at(-1).title, '새 탭 3개를 가져왔습니다')

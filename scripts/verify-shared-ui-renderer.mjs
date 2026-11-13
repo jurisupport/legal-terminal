@@ -22,6 +22,10 @@ assert.ok(apply)
 const tab = { id: 'case', profileId: 'desktop', ssh: { host: 'office' }, drafts: 'ssh://desktop/cases/a', remotePath: '/cases/a' }
 const doc = { id: 'dirty', caseTabId: 'case', path: 'ssh://desktop/cases/a/dirty.md', side: 'left' }
 const context = {
+  pendingNotificationOperations: () => [],
+  notificationEventId: (caseKey, id, activity, status) => JSON.stringify(['notification', caseKey, id, activity.runId, activity.sequence, status]),
+  notificationHistoryRef: { current: [{id:'local', host:'local'}] },
+  updateNotificationHistory: entries => { context.notificationHistoryRef.current = entries },
   workspaceHostKey: ssh => ssh.host,
   caseTabsRef: { current: [tab] }, docTabsRef: { current: [doc] }, dirtyDocsRef: { current: new Set(['dirty']) },
   termTabsRef: { current: [{ id: 'agent', caseTabId: 'case', side: 'right' }] },
@@ -44,7 +48,7 @@ const context = {
   openCaseTab: (...args) => { context.selected = args }
 }
 const fn = vm.runInNewContext(ts.transpileModule(`(${apply})`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText, context)
-const state = { selection: { caseKey: '["/cases/a",""]', tab: { kind: 'document', id: '/cases/a/new.md' } }, cases: {
+const state = { appliedOperationIds: [], selection: { caseKey: '["/cases/a",""]', tab: { kind: 'document', id: '/cases/a/new.md' } }, cases: {
   '["/cases/a",""]': { documents: { '/cases/a/dirty.md': false, '/cases/a/new.md': true }, activity: {
     agent: { runId: 'run', sequence: 2, status: 'done', attention: true }
   } }
@@ -85,6 +89,22 @@ context.sharedUiOpenAgentsRef.current.set('case', new Set())
 context.termTabsRef.current = []
 fn({ host: 'office' }, state)
 assert.equal(context.sharedUiActivitiesRef.current.get('case').agent, undefined, 'a closed agent cannot leave a ghost activity')
+state.notifications = [{ id: 'historic', termId: 'closed-agent', title: '닫힌 사건 알림', status: 'done', createdAt: 1 }]
+fn({ host: 'office' }, state)
+assert.equal(context.notificationHistoryRef.current.length, 2, 'history syncs even for closed agents while local history remains')
+state.notifications = []
+fn({ host: 'office' }, state)
+assert.equal(context.notificationHistoryRef.current.length, 1, 'remote clear removes cached history')
+assert.equal(context.notificationHistoryRef.current[0].host, 'local')
+context.pendingNotificationOperations = () => [{host:'office', operation: {type:'notification', id:'offline', entry:{id:'offline', title:'offline', termId:'agent', status:'done', createdAt:2}}}]
+fn({host:'office'}, state)
+assert.ok(context.notificationHistoryRef.current.some(entry => entry.id === 'offline'), 'remote snapshot cannot erase another window offline outbox')
+context.pendingNotificationOperations = () => [{host:'office', operation: {type:'notification-clear', id:'clear', entryIds:['historic']}}]
+state.notifications = [{id:'historic', termId:'agent', title:'old', status:'done', createdAt:1}]
+fn({host:'office'}, state)
+assert.equal(context.notificationHistoryRef.current.length, 1, 'offline clear overlays a stale remote snapshot')
+context.pendingNotificationOperations = () => []
+
 const closingCalls = []
 const closingContext = {
   docTabsRef: { current: [{ id: 'old', caseTabId: 'case', path: 'ssh://desktop/cases/a/old.md', side: 'left' },

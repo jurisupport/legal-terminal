@@ -5,6 +5,16 @@ export interface SharedUiActivity {
   attention: boolean
 }
 
+export interface SharedNotificationEntry {
+  id: string
+  termId: string
+  title: string
+  status: 'done' | 'question' | 'synced'
+  createdAt: number
+  caseKey?: string
+  count?: number
+}
+
 export type SharedUiTab = { kind: 'document' | 'agent'; id: string } | { kind: 'view'; id: 'files' | 'records' | 'hearing' }
 export interface SharedUiState {
   version: 1
@@ -12,8 +22,11 @@ export interface SharedUiState {
   selection: { caseKey: string | null; tab: SharedUiTab | null }
   cases: Record<string, { documents: Record<string, boolean>; activity: Record<string, SharedUiActivity> }>
   appliedOperationIds: string[]
+  notifications?: SharedNotificationEntry[]
 }
 export type SharedUiOperation =
+  | { id: string; type: 'notification'; entry: SharedNotificationEntry }
+  | { id: string; type: 'notification-clear'; entryIds: string[] }
   | { id: string; type: 'document'; caseKey: string; path: string; open: boolean; onlyIfMissing?: boolean }
   | { id: string; type: 'selection'; caseKey: string | null; tab: SharedUiTab | null; onlyIfUnset?: boolean }
   | ({ id: string; type: 'activity'; caseKey: string; agentId: string } & SharedUiActivity &
@@ -31,6 +44,13 @@ const tab = (v: unknown): v is SharedUiTab => object(v) &&
 const activity = (v: unknown): v is unknown & SharedUiActivity => object(v) && text(v.runId) && sequence(v.sequence) &&
   (v.status === 'working' || v.status === 'done' || v.status === 'question' || v.status === 'idle') && typeof v.attention === 'boolean'
 
+export function isSharedNotificationEntry(v: unknown): v is SharedNotificationEntry {
+  return object(v) && text(v.id) && (v.termId === '' || text(v.termId)) && text(v.title) &&
+    (v.status === 'done' || v.status === 'question' || v.status === 'synced') &&
+    sequence(v.createdAt) && v.createdAt <= 8_640_000_000_000_000 &&
+    (v.caseKey === undefined || key(v.caseKey)) && (v.count === undefined || sequence(v.count))
+}
+
 export function emptySharedUiState(): SharedUiState {
   return { version: 1, revision: 0, selection: { caseKey: null, tab: null }, cases: {}, appliedOperationIds: [] }
 }
@@ -41,11 +61,15 @@ export function isSharedUiState(v: unknown): v is SharedUiState {
     object(v.cases) && Object.entries(v.cases).every(([k, c]) => key(k) && object(c) && object(c.documents) &&
       Object.entries(c.documents).every(([p, open]) => text(p) && p.startsWith('/') && typeof open === 'boolean') &&
       object(c.activity) && Object.entries(c.activity).every(([id, a]) => key(id) && activity(a))) &&
-    Array.isArray(v.appliedOperationIds) && v.appliedOperationIds.every(text)
+    Array.isArray(v.appliedOperationIds) && v.appliedOperationIds.every(text) &&
+    (v.notifications === undefined || (Array.isArray(v.notifications) && v.notifications.length <= 100 &&
+      v.notifications.every(isSharedNotificationEntry)))
 }
 
 export function isSharedUiOperation(v: unknown): v is SharedUiOperation {
   if (!object(v) || !text(v.id)) return false
+  if (v.type === 'notification') return isSharedNotificationEntry(v.entry) && v.id === v.entry.id
+  if (v.type === 'notification-clear') return Array.isArray(v.entryIds) && v.entryIds.length <= 100 && v.entryIds.every(text)
   if (v.type === 'selection') return (v.caseKey === null || key(v.caseKey)) && (v.tab === null || tab(v.tab)) &&
     (v.caseKey !== null || v.tab === null) && (v.onlyIfUnset === undefined || typeof v.onlyIfUnset === 'boolean')
   if (!key(v.caseKey)) return false
@@ -60,7 +84,18 @@ export function isSharedUiOperation(v: unknown): v is SharedUiOperation {
 export function applySharedUiOperation(state: SharedUiState, operation: SharedUiOperation): SharedUiState {
   if (state.appliedOperationIds.includes(operation.id)) return state
   if (!Number.isSafeInteger(state.revision + 1)) throw new Error('공유 상태의 변경 번호가 너무 큽니다.')
-  if (operation.type === 'selection') {
+  if (operation.type === 'notification') {
+    const entries = state.notifications ?? []
+    if (!entries.some((entry) => entry.id === operation.entry.id)) {
+      state.notifications = [...entries, operation.entry]
+        .sort((a, b) => b.createdAt - a.createdAt || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+        .slice(0, 100)
+    }
+  } else if (operation.type === 'notification-clear') {
+    state.notifications = (state.notifications ?? []).filter((entry) => !operation.entryIds.includes(entry.id))
+    // A clear may reach the server before an offline window uploads the observed entry.
+    for (const id of operation.entryIds) if (!state.appliedOperationIds.includes(id)) state.appliedOperationIds.push(id)
+  } else if (operation.type === 'selection') {
     if (!operation.onlyIfUnset || state.selection.caseKey === null) {
       state.selection = { caseKey: operation.caseKey, tab: operation.tab }
     }

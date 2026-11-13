@@ -35,6 +35,10 @@ const caseKey = JSON.stringify(['/사건', 'case-id'])
 const op = (id, data) => ({ id, caseKey, ...data })
 const stateFile = join(root, '.claude/legal-terminal-shared-ui.json')
 try {
+  const clearBeforeUpload = shared.emptySharedUiState()
+  shared.applySharedUiOperation(clearBeforeUpload, {id:'clear-before-upload', type:'notification-clear', entryIds:['offline-event']})
+  shared.applySharedUiOperation(clearBeforeUpload, {id:'offline-event', type:'notification', entry:{id:'offline-event',termId:'agent',title:'offline',status:'done',createdAt:1}})
+  assert.equal(clearBeforeUpload.notifications.length, 0, 'clear arriving before an offline upload cannot resurrect observed history')
   const initial = shared.emptySharedUiState()
   shared.applySharedUiOperation(initial, op('initial-selection', { type: 'selection', tab: null, onlyIfUnset: true }))
   assert.equal(initial.selection.caseKey, caseKey, 'bootstrap selects a case when none exists')
@@ -87,6 +91,58 @@ try {
     status: 'working', attention: false, start: true, expectedRunId: 'run-1' }))
   assert.equal((await api.readSharedUi(ssh)).state.cases[caseKey].activity.agent.runId, 'run-2')
   assert.equal((await api.applySharedUi(ssh, op('bad', { type: 'document', path: 'relative', open: true }))).ok, false)
+  const notification = (id, createdAt, title = id) => ({ id, type: 'notification', entry: {
+    id, termId: 'agent', title, status: 'done', createdAt, caseKey
+  } })
+  assert.equal(shared.isSharedUiState(shared.emptySharedUiState()), true, 'legacy states need no notification field')
+  for (const entry of [
+    { ...notification('invalid', 1).entry, createdAt: NaN },
+    { ...notification('invalid', 1).entry, createdAt: -1 },
+    { ...notification('invalid', 1).entry, createdAt: 8_640_000_000_000_001 },
+    { ...notification('invalid', 1).entry, title: '' },
+    { ...notification('invalid', 1).entry, termId: 1 },
+    { ...notification('invalid', 1).entry, status: 'working' },
+    { ...notification('invalid', 1).entry, caseKey: '__proto__' },
+    { ...notification('invalid', 1).entry, count: -1 }
+  ]) assert.equal(shared.isSharedUiOperation({ id: entry.id, type: 'notification', entry }), false)
+  assert.equal(shared.isSharedUiOperation({ ...notification('entry-id', 1), id: 'different-operation' }), false)
+  assert.equal(shared.isSharedUiOperation({ id: 'clear-bad', type: 'notification-clear', entryIds: [5] }), false)
+  assert.equal(shared.isSharedUiOperation({ id: 'clear-large', type: 'notification-clear', entryIds: Array(101).fill('id') }), false)
+  assert.equal(shared.isSharedUiState({ ...shared.emptySharedUiState(), notifications: [{}] }), false)
+  const notices = await Promise.all([
+    api.applySharedUi(ssh, notification('notice-a', 100)),
+    api.applySharedUi(ssh, notification('notice-b', 200))
+  ])
+  assert.ok(notices.every(result => result.ok), 'two computers append concurrently without lost history')
+  state = (await api.readSharedUi(ssh)).state
+  assert.deepEqual(Array.from(state.notifications, entry => entry.id), ['notice-b', 'notice-a'])
+  assert.deepEqual(JSON.parse(await readFile(stateFile, 'utf8')).notifications, JSON.parse(JSON.stringify(state.notifications)),
+    'a fresh reader restores notification history from the persisted shared file')
+  const staleEntryIds = Array.from(state.notifications, entry => entry.id)
+  await api.applySharedUi(ssh, notification('notice-a', 999, 'duplicate'))
+  state = (await api.readSharedUi(ssh)).state
+  assert.equal(state.notifications.length, 2)
+  assert.equal(state.notifications.find(entry => entry.id === 'notice-a').createdAt, 100)
+  const clearing = await Promise.all([
+    api.applySharedUi(ssh, { id: 'clear-observed', type: 'notification-clear', entryIds: staleEntryIds }),
+    api.applySharedUi(ssh, notification('notice-c', 300))
+  ])
+  assert.ok(clearing.every(result => result.ok))
+  state = (await api.readSharedUi(ssh)).state
+  assert.deepEqual(Array.from(state.notifications, entry => entry.id), ['notice-c'],
+    'clearing an older snapshot preserves concurrent unseen notifications')
+  await api.applySharedUi(ssh, notification('notice-a', 100))
+  assert.deepEqual(Array.from((await api.readSharedUi(ssh)).state.notifications, entry => entry.id), ['notice-c'],
+    'an offline replay does not resurrect cleared history')
+  const bounded = shared.emptySharedUiState()
+  for (let i = 0; i < 105; i++) shared.applySharedUiOperation(bounded, notification(`bounded-${i}`, i))
+  assert.equal(bounded.notifications.length, 100)
+  assert.equal(bounded.notifications[0].id, 'bounded-104')
+  assert.equal(bounded.notifications.at(-1).id, 'bounded-5')
+  const tied = shared.emptySharedUiState()
+  shared.applySharedUiOperation(tied, notification('z-tied', 1))
+  shared.applySharedUiOperation(tied, notification('a-tied', 1))
+  assert.deepEqual(tied.notifications.map(entry => entry.id), ['a-tied', 'z-tied'], 'ties have deterministic ordering')
   const original = await readFile(stateFile, 'utf8')
   const interruptedWrite = (input) => new Promise((resolve, reject) => {
     const child = spawn(shell, ['-c', api.transactionScript], { env: { ...process.env, HOME: shellHome } })
@@ -114,7 +170,7 @@ try {
   await writeFile(stateFile, '{broken')
   assert.equal((await api.applySharedUi(ssh, op('fail', { type: 'document', path: '/x', open: true }))).ok, false)
   assert.equal(await readFile(stateFile, 'utf8'), '{broken')
-  console.log('shared UI state: concurrent writes, deduplication, stale runs, acknowledgement and corruption safety OK')
+  console.log('shared UI state: concurrent writes, persistent notification history, clear/replay safety, stale runs and corruption safety OK')
 } finally {
   await rm(root, { recursive: true, force: true })
 }

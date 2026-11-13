@@ -2113,7 +2113,7 @@ body {
 /* 질문/확인 대기 팝업(토스트) */
 .toasts {
   position: fixed;
-  top: 14px;
+  top: 46px;
   right: 14px;
   display: flex;
   flex-direction: column;
@@ -7605,3 +7605,21 @@ fieldset.todo-card { margin: 0; min-width: 0; }
 .case-recovery-body { border: 0; padding: 0; margin: 0; min-width: 0; }
 .today-hearings li { margin: 8px 0; overflow-wrap: anywhere; }
 .case-task-panel .todo-actions { flex-wrap: wrap; justify-content: flex-start; }
+
+.notification-history { position: relative; flex-shrink: 0; }
+.notification-history > summary { display: flex; align-items: center; gap: 6px; cursor: pointer; list-style: none; }
+.notification-history > summary::-webkit-details-marker { display: none; }
+.notification-history-count { font-size: 10px; color: var(--accent-fg); background: var(--accent); border-radius: 8px; padding: 0 5px; }
+.notification-history-panel { position: absolute; top: calc(100% + 8px); right: 0; width: min(380px, calc(100vw - 20px)); max-height: min(520px, calc(100vh - 60px)); overflow-y: auto; z-index: 1001; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-alt); box-shadow: 0 8px 28px #0008; }
+.notification-history-panel header { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 12px 14px 4px; }
+.notification-history-note { margin: 6px 14px 12px; color: var(--fg-muted); font-size: 11px; }
+.notification-history-empty { padding: 24px 14px; text-align: center; color: var(--fg-muted); }
+.notification-history-panel ul { list-style: none; padding: 0; margin: 0; }
+.notification-history-entry { display: flex; align-items: flex-start; gap: 10px; width: 100%; padding: 12px 14px; border: 0; border-top: 1px solid var(--border); background: transparent; color: var(--fg); text-align: left; font: inherit; cursor: pointer; }
+.notification-history-entry:hover:not(:disabled) { background: var(--bg-activity); }
+.notification-history-entry:disabled { opacity: 1; cursor: default; }
+.notification-history-icon { color: var(--link); font-size: 16px; }
+.notification-history-icon.question { color: #e9a78f; }
+.notification-history-body { display: flex; flex-direction: column; gap: 5px; min-width: 0; overflow-wrap: anywhere; }
+.notification-history-body > span, .notification-history-body time { font-size: 11px; color: var(--fg-muted); }
+.notification-history :focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
