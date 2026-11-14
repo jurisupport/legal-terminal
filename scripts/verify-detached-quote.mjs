@@ -110,6 +110,10 @@ function runApp({ root, temp }) {
       d.dispatchEvent(new d.defaultView.Event('selectionchange'));
       el.dispatchEvent(new d.defaultView.PointerEvent('pointerup', { bubbles: true, isPrimary: true, button: 0 }));
     })()`)
+    await wait('selection actions ready', async () => {
+      await evaluate(win, `document.querySelector('.html-frame').contentDocument.dispatchEvent(new Event('selectionchange'))`)
+      return evaluate(win, `!!document.querySelector('.sel-actions button')`)
+    })
     if (contextMenu) {
       // Full windows retain the inline command; the context menu stages a quote.
       await evaluate(win, `(() => {

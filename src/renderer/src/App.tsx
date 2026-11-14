@@ -2055,39 +2055,44 @@ export default function App(): JSX.Element {
     }
   }, [setWorkActive])
 
+  const [workFocusRequest, setWorkFocusRequest] = useState<{ side: DockSide; key: WorkTabKey | ''; force: boolean }>()
   const focusWorkTargetSoon = useCallback((side: DockSide, key: WorkTabKey | '', force = false): void => {
-    window.requestAnimationFrame(() => {
-      const pane = Array.from(document.querySelectorAll<HTMLElement>('.work-pane[data-work-side]')).find(
-        (el) => datasetSide(el.dataset.workSide) === side
-      )
-      if (!pane) return
-      const active = document.activeElement
-      if (!force && active instanceof Element && pane.contains(active)) return
-
-      const parsed = parseWorkKey(key)
-      if (parsed?.kind === 'doc') {
-        const doc = Array.from(pane.querySelectorAll<HTMLElement>('[data-doc-id]')).find(
-          (el) => el.dataset.docId === parsed.id
-        )
-        doc?.focus({ preventScroll: true })
-        return
-      }
-      if (parsed?.kind === 'terminal') {
-        const term = Array.from(pane.querySelectorAll<HTMLElement>('[data-term-id]')).find(
-          (el) => el.dataset.termId === parsed.id
-        )
-        const tab = termTabsRef.current.find((item) => item.id === parsed.id)
-        if (isAgentTab(tab)) {
-          setTermFocusNonce((current) => bumpFocusNonce(current, parsed.id))
-        } else {
-          term?.focus({ preventScroll: true })
-        }
-        return
-      }
-
-      pane.focus({ preventScroll: true })
-    })
+    setWorkFocusRequest({ side, key, force })
   }, [])
+  // File/PDF viewers mount on selection; focus after React commits the target pane.
+  useLayoutEffect(() => {
+    if (!workFocusRequest) return
+    const { side, key, force } = workFocusRequest
+    const pane = Array.from(document.querySelectorAll<HTMLElement>('.work-pane[data-work-side]')).find(
+      (el) => datasetSide(el.dataset.workSide) === side
+    )
+    if (!pane) return
+    const active = document.activeElement
+    if (!force && active instanceof Element && pane.contains(active)) return
+
+    const parsed = parseWorkKey(key)
+    if (parsed?.kind === 'doc') {
+      const doc = Array.from(pane.querySelectorAll<HTMLElement>('[data-doc-id]')).find(
+        (el) => el.dataset.docId === parsed.id
+      )
+      doc?.focus({ preventScroll: true })
+      return
+    }
+    if (parsed?.kind === 'terminal') {
+      const term = Array.from(pane.querySelectorAll<HTMLElement>('[data-term-id]')).find(
+        (el) => el.dataset.termId === parsed.id
+      )
+      const tab = termTabsRef.current.find((item) => item.id === parsed.id)
+      if (isAgentTab(tab)) {
+        setTermFocusNonce((current) => bumpFocusNonce(current, parsed.id))
+      } else {
+        term?.focus({ preventScroll: true })
+      }
+      return
+    }
+
+    pane.focus({ preventScroll: true })
+  }, [workFocusRequest])
   const activateWorkKeyAfterClose = useCallback(
     (side: DockSide, key: WorkTabKey | ''): void => {
       setActiveWork((active) => ({ ...active, [side]: key }))

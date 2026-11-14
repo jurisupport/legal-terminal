@@ -193,9 +193,18 @@ function runApp({ root, temp, closeMode }) {
             `document.querySelector('[data-doc-id="${id}"]')?.textContent.includes('Document focus regression fixture.')`))
         }
         await focusDoc('fourth')
+        // Deliver a legacy focus frame before React mounts the preceding file viewer.
+        // Focusing after commit must work even with this adverse scheduling order.
+        await evaluate(source, `window.beforeCloseFrame = window.requestAnimationFrame;
+          window.requestAnimationFrame = callback => {
+            window.requestAnimationFrame = window.beforeCloseFrame;
+            callback(performance.now());
+            return 0;
+          }; undefined`)
         source.webContents.send('app:closeActiveTab')
         await wait('preceding document receives keyboard focus', () => evaluate(source,
           `document.activeElement?.closest('[data-doc-id]')?.dataset.docId === 'third'`))
+        await evaluate(source, `window.requestAnimationFrame = window.beforeCloseFrame; undefined`)
         assert.deepEqual(await leftTitles(), ['first.rst', 'second.rst', 'third.rst'])
         assert.equal(agentCloses().length, 0)
 
@@ -209,7 +218,7 @@ function runApp({ root, temp, closeMode }) {
         await wait('background document closed', async () => (await leftTitles()).length === 2)
         assert.equal(await evaluate(source, `document.querySelector('.work-left .tab.active .tab-title')?.textContent`), 'third.rst')
 
-        // Hold focus restoration so native close events exercise the gap between render and rAF.
+        // Consecutive native closes must remain in their pane even while animation frames are delayed.
         await evaluate(source, `window.savedRequestAnimationFrame = window.requestAnimationFrame;
           window.heldFocusFrames = [];
           window.requestAnimationFrame = callback => window.heldFocusFrames.push(callback); undefined`)

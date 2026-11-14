@@ -16,6 +16,10 @@ function visit(node) {
   if (ts.isBinaryExpression(node) && node.left.getText(parsed) === 'closeActiveTabRef.current') {
     handlers.set('closeActiveTab', node.right.getText(parsed))
   }
+  if (ts.isCallExpression(node) && node.expression.getText(parsed) === 'useLayoutEffect' &&
+      node.arguments[0]?.getText(parsed).includes('workFocusRequest')) {
+    handlers.set('applyWorkFocusRequest', node.arguments[0].getText(parsed))
+  }
   ts.forEachChild(node, visit)
 }
 visit(parsed)
@@ -346,6 +350,25 @@ const focusAfterClose = loadHandlers(['parseWorkKey', 'activateWorkKeyAfterClose
 focusAfterClose.activateWorkKeyAfterClose('left', 'doc:before')
 assert.deepEqual(focusCalls, [['left', 'doc:before', true]],
   'closing explicitly focuses the selected document even if focus remains inside its pane')
+
+{
+  let mounted = false, focused = false
+  const target = { dataset: { docId: 'next' }, focus: () => { focused = true } }
+  const pane = { dataset: { workSide: 'left' }, querySelectorAll: () => mounted ? [target] : [] }
+  const context = {
+    useCallback: fn => fn,
+    setWorkFocusRequest: request => { context.workFocusRequest = request },
+    document: { activeElement: null, querySelectorAll: () => [pane] },
+    datasetSide: side => side,
+    window: { requestAnimationFrame: fn => fn() }
+  }
+  const focus = loadHandlers(['parseWorkKey', 'focusWorkTargetSoon', 'applyWorkFocusRequest'], context)
+  focus.focusWorkTargetSoon('left', 'doc:next', true)
+  assert.equal(focused, false, 'a request before React commits must not attempt DOM focus')
+  mounted = true
+  focus.applyWorkFocusRequest()
+  assert.equal(focused, true, 'the committed document receives focus even when a frame would have fired too early')
+}
 
 for (const [focusedSide, rememberedSide, activeLeft, expected] of [
   ['left', 'left', '', []],
