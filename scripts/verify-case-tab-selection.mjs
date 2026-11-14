@@ -13,6 +13,9 @@ function visit(node) {
   if (ts.isVariableDeclaration(node) && node.initializer) {
     handlers.set(node.name.getText(parsed), node.initializer.getText(parsed))
   }
+  if (ts.isBinaryExpression(node) && node.left.getText(parsed) === 'closeActiveTabRef.current') {
+    handlers.set('closeActiveTab', node.right.getText(parsed))
+  }
   ts.forEachChild(node, visit)
 }
 visit(parsed)
@@ -343,6 +346,26 @@ const focusAfterClose = loadHandlers(['parseWorkKey', 'activateWorkKeyAfterClose
 focusAfterClose.activateWorkKeyAfterClose('left', 'doc:before')
 assert.deepEqual(focusCalls, [['left', 'doc:before', true]],
   'closing explicitly focuses the selected document even if focus remains inside its pane')
+
+for (const [focusedSide, rememberedSide, activeLeft, expected] of [
+  ['left', 'left', '', []],
+  [undefined, 'left', '', []],
+  [undefined, 'left', 'doc:remaining', ['doc:remaining']],
+  ['right', 'left', '', ['terminal:agent']]
+]) {
+  const closed = []
+  const closing = loadHandlers(['parseWorkKey', 'closeActiveTab'], {
+    document: { activeElement: {} }, docOnly: false, termOnly: false,
+    focusedTermId: () => undefined, focusedDocId: () => undefined,
+    focusedWorkSide: () => focusedSide, lastWorkSideRef: { current: rememberedSide },
+    activeWork: { left: activeLeft, right: 'terminal:agent' },
+    activeTerm: 'agent', activeDoc: 'remaining', termTabs: [{ id: 'agent' }], docTabs: [{ id: 'remaining' }],
+    closeDetachedDoc: id => closed.push(`doc:${id}`),
+    closeDetachedTerm: id => closed.push(`terminal:${id}`)
+  })
+  closing.closeActiveTab()
+  assert.deepEqual(closed, expected, 'close stays in the intended pane even before focus restoration or after its last tab')
+}
 
 for (const scenario of ['active', 'active-middle', 'active-end', 'empty-neighbor', 'last', 'background', 'cancel-dirty', 'cancel-working', 'switch-during-save', 'remove-neighbor-during-save',
   'remote-idle', 'remote-project', 'remote-todo', 'remote-dirty', 'remote-working', 'remote-question', 'remote-draft', 'remote-attachment', 'remote-inline']) {

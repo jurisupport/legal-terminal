@@ -84,6 +84,7 @@ function runApp({ root, temp, closeMode }) {
     if (channel === 'todo:capabilities') return { ok: true, capabilities: {} }
     if (['fs:list', 'fs:listPdfs', 'sessions:list'].includes(channel)) return []
     if (channel === 'fs:listDocumentDrafts') return { ok: true, entries: [] }
+    if (channel === 'fs:readText') return { kind: 'text', text: 'Document focus regression fixture.' }
     if (['case:getPairing', 'case:getJsPairing', 'sessions:current'].includes(channel)) return null
     if (channel === 'sessions:remember') return undefined
     if (channel === 'sessions:transcript') return { sessionId: args[0].sessionId, messages: isFork
@@ -179,6 +180,64 @@ function runApp({ root, temp, closeMode }) {
       await wait('two source conversations', async () => (await tabTitles(source)).filter((title) => title.includes('대화')).length === 2)
       await wait('initial source workspace save', () => saves(source).length > 0)
       assert.equal(await evaluate(source, `document.querySelector('.agent-ask-beside') !== null || [...document.querySelectorAll('button')].some(button => button.textContent.includes('옆에서 물어보기'))`), false, 'removed side-question action is absent')
+
+      if (closeMode === 'document-focus') {
+        const leftTitles = () => evaluate(source, `[...document.querySelectorAll('.work-left .tab-title')].map(tab => tab.textContent)`)
+        const agentCloses = () => calls.filter(call => call.channel === 'agent:close')
+        const focusDoc = id => evaluate(source, `document.querySelector('[data-doc-id="${id}"]').focus()`)
+        for (const id of ['first', 'second', 'third', 'fourth']) {
+          source.webContents.send('tabs:receive', { kind: 'doc', tab: {
+            id, kind: 'file', title: `${id}.rst`, path: `ssh://${profile.id}${cwd}/${id}.rst`, side: 'left'
+          } })
+          await wait(`${id} document loaded`, () => evaluate(source,
+            `document.querySelector('[data-doc-id="${id}"]')?.textContent.includes('Document focus regression fixture.')`))
+        }
+        await focusDoc('fourth')
+        source.webContents.send('app:closeActiveTab')
+        await wait('preceding document receives keyboard focus', () => evaluate(source,
+          `document.activeElement?.closest('[data-doc-id]')?.dataset.docId === 'third'`))
+        assert.deepEqual(await leftTitles(), ['first.rst', 'second.rst', 'third.rst'])
+        assert.equal(agentCloses().length, 0)
+
+        // A removed close button leaves body focused; the next shortcut must retain its pane.
+        await evaluate(source, `(() => {
+          const button = [...document.querySelectorAll('.work-left .tab')].find(tab => tab.textContent.includes('first.rst')).querySelector('.tab-close');
+          button.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+          button.focus();
+          button.click();
+        })()`)
+        await wait('background document closed', async () => (await leftTitles()).length === 2)
+        assert.equal(await evaluate(source, `document.querySelector('.work-left .tab.active .tab-title')?.textContent`), 'third.rst')
+
+        // Hold focus restoration so native close events exercise the gap between render and rAF.
+        await evaluate(source, `window.savedRequestAnimationFrame = window.requestAnimationFrame;
+          window.heldFocusFrames = [];
+          window.requestAnimationFrame = callback => window.heldFocusFrames.push(callback); undefined`)
+        source.webContents.send('app:closeActiveTab')
+        await wait('third document closed before focus restoration', async () => (await leftTitles()).length === 1)
+        assert.deepEqual(await leftTitles(), ['second.rst'])
+        source.webContents.send('app:closeActiveTab')
+        await wait('last document closed before focus restoration', async () => (await leftTitles()).length === 0)
+        source.webContents.send('app:closeActiveTab')
+        await evaluate(source, `new Promise(resolve => setTimeout(resolve, 80))`)
+        assert.equal(agentCloses().length, 0, 'rapid closes never cross from the empty left pane to an agent')
+        await evaluate(source, `window.requestAnimationFrame = window.savedRequestAnimationFrame;
+          window.heldFocusFrames.splice(0).forEach(callback => callback(performance.now()))`)
+        source.webContents.send('app:closeActiveTab')
+        await evaluate(source, `new Promise(resolve => setTimeout(resolve, 80))`)
+        assert.equal(agentCloses().length, 0, 'closing again after focus restoration preserves both agents')
+        assert.deepEqual((await tabTitles(source)).filter(title => title.includes('대화')).sort(), ['남아 있을 대화', '이동할 대화'].sort())
+
+        await evaluate(source, `document.querySelector('.work-right .tab.active').click()`)
+        await wait('explicit agent selection focuses the right pane', () => evaluate(source,
+          `document.activeElement?.closest('[data-work-side]')?.dataset.workSide === 'right'`))
+        source.webContents.send('app:closeActiveTab')
+        await wait('explicitly selected agent can still close', () => agentCloses().length === 1)
+        assert.deepEqual(errors, [])
+        console.log('PASS: previous document focus, background close, rapid native closes and empty-pane boundary preserve the opposite agents; explicit agent close still works')
+        app.exit(0)
+        return
+      }
 
       if (isFork) {
         const panel = `document.querySelector('.agent-panel[data-visible="true"]')`
@@ -330,7 +389,7 @@ function runApp({ root, temp, closeMode }) {
 const env = { ...process.env }
 delete env.ELECTRON_RUN_AS_NODE
 try {
-  for (const closeMode of ['native', 'tab', 'fork', 'fork-codex', 'fork-failure']) {
+  for (const closeMode of ['native', 'tab', 'fork', 'fork-codex', 'fork-failure', 'document-focus']) {
     const entry = path.join(temp, `${closeMode}.cjs`)
     await fs.writeFile(entry, `(${runApp.toString()})(${JSON.stringify({ root, temp, closeMode })})`)
     const code = await new Promise((resolve, reject) => {

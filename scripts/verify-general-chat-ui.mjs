@@ -418,7 +418,13 @@ function runApp({ root, temp, screenshotDir, provider, mode, remote }) {
           assert.equal(await evaluate(`window.visibleComposer().value`), '아직 전송하지 않은 일반 질문')
           await evaluate(`document.querySelector('[data-doc-id="general-note"]').focus(); [...document.querySelectorAll('.work-left .tab')].find(el => el.textContent.includes('note.rst')).querySelector('.tab-close').click()`)
           await wait(() => evaluate(`document.querySelector('.shell').classList.contains('general-chat')`), 'single conversation restored')
-          await wait(() => evaluate(`document.activeElement === window.visibleComposer()`), 'typing returns to the single question input')
+          await evaluate(`new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))`)
+          assert.equal(await evaluate(`document.activeElement === window.visibleComposer()`), false,
+            'closing the last left document must not focus the right agent')
+          win.webContents.send('app:closeActiveTab')
+          await evaluate(`new Promise(resolve => setTimeout(resolve, 80))`)
+          assert.equal(calls.some(call => call.channel === 'agent:close'), false,
+            'another close after the last left document must preserve the right agent')
           assert.equal((await checkUnifiedChat()).draft, '아직 전송하지 않은 일반 질문')
           assert.equal(agents.size, 1, 'layout changes reuse the existing conversation')
         })

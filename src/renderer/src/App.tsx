@@ -1811,6 +1811,7 @@ export default function App(): JSX.Element {
     left: docOnly ? '' : docKey('doc-welcome'),
     right: ''
   })
+  const lastWorkSideRef = useRef<DockSide>()
   const activeWorkRef = useRef(activeWork)
   activeWorkRef.current = activeWork
   const [draftsRoot, setDraftsRoot] = useState<string | undefined>()
@@ -2411,6 +2412,7 @@ export default function App(): JSX.Element {
     if (!tab) return false
     if (!opts.fromSync) shareDocument(tab, false)
     const side = docSide(tab)
+    if (!opts.fromSync) lastWorkSideRef.current = side
     const closingKey = docKey(id)
     const sideKeys = workKeysForSide(visibleDocTabs, visibleTermTabs, side)
     const nextKey =
@@ -4679,9 +4681,6 @@ export default function App(): JSX.Element {
     visibleDocTabs.every((doc) => doc.kind === 'welcome') &&
     visibleTermTabs.every((term) => termSide(term) === termSide(activeTermTab))
     ? termSide(activeTermTab) : undefined
-  useEffect(() => {
-    if (generalChatSide) setTermFocusNonce((current) => bumpFocusNonce(current, activeTerm))
-  }, [generalChatSide, activeTerm])
   const rememberedAgentForDoc = (doc?: DocTab): (TermTab & { kind: 'agent' }) | undefined =>
     doc && visibleTermTabs.find((term): term is TermTab & { kind: 'agent' } =>
       term.id === documentAgentTabs[documentAgentKey(doc)] && isAgentTab(term))
@@ -7847,7 +7846,7 @@ export default function App(): JSX.Element {
       void closeDetachedDoc(docId)
       return
     }
-    const side = focusedWorkSide(activeEl)
+    const side = focusedWorkSide(activeEl) ?? (!docOnly && !termOnly ? lastWorkSideRef.current : undefined)
     const parsed = side ? parseWorkKey(activeWork[side]) : null
     if (parsed?.kind === 'terminal') {
       void closeDetachedTerm(parsed.id)
@@ -7857,6 +7856,7 @@ export default function App(): JSX.Element {
       void closeDetachedDoc(parsed.id)
       return
     }
+    if (side) return
     if (activeTerm) {
       void closeDetachedTerm(activeTerm)
       return
@@ -9674,6 +9674,14 @@ export default function App(): JSX.Element {
   return (
     <div
       ref={shellRef}
+      onFocusCapture={(event) => {
+        const side = focusedWorkSide(event.target as HTMLElement)
+        if (side) lastWorkSideRef.current = side
+      }}
+      onMouseDownCapture={(event) => {
+        const side = focusedWorkSide(event.target as HTMLElement)
+        if (side) lastWorkSideRef.current = side
+      }}
       className={`shell ${isViewer ? 'mode-viewer' : 'mode-default'} ${explorerVisible ? '' : 'explorer-hidden'} ${generalChatSide ? `general-chat general-chat-${generalChatSide}` : ''}`}
       style={shellStyle}
       {...shellDragProps}

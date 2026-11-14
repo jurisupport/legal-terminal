@@ -74,6 +74,7 @@ for (const kind of ['doc', 'term']) {
     const closed = []
     let release, windowCloses = 0
     const context = {
+      lastWorkSideRef: { current: undefined },
       window: { lt: { dialog: { confirm: () => new Promise((resolve) => { release = resolve }) } } },
       docOnly: true, termOnly: true, docTabsRef: refs, termTabsRef: refs, dirtyDocsRef: dirty,
       visibleDocTabs: [target], visibleTermTabs: [target], activeDoc: target.id,

@@ -107,6 +107,7 @@ context.pendingNotificationOperations = () => []
 
 const closingCalls = []
 const closingContext = {
+  lastWorkSideRef: { current: undefined },
   docTabsRef: { current: [{ id: 'old', caseTabId: 'case', path: 'ssh://desktop/cases/a/old.md', side: 'left' },
     { id: 'next', caseTabId: 'case', path: 'ssh://desktop/cases/a/next.md', side: 'left' }] },
   dirtyDocsRef: { current: new Set() }, termTabsRef: { current: [] }, activeWork: { left: 'doc:old', right: '' },
@@ -124,9 +125,12 @@ const close = vm.runInNewContext(ts.transpileModule(`(${handlers.get('closeDoc')
 }).outputText, closingContext)
 await close('old')
 assert.equal(closingCalls[0][1], false)
+assert.equal(closingContext.lastWorkSideRef.current, 'left')
 assert.equal(closingCalls[1][1].id, '/cases/a/next.md', 'closing the selected document publishes the fallback')
 closingCalls.length = 0
+closingContext.lastWorkSideRef.current = 'right'
 await close('old', { fromSync: true })
+assert.equal(closingContext.lastWorkSideRef.current, 'right', 'remote close preserves the local pane intent')
 assert.equal(closingCalls.length, 0, 'a remote close does not echo local changes')
 const sent = []
 const runtime = {
