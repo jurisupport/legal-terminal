@@ -7,6 +7,7 @@ export interface SessionVisit {
   scope: string
   task: SidebarTask
   openedAt: number
+  hidden?: true
 }
 
 function readSaved(key: string): unknown[] {
@@ -34,32 +35,50 @@ export function moveCaseTab(order: readonly string[], from: string, to: string):
 }
 
 export function readSessionVisits(): SessionVisit[] {
-  return readSaved(SESSION_VISITS_KEY).flatMap((raw) => {
+  return readSaved(SESSION_VISITS_KEY).flatMap<SessionVisit>((raw) => {
     if (!raw || typeof raw !== 'object') return []
-    const { scope, task, openedAt } = raw as Partial<SessionVisit>
+    const { scope, task, openedAt, hidden } = raw as Partial<SessionVisit>
     if (typeof scope !== 'string' || typeof openedAt !== 'number' || !Number.isFinite(openedAt) ||
       !task || typeof task !== 'object' || typeof task.id !== 'string' || typeof task.title !== 'string') return []
-    return [{ scope, openedAt, task: {
+    return [{ scope, openedAt, hidden: hidden === true || undefined, task: {
       id: task.id, title: task.title, mtime: openedAt,
       sessionId: typeof task.sessionId === 'string' ? task.sessionId : undefined,
       originDevice: task.originDevice === 'android' || task.originDevice === 'desktop' ? task.originDevice : undefined
     } }]
-  }).slice(0, 100)
+  })
 }
 
-export function recordSessionVisit(visits: readonly SessionVisit[], scope: string, task: SidebarTask, openedAt: number): SessionVisit[] {
+function sameTask(a: SidebarTask, b: SidebarTask): boolean {
+  return a.id === b.id || !!a.sessionId && a.sessionId === b.sessionId
+}
+
+export function removeSessionVisit(visits: readonly SessionVisit[], item: SidebarCase, task: SidebarTask): SessionVisit[] {
+  const scope = item.historyKey ?? item.id
+  const remaining = visits.filter((visit) => visit.scope !== scope || !sameTask(visit.task, task))
+  // Open tabs also appear in recents without a visit. Suppress that fallback until the next visit.
+  if (item.tasks.some((open) => sameTask(open, task))) {
+    remaining.push({ scope, task: { id: task.id, sessionId: task.sessionId, title: '', mtime: 0 }, openedAt: 0, hidden: true })
+  }
+  return remaining
+}
+
+export function recordSessionVisit(visits: SessionVisit[], scope: string, task: SidebarTask, openedAt: number, revisit = true): SessionVisit[] {
+  const matches = (visit: SessionVisit): boolean => visit.scope === scope && sameTask(visit.task, task)
+  if (!revisit && visits.some((visit) => visit.hidden && matches(visit))) return visits
+  const remaining = visits.filter((visit) => !matches(visit))
   return [{ scope, task: { ...task, active: undefined, status: undefined }, openedAt },
-    ...visits.filter((visit) => visit.scope !== scope || (visit.task.id !== task.id &&
-      (!task.sessionId || visit.task.sessionId !== task.sessionId)))].slice(0, 100)
+    ...remaining.filter((visit) => !visit.hidden).slice(0, 99), ...remaining.filter((visit) => visit.hidden)]
 }
 
 export function recentSidebarTasks(cases: readonly SidebarCase[], visits: readonly SessionVisit[]): { item: SidebarCase; task: SidebarTask; openedAt: number }[] {
   return cases.flatMap((item) => {
     const history = visits.filter((visit) => visit.scope === (item.historyKey ?? item.id))
-    const matches = (a: SidebarTask, b: SidebarTask): boolean => a.id === b.id || !!a.sessionId && a.sessionId === b.sessionId
     return [
-      ...item.tasks.map((task) => ({ item, task, openedAt: history.find((visit) => matches(visit.task, task))?.openedAt ?? 0 })),
-      ...history.filter((visit) => visit.task.sessionId && !item.tasks.some((task) => matches(visit.task, task)))
+      ...item.tasks.flatMap((task) => {
+        const visit = history.find((entry) => sameTask(entry.task, task))
+        return visit?.hidden ? [] : [{ item, task, openedAt: visit?.openedAt ?? 0 }]
+      }),
+      ...history.filter((visit) => !visit.hidden && visit.task.sessionId && !item.tasks.some((task) => sameTask(visit.task, task)))
         .map((visit) => ({ item, task: visit.task, openedAt: visit.openedAt }))
     ]
   }).sort((a, b) => b.openedAt - a.openedAt)

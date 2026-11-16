@@ -107,7 +107,7 @@ import {
   type FolderMatchSuggestion
 } from './caseFolderMatch'
 import { mergeWorkspaceSessions } from './workspaceSessions'
-import { CASE_ORDER_KEY, SESSION_VISITS_KEY, readCaseOrder, orderCaseTabs, moveCaseTab, readSessionVisits, recordSessionVisit } from './sidebarNavigation'
+import { CASE_ORDER_KEY, SESSION_VISITS_KEY, readCaseOrder, orderCaseTabs, moveCaseTab, readSessionVisits, recordSessionVisit, removeSessionVisit } from './sidebarNavigation'
 import { agentTabsOnly, isAgentTabClosed } from '../../shared/workspaceAgentTabs'
 import type { SharedUiActivity, SharedUiOperation, SharedUiState, SharedUiTab } from '../../shared/sharedUiState'
 import { isGeneralChatDirectory } from '../../shared/generalChat'
@@ -7389,8 +7389,11 @@ export default function App(): JSX.Element {
       return
     }
     const key = JSON.stringify([viewedScope, viewedTask.id])
-    if (lastViewedSessionRef.current.key !== key) lastViewedSessionRef.current = { key, openedAt: Date.now() }
-    setSessionVisits((visits) => recordSessionVisit(visits, viewedScope, viewedTask, lastViewedSessionRef.current.openedAt))
+    const previous = lastViewedSessionRef.current
+    const revisit = previous.key !== key
+    const openedAt = revisit ? Date.now() : previous.openedAt
+    lastViewedSessionRef.current = { key, openedAt }
+    setSessionVisits((visits) => recordSessionVisit(visits, viewedScope, viewedTask, openedAt, revisit))
   }, [viewedScope, viewedTask?.id, viewedTask?.sessionId, viewedTask?.title, viewedTask?.originDevice, docOnly, termOnly])
 
   const sidebarSessionSource = (id: string): TermTab | undefined => {
@@ -9856,6 +9859,7 @@ export default function App(): JSX.Element {
             <CaseSidebar
               cases={sidebarCases}
               sessionVisits={sessionVisits}
+              onRemoveRecent={(item, task) => setSessionVisits((visits) => removeSessionVisit(visits, item, task))}
               onReorderCase={reorderCaseTabs}
               attentionOnly={caseAttentionOnly}
               onAttentionOnlyChange={setCaseAttentionOnly}

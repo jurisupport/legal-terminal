@@ -954,6 +954,7 @@ export async function listAutomaticWorkspaces(ssh?: SshProfileLike, includeClose
       contents = await Promise.all(names.filter((name) => /^[a-f0-9]{24}\.json$/.test(name))
         .map(async (name) => ({ name, content: await readFile(join(dir, name), 'utf8') })))
     }
+    const filenames = new Set(contents.map(({ name }) => name))
     const snapshots = new Map<string, WorkspaceSnapshot>()
     for (const { name, content } of contents) {
       try {
@@ -966,9 +967,11 @@ export async function listAutomaticWorkspaces(ssh?: SshProfileLike, includeClose
         const caseId = asString(asRecord(source?.meta)?.jsId)
         const projectId = projectIdFromSnapshot(snapshot)
         if (!snapshotMatchesLocation(snapshot, { caseId, projectId })) continue
-        const canonical = name === sharedRemoteFile(cwd, caseId, projectId)
-        const key = JSON.stringify([cwd, caseId ?? null, projectId ?? null])
-        if (!snapshots.has(key) || canonical) snapshots.set(key, agentTabsOnly(snapshot))
+        const canonical = sharedRemoteFile(cwd, caseId, projectId)
+        // A damaged canonical file still supersedes older copies of the same workspace.
+        if (name !== canonical && filenames.has(canonical)) continue
+        const previous = snapshots.get(canonical)
+        if (!previous || snapshot.savedAt > previous.savedAt) snapshots.set(canonical, agentTabsOnly(snapshot))
       } catch {
         // A damaged backup must not prevent other cases from being discovered.
       }

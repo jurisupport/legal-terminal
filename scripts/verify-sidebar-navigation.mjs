@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { CASE_ORDER_KEY, SESSION_VISITS_KEY, readCaseOrder, orderCaseTabs, moveCaseTab,
-  readSessionVisits, recordSessionVisit, recentSidebarTasks } from '../src/renderer/src/sidebarNavigation.ts'
+  readSessionVisits, recordSessionVisit, removeSessionVisit, recentSidebarTasks } from '../src/renderer/src/sidebarNavigation.ts'
 
 const storage = new Map()
 globalThis.localStorage = { getItem: (key) => storage.get(key) ?? null }
@@ -42,6 +42,18 @@ assert.equal(recentSidebarTasks([item('local', [])], pending).length, 0, 'closed
 storage.set(SESSION_VISITS_KEY, JSON.stringify(visits))
 assert.deepEqual(rowKeys([restored, remote], readSessionVisits()), rowKeys([restored, remote], visits))
 assert.deepEqual(recentSidebarTasks([item('changed-host', [])], visits), [], 'SSH host changes cannot expose stale session links')
+
+const dismissed = removeSessionVisit(visits, local, task('a'))
+assert.deepEqual(rowKeys([local, remote], dismissed), ['local:b', 'remote:a'], 'dismissal covers unvisited open tabs in just the selected workspace')
+storage.set(SESSION_VISITS_KEY, JSON.stringify(dismissed))
+const reloaded = readSessionVisits()
+assert.deepEqual(rowKeys([local, remote], recordSessionVisit(reloaded, 'local', task('a', { title: 'renamed' }), 50, false)),
+  ['local:b', 'remote:a'], 'restoring the active tab or updating its title keeps the dismissal')
+assert.deepEqual(rowKeys([local, remote], recordSessionVisit(reloaded, 'local', task('a'), 60)),
+  ['local:a', 'local:b', 'remote:a'], 'visiting again returns the session to the top')
+const closed = item('local', [])
+assert.deepEqual(rowKeys([closed, remote], removeSessionVisit(visits, closed, task('b'))), ['remote:a'],
+  'removing a closed session resolves its saved session ID')
 
 for (const malformed of ['{', '{}', 'null', '[null, 12, {}]']) {
   storage.set(CASE_ORDER_KEY, malformed)

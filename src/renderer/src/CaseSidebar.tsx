@@ -41,6 +41,7 @@ export interface SidebarCase {
 interface CaseSidebarProps {
   cases: SidebarCase[]
   sessionVisits: SessionVisit[]
+  onRemoveRecent: (item: SidebarCase, task: SidebarTask) => void
   onReorderCase: (from: string, to: string) => void
   onOpenCase: (id: string) => void
   onOpenTask: (caseId: string, task: SidebarTask) => void
@@ -337,7 +338,7 @@ function CaseGroup({
   )
 }
 
-export default function CaseSidebar({ cases, sessionVisits, onAddCase, attentionOnly, onAttentionOnlyChange, noticeCount, onNextAttention, ...callbacks }: CaseSidebarProps): JSX.Element {
+export default function CaseSidebar({ cases, sessionVisits, onRemoveRecent, onAddCase, attentionOnly, onAttentionOnlyChange, noticeCount, onNextAttention, ...callbacks }: CaseSidebarProps): JSX.Element {
   const [days, setDays] = useState(readPeriod)
   const [visibleCases, setVisibleCases] = useState(6)
   const [search, setSearch] = useState('')
@@ -410,15 +411,20 @@ export default function CaseSidebar({ cases, sessionVisits, onAddCase, attention
         <div className="case-sidebar-heading" title="마지막으로 열어본 순서">최근 세션</div>
         <div className="case-sidebar-recent-list">
           {recentTasks.slice(0, visibleSessions).map(({ item, task }) => (
-            <button type="button" key={`${item.id}:${task.id}`}
-              className={`case-sidebar-task case-sidebar-recent-task${task.active ? ' active' : ''}`}
-              title={`${task.title} | ${[item.title, item.participants].filter(Boolean).join(' · ')}`}
-              aria-current={task.active ? 'page' : undefined} disabled={item.unavailable}
-              onClick={() => callbacks.onOpenTask(item.id, task)}>
-              <span className="case-sidebar-task-title">{task.title}</span>
-              <span className="case-sidebar-task-divider" aria-hidden="true">|</span>
-              <span className="case-sidebar-task-case">{item.title}</span>
-            </button>
+            <div className="case-sidebar-recent-row" key={`${item.id}:${task.id}`}>
+              <button type="button"
+                className={`case-sidebar-task case-sidebar-recent-task${task.active ? ' active' : ''}`}
+                title={`${task.title} | ${[item.title, item.participants].filter(Boolean).join(' · ')}`}
+                aria-current={task.active ? 'page' : undefined} disabled={item.unavailable}
+                onClick={() => callbacks.onOpenTask(item.id, task)}>
+                <span className="case-sidebar-task-title">{task.title}</span>
+                <span className="case-sidebar-task-divider" aria-hidden="true">|</span>
+                <span className="case-sidebar-task-case">{item.title}</span>
+              </button>
+              <button type="button" className="case-sidebar-recent-remove"
+                title="최근 세션 목록에서 삭제" aria-label={`${task.title} 최근 세션 목록에서 삭제`}
+                onClick={() => onRemoveRecent(item, task)}>×</button>
+            </div>
           ))}
           {recentTasks.length === 0 && <p className="case-sidebar-message">{search.trim() ? '검색 결과가 없습니다.' : '세션을 열면 여기에 표시됩니다.'}</p>}
           {recentTasks.length > visibleSessions && <button type="button" className="case-sidebar-more-tasks"

@@ -21,11 +21,19 @@ const require = createRequire(import.meta.url)
 let failRead = false
 let writes = 0
 let delayRead = false
+let inspectWrite
 const mocks = {
   electron: { app: { getPath: () => userData } },
   os: { homedir: () => hostHome, hostname: () => 'test-pc' },
   './sshOptions': { buildSshArgs: () => [] },
   '../shared/workspaceAgentTabs': shared,
+  'fs/promises': { ...require('node:fs/promises'), writeFile: async (path, data, ...options) => {
+    if (inspectWrite) {
+      await writeFile(path, '', ...options)
+      await inspectWrite()
+    }
+    return writeFile(path, data, ...options)
+  } },
   child_process: {
     execFile: (_bin, args, options, done) => failRead
       ? done(new Error('offline'), '')
@@ -71,6 +79,21 @@ try {
   const backup = await api.loadWorkspaceSnapshot(saved.entry.id)
   assert.equal(backup.snapshot.docs.length, 1, 'local manual backup still retains documents')
 
+  // A reader during an unfinished write must still see the previous complete snapshot.
+  inspectWrite = async () => {
+    const duringSave = await api.loadWorkspaceSnapshot(saved.entry.id)
+    assert.equal(duringSave.ok, true, 'in-progress save never exposes truncated JSON')
+    assert.equal(duringSave.snapshot.terminals[0].id, 'pc')
+  }
+  try {
+    assert.equal((await api.saveWorkspaceSnapshot(backup.snapshot)).ok, true)
+  } finally { inspectWrite = undefined }
+  const intactBackup = await readFile(saved.path, 'utf8')
+  inspectWrite = async () => { throw new Error('simulated interrupted write') }
+  try {
+    assert.equal((await api.saveWorkspaceSnapshot(backup.snapshot)).ok, false)
+    assert.equal(await readFile(saved.path, 'utf8'), intactBackup, 'failed save preserves the last complete backup')
+  } finally { inspectWrite = undefined }
   for (const ssh of [location.ssh, undefined]) {
     await writeFile(saved.path, '')
     const recovered = await api.loadAutomaticWorkspace({ ...location, ssh })
@@ -267,6 +290,66 @@ try {
   latest = (await oldDesktop.loadAutomaticWorkspace(staleLocation)).remote.snapshot
   assert.equal(latest.workspaceOpen, false, 'retrying an old reopen cannot erase a newer close')
 
+  // Desktop and Android share case-scoped files, including locks and legacy migration.
+  for (const ssh of [location.ssh, undefined]) {
+    const caseCwd = ssh ? '/registered-remote' : '/registered-local'
+    const scopedLocation = (id) => ({ ...location, cwd: caseCwd, ssh, caseId: id })
+    const scopedSnapshot = (id, terminals = [term(id)]) => ({ ...snapshot(terminals),
+      currentCase: { name: id, drafts: caseCwd, meta: { jsId: id } } })
+    const casePath = (id = '') => join(folder, `${createHash('sha256').update(id
+      ? JSON.stringify(['case-workspace', caseCwd, id]) : caseCwd).digest('hex').slice(0, 24)}.json`)
+    const legacy = { ...scopedSnapshot('a'), workspaceOpen: true, savedAt: '2099-01-01T00:00:00Z' }
+    await writeFile(casePath(), JSON.stringify(legacy))
+    assert.equal((await api.loadAutomaticWorkspace(scopedLocation('a'))).remote.snapshot.currentCase.meta.jsId, 'a')
+    assert.equal((await api.loadAutomaticWorkspace(scopedLocation('b'))).remote.snapshot, null,
+      'legacy ownership cannot cross cases at the same folder')
+    const savedA = await api.saveAutomaticWorkspace({ ...scopedSnapshot('a'), workspaceOpen: false }, scopedLocation('a'))
+    const savedB = await api.saveAutomaticWorkspace(scopedSnapshot('b'), scopedLocation('b'))
+    assert.equal(savedA.remoteError, undefined)
+    assert.equal(savedB.remoteError, undefined)
+    assert.notEqual(savedA.entry.id, savedB.entry.id, 'local backups are case scoped')
+    assert.equal(JSON.parse(await readFile(casePath('a'), 'utf8')).workspaceOpen, false)
+    assert.equal(JSON.parse(await readFile(casePath(), 'utf8')).workspaceOpen, true, 'migration preserves legacy source')
+    const listed = (await api.listAutomaticWorkspaces(ssh, true)).snapshots.filter((item) => item.currentCase.drafts === caseCwd)
+    assert.equal(listed.length, 2)
+    assert.equal(listed.find((item) => item.currentCase.meta.jsId === 'a').workspaceOpen, false,
+      'canonical close defeats a newer legacy open')
+    assert.equal((await api.listAutomaticWorkspaces(ssh)).snapshots.filter((item) => item.currentCase.drafts === caseCwd).length, 1)
+    await writeFile(casePath('a'), '{broken')
+    assert.equal((await api.loadAutomaticWorkspace(scopedLocation('a'))).ok, false)
+    assert.equal((await api.listAutomaticWorkspaces(ssh, true)).snapshots.filter((item) => item.currentCase.drafts === caseCwd).length, 1,
+      'corrupt canonical does not resurrect legacy')
+    await rm(casePath('a'))
+    await writeFile(casePath(), JSON.stringify({ ...legacy, terminals: [{ ...term('foreign'), jsId: 'b' }] }))
+    assert.equal((await api.loadAutomaticWorkspace(scopedLocation('a'))).remote.snapshot, null, 'mixed legacy ownership rejected')
+    await writeFile(casePath(), '{broken')
+    assert.equal((await api.loadAutomaticWorkspace(scopedLocation('a'))).ok, false, 'legacy parse failure is visible')
+    assert.ok((await api.saveAutomaticWorkspace(scopedSnapshot('a'), scopedLocation('a'))).remoteError,
+      'unreadable legacy cannot silently initialize a new file')
+    await writeFile(casePath(), JSON.stringify(legacy))
+    await mkdir(casePath('a') + '.lock')
+    let released = false
+    setTimeout(() => { released = true; void rm(casePath('a') + '.lock', { recursive: true }) }, 150)
+    const locked = await api.saveAutomaticWorkspace(scopedSnapshot('a'), scopedLocation('a'))
+    assert.equal(locked.remoteError, undefined)
+    assert.equal(released, true, 'writer honors Android canonical lock')
+    assert.equal((await api.saveAutomaticWorkspace(scopedSnapshot('b'), scopedLocation('a'))).ok, false,
+      'mismatched explicit case cannot write')
+  }
+
+  const retryApi = loadDevice(join(root, 'case-intents'))
+  const retryLocation = (caseId) => ({ ...location, cwd: '/retry-cases', caseId })
+  const retrySnapshot = (id) => ({ ...snapshot([]), currentCase: { drafts: '/retry-cases', name: id, meta: { jsId: id } },
+    workspaceOpen: false, workspaceIntentId: 'same-intent-per-case' })
+  failRead = true
+  for (const id of ['a', 'b']) assert.ok((await retryApi.saveAutomaticWorkspace(retrySnapshot(id), retryLocation(id))).remoteError)
+  assert.equal(JSON.parse(await readFile(join(root, 'case-intents/workspace-intents.json'), 'utf8')).length, 2,
+    'offline intents for same-folder cases do not replace each other')
+  failRead = false
+  assert.equal((await retryApi.listAutomaticWorkspaces(location.ssh, true)).ok, true)
+  for (const id of ['a', 'b']) assert.equal((await retryApi.loadAutomaticWorkspace(retryLocation(id))).remote.snapshot.workspaceOpen, false)
+  assert.equal(JSON.parse(await readFile(join(root, 'case-intents/workspace-intents.json'), 'utf8')).length, 0)
+
   // Exercise the actual renderer restore handler, including async failure/retry and live work.
   const app = await readFile(process.argv.find(arg => arg.startsWith('--app-source='))?.slice('--app-source='.length) ?? new URL('../src/renderer/src/App.tsx', import.meta.url), 'utf8')
   const parsed = ts.createSourceFile('App.tsx', app, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX)
@@ -313,6 +396,9 @@ try {
   const identity = vm.runInNewContext(ts.transpileModule(`${identityHelpers.join('\n')}\n({caseIdentityKey, normalizedCasePathKey, currentCaseFromCaseTab, workspaceLocation, workspaceLocationKey, sessionListKey, sameWorkspaceLocation: typeof sameWorkspaceLocation === 'function' ? sameWorkspaceLocation : undefined, rebaseRemoteWorkspace})`, {
     compilerOptions: { target: ts.ScriptTarget.ES2022 }
   }).outputText, { isGeneralChatDirectory })
+  const registered = { drafts: '/same-folder', meta: { jsId: 'a' } }
+  assert.equal(identity.workspaceLocation(registered).caseId, 'a')
+  assert.notEqual(identity.workspaceLocationKey(registered), identity.workspaceLocationKey({ ...registered, meta: { jsId: 'b' } }))
   context.caseIdentityKey = identity.caseIdentityKey
   context.normalizedCasePathKey = identity.normalizedCasePathKey
   context.currentCaseFromCaseTab = identity.currentCaseFromCaseTab
