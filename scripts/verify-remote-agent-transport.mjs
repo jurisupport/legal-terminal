@@ -158,6 +158,30 @@ try {
   assert.ok(!failedReplay.stdout.includes('permission-1'), 'failed run replay must suppress unanswered historical approval')
   assert.equal((await probeRemoteAgentRun({ ...options(), identity: { id: 'alias-newest', provider: 'claude', resumeSessionId: 'claude-persistent' } })).runId, failureInfo.runId, 'session alias must discover newest turn')
 
+  const agyBase = options('antigravity')
+  const agyScript = String.raw`
+import json, sys
+prompt = json.loads(sys.stdin.readline())
+assert prompt['event'] == 'user'
+print(json.dumps({'event':'init','conversation_id':'agy-persistent'}), flush=True)
+assert sys.stdin.read() == ''
+print('Sign in: https://accounts.google.com/o/oauth2/auth?state=private-test-value', file=sys.stderr, flush=True)
+print(json.dumps({'event':'result','result':{'status':'SUCCESS','response':'원격 응답'}}), flush=True)
+`
+  const agy = start({ ...agyBase, command: `python3 -u -c ${quote(agyScript)}` })
+  const agyInfo = await agy.process.ready
+  runs.push({ base: agyBase, runId: agyInfo.runId })
+  write(agy, { event: 'user', message: { content: '원격 질문' } })
+  await until(() => agy.closed, 'remote Antigravity completes after one prompt even without a client EOF')
+  assert.equal(agy.code, 0)
+  assert.equal(agy.stderr.trim(), 'Sign in: Authentication required')
+  const agyAlias = { ...agyBase, identity: { id: 'other-agy-tab', provider: 'antigravity', resumeSessionId: 'agy-persistent' } }
+  assert.equal((await probeRemoteAgentRun(agyAlias)).runId, agyInfo.runId)
+  assert.equal((await probeRemoteAgentRun(agyBase)).hasTurnInput, true)
+  const agyReplay = await attach(agyAlias, agyInfo.runId)
+  await until(() => agyReplay.closed, 'completed Antigravity turn can be restored')
+  assert.equal(agyReplay.stdout, agy.stdout)
+
   const codexBase = options('codex')
   const codexClient = start({ ...codexBase, command: `python3 -u -c ${quote(codex)}` })
   const codexInfo = await codexClient.process.ready

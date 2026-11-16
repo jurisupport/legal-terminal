@@ -68,9 +68,9 @@ function shq(s: string): string {
 function agentLaunchCommand(opts: CreatePtyOptions): string {
   const agent = opts.autoLaunchAgent ?? (opts.autoLaunchClaude ? 'claude' : undefined)
   if (agent === 'antigravity') {
-    if (opts.ssh) return ''
-    if (!opts.resumeSessionId) return 'agy'
-    return /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(opts.resumeSessionId) ? `agy --conversation ${opts.resumeSessionId}` : ''
+    const command = opts.ssh ? 'env PATH="$HOME/.local/bin:$PATH" agy' : 'agy'
+    if (!opts.resumeSessionId) return command
+    return /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(opts.resumeSessionId) ? `${command} --conversation ${opts.resumeSessionId}` : ''
   }
   const remoteControl = agent === 'claude' && opts.ssh?.remoteControl
   const name = opts.cwd?.replace(/[\\/]+$/, '').split(/[\\/]/).pop() || opts.id

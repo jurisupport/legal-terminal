@@ -24,10 +24,10 @@ const resolveProvider = compile(`const isAgentProvider = ${declarations.get('isA
   DEFAULT_AGENT_PROVIDER: 'claude'
 })
 assert.equal(resolveProvider('antigravity'), 'antigravity')
-assert.equal(resolveProvider('antigravity', { host: 'server.invalid' }), 'claude')
-assert.equal(resolveProvider('antigravity', undefined, { contextKind: 'project' }), 'claude')
+assert.equal(resolveProvider('antigravity', { contextKind: 'case' }), 'antigravity')
+assert.equal(resolveProvider('antigravity', { contextKind: 'project' }), 'claude')
 for (const todoManagement of [true, false]) {
-  assert.equal(resolveProvider('antigravity', undefined, { todoManagement }), 'claude')
+  assert.equal(resolveProvider('antigravity', { todoManagement }), 'claude')
 }
 
 const restore = compile(`(${declarations.get('sanitizeWorkspaceTerm')})`, {

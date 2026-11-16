@@ -7,7 +7,7 @@ const CLIENT_HEARTBEAT_INTERVAL_MS = 5_000
 
 export interface RemoteAgentRunInfo {
   runId: string
-  provider: 'claude' | 'codex'
+  provider: AgentExecutionIdentity['provider']
   sessionId?: string
   running: boolean
   metadata: Record<string, unknown>
@@ -127,6 +127,8 @@ def broker(request):
         timer.daemon = not client_required
         timer.start()
     def redact(data):
+        if identity['provider'] == 'antigravity':
+            data = re.sub(rb'https?://accounts\.google\.com/[^\s"<>]+', b'Authentication required', data)
         for secret in secrets: data = data.replace(secret.encode(), b'[redacted]')
         return data
     def find_secrets(value, key=''):
@@ -157,7 +159,9 @@ def broker(request):
                 if isinstance(mid, int): state['lastRequestId'] = max(state['lastRequestId'], mid)
                 if message.get('method') in ('thread/start', 'thread/resume'): thread_requests.add(mid)
                 if message.get('method') == 'config/read': config_requests.add(mid)
-                if message.get('type') == 'user' or message.get('method') in ('turn/start', 'review/start', 'thread/compact/start'): has_turn = True
+                if (message.get('type') == 'user' or message.get('method') in ('turn/start', 'review/start', 'thread/compact/start')
+                        or (identity['provider'] == 'antigravity' and message.get('event') == 'user')):
+                    has_turn = True
                 response = message.get('response') or {}
                 resolved = None
                 if identity['provider'] == 'claude' and message.get('type') == 'control_response' and isinstance(response, dict):
@@ -197,6 +201,8 @@ def broker(request):
                 # Draining stdout must remain possible while a large input blocks on the pipe.
                 child.stdin.write(data)
                 child.stdin.flush()
+                # One agy process serves one turn; a lost client must not strand it waiting for EOF.
+                if identity['provider'] == 'antigravity' and has_turn: child.stdin.close()
                 with lock:
                     if has_turn: state['hasTurnInput'] = True
                     for rid in resolved_ids:
@@ -257,6 +263,8 @@ def broker(request):
                                 record_value['requestId'] = rid
                             if identity['provider'] == 'claude' and message.get('type') == 'system' and message.get('subtype') == 'init':
                                 remember(message.get('session_id'))
+                            elif identity['provider'] == 'antigravity' and message.get('event') == 'init':
+                                remember(message.get('conversation_id'))
                             elif identity['provider'] == 'codex' and message.get('id') in thread_requests:
                                 thread_requests.discard(message.get('id'))
                                 result = message.get('result') or {}

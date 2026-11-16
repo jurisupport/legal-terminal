@@ -226,7 +226,7 @@ function runApp({ root, temp, screenshotDir, provider, mode, remote }) {
     assert.equal(layout.overflow, false, 'unified conversation fits the window')
     assert.equal(await evaluate(`document.querySelectorAll('.agent-browser-toggle, .browser-workspace, .agent-browser').length`), 0, 'removed browser UI is absent in local and remote conversations')
     assert.equal(await evaluate(`typeof window.lt.browser`), 'undefined', 'removed browser API is not exposed')
-    assert.equal(await evaluate(`!!window.visibleComposer().closest('.agent-panel').querySelector('.agent-provider-select option[value="antigravity"]')`), !remote, 'Antigravity is offered only for local chat')
+    assert.equal(await evaluate(`!!window.visibleComposer().closest('.agent-panel').querySelector('.agent-provider-select option[value="antigravity"]')`), true, 'Antigravity is offered in local and remote chat')
     if (provider === 'antigravity') {
       assert.equal(await evaluate(`window.visibleComposer().closest('.agent-panel').querySelector('.agent-provider-select').value`), provider)
       assert.equal(await evaluate(`!!window.visibleComposer().closest('.agent-panel').querySelector('.agent-mode-trigger, .agent-auth-btn')`), false)
@@ -234,8 +234,8 @@ function runApp({ root, temp, screenshotDir, provider, mode, remote }) {
     }
     return layout
   }
-  const checkScope = (agent, profile = phoneProfile) => {
-    assert.equal(agent.provider, remote ? 'claude' : provider)
+  const checkScope = (agent, profile = phoneProfile, expectedProvider = remote ? 'claude' : provider) => {
+    assert.equal(agent.provider, expectedProvider)
     assert.equal(agent.source, remote ? 'ssh' : 'local')
     if (remote) {
       assert.equal(agent.ssh?.host, profile.host)
@@ -330,13 +330,14 @@ function runApp({ root, temp, screenshotDir, provider, mode, remote }) {
           const before = agents.size
           const directoryCalls = calls.filter(call => call.channel === 'app:generalChatDirectory').length
           settings.sshProfiles = [replacementProfile]
+          settings.agentDefaultProvider = 'antigravity'
           await evaluate(`window.dispatchEvent(new CustomEvent('lt:settings-updated', { detail: ${JSON.stringify(settings)} }))`)
           await wait(() => calls.filter(call => call.channel === 'app:generalChatDirectory').length > directoryCalls, 'replacement server directory prepared')
           await wait(() => evaluate(`!document.querySelector('.general-chat-button').disabled`), 'replacement server ready')
           await evaluate(`document.querySelector('.general-chat-button').click()`)
           await wait(() => [...agents.values()].some(agent => agent.ssh?.host === replacementProfile.host), 'replacement server conversation')
           replacementAgent = [...agents.values()].find(agent => agent.ssh?.host === replacementProfile.host)
-          checkScope(replacementAgent, replacementProfile)
+          checkScope(replacementAgent, replacementProfile, 'antigravity')
           assert.equal(agents.size, before + 1, 'the replacement server receives a new agent')
           assert.equal(replacementAgent.resumeSessionId, undefined, 'the replacement server never resumes an old server session')
           assert.equal(agents.get('mobile-shared').ssh.host, phoneProfile.host, 'the phone session stays on its original server')
@@ -370,6 +371,8 @@ function runApp({ root, temp, screenshotDir, provider, mode, remote }) {
           await evaluate(`document.querySelector('.general-chat-button').click()`)
           await wait(() => evaluate(`document.querySelector('.case-sidebar-group.active')?.dataset.caseId === ${JSON.stringify(replacementCaseId)} && window.visibleComposer()?.closest('[data-term-id]')?.dataset.termId === ${JSON.stringify(replacementAgent.id)}`), 'general questions return to the configured replacement server')
           assert.equal(agents.size, before, 'switching between servers reuses each server conversation')
+          assert.equal(await evaluate(`window.visibleComposer().closest('.agent-panel').querySelector('.agent-provider-select').value`), 'antigravity')
+          assert.ok((await evaluate(`window.visibleComposer().closest('.agent-panel').querySelector('.agent-title-sub').textContent`)).includes(replacementProfile.host))
           await capture('replacement-server-remote')
         })
       } else if (mode) {

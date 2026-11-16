@@ -2084,7 +2084,7 @@ export default function AgentPanel({
 }: AgentPanelProps): JSX.Element {
   const isGeneralChat = workspaceContext?.kind === 'global' && workspaceContext.todoManagement === undefined
   const isAntigravity = provider === 'antigravity'
-  const offersAntigravity = !ssh && workspaceContext?.kind !== 'project' && workspaceContext?.todoManagement === undefined
+  const offersAntigravity = workspaceContext?.kind !== 'project' && workspaceContext?.todoManagement === undefined
   const usesClaudeRemoteAuth = Boolean(ssh) && provider === 'claude'
   const usesAgentAuth = provider === 'claude' || provider === 'codex'
   const [items, setItems] = useState<TimelineItem[]>([])
@@ -4015,7 +4015,7 @@ export default function AgentPanel({
           <span className="agent-title-sub" title={cwd}>
             {isGeneralChat
               ? ssh
-                ? provider === 'claude' ? `폰과 이어쓰기 · 같은 서버 ${ssh.host}` : 'Codex 대화 · PC에서 이어쓰기'
+                ? provider === 'claude' ? `폰과 이어쓰기 · 같은 서버 ${ssh.host}` : `${agentLabel} 대화 · 서버 ${ssh.host}`
                 : '이 컴퓨터에서 대화합니다'
               : cwd}
           </span>

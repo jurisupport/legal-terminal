@@ -265,6 +265,20 @@ function runApp({ root, temp, screenshot }) {
       assert.equal(remote.cwd, '/cases/kim')
       assert.equal(remote.ssh.host, profile.host, 'resume retains selected SSH host despite same local cwd')
       assert.equal(await evaluate(`${group('박지훈')}.querySelector('.case-sidebar-case-participants').textContent`), '박지훈 / 김철수', 'direct history resume preserves both parties from a closed case')
+      await evaluate(`{
+        const select = document.querySelector('.agent-panel[data-visible="true"] .agent-provider-select');
+        select.value = 'antigravity';
+        select.dispatchEvent(new Event('change', { bubbles: true }));
+      }`)
+      await wait(() => [...agents.values()].some(agent => agent.provider === 'antigravity'))
+      const agy = [...agents.values()].find(agent => agent.provider === 'antigravity')
+      assert.equal(agy.source, 'ssh')
+      assert.equal(agy.cwd, remote.cwd)
+      assert.deepEqual(agy.ssh, remote.ssh)
+      assert.deepEqual(agy.workspaceContext, remote.workspaceContext)
+      assert.notEqual(agy.id, remote.id)
+      assert.equal(agy.resumeSessionId, undefined, 'a new provider must not receive a Claude session ID')
+      assert.ok(!calls.some(call => call.channel === 'agent:close' && call.args[0] === remote.id), 'keep the original remote conversation')
       await evaluate(`${group('폰에서 시작한 사건')}.querySelector('.case-sidebar-toggle').click()`)
       await wait(() => evaluate(`${group('폰에서 시작한 사건')}?.textContent.includes('폰에서 작성한 초안')`))
       assert.equal(await evaluate(`${group('폰에서 시작한 사건')}.querySelector('.case-sidebar-task-origin')?.textContent`), '폰',

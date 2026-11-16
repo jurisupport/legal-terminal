@@ -440,10 +440,9 @@ const isAgentProvider = (value: unknown): value is AgentProvider =>
   value === 'claude' || value === 'codex' || value === 'antigravity'
 const resolveAgentProvider = (
   value: unknown,
-  ssh?: SshConn,
   context?: Pick<TermTab, 'contextKind' | 'todoManagement'>
 ): AgentProvider => {
-  if (value === 'antigravity' && (ssh || context?.contextKind === 'project' || context?.todoManagement !== undefined)) {
+  if (value === 'antigravity' && (context?.contextKind === 'project' || context?.todoManagement !== undefined)) {
     return DEFAULT_AGENT_PROVIDER
   }
   return isAgentProvider(value) ? value : DEFAULT_AGENT_PROVIDER
@@ -3126,7 +3125,7 @@ export default function App(): JSX.Element {
       suggestedRecords: suggested,
       suggestedRecordOptions: suggestedOptions,
       autoClaude: kind === 'terminal',
-      agentProvider: kind === 'agent' ? resolveAgentProvider(agentProviderOverride ?? agentDefaultProvider, undefined, caseMeta) : undefined,
+      agentProvider: kind === 'agent' ? resolveAgentProvider(agentProviderOverride ?? agentDefaultProvider, caseMeta) : undefined,
       createdAt: Date.now(),
       originDevice: 'desktop',
       side,
@@ -3171,7 +3170,8 @@ export default function App(): JSX.Element {
       setTermFocusNonce((current) => bumpFocusNonce(current, existing.id))
     } else {
       const tab = profile
-        ? createRemoteCase(profile, generalChatDirectory, '일반 질문', { contextKind: 'folder' }, undefined, 'right', 'agent', 'claude')
+        ? createRemoteCase(profile, generalChatDirectory, '일반 질문', { contextKind: 'folder' }, undefined, 'right', 'agent',
+          agentDefaultProvider === 'antigravity' ? 'antigravity' : 'claude')
         : createCase(generalChatDirectory, '일반 질문', undefined, undefined, { contextKind: 'folder' })
       termTabsRef.current = [...termTabsRef.current, tab]
       setDocTabs((tabs) => tabs.map((doc) =>
@@ -3262,7 +3262,7 @@ export default function App(): JSX.Element {
       cwd: remotePath,
       recordsFolder: records,
       autoClaude: kind === 'terminal',
-      agentProvider: kind === 'agent' ? resolveAgentProvider(agentProviderOverride ?? agentDefaultProvider, ssh) : undefined,
+      agentProvider: kind === 'agent' ? resolveAgentProvider(agentProviderOverride ?? agentDefaultProvider, meta) : undefined,
       createdAt: Date.now(),
       originDevice: 'desktop',
       ssh,
@@ -3820,7 +3820,7 @@ export default function App(): JSX.Element {
       cwd,
       recordsFolder: cur?.recordsFolder ?? currentCase?.records,
       autoClaude: false,
-      agentProvider: resolveAgentProvider(agentProviderOverride ?? cur?.agentProvider ?? agentDefaultProvider, ssh, cur ?? currentCase?.meta),
+      agentProvider: resolveAgentProvider(agentProviderOverride ?? cur?.agentProvider ?? agentDefaultProvider, cur ?? currentCase?.meta),
       createdAt: Date.now(),
       originDevice: 'desktop',
       todoManagement: cur?.todoManagement,
@@ -3855,13 +3855,13 @@ export default function App(): JSX.Element {
   ): void => {
     const current = termTabsRef.current.find((term) => term.id === termId)
     if (!current || !isAgentTab(current)) return
-    const nextProvider = resolveAgentProvider(provider, current.ssh, current)
+    const nextProvider = resolveAgentProvider(provider, current)
     if (provider !== nextProvider || current.agentProvider === nextProvider) return
 
     // 대화가 이미 있는 탭이면 세션을 버리지 않고 같은 독의 새 탭에서 연다.
     // 맥락은 패널 타임라인에서 추출한 transcript를 첫 지시에 합쳐 전달한다.
     // (세션 파일을 읽지 않으므로 Claude↔Codex 양방향·원격에서도 즉시 동작)
-    if (handoff && handoff.count > 0) {
+    if (current.resumeSessionId || (handoff && handoff.count > 0)) {
       openForkedAgentTab(current, {
         cwd: current.cwd,
         title: `${current.title} · ${agentProviderLabels[nextProvider]}`,
@@ -3921,7 +3921,7 @@ export default function App(): JSX.Element {
       kind: 'agent',
       cwd: opts.cwd,
       autoClaude: false,
-      agentProvider: resolveAgentProvider(opts.provider ?? source.agentProvider, opts.ssh, source),
+      agentProvider: resolveAgentProvider(opts.provider ?? source.agentProvider, source),
       createdAt: Date.now(),
       originDevice: 'desktop',
       resumeSessionId: undefined,
@@ -13795,7 +13795,7 @@ function SettingsView({ onSync }: { onSync: (init: SyncModalInit) => void }): JS
           >
             <option value="claude">Claude</option>
             <option value="codex">Codex</option>
-            <option value="antigravity">Antigravity (로컬 일반 질문·폴더·사건)</option>
+            <option value="antigravity">Antigravity (일반 질문·폴더·사건)</option>
           </select>
         </div>
       </section>

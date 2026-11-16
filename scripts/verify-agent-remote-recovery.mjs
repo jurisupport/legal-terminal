@@ -66,7 +66,18 @@ log({'pid':os.getpid()})
 for line in sys.stdin:
     message = json.loads(line)
     log({'input':message})
-    if provider == 'claude':
+    if provider == 'antigravity':
+        assert message.get('event') == 'user'
+        emit({'event':'init','conversation_id':native})
+        emit({'event':'step_update','step_update':{'step_type':'agent_response','text_delta':'started once'}})
+        if identity.endswith('-result-error'):
+            emit({'event':'result','result':{'status':'ERROR','error':'synthetic remote service failure'}})
+            sys.exit(3)
+        deadline = time.monotonic() + 25
+        while not os.path.exists(release) and time.monotonic() < deadline: time.sleep(0.02)
+        if not os.path.exists(release): sys.exit(17)
+        emit({'event':'result','result':{'status':'SUCCESS','response':'started once and finished'}})
+    elif provider == 'claude':
         if message.get('type') == 'user':
             emit({'type':'system','subtype':'init','session_id':native})
             emit({'type':'assistant','uuid':'native-answer-1','message':{'id':'native-answer-1','role':'assistant','content':[{'type':'text','text':'started once'}]}})
@@ -127,6 +138,11 @@ class TestTransport extends RemoteAgentTransport {
   }
 }
 const require = createRequire(import.meta.url)
+const agy = { exports: {} }
+const adapter = await readFile(new URL('../src/main/agent/antigravity.ts', import.meta.url), 'utf8')
+runInNewContext(ts.transpileModule(adapter, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText, {
+  exports: agy.exports, process, Buffer, require: (name) => name === './agentExecutionLock' ? execution : require(name)
+})
 const service = await readFile(new URL('../src/main/agent/agent-service.ts', import.meta.url), 'utf8')
 const compiled = ts.transpileModule(`${service}
 refreshAgentAuthStatus = (session) => emitAuthStatus(session, 'authenticated');
@@ -144,7 +160,7 @@ function freshApp(usageHydration) {
     require: (name) => {
       if (name === './remoteAgentTransport') return { RemoteAgentTransport: TestTransport,
         probeRemoteAgentRun: (opts) => probeRemoteAgentRun({ ...opts, ...options(opts.identity) }) }
-      if (name === './antigravity') return {}
+      if (name === './antigravity') return agy.exports
       if (name === './agentExecutionLock') return execution
       if (name === './agentProgress') return progress
       if (name === './agentMcp') return mcp
@@ -296,7 +312,66 @@ try {
     console.log(`${provider}: approval recovery, stable replay, detached child completion, completed run, explicit Stop and retired browser worker shutdown verified`)
   }
 
-  for (const [provider, failure] of [['claude', 'exit-error'], ['claude', 'result-error'], ['codex', 'exit-error']]) {
+  const slowSender = { id: 'agy-before-input', provider: 'antigravity' }
+  identities.push(slowSender)
+  const sender = new TestTransport({ ...options(slowSender), command: 'fixture', metadata: { cwd: root } })
+  sender.on('error', error => assert.fail(error.message))
+  await sender.ready
+  const observer = freshApp()
+  const waiting = await create(observer, slowSender.id, slowSender.provider)
+  await until(() => observer.events.some(e => e.type === 'process:event' && e.text?.includes('첫 요청')), 'agy: attached before input')
+  assert.equal((await probe(slowSender)).running, true, 'an observer must not kill a still-sending turn')
+  const beforeInput = JSON.stringify({ event: 'user', message: { content: 'delayed original prompt' } })
+  sender.stdin.write(beforeInput + '\n')
+  sender.stdin.end()
+  await writeFile(join(root, slowSender.id + '.release'), '')
+  await until(() => !waiting.running, 'agy: original sender can complete after early attach')
+  assert.ok(observer.events.some(e => e.type === 'message:assistant_done'))
+  assert.equal(observer.events.some(e => e.type === 'error'), false)
+  assert.equal((await trace(slowSender.id)).filter(row => row.input?.event === 'user').length, 1)
+  observer.disposeAgentSessions()
+
+  const agyIdentity = { id: 'agy-recovery', provider: 'antigravity' }
+  identities.push(agyIdentity)
+  const firstAgy = freshApp()
+  const firstAgySession = await create(firstAgy, agyIdentity.id, 'antigravity')
+  firstAgy.sendAgentMessage(agyIdentity.id, { text: 'continue after SSH disconnect' })
+  await until(() => firstAgy.events.some(e => e.type === 'message:assistant_delta'), 'agy: real remote transport streams a reply')
+  const assistantId = firstAgy.events.find(e => e.type === 'message:assistant_start').messageId
+  const nativeAgy = firstAgySession.resumeSessionId
+  const persisted = await probe(agyIdentity)
+  assert.equal(persisted.sessionId, nativeAgy)
+  assert.equal(persisted.hasTurnInput, true)
+  firstAgy.disposeAgentSessions()
+  assert.equal((await probe(agyIdentity)).running, true)
+  const secondAgy = freshApp()
+  const secondAgySession = await create(secondAgy, 'agy-other-tab', 'antigravity', 'ssh', nativeAgy)
+  await until(() => secondAgy.events.some(e => e.type === 'message:assistant_start'), 'agy: reattach by native session ID')
+  await writeFile(join(root, agyIdentity.id + '.release'), '')
+  await until(() => !secondAgySession.running, 'agy: reattached turn finishes')
+  assert.equal(secondAgy.events.find(e => e.type === 'message:assistant_done')?.messageId, assistantId)
+  assert.equal(secondAgy.events.some(e => e.type === 'error'), false)
+  secondAgy.disposeAgentSessions()
+  const thirdAgy = freshApp()
+  const replayAgy = await create(thirdAgy, agyIdentity.id, 'antigravity')
+  await until(() => !replayAgy.running, 'agy: completed run replays')
+  assert.equal(thirdAgy.events.find(e => e.type === 'message:assistant_done')?.messageId, assistantId)
+  assert.equal((await trace(agyIdentity.id)).filter(row => row.input?.event === 'user').length, 1, 'reconnect must not resend agy prompt')
+  thirdAgy.disposeAgentSessions()
+  const stopIdentity = { id: 'agy-stop', provider: 'antigravity' }
+  identities.push(stopIdentity)
+  const stopAgy = freshApp()
+  const stopAgySession = await create(stopAgy, stopIdentity.id, 'antigravity')
+  stopAgy.sendAgentMessage(stopIdentity.id, { text: 'wait for Stop' })
+  await until(() => stopAgy.events.some(e => e.type === 'message:assistant_delta'), 'agy: stop fixture started')
+  stopAgy.interruptAgentSession(stopIdentity.id)
+  await until(() => !stopAgySession.running, 'agy: Stop finishes')
+  assert.equal((await probe(stopIdentity)).running, false)
+  assert.equal(stopAgy.events.some(e => e.type === 'error'), false)
+  stopAgy.disposeAgentSessions()
+  console.log('Antigravity: streaming, detach/reattach by native ID, completed replay, input deduplication and Stop passed')
+
+  for (const [provider, failure] of [['claude', 'exit-error'], ['claude', 'result-error'], ['codex', 'exit-error'], ['antigravity', 'result-error']]) {
     const identity = { id: `${provider}-${failure}`, provider }
     identities.push(identity)
     const first = freshApp()
@@ -313,7 +388,7 @@ try {
       `${identity.id}: replay cleanup must not overwrite failure with idle`)
     restored.disposeAgentSessions()
   }
-  console.log('cold failure replay: Claude nonzero/zero-exit errors and Codex nonzero exit keep error status')
+  console.log('cold failure replay: Claude, Codex and Antigravity remote failures keep error status')
 
   const hydrationIdentity = { id: 'claude-hydration-stop', provider: 'claude' }
   identities.push(hydrationIdentity)
