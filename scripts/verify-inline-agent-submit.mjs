@@ -33,11 +33,11 @@ const deferred = () => {
 const attachment = { kind: 'selection', label: '계약서 · PDF 2쪽', text: '선택한 문장', range: { startPage: 2, endPage: 2 } }
 const request = { text: '  이 부분을 설명해줘  ', attachment }
 const unchanged = () => assert.fail('inline submission must not modify or focus the normal composer')
-const fixture = (createPromise = Promise.resolve({ ok: true })) => {
+const fixture = (createPromise = Promise.resolve({ ok: true }), provider = 'claude') => {
   const sent = [], registrations = [], errors = [], modes = []
   let creates = 0, consumed = 0
   const ctx = {
-    id: 'agent-1', provider: 'claude', cwd: '/case', title: '사건', settingsLoaded: true,
+    id: 'agent-1', provider, isAntigravity: provider === 'antigravity', cwd: '/case', title: '사건', settingsLoaded: true,
     mode: 'ask', resumeSessionId: undefined, defaultModel: 'model-1', ssh: undefined,
     caseContext: '사건 맥락', workspaceContext: { kind: 'case', cwd: '/case', caseId: 'case-1' }, forkFromSessionId: undefined,
     input: '오른쪽에 작성 중인 초안', attachments: [{ kind: 'file', path: '/draft.md' }], quotedMessage: { text: '보류한 인용' },
@@ -110,6 +110,11 @@ const beforeSettings = fixture()
 beforeSettings.ctx.inlineSession.creation = null
 beforeSettings.ctx.inlineStateRef.current.sendBlockedReason = 'Agent 설정 로드 중'
 assert.equal((await beforeSettings.actions.submit(request)).error, 'Agent 설정 로드 중')
+
+const antigravity = fixture(undefined, 'antigravity')
+antigravity.ctx.inlineStateRef.current.mode = 'plan'
+assert.equal((await antigravity.actions.submit(request)).ok, true)
+assert.equal(antigravity.sent[0].payload.permissionMode, 'ask')
 
 const prepared = deferred()
 const queued = fixture()
