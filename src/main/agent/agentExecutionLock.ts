@@ -3,7 +3,7 @@ export const AGENT_BUSY_MESSAGE = '다른 컴퓨터에서 이 AI 대화를 실�
 
 export interface AgentExecutionIdentity {
   id: string
-  provider: 'claude' | 'codex'
+  provider: 'claude' | 'codex' | 'antigravity'
   resumeSessionId?: string
   freshSession?: boolean
 }
@@ -94,6 +94,8 @@ try:
             resume = str(uuid.uuid4())
             alias(resume)
             command += ['--session-id', resume]
+    elif identity['provider'] == 'antigravity' and resume and not identity.get('resumeSessionId'):
+        command += ['--conversation', resume]
     for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
         signal.signal(sig, terminate)
     child = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
@@ -136,7 +138,7 @@ try:
                 child.stdin.close()
             except (BrokenPipeError, OSError):
                 pass
-            if identity['provider'] == 'codex' or not finished:
+            if identity['provider'] == 'codex' or (identity['provider'] == 'claude' and not finished):
                 terminate()
     threading.Thread(target=input_pump, daemon=True).start()
     for line in child.stdout:
@@ -147,6 +149,8 @@ try:
             session = None
             if identity['provider'] == 'claude' and message.get('type') == 'system' and message.get('subtype') == 'init':
                 session = message.get('session_id')
+            elif identity['provider'] == 'antigravity' and message.get('event') == 'init':
+                session = message.get('conversation_id')
             elif identity['provider'] == 'codex' and message.get('id') in thread_requests:
                 thread_requests.discard(message.get('id'))
                 result = message.get('result') or {}

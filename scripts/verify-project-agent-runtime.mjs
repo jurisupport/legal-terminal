@@ -95,6 +95,7 @@ vm.runInNewContext(ts.transpileModule(source, { compilerOptions: { module: ts.Mo
     if (name === '../projectAgent') return projectAgent
     if (name === './projectMcpConfig') return projectMcp
     if (name === './agentMcp') return managed
+    if (name === './antigravity') return {}
     if (name === './agentExecutionLock') return executionLock
     if (name === './remoteAgentTransport') return { RemoteAgentTransport: FakeRemoteProcess, probeRemoteAgentRun: async () => remoteRunInfo }
     if (name === '../../shared/media') return media

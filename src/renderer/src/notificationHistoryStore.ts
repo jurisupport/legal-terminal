@@ -1,6 +1,17 @@
 import { isSharedNotificationEntry, isSharedUiOperation, type SharedNotificationEntry, type SharedUiOperation } from '../../shared/sharedUiState'
 
 export interface NotificationEntry extends SharedNotificationEntry { host: string }
+export function notificationTitle(term?: { title: string; sessionTitle?: string; renamed?: boolean }): string {
+  const title = term?.title?.trim() || '세션'
+  const session = term?.sessionTitle?.trim()
+  return (!term?.renamed && session && title !== session ? `${title} · ${session}` : title).slice(0, 4096)
+}
+
+export function notificationBody(status: SharedNotificationEntry['status']): string {
+  if (status === 'question') return '확인/입력을 기다립니다'
+  return status === 'synced' ? '다른 기기에서 열린 탭입니다' : '작업이 완료되었습니다'
+}
+
 export const NOTIFICATION_HISTORY_KEY = 'notification-history-v1'
 export const NOTIFICATION_OUTBOX_KEY = 'notification-outbox-v1'
 type ReadStorage = Pick<Storage, 'getItem' | 'key' | 'length'>

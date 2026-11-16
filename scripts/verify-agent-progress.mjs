@@ -108,6 +108,27 @@ const { sessions, handleSdkMessage, handleRemoteJsonLine, currentSessionStatus, 
 
 const panelSource = readFileSync(new URL('../src/renderer/src/agent/AgentPanel.tsx', import.meta.url), 'utf8')
 const panelAst = ts.createSourceFile('AgentPanel.tsx', panelSource, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX)
+const noticeSource = panelAst.statements.find(node => node.name?.text === 'agentNoticeDetail').getText(panelAst)
+const noticeDetail = runInNewContext(ts.transpileModule(noticeSource + '\nagentNoticeDetail', {
+  compilerOptions: { target: ts.ScriptTarget.ES2022 }
+}).outputText, { ...values, markdownPreviewText: text => text, toolDisplayName: tool => tool, TIMELINE_PREVIEW_LIMIT: 78 })
+const noticeState = {}
+const notice = (type, fields) => noticeDetail(noticeState, {type, ...fields})
+notice('message:assistant_delta', {messageId: 'one', text: '이전 답변'})
+notice('message:assistant_delta', {messageId: 'two', text: '검토'})
+notice('message:assistant_delta', {messageId: 'two', text: '했습니다.'})
+assert.equal(notice('status', {status:'done'}), '검토했습니다.')
+notice('message:assistant_replace', {messageId: 'two', text: '다시 검토했습니다.'})
+notice('message:user', {text:'새 작업'})
+assert.equal(notice('status', {status:'done'}), undefined, 'new turns cannot reuse an old answer')
+notice('dialog:request', {dialog: {questions:[{question:'어느 문서를 열까요?'}]}})
+assert.equal(notice('status', {status:'waiting_user'}), '어느 문서를 열까요?')
+notice('permission:request', {request:{toolName:'Shell', input:{command:'private command'}}})
+assert.equal(notice('status', {status:'waiting_permission'}), 'Shell 권한을 요청했습니다')
+notice('message:assistant_replace', {messageId:'two', text:'완료.\n```sh\nprivate command'})
+assert.equal(notice('status', {status:'done'}), '완료.')
+assert.equal(notice('status', {status:'error'}), '작업 중 오류가 발생했습니다')
+
 const reducerNames = new Set(['upsertItem', 'stepSummary', 'processGroupId', 'mergeProcessStep', 'upsertProcessStep', 'reduceTimeline'])
 const reducerSource = panelAst.statements.filter((node) =>
   reducerNames.has(node.name?.text) || (ts.isVariableStatement(node) && node.declarationList.declarations.some((declaration) => reducerNames.has(declaration.name.getText(panelAst))))
@@ -615,8 +636,10 @@ const dismissed = []
 const onTermStatus = runInNewContext(ts.transpileModule(`${termStatusSource}\nonTermStatus`, {
   compilerOptions: { target: ts.ScriptTarget.ES2022 }
 }).outputText, {
-  termStatusRef, termTabsRef: { current: [] }, sharedUiRunsRef: { current: new Map() },
-  newId: () => "test-run",
+  termStatusRef, notificationTitle: () => '세션', notificationBody: () => '완료',
+  termTabsRef: { current: [] },
+  sharedUiRunsRef: { current: new Map() },
+  newId: () => 'test-run',
   setTermStatus: (update) => statusUpdates.push(update),
   setTermAttention: (update) => { termAttention = update(termAttention) },
   dismissToastForTerm: (id) => dismissed.push(id),

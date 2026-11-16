@@ -22,6 +22,7 @@ assert.ok(apply)
 const tab = { id: 'case', profileId: 'desktop', ssh: { host: 'office' }, drafts: 'ssh://desktop/cases/a', remotePath: '/cases/a' }
 const doc = { id: 'dirty', caseTabId: 'case', path: 'ssh://desktop/cases/a/dirty.md', side: 'left' }
 const context = {
+  notificationTitle: term => term.title, notificationBody: status => status,
   pendingNotificationOperations: () => [],
   notificationEventId: (caseKey, id, activity, status) => JSON.stringify(['notification', caseKey, id, activity.runId, activity.sequence, status]),
   notificationHistoryRef: { current: [{id:'local', host:'local'}] },
@@ -33,7 +34,7 @@ const context = {
   sharedUiOpenAgentsRef: { current: new Map() }, sharedUiActivityId: term => term.kind === 'terminal' ? `terminal:${term.id}` : term.id,
   observedSharedUiHostsRef: { current: new Set() }, notifyDone: true, notificationSound: '', notificationVolume: 0,
   sharedUiSeenSelectionsRef: { current: new Map() }, sharedUiPendingSelectionsRef: { current: new Map() },
-  isTermVisibleInCurrentWorkspace: () => false, pushToast: (id, status) => context.notices.push([id, status]), notices: [],
+  isTermVisibleInCurrentWorkspace: () => false, pushToast: (id, status, title, _shared, body) => context.notices.push([id, status, title, body]), notices: [],
   playNotificationSound: () => {}, dismissToastForTerm: () => {}, window: { lt: { app: { requestAttention: () => {}, notify: () => {}, dismissNotify: () => {} } } },
   sharedUiCaseKey: () => '["/cases/a",""]', caseIdForDoc: item => item.caseTabId, caseIdForTerm: item => item.caseTabId,
   sharedUiDocumentPath: path => path?.replace('ssh://desktop', ''), remoteUri: (id, path) => `ssh://${id}${path}`,
@@ -76,10 +77,11 @@ fn({ host: 'office' }, state)
 assert.equal(context.selected, undefined, 'remote selection waits while editing')
 state.cases['["/cases/a",""]'].activity = { agent: { runId: 'next', sequence: 1, status: 'working', attention: false } }
 fn({ host: 'office' }, state)
-state.cases['["/cases/a",""]'].activity = { agent: { runId: 'next', sequence: 2, status: 'done', attention: true } }
+state.cases['["/cases/a",""]'].activity = { agent: { runId: 'next', sequence: 2, status: 'done', attention: true, notice: {title:'준비서면 검토', body:'인용 부분을 확인했습니다'} } }
 fn({ host: 'office' }, state)
 fn({ host: 'office' }, state)
 assert.equal(context.notices.length, 1, 'a new remote completion notifies once')
+assert.deepEqual(context.notices[0].slice(2), ['준비서면 검토', '인용 부분을 확인했습니다'])
 let dismissed = 0
 context.dismissToastForTerm = () => dismissed++
 state.cases['["/cases/a",""]'].activity = { agent: { runId: 'next', sequence: 2, status: 'done', attention: false } }
@@ -134,6 +136,7 @@ assert.equal(closingContext.lastWorkSideRef.current, 'right', 'remote close pres
 assert.equal(closingCalls.length, 0, 'a remote close does not echo local changes')
 const sent = []
 const runtime = {
+  notificationTitle: () => '검토', notificationBody: status => status,
   termTabsRef: { current: [{ id: 'agent', caseTabId: 'case', kind: 'agent' }] },
   termTabs: [{ id: 'agent', title: 'Task' }], termStatusRef: { current: new Map() },
   sharedUiActivitiesRef: { current: new Map([['case', { agent: { runId: 'previous', sequence: 9, status: 'done', attention: false } }]]) },
@@ -149,7 +152,9 @@ const runtime = {
 const code = ['onTermStatus', 'shareAcknowledgement'].map(name => `const ${name} = ${handlers.get(name)};`).join('\n') + '\n({ onTermStatus, shareAcknowledgement })'
 const event = vm.runInNewContext(ts.transpileModule(code, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText, runtime)
 event.onTermStatus('agent', 'working')
-event.onTermStatus('agent', 'done')
+event.onTermStatus('agent', 'done', '검토가 끝났습니다')
+assert.equal(sent[1].notice.title, '검토')
+assert.equal(sent[1].notice.body, '검토가 끝났습니다')
 assert.equal(sent[0].start, true)
 assert.equal(sent[0].expectedRunId, 'previous', 'new runs compare against the observed run')
 assert.equal(sent[1].runId, sent[0].runId)

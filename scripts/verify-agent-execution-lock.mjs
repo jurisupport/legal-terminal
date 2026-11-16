@@ -105,6 +105,25 @@ try {
   await wait(() => afterCrash.lines.length, 'lock must recover without a lease or stale lock deletion')
   await stop(afterCrash)
 
+  const agy = String.raw`
+import json, sys, uuid
+session = sys.argv[sys.argv.index('--conversation') + 1] if '--conversation' in sys.argv else str(uuid.uuid4())
+print(json.dumps({'event':'init', 'conversation_id':session}), flush=True)
+sys.stdin.read()
+print(json.dumps({'event':'result'}), flush=True)
+`
+  const agyTab = { id: 'agy-tab', provider: 'antigravity' }
+  const firstAgy = start(agyTab, agy)
+  await wait(() => firstAgy.lines.length, 'Antigravity must initialize')
+  const agyId = firstAgy.lines[0].conversation_id
+  await busy({ ...agyTab, id: 'other-tab', resumeSessionId: agyId })
+  await stop(firstAgy)
+  assert.equal(firstAgy.lines.at(-1).event, 'result', 'Antigravity must finish its turn after stdin closes')
+  const resumedAgy = start(agyTab, agy)
+  await wait(() => resumedAgy.lines.length, 'Antigravity must resume after reopening a tab')
+  assert.equal(resumedAgy.lines[0].conversation_id, agyId)
+  await stop(resumedAgy)
+
   const firstCodex = start({ id: 'codex-blank', provider: 'codex' })
   firstCodex.proc.stdin.write(JSON.stringify({ id: 1, method: 'thread/start', params: {} }) + '\n')
   await wait(() => firstCodex.lines.length, 'Codex must create a thread')

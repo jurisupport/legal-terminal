@@ -52,7 +52,7 @@ export interface CreatePtyOptions {
   cwd?: string
   cols: number
   rows: number
-  autoLaunchAgent?: 'claude' | 'codex'
+  autoLaunchAgent?: 'claude' | 'codex' | 'antigravity'
   autoLaunchClaude?: boolean
   resumeSessionId?: string // 주어지면 `claude --resume <id>`로 과거 세션 이어서 실행
   ssh?: SshConn // 주어지면 로컬 셸 대신 ssh로 원격 접속 (cwd는 원격 경로)
@@ -67,6 +67,11 @@ function shq(s: string): string {
 
 function agentLaunchCommand(opts: CreatePtyOptions): string {
   const agent = opts.autoLaunchAgent ?? (opts.autoLaunchClaude ? 'claude' : undefined)
+  if (agent === 'antigravity') {
+    if (opts.ssh) return ''
+    if (!opts.resumeSessionId) return 'agy'
+    return /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(opts.resumeSessionId) ? `agy --conversation ${opts.resumeSessionId}` : ''
+  }
   const remoteControl = agent === 'claude' && opts.ssh?.remoteControl
   const name = opts.cwd?.replace(/[\\/]+$/, '').split(/[\\/]/).pop() || opts.id
   if (opts.resumeSessionId) {

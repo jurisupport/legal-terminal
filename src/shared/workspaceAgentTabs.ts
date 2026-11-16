@@ -8,7 +8,7 @@ export function agentTabsOnly<T extends {
   const terminals = (Array.isArray(snapshot.terminals) ? snapshot.terminals : []).filter(
     (tab) => tab && typeof tab === 'object' && tab.kind === 'agent' &&
       typeof tab.id === 'string' && !!tab.id && typeof tab.cwd === 'string' && !!tab.cwd &&
-      (tab.agentProvider === undefined || ['claude', 'codex'].includes(tab.agentProvider))
+      (tab.agentProvider === undefined || ['claude', 'codex', 'antigravity'].includes(tab.agentProvider))
   )
   return {
     ...snapshot,
@@ -88,7 +88,7 @@ const sameAgent = (a: SharedAgentTabIdentity, b: SharedAgentTabIdentity): boolea
 const closedTabs = (snapshot: { closedAgentTabs?: unknown } | undefined): SharedAgentTabIdentity[] =>
   (Array.isArray(snapshot?.closedAgentTabs) ? snapshot.closedAgentTabs : []).filter(
     (tab) => tab && typeof tab.id === 'string' && typeof tab.cwd === 'string' &&
-      (tab.agentProvider === undefined || ['claude', 'codex'].includes(tab.agentProvider)) &&
+      (tab.agentProvider === undefined || ['claude', 'codex', 'antigravity'].includes(tab.agentProvider)) &&
       (tab.resumeSessionId === undefined || typeof tab.resumeSessionId === 'string')
   )
 

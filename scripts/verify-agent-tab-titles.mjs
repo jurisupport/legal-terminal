@@ -20,7 +20,23 @@ const compile = (source, context) => vm.runInNewContext(ts.transpileModule(sourc
   compilerOptions: { target: ts.ScriptTarget.ES2022 }
 }).outputText, context)
 
+const resolveProvider = compile(`const isAgentProvider = ${declarations.get('isAgentProvider')}; (${declarations.get('resolveAgentProvider')})`, {
+  DEFAULT_AGENT_PROVIDER: 'claude'
+})
+assert.equal(resolveProvider('antigravity'), 'antigravity')
+assert.equal(resolveProvider('antigravity', { host: 'server.invalid' }), 'claude')
+assert.equal(resolveProvider('antigravity', undefined, { contextKind: 'project' }), 'claude')
+for (const todoManagement of [true, false]) {
+  assert.equal(resolveProvider('antigravity', undefined, { todoManagement }), 'claude')
+}
+
+const restore = compile(`(${declarations.get('sanitizeWorkspaceTerm')})`, {
+  sshProfiles: [], resolveAgentProvider: resolveProvider
+})
 for (const ssh of [undefined, { host: 'server.invalid', user: 'lawyer' }]) {
+  const restored = restore({ kind: 'agent', id: 'saved', cwd: '/work', agentProvider: 'antigravity', resumeSessionId: 'agy-session', ssh })
+  assert.equal(restored.agentProvider, 'antigravity', 'restoring an existing provider must never route its session ID to another provider')
+  assert.equal(restored.resumeSessionId, 'agy-session')
   const original = { id: 'old', title: '프롬프트에 따라 답변을 만들어', sessionTitle: '기존 대화 제목',
     renamed: true, resumeSessionId: 'old-session', kind: 'agent', agentProvider: 'claude',
     cwd: '/work/project', caseTabId: 'project', recordsFolder: '/records', ssh, projectId: 'project-1' }

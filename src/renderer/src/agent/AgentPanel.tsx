@@ -154,7 +154,7 @@ interface AgentPanelProps {
   attachmentRequests?: AgentAttachmentRequest[]
   onAttachmentRequestsHandled?: (requestIds: string[]) => void
   onDraftChange?: (draft: AgentDraftState) => void
-  onStatus?: (status: AgentRunStatus) => void
+  onStatus?: (status: AgentRunStatus, detail?: string) => void
   onFork?: () => void
   onForkAndSend?: (handoff?: AgentProviderHandoff) => Promise<void>
   onProviderChange?: (provider: AgentProvider, handoff?: AgentProviderHandoff) => void
@@ -293,9 +293,10 @@ const modeLabels: { value: AgentPermissionMode; label: string; title: string }[]
   { value: 'dontAsk', label: '거절', title: '승인되지 않은 작업을 거절합니다' }
 ]
 
-const agentProviderLabels: Record<AgentProvider, string> = {
+export const agentProviderLabels: Record<AgentProvider, string> = {
   claude: 'Claude',
-  codex: 'Codex'
+  codex: 'Codex',
+  antigravity: 'Antigravity'
 }
 
 const emptyStateSuggestions: { label: string; prompt: string }[] = [
@@ -384,6 +385,7 @@ const slashCommands: SlashCommand[] = [
   },
   {
     name: '/model',
+    providers: ['claude', 'codex'],
     label: '모델',
     description: '모델과 추론 정도를 선택합니다'
   },
@@ -503,7 +505,7 @@ function isTerminalOnlySlashCommand(command: SlashCommand, provider: AgentProvid
   const name = command.name.toLowerCase()
   return provider === 'codex'
     ? codexTerminalOnlySlashCommandNames.has(name)
-    : claudeTerminalOnlySlashCommandNames.has(name)
+    : provider === 'claude' && claudeTerminalOnlySlashCommandNames.has(name)
 }
 
 function slashCommandSurfaceLabel(command: SlashCommand, provider: AgentProvider): string {
@@ -582,6 +584,17 @@ function InputPreview({ text }: { text: string }): JSX.Element {
       </button>
     </div>
   )
+}
+
+const messageTimeFormat = new Intl.DateTimeFormat('ko-KR', {
+  year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23'
+})
+
+function MessageTime({ timestamp }: { timestamp?: number }): JSX.Element | null {
+  if (timestamp === undefined) return null
+  const date = new Date(timestamp)
+  if (!Number.isFinite(date.getTime())) return null
+  return <time className="agent-msg-time" dateTime={date.toISOString()}>{messageTimeFormat.format(date)}</time>
 }
 
 function UserQuestion({ text }: { text: string }): JSX.Element {
@@ -1473,6 +1486,7 @@ function reduceTimeline(items: TimelineItem[], event: AgentEvent, agentLabel: st
       {
         id,
         kind: 'user',
+        timestamp: numberValue(event.timestamp),
         title: '나',
         text: stringValue(event.text) ?? '',
         quote: messageQuote(event.quote),
@@ -1488,7 +1502,7 @@ function reduceTimeline(items: TimelineItem[], event: AgentEvent, agentLabel: st
     return upsertItem(
       items,
       id,
-      () => ({ id, kind: 'assistant', title: agentLabel, text: '', status: 'streaming' }),
+      () => ({ id, kind: 'assistant', title: agentLabel, text: '', status: 'streaming', timestamp: numberValue(event.timestamp) }),
       (item) => ({ ...item, status: item.status === 'done' ? 'done' : 'streaming' })
     )
   }
@@ -1972,6 +1986,55 @@ function providerHandoffFromTimeline(items: TimelineItem[]): AgentProviderHandof
 }
 
 
+interface NoticeContext {
+  messageId?: string
+  reply?: string
+  question?: string
+  permission?: string
+}
+
+function agentNoticeDetail(context: NoticeContext, event: AgentEvent): string | undefined {
+  switch (event.type) {
+    case 'message:user':
+    case 'session:interrupted':
+      context.reply = context.question = context.permission = undefined
+      break
+    case 'message:assistant_delta':
+    case 'message:assistant_replace': {
+      const id = stringValue(event.messageId)
+      const before = event.type === 'message:assistant_delta' && id === context.messageId ? context.reply : ''
+      context.messageId = id
+      context.reply = ((before ?? '') + (stringValue(event.text) ?? '').slice(0, 512)).slice(0, 512)
+      break
+    }
+    case 'permission:request': {
+      const tool = stringValue(asRecord(event.request)?.toolName)
+      context.permission = tool ? `${toolDisplayName(tool)} 권한을 요청했습니다` : '도구 사용 권한을 요청했습니다'
+      break
+    }
+    case 'dialog:request': {
+      const dialog = asRecord(event.dialog)
+      context.question = stringValue(recordArray(dialog?.questions)[0]?.question) || stringValue(dialog?.title)
+      break
+    }
+    case 'auth:started':
+      context.question = '로그인을 완료해 주세요'
+      break
+    case 'status': {
+      let detail: string | undefined
+      if (event.status === 'done') detail = context.reply?.split(/`{3}|~{3}/, 1)[0]
+      if (event.status === 'waiting_user') detail = context.question
+      if (event.status === 'waiting_permission') detail = context.permission
+      if (event.status === 'error') detail = '작업 중 오류가 발생했습니다'
+      if (event.status === 'idle' || event.status === 'done' || event.status === 'error') context.reply = undefined
+      if (event.status !== 'waiting_user') context.question = undefined
+      if (event.status !== 'waiting_permission') context.permission = undefined
+      const text = detail && markdownPreviewText(detail.slice(0, 512)).replace(/\s+/g, ' ').trim()
+      return text && text.length > TIMELINE_PREVIEW_LIMIT ? `${text.slice(0, TIMELINE_PREVIEW_LIMIT)}…` : text || undefined
+    }
+  }
+}
+
 function latestGeneratedPreview(items: TimelineItem[]): string {
   for (let index = items.length - 1; index >= 0; index -= 1) {
     const item = items[index]
@@ -2020,11 +2083,14 @@ export default function AgentPanel({
   onInlineActions
 }: AgentPanelProps): JSX.Element {
   const isGeneralChat = workspaceContext?.kind === 'global' && workspaceContext.todoManagement === undefined
+  const isAntigravity = provider === 'antigravity'
+  const offersAntigravity = !ssh && workspaceContext?.kind !== 'project' && workspaceContext?.todoManagement === undefined
   const usesClaudeRemoteAuth = Boolean(ssh) && provider === 'claude'
   const usesAgentAuth = provider === 'claude' || provider === 'codex'
   const [items, setItems] = useState<TimelineItem[]>([])
   const taskChangesRef = useRef(onTasksChanged)
   taskChangesRef.current = onTasksChanged
+  const noticeContextRef = useRef<NoticeContext>({})
   const changedTaskCalls = useRef(new Set<string>())
   const taskTurnRunning = useRef(false)
   const [input, setInput] = useState(() => initialDraft?.input ?? '')
@@ -2359,6 +2425,7 @@ export default function AgentPanel({
   useEffect(() => {
     const off = window.lt.agent.onEvent((event) => {
       if (eventSessionId(event) !== id) return
+      const noticeDetail = agentNoticeDetail(noticeContextRef.current, event)
       if (event.type === 'session:restored') {
         restoredTurnStartedAtRef.current = numberValue(event.startedAt)
       }
@@ -2446,9 +2513,9 @@ export default function AgentPanel({
         ) {
           setStatus(next)
           if (next === 'working') onStatus?.('working')
-          else if (next === 'waiting_permission' || next === 'waiting_user') onStatus?.('question')
-          else if (next === 'done') onStatus?.('done')
-          else onStatus?.('question')
+          else if (next === 'waiting_permission' || next === 'waiting_user') onStatus?.('question', noticeDetail)
+          else if (next === 'done') onStatus?.('done', noticeDetail)
+          else onStatus?.('question', noticeDetail)
         } else if (next === 'idle') {
           setStatus('idle')
           onStatus?.('idle')
@@ -2469,7 +2536,7 @@ export default function AgentPanel({
         provider,
         model: resumeSessionId ? undefined : defaultModel,
         resumeSessionId,
-        permissionMode: mode,
+        permissionMode: isAntigravity ? 'ask' : mode,
         source: ssh ? 'ssh' : 'local',
         ssh,
         context: caseContext,
@@ -2802,7 +2869,7 @@ export default function AgentPanel({
     () =>
       mergeSlashCommands(
         slashCommands.filter((command) => !command.providers || command.providers.includes(provider)),
-        provider === 'claude' ? runtimeSlashCommands : codexSlashCommands
+        provider === 'claude' ? runtimeSlashCommands : provider === 'codex' ? codexSlashCommands : []
       ),
     [provider, runtimeSlashCommands]
   )
@@ -2959,10 +3026,10 @@ export default function AgentPanel({
           : undefined,
         sameRemote ? `앱 원격 URI: ${path}` : undefined,
         remote && !sameRemote
-          ? '주의: 이 파일은 Legal Terminal 원격 URI입니다. 같은 SSH 프로필의 Agent가 아니면 Claude가 직접 읽지 못할 수 있습니다.'
+          ? '주의: 이 파일은 Legal Terminal 원격 URI입니다. 같은 SSH 프로필의 Agent가 아니면 직접 읽지 못할 수 있습니다.'
           : undefined,
         !remote && ssh
-          ? '주의: 이 파일은 로컬 경로입니다. 현재 Agent가 원격에서 실행 중이면 원격 서버에 같은 파일이 있어야 Claude가 직접 읽을 수 있습니다.'
+          ? '주의: 이 파일은 로컬 경로입니다. 현재 Agent가 원격에서 실행 중이면 원격 서버에 같은 파일이 있어야 직접 읽을 수 있습니다.'
           : undefined,
         isDir
           ? '폴더 첨부는 상위 목록 요약만 전달합니다. 필요한 파일 본문은 개별 첨부하거나 명시적으로 읽으세요.'
@@ -3162,14 +3229,14 @@ export default function AgentPanel({
             text: handoff ? `${handoff.preamble}\n${expanded.text}` : expanded.text,
             ...(handoff ? { displayText: expanded.text } : {}),
             attachments: [prepared],
-            permissionMode: expanded.mode ?? state.mode,
+            permissionMode: session.provider === 'antigravity' ? 'ask' : expanded.mode ?? state.mode,
             delivery: state.queuesNewInput ? 'queue' : 'normal'
           })
           if (!result.ok) return { ok: false, error: result.error ?? 'Agent 요청을 보낼 수 없습니다.' }
           if (isCurrent()) {
             // Inline history must not reset the normal input's history draft/cursor.
             promptHistoryRef.current = mergePromptHistory(promptHistoryRef.current, [rawText])
-            if (expanded.mode) state.selectPermissionMode(expanded.mode, false)
+            if (expanded.mode && session.provider !== 'antigravity') state.selectPermissionMode(expanded.mode, false)
             if (handoff && inlineStateRef.current.pendingHandoff === handoff) {
               setPendingHandoff((current) => current === handoff ? null : current)
               state.onHandoffConsumed?.()
@@ -3195,6 +3262,10 @@ export default function AgentPanel({
     const sendAttachments = attachments
     const commandName = rawText ? slashCommandName(rawText) : undefined
     const slashArgument = rawText.match(/^\/[^\s]+(?:\s+([\s\S]*))?$/)?.[1]?.trim() ?? ''
+    if (isAntigravity && (commandName === '/model' || commandName === '/mcp')) {
+      setError(`Antigravity 채팅에서 지원하지 않는 명령입니다: ${commandName}`)
+      return
+    }
     if (commandName === '/mcp' && isInteractiveMcpArgument(slashArgument)) {
       setError('/mcp 설정/OAuth 조작은 터미널 TUI 전용입니다. 상단 터미널 버튼으로 터미널 모드에서 실행해 주세요.')
       return
@@ -3289,7 +3360,7 @@ export default function AgentPanel({
     if (pendingHistorySendRef.current) return
     scrollTimelineToBottom()
     const nextMode = expanded.mode ?? mode
-    if (expanded.mode) selectPermissionMode(expanded.mode, false)
+    if (expanded.mode && !isAntigravity) selectPermissionMode(expanded.mode, false)
     if (rawText) rememberPrompts([rawText])
     setInput('')
     setAttachments([])
@@ -3331,7 +3402,7 @@ export default function AgentPanel({
           }
         : {}),
       attachments: outgoingAttachments,
-      permissionMode: nextMode,
+      permissionMode: isAntigravity ? 'ask' : nextMode,
       delivery: nextDelivery
     }).catch((error) => ({ ok: false, error: error instanceof Error ? error.message : String(error) }))
     if (!result.ok) {
@@ -3586,7 +3657,7 @@ export default function AgentPanel({
     setAuthActive(false)
     setItems((current) => interruptedTimelineItems(current))
     setStatus('idle')
-    onStatus?.('done')
+    onStatus?.('done', '작업이 중지되었습니다')
   }, [disarmEscInterrupt, id, onStatus])
 
   useEffect(() => {
@@ -3648,9 +3719,9 @@ export default function AgentPanel({
   }, [agentLabel, id])
 
   useEffect(() => {
-    if (!settingsLoaded || !visible || (usesAgentAuth && authStatus !== 'authenticated')) return
+    if (isAntigravity || !settingsLoaded || !visible || (usesAgentAuth && authStatus !== 'authenticated')) return
     void loadModelOptions()
-  }, [authStatus, loadModelOptions, settingsLoaded, usesAgentAuth, visible])
+  }, [authStatus, isAntigravity, loadModelOptions, settingsLoaded, usesAgentAuth, visible])
 
   const openModelPicker = async (): Promise<void> => {
     setError('')
@@ -4126,6 +4197,7 @@ export default function AgentPanel({
               const userCopyText = item.text && item.text.trim().length > 0 ? item.text : ''
               return (
                 <section key={item.id} className="agent-msg user">
+                  <MessageTime timestamp={item.timestamp} />
                   <div className="agent-msg-bubble">
                     {item.quote && (
                       <QuoteReference
@@ -4187,6 +4259,7 @@ export default function AgentPanel({
                   id={`agent-message-${id}-${item.id}`}
                   className={`agent-msg assistant ${item.status ?? ''}`}
                 >
+                  {item.text && <MessageTime timestamp={item.timestamp} />}
                   {item.text && (
                     <MarkdownMessage
                       text={item.text}
@@ -5050,42 +5123,46 @@ export default function AgentPanel({
             >
               <IconMention size={14} />
             </button>
-            <div className="agent-mode-menu" ref={modeMenuRef}>
-              <button
-                type="button"
-                className={`agent-mode-trigger ${modeMenuOpen ? 'active' : ''}`}
-                title={currentMode.title}
-                aria-haspopup="menu"
-                aria-expanded={modeMenuOpen}
-                onClick={() => setModeMenuOpen((open) => !open)}
-              >
-                {currentMode.label}
-                <span className="agent-mode-caret" aria-hidden="true">
-                  ▾
-                </span>
-              </button>
-              {modeMenuOpen && (
-                <div className="agent-mode-popover" role="menu">
-                  {modeLabels.map((option) => (
-                    <button
-                      key={option.value}
-                      type="button"
-                      className={mode === option.value ? 'active' : ''}
-                      title={option.title}
-                      role="menuitemradio"
-                      aria-checked={mode === option.value}
-                      onClick={() => {
-                        selectPermissionMode(option.value)
-                        setModeMenuOpen(false)
-                      }}
-                    >
-                      <span>{option.label}</span>
-                      <small>{option.title}</small>
-                    </button>
-                  ))}
-                </div>
-              )}
-            </div>
+            {isAntigravity ? (
+              <span className="muted small" title="Antigravity는 현재 폴더의 자료를 읽고 채팅으로 답합니다">읽기 전용</span>
+            ) : (
+              <div className="agent-mode-menu" ref={modeMenuRef}>
+                <button
+                  type="button"
+                  className={`agent-mode-trigger ${modeMenuOpen ? 'active' : ''}`}
+                  title={currentMode.title}
+                  aria-haspopup="menu"
+                  aria-expanded={modeMenuOpen}
+                  onClick={() => setModeMenuOpen((open) => !open)}
+                >
+                  {currentMode.label}
+                  <span className="agent-mode-caret" aria-hidden="true">
+                    ▾
+                  </span>
+                </button>
+                {modeMenuOpen && (
+                  <div className="agent-mode-popover" role="menu">
+                    {modeLabels.map((option) => (
+                      <button
+                        key={option.value}
+                        type="button"
+                        className={mode === option.value ? 'active' : ''}
+                        title={option.title}
+                        role="menuitemradio"
+                        aria-checked={mode === option.value}
+                        onClick={() => {
+                          selectPermissionMode(option.value)
+                          setModeMenuOpen(false)
+                        }}
+                      >
+                        <span>{option.label}</span>
+                        <small>{option.title}</small>
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
             <select
               className="agent-provider-select"
               value={provider}
@@ -5100,16 +5177,19 @@ export default function AgentPanel({
             >
               <option value="claude">Claude</option>
               <option value="codex">Codex</option>
+              {offersAntigravity && <option value="antigravity">Antigravity</option>}
             </select>
-            <button
-              type="button"
-              className="agent-auth-btn agent-model-btn"
-              disabled={authActive || queuesNewInput || (usesAgentAuth && authStatus !== 'authenticated')}
-              title={`현재 모델: ${currentModel.modelLabel}${currentModel.effort ? ` / 추론 정도: ${currentModel.effort}` : ''}`}
-              onClick={() => void openModelPicker()}
-            >
-              {modelButtonLabel}
-            </button>
+            {!isAntigravity && (
+              <button
+                type="button"
+                className="agent-auth-btn agent-model-btn"
+                disabled={authActive || queuesNewInput || (usesAgentAuth && authStatus !== 'authenticated')}
+                title={`현재 모델: ${currentModel.modelLabel}${currentModel.effort ? ` / 추론 정도: ${currentModel.effort}` : ''}`}
+                onClick={() => void openModelPicker()}
+              >
+                {modelButtonLabel}
+              </button>
+            )}
             {usesAgentAuth && (
               <button
                 className="agent-auth-btn"

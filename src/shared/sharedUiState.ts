@@ -3,12 +3,14 @@ export interface SharedUiActivity {
   sequence: number
   status: 'working' | 'done' | 'question' | 'idle'
   attention: boolean
+  notice?: { title: string; body: string }
 }
 
 export interface SharedNotificationEntry {
   id: string
   termId: string
   title: string
+  body?: string
   status: 'done' | 'question' | 'synced'
   createdAt: number
   caseKey?: string
@@ -42,11 +44,12 @@ const tab = (v: unknown): v is SharedUiTab => object(v) &&
   (((v.kind === 'document' || v.kind === 'agent') && text(v.id)) ||
     (v.kind === 'view' && (v.id === 'files' || v.id === 'records' || v.id === 'hearing')))
 const activity = (v: unknown): v is unknown & SharedUiActivity => object(v) && text(v.runId) && sequence(v.sequence) &&
-  (v.status === 'working' || v.status === 'done' || v.status === 'question' || v.status === 'idle') && typeof v.attention === 'boolean'
+  (v.status === 'working' || v.status === 'done' || v.status === 'question' || v.status === 'idle') && typeof v.attention === 'boolean' &&
+  (v.notice === undefined || (object(v.notice) && text(v.notice.title) && text(v.notice.body)))
 
 export function isSharedNotificationEntry(v: unknown): v is SharedNotificationEntry {
   return object(v) && text(v.id) && (v.termId === '' || text(v.termId)) && text(v.title) &&
-    (v.status === 'done' || v.status === 'question' || v.status === 'synced') &&
+    (v.body === undefined || text(v.body)) && (v.status === 'done' || v.status === 'question' || v.status === 'synced') &&
     sequence(v.createdAt) && v.createdAt <= 8_640_000_000_000_000 &&
     (v.caseKey === undefined || key(v.caseKey)) && (v.count === undefined || sequence(v.count))
 }
@@ -109,7 +112,7 @@ export function applySharedUiOperation(state: SharedUiState, operation: SharedUi
       if ((operation.start && (previous?.runId ?? null) === operation.expectedRunId) ||
           (!operation.start && previous?.runId === operation.runId && operation.sequence > previous.sequence)) {
         c.activity[operation.agentId] = { runId: operation.runId, sequence: operation.sequence,
-          status: operation.status, attention: operation.attention }
+          status: operation.status, attention: operation.attention, ...(operation.notice && { notice: operation.notice }) }
       }
     } else {
       const previous = c.activity[operation.agentId]

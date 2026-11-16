@@ -481,7 +481,7 @@ export interface SessionTranscript {
 }
 
 export type AgentPermissionMode = 'ask' | 'plan' | 'acceptEdits' | 'bypassPermissions' | 'dontAsk'
-export type AgentProvider = 'claude' | 'codex'
+export type AgentProvider = 'claude' | 'codex' | 'antigravity'
 
 export interface OfficeProfileSettings {
   officeName?: string

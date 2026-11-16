@@ -110,6 +110,7 @@ vm.runInNewContext(ts.transpileModule(source, { compilerOptions: { module: ts.Mo
     if (name === '../settings') return { getSettings: async () => ({ sshProfiles: [profile] }) }
     if (name === './projectMcpConfig') return projectMcp
     if (name === './agentMcp') return managed
+    if (name === './antigravity') return {}
     if (name === './agentExecutionLock') return executionLock
     if (name === './remoteAgentTransport') return { RemoteAgentTransport: class extends FakeProcess {
       constructor(options) { super(['ssh', [options.command]]); this.options = options; this.ready = Promise.resolve({}); launches.push(this) }

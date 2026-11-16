@@ -1,0 +1,121 @@
+import assert from 'node:assert/strict'
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { spawn } from 'node:child_process'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { createRequire } from 'node:module'
+import { runInNewContext } from 'node:vm'
+import ts from 'typescript'
+import * as execution from '../src/main/agent/agentExecutionLock.ts'
+
+// Exercise create, send, snapshot, restore and stop through the native protocol in an isolated workspace.
+const root = await mkdtemp(join(tmpdir(), 'antigravity-test-'))
+const fixture = join(root, 'agy.py')
+const events = []
+const requireAgent = createRequire(new URL('../src/main/agent/agent-service.ts', import.meta.url))
+const viewer = { id: 1, once() {}, isDestroyed: () => false, send: (_channel, event) => events.push(event) }
+const cli = String.raw`
+import json, sys, time, uuid
+def emit(event, **fields):
+    print(json.dumps({'event':event, **fields}), flush=True)
+args = sys.argv[1:]
+assert args[args.index('--output-format')+1] == 'stream-json'
+assert '--dangerously-skip-permissions' not in args
+settings = json.loads(args[args.index('--settings')+1])
+assert settings['toolPermission'] == 'strict' and settings['allowNonWorkspaceAccess'] is False
+assert {'write_file(*)', 'command(*)', 'read_url(*)', 'execute_url(*)', 'mcp(*)', 'read_file(private/**)'} <= set(settings['permissions']['deny'])
+assert 'read_file(drafts/**)' in settings['permissions']['ask']
+native = args[args.index('--conversation')+1] if '--conversation' in args else str(uuid.uuid4())
+prompt = json.load(sys.stdin)['message']['content']
+emit('init', conversation_id=native)
+if 'simulate-denial' in prompt:
+    emit('result', result={'status':'ERROR', 'error':'403: Agent Platform API is disabled in test-project.'})
+    sys.exit(3)
+emit('step_update', step_update={'step_type':'agent_response','step_index':1,'text_delta':'응답'})
+if 'simulate-interrupt' in prompt:
+    time.sleep(15)
+emit('result', result={'status':'SUCCESS','response':'응답 완료','conversation_id':native})
+`
+async function load(name, mocks) {
+  const source = await readFile(new URL('../src/main/agent/' + name + '.ts', import.meta.url), 'utf8')
+  const code = ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS } }).outputText
+  const exports = {}
+  runInNewContext(code, {
+    exports, process, Buffer, AbortController, URL, setTimeout, clearTimeout, setInterval, clearInterval,
+    require: (id) => mocks[id] ?? requireAgent(id.startsWith('.') ? id + '.ts' : id)
+  })
+  return exports
+}
+async function waitFor(predicate) {
+  for (let n = 0; n < 500; n++) {
+    if (events.some(predicate)) return
+    await new Promise(resolve => setTimeout(resolve, 10))
+  }
+  assert.fail('Timed out. Events: ' + JSON.stringify(events))
+}
+
+let api
+try {
+  const config = join(root, '.gemini', 'antigravity-cli')
+  await mkdir(config, { recursive: true })
+  await writeFile(join(config, 'settings.json'), JSON.stringify({
+    toolPermission: 'strict', permissions: { deny: ['read_file(private/**)'], ask: ['read_file(drafts/**)'] }
+  }))
+  await writeFile(fixture, cli)
+  const adapter = await load('antigravity', {
+    'node:os': { homedir: () => root },
+    'node:fs': { existsSync: () => false },
+    'node:child_process': { spawn(command, args, options) {
+      if (command === 'agy.exe') return spawn('python', [fixture, ...args], options)
+      assert.equal(command, 'python3')
+      const cliIndex = args.indexOf('agy')
+      assert.ok(cliIndex > 0, 'wrap the fake CLI with the real execution lock')
+      return spawn(command, [...args.slice(0, cliIndex), 'python3', fixture, ...args.slice(cliIndex + 1)], options)
+    } },
+    './agentExecutionLock': { agentExecutionArgs: (identity) => {
+      const args = execution.agentExecutionArgs(identity)
+      args[2] = args[2].replace("os.path.expanduser('~')", JSON.stringify(root))
+      return args
+    } }
+  })
+  api = await load('agent-service', {
+    './antigravity': adapter, '../jurisupport': { onAgentMcpAccountChange() {} },
+    '../remoteFs': {}, '../sessions': {}, '../settings': {}, '../projectAgent': { releaseProjectMcp() {} },
+    '@anthropic-ai/claude-agent-sdk': { query() { assert.fail('Antigravity opened Claude') } }
+  })
+  const options = { cwd: root, provider: 'antigravity' }
+  const create = (id, extra = {}) => assert.equal(api.createAgentSession({ ...options, id, ...extra }, viewer).ok, true)
+  const send = (id, text) => {
+    events.length = 0
+    const result = api.sendAgentMessage(id, { text })
+    assert.equal(result.ok, true, result.error)
+  }
+  const reply = async (id) => {
+    send(id, '검사')
+    await waitFor(e => e.type === 'status' && e.status === 'idle')
+    assert.equal(events.filter(e => e.type === 'message:assistant_delta').map(e => e.text).join(''), '응답 완료')
+    assert.equal(events.filter(e => e.type === 'message:assistant_done').length, 1)
+    assert.equal(events.some(e => e.type === 'error'), false)
+    return api.getAgentSessionSnapshot(id).session.resumeSessionId
+  }
+  create('initial')
+  const native = await reply('initial')
+  assert.match(native, /^[a-f0-9-]{36}$/)
+  api.closeAgentSession('initial')
+  create('restored', { resumeSessionId: native })
+  assert.equal(await reply('restored'), native)
+  send('restored', 'simulate-denial')
+  await waitFor(e => e.type === 'error' && /403.*test-project/.test(e.message))
+  assert.equal(events.some(e => e.type === 'auth:status' && e.state === 'unauthenticated'), false)
+  send('restored', 'simulate-interrupt')
+  await waitFor(e => e.type === 'message:assistant_delta')
+  assert.equal(api.interruptAgentSession('restored').ok, true)
+  await waitFor(e => e.type === 'session:interrupted')
+  assert.equal(await reply('restored'), native, 'interruption must release the native conversation lock')
+  assert.equal(api.createAgentSession({ ...options, id: 'remote', source: 'ssh', ssh: { host: 'example.invalid', user: 'test' } }, viewer).ok, false)
+  console.log('Antigravity session streaming, restored conversation, service denial, interrupt/retry and SSH rejection passed')
+} finally {
+  api?.closeAgentSession('initial')
+  api?.closeAgentSession('restored')
+  await rm(root, { recursive: true, force: true })
+}

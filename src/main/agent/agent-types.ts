@@ -3,7 +3,7 @@ import type { AgentWorkspaceContext } from '../../shared/agentWorkspaceContext'
 
 export type AgentPermissionMode = 'ask' | 'plan' | 'acceptEdits' | 'bypassPermissions' | 'dontAsk'
 
-export type AgentProvider = 'claude' | 'codex'
+export type AgentProvider = 'claude' | 'codex' | 'antigravity'
 
 export type AgentSource = 'local' | 'ssh'
 
@@ -259,13 +259,14 @@ export type AgentEvent =
   | { type: 'session:interrupted'; sessionId: string; message?: string }
   | {
       type: 'message:user'
+      timestamp: number
       sessionId: string
       messageId: string
       text: string
       quote?: AgentMessageQuote
       attachments: AgentAttachment[]
     }
-  | { type: 'message:assistant_start'; sessionId: string; messageId: string }
+  | { type: 'message:assistant_start'; sessionId: string; messageId: string; timestamp?: number }
   | { type: 'message:assistant_delta'; sessionId: string; messageId: string; text: string }
   | { type: 'message:assistant_replace'; sessionId: string; messageId: string; text: string }
   | { type: 'message:assistant_done'; sessionId: string; messageId: string; transcriptId?: string }

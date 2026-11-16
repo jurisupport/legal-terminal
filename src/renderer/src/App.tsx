@@ -15,10 +15,11 @@ import {
 } from 'react'
 import Terminal from './terminal/Terminal'
 import NotificationHistory from './NotificationHistory'
-import { NOTIFICATION_HISTORY_KEY, limitNotificationHistory, notificationEventId, readNotificationHistory, writeNotificationHistory, readNotificationOutbox, saveNotificationOperation, removeNotificationOperation, type NotificationEntry } from './notificationHistoryStore'
+import { notificationTitle, notificationBody, NOTIFICATION_HISTORY_KEY, limitNotificationHistory, notificationEventId, readNotificationHistory, writeNotificationHistory, readNotificationOutbox, saveNotificationOperation, removeNotificationOperation, type NotificationEntry } from './notificationHistoryStore'
 import CaseSidebar, { type SidebarCase, type SidebarTask } from './CaseSidebar'
 import AgentPanel, {
   DiffPreview,
+  agentProviderLabels,
   type AgentAttachmentRequest,
   type AgentDraftState,
   type AgentDiffOpenRequest,
@@ -435,13 +436,22 @@ type TermRunStatus = 'idle' | 'working' | 'done' | 'question'
 const docSide = (tab?: DocTab): DockSide => tab?.side ?? 'left'
 const termSide = (tab?: TermTab): DockSide => tab?.side ?? 'right'
 const isAgentTab = (tab?: TermTab): tab is TermTab & { kind: 'agent' } => tab?.kind === 'agent'
-const isAgentProvider = (value: unknown): value is AgentProvider => value === 'claude' || value === 'codex'
-const resolveAgentProvider = (value: unknown, _ssh?: SshConn): AgentProvider =>
-  isAgentProvider(value) ? value : DEFAULT_AGENT_PROVIDER
+const isAgentProvider = (value: unknown): value is AgentProvider =>
+  value === 'claude' || value === 'codex' || value === 'antigravity'
+const resolveAgentProvider = (
+  value: unknown,
+  ssh?: SshConn,
+  context?: Pick<TermTab, 'contextKind' | 'todoManagement'>
+): AgentProvider => {
+  if (value === 'antigravity' && (ssh || context?.contextKind === 'project' || context?.todoManagement !== undefined)) {
+    return DEFAULT_AGENT_PROVIDER
+  }
+  return isAgentProvider(value) ? value : DEFAULT_AGENT_PROVIDER
+}
 const isClaudeAgentTab = (tab?: TermTab): tab is TermTab & { kind: 'agent' } =>
-  isAgentTab(tab) && resolveAgentProvider(tab.agentProvider, tab.ssh) === 'claude'
+  isAgentTab(tab) && resolveAgentProvider(tab.agentProvider) === 'claude'
 const agentProviderLabel = (term: TermTab): string =>
-  resolveAgentProvider(term.agentProvider, term.ssh) === 'codex' ? 'Codex Agent' : 'Claude Agent'
+  `${agentProviderLabels[resolveAgentProvider(term.agentProvider)]} Agent`
 const otherSide = (side: DockSide): DockSide => (side === 'left' ? 'right' : 'left')
 const docKey = (id: string): WorkTabKey => `doc:${id}`
 const termKeyOf = (id: string): WorkTabKey => `terminal:${id}`
@@ -877,30 +887,23 @@ const describeRecordsStatus = (
 const describeTermStatus = (term: TermTab | undefined, status?: TermRunStatus): string | undefined => {
   if (!term) return undefined
   const agent = isAgentTab(term)
+  const terminalLabel = term.autoAgent ? agentProviderLabels[term.autoAgent] : term.autoClaude ? 'Claude' : '터미널'
   const run =
     status === 'working'
       ? agent
         ? 'Agent 작업 중'
-        : 'Claude 작업 중'
+        : `${terminalLabel} 작업 중`
       : status === 'question'
         ? agent
           ? 'Agent 확인 대기'
-          : 'Claude 질문 대기'
+          : `${terminalLabel} 질문 대기`
         : status === 'done'
           ? agent
             ? 'Agent 완료'
-            : term.autoAgent === 'codex'
-              ? 'Codex 완료'
-              : term.autoClaude
-                ? 'Claude 완료'
-                : '터미널 완료'
+            : `${terminalLabel} 완료`
           : agent
             ? 'Agent 대기'
-            : term.autoAgent === 'codex'
-              ? 'Codex 대기'
-              : term.autoClaude
-                ? 'Claude 대기'
-                : '터미널 대기'
+            : `${terminalLabel} 대기`
   const connection = term.ssh ? `원격 ${term.sshLabel ?? term.ssh.host}` : '로컬'
   return joinStatus([run, connection])
 }
@@ -2916,7 +2919,7 @@ export default function App(): JSX.Element {
       const tab = {
         ...rawTab,
         caseTabId: resolveCaseTabId(receivedCase),
-        agentProvider: rawTab.kind === 'agent' ? resolveAgentProvider(rawTab.agentProvider, rawTab.ssh) : undefined,
+        agentProvider: rawTab.kind === 'agent' ? resolveAgentProvider(rawTab.agentProvider) : undefined,
         side: rawTab.side ?? 'right'
       }
       setTermTabs((tabs) =>
@@ -3008,6 +3011,7 @@ export default function App(): JSX.Element {
   }, [])
 
   const rememberSessionForTerm = (term: TermTab, sessionId: string, title?: string, mtime?: number): void => {
+    if (term.agentProvider === 'antigravity' || term.autoAgent === 'antigravity') return
     const key = `${term.ssh ? `${term.ssh.user}@${term.ssh.host}:${term.ssh.port ?? 22}` : 'local'}:${sessionId}:${title ?? ''}:${term.caseNumber ?? ''}:${term.cwd}:${term.originDevice ?? ''}`
     if (rememberedSessionsRef.current.has(key)) return
     rememberedSessionsRef.current.add(key)
@@ -3021,7 +3025,7 @@ export default function App(): JSX.Element {
     let alive = true
     const tick = (): void => {
       termTabsRef.current.forEach((t) => {
-        if (t.renamed || (!isAgentTab(t) && t.ssh)) return
+        if (t.renamed || (!isAgentTab(t) && (t.ssh || t.autoAgent === 'antigravity'))) return
         const current = isAgentTab(t)
           ? window.lt.agent.snapshot(t.id).then((result) => result.ok && result.session
             ? { sessionId: result.session.resumeSessionId, title: result.session.sessionTitle }
@@ -3122,7 +3126,7 @@ export default function App(): JSX.Element {
       suggestedRecords: suggested,
       suggestedRecordOptions: suggestedOptions,
       autoClaude: kind === 'terminal',
-      agentProvider: kind === 'agent' ? resolveAgentProvider(agentProviderOverride ?? agentDefaultProvider) : undefined,
+      agentProvider: kind === 'agent' ? resolveAgentProvider(agentProviderOverride ?? agentDefaultProvider, undefined, caseMeta) : undefined,
       createdAt: Date.now(),
       originDevice: 'desktop',
       side,
@@ -3705,7 +3709,7 @@ export default function App(): JSX.Element {
     }
     const terminalAutoAgent = isAgentTab(cur)
       ? options?.reuseAgentTab
-        ? resolveAgentProvider(cur.agentProvider, cur.ssh)
+        ? resolveAgentProvider(cur.agentProvider)
         : undefined
       : cur.autoAgent
     const terminalAutoClaude = terminalAutoAgent ? terminalAutoAgent === 'claude' : !isAgentTab(cur)
@@ -3816,7 +3820,7 @@ export default function App(): JSX.Element {
       cwd,
       recordsFolder: cur?.recordsFolder ?? currentCase?.records,
       autoClaude: false,
-      agentProvider: resolveAgentProvider(agentProviderOverride ?? cur?.agentProvider ?? agentDefaultProvider, ssh),
+      agentProvider: resolveAgentProvider(agentProviderOverride ?? cur?.agentProvider ?? agentDefaultProvider, ssh, cur ?? currentCase?.meta),
       createdAt: Date.now(),
       originDevice: 'desktop',
       todoManagement: cur?.todoManagement,
@@ -3836,7 +3840,7 @@ export default function App(): JSX.Element {
     setTermTabs((tabs) => [...tabs, tab])
     const shouldMoveDraft =
       isAgentTab(cur) &&
-      (!agentProviderOverride || resolveAgentProvider(cur.agentProvider, cur.ssh) === agentProviderOverride)
+      (!agentProviderOverride || resolveAgentProvider(cur.agentProvider) === agentProviderOverride)
     moveAgentDraft(shouldMoveDraft ? cur.id : undefined, tab.id)
     setActiveTerm(tab.id)
     setWorkActive(side, termKeyOf(tab.id))
@@ -3851,8 +3855,8 @@ export default function App(): JSX.Element {
   ): void => {
     const current = termTabsRef.current.find((term) => term.id === termId)
     if (!current || !isAgentTab(current)) return
-    const nextProvider = resolveAgentProvider(provider, current.ssh)
-    if (current.agentProvider === nextProvider) return
+    const nextProvider = resolveAgentProvider(provider, current.ssh, current)
+    if (provider !== nextProvider || current.agentProvider === nextProvider) return
 
     // 대화가 이미 있는 탭이면 세션을 버리지 않고 같은 독의 새 탭에서 연다.
     // 맥락은 패널 타임라인에서 추출한 transcript를 첫 지시에 합쳐 전달한다.
@@ -3860,7 +3864,7 @@ export default function App(): JSX.Element {
     if (handoff && handoff.count > 0) {
       openForkedAgentTab(current, {
         cwd: current.cwd,
-        title: `${current.title} · ${nextProvider === 'codex' ? 'Codex' : 'Claude'}`,
+        title: `${current.title} · ${agentProviderLabels[nextProvider]}`,
         side: termSide(current),
         ssh: current.ssh,
         sshLabel: current.sshLabel,
@@ -3917,7 +3921,7 @@ export default function App(): JSX.Element {
       kind: 'agent',
       cwd: opts.cwd,
       autoClaude: false,
-      agentProvider: resolveAgentProvider(opts.provider ?? source.agentProvider, opts.ssh),
+      agentProvider: resolveAgentProvider(opts.provider ?? source.agentProvider, opts.ssh, source),
       createdAt: Date.now(),
       originDevice: 'desktop',
       resumeSessionId: undefined,
@@ -4014,7 +4018,7 @@ export default function App(): JSX.Element {
 
   const agentTabContextMenuItems = (termId: string, side: DockSide): TabBarAction[] => {
     const tab = termTabsRef.current.find((t) => t.id === termId)
-    if (!tab || !isAgentTab(tab)) return []
+    if (!tab || !isAgentTab(tab) || tab.agentProvider === 'antigravity') return []
     return [
       {
         label: 'Fork',
@@ -4209,11 +4213,14 @@ export default function App(): JSX.Element {
   // 터미널 작업 상태(진행중/완료/질문대기).
   // 컨벤션: 보고 있는 작업(탭 표시 + 창 포커스)은 조용히 넘어가고, 그 외에는 알린다.
   // 창 포커스 중 → 앱 내 알림음 + 토스트. 비포커스 → OS 네이티브 알림(소리·집중 모드는 OS가 결정) + 독 주목.
-  const onTermStatus = (id: string, status: TermRunStatus): void => {
+  const onTermStatus = (id: string, status: TermRunStatus, detail?: string): void => {
     const previousStatus = termStatusRef.current.get(id)
     // 같은 렌더 사이에 done → idle이 도착해도 최신 완료 상태를 유지한다.
     const nextStatus = status === 'idle' && previousStatus === 'done' ? 'done' : status
     const term = termTabsRef.current.find((item) => item.id === id)
+    const notice = status === 'done' || status === 'question'
+      ? { title: notificationTitle(term), body: detail?.trim().slice(0, 4096) || notificationBody(status) }
+      : undefined
     const sharedCase = term ? sharedUiCase(caseIdForTerm(term)) : undefined
     const activityId = term ? sharedUiActivityId(term) : id
     let run = sharedUiRunsRef.current.get(id)
@@ -4226,7 +4233,7 @@ export default function App(): JSX.Element {
       const attention = (nextStatus === 'done' || nextStatus === 'question') &&
         !(isTermVisibleInCurrentWorkspace(id) && document.hasFocus())
       const expectedRunId = sharedUiActivitiesRef.current.get(sharedCase.id)?.[activityId]?.runId ?? null
-      const activity = { runId: run.runId, sequence: ++run.sequence, status: nextStatus, attention }
+      const activity = { runId: run.runId, sequence: ++run.sequence, status: nextStatus, attention, ...(attention && notice && { notice }) }
       sharedUiActivitiesRef.current.set(sharedCase.id, { ...sharedUiActivitiesRef.current.get(sharedCase.id), [activityId]: activity })
       sharedUiSendRef.current(sharedCase, { id: newId(), type: 'activity', caseKey: sharedUiCaseKey(sharedCase),
         agentId: activityId, ...activity, ...(start ? { start: true, expectedRunId } : { start: false }) })
@@ -4266,17 +4273,16 @@ export default function App(): JSX.Element {
       dismissToastForTerm(id)
       return
     }
-    pushToast(id, status)
+    if (!notice) return
+    pushToast(id, status, notice.title, undefined, notice.body)
     if (document.hasFocus()) {
       playNotificationSound(notificationSound, notificationVolume)
       return
     }
     window.lt.app.requestAttention(status)
-    const notificationTerm = termTabs.find((t) => t.id === id)
     window.lt.app.notify({
       termId: id,
-      title: notificationTerm?.title ?? '세션',
-      body: status === 'question' ? '확인/입력을 기다립니다' : '작업이 완료되었습니다',
+      ...notice,
       urgency: status
     })
   }
@@ -4296,7 +4302,7 @@ export default function App(): JSX.Element {
     setNotificationHistory(next)
   }
   const recordNotification = (
-    notice: { termId: string; title: string; status: 'done' | 'question' | 'synced'; count?: number },
+    notice: { termId: string; title: string; body?: string; status: 'done' | 'question' | 'synced'; count?: number },
     tab?: CaseWorkspaceTab,
     run?: { runId: string; sequence: number }
   ): void => {
@@ -4310,13 +4316,13 @@ export default function App(): JSX.Element {
     updateNotificationHistory([{ ...entry, host }, ...notificationHistoryRef.current])
     if (host !== 'local') enqueueSharedUiOperation(host, { id, type: 'notification', entry })
   }
-  const pushToast = (termId: string, status: 'done' | 'question', title?: string, fromShared?: { tab: CaseWorkspaceTab; activity: SharedUiActivity; recorded: boolean }): void => {
+  const pushToast = (termId: string, status: 'done' | 'question', title?: string, fromShared?: { tab: CaseWorkspaceTab; activity: SharedUiActivity; recorded: boolean }, body?: string): void => {
     const t = termTabsRef.current.find((x) => x.id === termId)
     const key = ++toastSeq.current
-    const notice = { key, termId, title: title ?? t?.title ?? '세션', status }
+    const notice = { key, termId, title: title ?? notificationTitle(t), body: body ?? notificationBody(status), status }
     if (!fromShared?.recorded) {
       const tab = fromShared?.tab ?? (t ? sharedUiCase(caseIdForTerm(t)) : undefined)
-      recordNotification({ title: notice.title, status, termId: t ? sharedUiActivityId(t) : termId }, tab, fromShared?.activity ?? sharedUiRunsRef.current.get(termId))
+      recordNotification({ title: notice.title, body: notice.body, status, termId: t ? sharedUiActivityId(t) : termId }, tab, fromShared?.activity ?? sharedUiRunsRef.current.get(termId))
     }
     setToasts((ts) => [...ts.filter((x) => x.termId !== termId), notice])
     if (status === 'done') {
@@ -4327,14 +4333,18 @@ export default function App(): JSX.Element {
     setToasts((ts) => ts.filter((x) => x.termId !== termId))
   const dismissToast = (key: number): void => setToasts((ts) => ts.filter((x) => x.key !== key))
 
-  const pushSyncedTabsToast = (count: number, tab?: CaseWorkspaceTab): void => {
+  const pushSyncedTabsToast = (count: number, tab?: CaseWorkspaceTab, firstTask?: string): void => {
     const key = ++toastSeq.current
-    recordNotification({ termId: '', title: `새 탭 ${count}개를 가져왔습니다`, status: 'synced', count }, tab)
+    const subject = [...new Set([tab?.name, firstTask].filter(Boolean))].join(' · ').slice(0, 240)
+    const title = subject ? subject + (count > 1 ? ` 외 ${count - 1}개` : '') : `새 탭 ${count}개를 가져왔습니다`
+    const body = firstTask ? '다른 기기에서 열린 작업 탭입니다' : '다른 기기에서 열린 사건 탭입니다'
+    const notice = { termId: '', title, body, status: 'synced' as const, count }
+    recordNotification(notice, tab)
     setToasts((current) => {
-      const total = count + (current.find((toast) => toast.status === 'synced')?.count ?? 0)
-      return [...current.filter((toast) => toast.status !== 'synced'), {
-        key, termId: '', title: `새 탭 ${total}개를 가져왔습니다`, status: 'synced', count: total
-      }]
+      const previous = current.find((toast) => toast.status === 'synced')
+      const total = count + (previous?.count ?? 0)
+      const popup = previous ? { ...notice, title: `새 탭 ${total}개를 가져왔습니다`, body: `최근 · ${title}`, count: total } : notice
+      return [...current.filter((toast) => toast.status !== 'synced'), { ...popup, key }]
     })
     setTimeout(() => setToasts((current) => current.filter((toast) => toast.key !== key)), 4000)
   }
@@ -5112,7 +5122,7 @@ export default function App(): JSX.Element {
     const terminals = await Promise.all(
       sourceTerms.map(async (t) => {
         const caseTabIdValue = caseIdForTerm(t)
-        if (!refreshSessions) return { ...t, caseTabId: caseTabIdValue, side: termSide(t) }
+        if (!refreshSessions || t.autoAgent === 'antigravity') return { ...t, caseTabId: caseTabIdValue, side: termSide(t) }
         if (isAgentTab(t)) {
           const agentSnapshot = await window.lt.agent.snapshot(t.id).catch(() => null)
           const resumeSessionId =
@@ -5247,7 +5257,7 @@ export default function App(): JSX.Element {
         : undefined,
       autoClaude: t.kind === 'agent' ? false : (t.autoClaude ?? true),
       autoAgent: t.kind === 'agent' ? undefined : isAgentProvider(t.autoAgent) ? t.autoAgent : undefined,
-      agentProvider: t.kind === 'agent' ? resolveAgentProvider(t.agentProvider, ssh) : undefined,
+      agentProvider: t.kind === 'agent' ? resolveAgentProvider(t.agentProvider) : undefined,
       todoManagement: typeof t.todoManagement === 'boolean' ? t.todoManagement : undefined,
       selectedTaskId: typeof t.selectedTaskId === 'string' ? t.selectedTaskId : undefined,
       contextKind: t.contextKind === 'global' || t.contextKind === 'case' || t.contextKind === 'folder' || t.contextKind === 'project' ? t.contextKind : undefined,
@@ -5646,7 +5656,8 @@ export default function App(): JSX.Element {
             )
             autoSaveEligibleRef.current.add(id)
             if (refresh && observedWorkspaceHostsRef.current.has(workspaceHostKey(source.ssh))) {
-              pushSyncedTabsToast(added.length, sharedUiCase(id))
+              const first = added[0]
+              pushSyncedTabsToast(added.length, sharedUiCase(id), first.renamed ? first.title : first.sessionTitle || first.title)
             }
           }
         }
@@ -5755,12 +5766,15 @@ export default function App(): JSX.Element {
             sharedUiRunsRef.current.get(term?.id ?? id)?.runId === activity.runId ||
             (activity.status === 'done' && !notifyDone) ||
             (term && isTermVisibleInCurrentWorkspace(term.id) && document.hasFocus())) continue
-          pushToast(term?.id ?? id, activity.status, term?.title ?? tab.name, { tab, activity, recorded: state.appliedOperationIds.includes(notificationEventId(sharedUiCaseKey(tab), id, activity, activity.status)) })
+          const eventId = notificationEventId(sharedUiCaseKey(tab), id, activity, activity.status)
+          const saved = state.notifications?.find((entry) => entry.id === eventId)
+          const title = activity.notice?.title ?? saved?.title ?? (term ? notificationTitle(term) : tab.name)
+          const body = activity.notice?.body ?? saved?.body ?? notificationBody(activity.status)
+          pushToast(term?.id ?? id, activity.status, title, { tab, activity, recorded: state.appliedOperationIds.includes(eventId) }, body)
           if (document.hasFocus()) playNotificationSound(notificationSound, notificationVolume)
           else {
             window.lt.app.requestAttention(activity.status)
-            window.lt.app.notify({ termId: id, title: term?.title ?? tab.name,
-              body: activity.status === 'question' ? '확인/입력을 기다립니다' : '작업이 완료되었습니다', urgency: activity.status })
+            window.lt.app.notify({ termId: id, title, body, urgency: activity.status })
           }
         }
       }
@@ -7174,6 +7188,7 @@ export default function App(): JSX.Element {
     key: number
     termId: string
     title: string
+    body?: string
     status: 'done' | 'question' | 'synced'
     count?: number
   }[]>([])
@@ -7372,7 +7387,7 @@ export default function App(): JSX.Element {
         title: term.sessionTitle || term.title,
         mtime: term.createdAt ?? 0,
         originDevice: term.originDevice,
-        sessionId: term.agentProvider === 'codex' ? undefined : term.resumeSessionId,
+        sessionId: (term.agentProvider ?? term.autoAgent ?? 'claude') === 'claude' ? term.resumeSessionId : undefined,
         active: tab.id === activeCaseTabId && isTermVisibleInCurrentWorkspace(term.id),
         status: termStatus.get(term.id) === 'working' ? '작업 중'
           : termStatus.get(term.id) === 'question' ? '확인 대기'
@@ -8848,7 +8863,7 @@ export default function App(): JSX.Element {
         {termTabs.length === 0 &&
           (currentCase ? (
             <Empty
-              label={`「${currentCase.name}」 — Claude 탭이 모두 닫혔습니다`}
+              label={`「${currentCase.name}」 — Agent 탭이 모두 닫혔습니다`}
               actionLabel="이 사건에서 Agent 열기"
               onAction={() => addAgentSame('right')}
               secondaryLabel="터미널로 실행"
@@ -8887,7 +8902,7 @@ export default function App(): JSX.Element {
                 cwd={t.cwd}
                 title={t.title}
                 documentLink={documentLinkForAgent(t)}
-                provider={resolveAgentProvider(t.agentProvider, t.ssh)}
+                provider={resolveAgentProvider(t.agentProvider)}
                 resumeSessionId={t.resumeSessionId}
                 forkFromSessionId={t.forkFromSessionId}
                 initialHandoff={t.handoffContext}
@@ -8907,12 +8922,12 @@ export default function App(): JSX.Element {
                 onAttachmentRequestsHandled={(requestIds) =>
                   handleAgentAttachmentRequestsHandled(t.id, requestIds)
                 }
-                onStatus={(s) => onTermStatus(t.id, s)}
-                onFork={() => void forkAgentTab(t.id, termSide(t))}
+                onStatus={(s, detail) => onTermStatus(t.id, s, detail)}
+                onFork={t.agentProvider === 'antigravity' ? undefined : () => void forkAgentTab(t.id, termSide(t))}
                 onForkAndSend={(handoff) => forkAgentTab(t.id, termSide(t), { handoff })}
                 onProviderChange={(provider, handoff) => changeAgentProvider(t.id, provider, handoff)}
                 onHandoffConsumed={() => consumeAgentHandoff(t.id)}
-                onWorktreeFork={() => void forkAgentWorktreeTab(t.id, termSide(t))}
+                onWorktreeFork={t.agentProvider === 'antigravity' ? undefined : () => void forkAgentWorktreeTab(t.id, termSide(t))}
                 onOpenTerminal={() => addTermSame(termSide(t), t.id, { reuseAgentTab: true })}
                 onOpenDiff={(request) => openAgentDiff(request, caseIdForTerm(t))}
                 onOpenFile={(path, title) => openFile(path, title ?? fileNameFromPath(path), 'left', t.caseTabId)}
@@ -9280,7 +9295,7 @@ export default function App(): JSX.Element {
                   cwd={t.cwd}
                   title={t.title}
                   documentLink={documentLinkForAgent(t)}
-                  provider={resolveAgentProvider(t.agentProvider, t.ssh)}
+                  provider={resolveAgentProvider(t.agentProvider)}
                   resumeSessionId={t.resumeSessionId}
                   forkFromSessionId={t.forkFromSessionId}
                   initialHandoff={t.handoffContext}
@@ -9300,12 +9315,12 @@ export default function App(): JSX.Element {
                   onAttachmentRequestsHandled={(requestIds) =>
                     handleAgentAttachmentRequestsHandled(t.id, requestIds)
                   }
-                  onStatus={(s) => onTermStatus(t.id, s)}
-                  onFork={() => void forkAgentTab(t.id, side)}
+                  onStatus={(s, detail) => onTermStatus(t.id, s, detail)}
+                  onFork={t.agentProvider === 'antigravity' ? undefined : () => void forkAgentTab(t.id, side)}
                   onForkAndSend={(handoff) => forkAgentTab(t.id, side, { handoff })}
                   onProviderChange={(provider, handoff) => changeAgentProvider(t.id, provider, handoff)}
                   onHandoffConsumed={() => consumeAgentHandoff(t.id)}
-                  onWorktreeFork={() => void forkAgentWorktreeTab(t.id, side)}
+                  onWorktreeFork={t.agentProvider === 'antigravity' ? undefined : () => void forkAgentWorktreeTab(t.id, side)}
                   onOpenTerminal={() => addTermSame(side, t.id, { reuseAgentTab: true })}
                   onOpenDiff={(request) => openAgentDiff(request, caseIdForTerm(t))}
                   onOpenFile={(path, title) => openFile(path, title ?? fileNameFromPath(path), 'left', t.caseTabId)}
@@ -9578,7 +9593,7 @@ export default function App(): JSX.Element {
             id: 'new-agent',
             label: '새 Agent',
             detail: '현재 사건에서 새 AI 작업 시작',
-            keywords: '에이전트 claude codex ai',
+            keywords: '에이전트 claude codex antigravity ai',
             shortcut: `${primaryShortcut}T`,
             run: () => addAgentSame(termSide(activeTermTab), activeTerm)
           },
@@ -10179,9 +10194,7 @@ export default function App(): JSX.Element {
               <span className="toast-body">
                 <b>{t.title}</b>
                 <span className="toast-sub">
-                  {t.status === 'synced' ? '다른 기기에서 열린 탭입니다' : t.status === 'question'
-                    ? '확인/입력을 기다립니다 · 클릭하여 이동'
-                    : '작업이 완료되었습니다 · 클릭하여 이동'}
+                  {t.body ?? notificationBody(t.status)}{t.status !== 'synced' && ' · 클릭하여 이동'}
                 </span>
               </span>
               <button
@@ -12075,7 +12088,7 @@ function Welcome({
         <li>💬 <b>일반 질문</b> — 대화창에 바로 질문하세요. 사건이나 폴더를 선택하지 않아도 됩니다.</li>
         <li>📁 <b>탐색기 모드</b> — 작성서류 폴더의 파일트리에서 문서를 본문에 엽니다</li>
         <li>📄 <b>기록뷰어 모드</b> — 문서 | 본문 | 서증·첨부서류 | 터미널</li>
-        <li>✳️ <b>AI 대화</b> — Claude 또는 Codex를 선택해 질문하고 작업을 이어갑니다.</li>
+        <li>✳️ <b>AI 대화</b> — Claude, Codex 또는 Antigravity를 선택해 질문하고 작업을 이어갑니다.</li>
       </ul>
     </div>
   )
@@ -13782,6 +13795,7 @@ function SettingsView({ onSync }: { onSync: (init: SyncModalInit) => void }): JS
           >
             <option value="claude">Claude</option>
             <option value="codex">Codex</option>
+            <option value="antigravity">Antigravity (로컬 일반 질문·폴더·사건)</option>
           </select>
         </div>
       </section>

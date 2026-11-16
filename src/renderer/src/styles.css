@@ -3231,6 +3231,13 @@ body {
   background: #181818;
   box-shadow: 0 -10px #181818;
 }
+.agent-msg-time {
+  display: block;
+  margin-bottom: 2px;
+  color: var(--fg-muted);
+  font-size: var(--agent-micro-font-size);
+  font-variant-numeric: tabular-nums;
+}
 .agent-msg-bubble {
   padding: 4px 10px;
   border-left: 2px solid color-mix(in srgb, var(--accent) 62%, var(--border));

@@ -79,6 +79,7 @@ function freshApp(scenarios, restoreInfo) {
     exports: module.exports, process, Buffer, AbortController, setTimeout, clearTimeout, setInterval, clearInterval,
     require: (name) => {
       if (name === './remoteAgentTransport') return { RemoteAgentTransport: TestTransport, probeRemoteAgentRun: async () => restoreInfo }
+      if (name === './antigravity') return {}
       if (name === './agentExecutionLock') return execution
       if (name === './agentProgress') return progress
       if (name === './agentMcp') return mcp

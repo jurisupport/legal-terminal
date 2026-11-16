@@ -75,12 +75,13 @@ try {
   await api.applySharedUi(ssh, op('start', { type: 'activity', agentId: 'agent', runId: 'run-1', sequence: 1,
     status: 'working', attention: false, start: true, expectedRunId: null }))
   await api.applySharedUi(ssh, op('done', { type: 'activity', agentId: 'agent', runId: 'run-1', sequence: 2,
-    status: 'done', attention: true, start: false }))
+    status: 'done', attention: true, start: false, notice: {title:'문서 검토', body:'초안을 검토했습니다'} }))
   await api.applySharedUi(ssh, op('late', { type: 'activity', agentId: 'agent', runId: 'run-1', sequence: 1,
     status: 'working', attention: false, start: false }))
   await api.applySharedUi(ssh, op('wrong-ack', { type: 'ack', agentId: 'agent', runId: 'old', sequence: 2 }))
   await api.applySharedUi(ssh, op('stale-ack', { type: 'ack', agentId: 'agent', runId: 'run-1', sequence: 1 }))
   state = (await api.readSharedUi(ssh)).state
+  assert.equal(state.cases[caseKey].activity.agent.notice.body, '초안을 검토했습니다')
   assert.equal(state.cases[caseKey].activity.agent.status, 'done')
   assert.equal(state.cases[caseKey].activity.agent.attention, true)
   await api.applySharedUi(ssh, op('ack', { type: 'ack', agentId: 'agent', runId: 'run-1', sequence: 2 }))
@@ -100,6 +101,7 @@ try {
     { ...notification('invalid', 1).entry, createdAt: -1 },
     { ...notification('invalid', 1).entry, createdAt: 8_640_000_000_000_001 },
     { ...notification('invalid', 1).entry, title: '' },
+    { ...notification('invalid', 1).entry, body: 7 },
     { ...notification('invalid', 1).entry, termId: 1 },
     { ...notification('invalid', 1).entry, status: 'working' },
     { ...notification('invalid', 1).entry, caseKey: '__proto__' },

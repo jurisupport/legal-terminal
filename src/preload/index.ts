@@ -445,7 +445,7 @@ interface SessionTranscript {
 }
 
 type AgentPermissionMode = 'ask' | 'plan' | 'acceptEdits' | 'bypassPermissions' | 'dontAsk'
-type AgentProvider = 'claude' | 'codex'
+type AgentProvider = 'claude' | 'codex' | 'antigravity'
 
 interface OfficeProfileSettings {
   officeName?: string

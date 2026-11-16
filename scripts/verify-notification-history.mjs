@@ -129,6 +129,30 @@ assert.equal(store.readNotificationOutbox(localStorage).length, 1, 'clear remain
 await transport(transportContext()).flushSharedUiQueue()
 assert.equal(transportServer.notifications.length, 0, 'restoring the profile applies the durable clear')
 
+// Two conversations in one case must remain distinguishable through every delivery channel.
+const sentNative = []
+Object.assign(context, {
+  termStatusRef: {current:new Map()}, setTermStatus: () => {}, setTermAttention: () => {},
+  isTermVisibleInCurrentWorkspace: () => false, document: {hasFocus: () => false}, notifyDone:true,
+  window: {lt:{app:{requestAttention: () => {}, notify: entry => sentNative.push(entry)}}}
+})
+vm.runInContext(ts.transpileModule(`const onTermStatus = ${declarations.get('onTermStatus')}`, {
+  compilerOptions: {target: ts.ScriptTarget.ES2022}
+}).outputText, context)
+for (const [id, sessionTitle, status, body] of [
+  ['first', '준비서면 작성', 'done', '준비서면 초안을 작성했습니다.'],
+  ['second', '증거 검토', 'question', '어느 증거를 첨부할까요?']
+]) {
+  context.termTabsRef.current.push({id, title:'대여금', sessionTitle})
+  vm.runInContext(`onTermStatus(${JSON.stringify(id)}, ${JSON.stringify(status)}, ${JSON.stringify(body)})`, context)
+  for (const entry of [sentNative.at(-1), history[0], toasts.at(-1)]) {
+    assert.equal(entry.title, '대여금 · ' + sessionTitle)
+    assert.equal(entry.body, body)
+  }
+}
+assert.equal(store.notificationTitle({title:'직접 정한 이름', sessionTitle:'자동 제목', renamed:true}), '직접 정한 이름')
+assert.equal(store.readNotificationHistory(localStorage)[0].body, '어느 증거를 첨부할까요?')
+
 const temp = await fs.mkdtemp(path.join(os.tmpdir(), 'notification-history-'))
 try {
   await build({
@@ -155,7 +179,7 @@ try {
         await run('document.querySelector("summary").click()')
         assert.ok(await run('document.body.innerText.includes("아직 받은 알림이 없습니다")'))
         const entries = [
-          { id: 'three', host: 'office', termId: 'remote', title: '손해배상 사건 · 상대방 준비서면 검토 및 추가 자료 확인 요청', status: 'question', createdAt: Date.now() },
+          { id: 'three', host: 'office', termId: 'remote', title: '손해배상 사건 · 상대방 준비서면 검토 및 추가 자료 확인 요청', body:'어느 증거를 첨부할까요?', status: 'question', createdAt: Date.now() },
           { id: 'two', host: 'office', termId: 'local', title: '대여금 사건 · 준비서면 초안', status: 'done', createdAt: Date.now() - 60000 },
           { id: 'one', host: 'office', termId: '', title: '새 탭 2개를 가져왔습니다', status: 'synced', createdAt: Date.now() - 120000 }
         ]
@@ -167,6 +191,8 @@ try {
         for (let i = 0; i < 50 && !await run('!!document.querySelector("summary")'); i++) await new Promise(r => setTimeout(r, 20))
         await run('document.querySelector("summary").click()')
         assert.equal(await run('document.querySelectorAll(".notification-history-entry").length'), 3, 'reload restores the history UI')
+        assert.equal(await run('document.querySelector(".notification-history-body > span").textContent'), '어느 증거를 첨부할까요?')
+        assert.equal(await run('document.querySelectorAll(".notification-history-body > span")[1].textContent'), '작업이 완료되었습니다')
         const bounds = await run('JSON.stringify(document.querySelector(".notification-history-panel").getBoundingClientRect().toJSON())')
         assert.ok(JSON.parse(bounds).right <= 1000)
         fs.writeFileSync(screenshot, (await win.webContents.capturePage()).toPNG())

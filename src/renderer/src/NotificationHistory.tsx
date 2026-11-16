@@ -1,6 +1,6 @@
 import { useEffect, useRef } from 'react'
 
-import type { NotificationEntry } from './notificationHistoryStore'
+import { notificationBody, type NotificationEntry } from './notificationHistoryStore'
 
 export default function NotificationHistory({ entries, error, onSelect, onClear }: {
   entries: NotificationEntry[]
@@ -49,7 +49,7 @@ export default function NotificationHistory({ entries, error, onSelect, onClear 
                 <span className={`notification-history-icon ${entry.status}`} aria-hidden="true">{entry.status === 'question' ? '?' : entry.status === 'synced' ? '+' : '✓'}</span>
                 <span className="notification-history-body">
                   <strong>{entry.title}</strong>
-                  <span>{entry.status === 'question' ? '확인/입력을 기다립니다' : entry.status === 'synced' ? '다른 기기에서 열린 탭입니다' : '작업이 완료되었습니다'}</span>
+                  <span>{entry.body ?? notificationBody(entry.status)}</span>
                   <time dateTime={new Date(entry.createdAt).toISOString()}>{new Date(entry.createdAt).toLocaleString('ko-KR')}</time>
                 </span>
               </button>

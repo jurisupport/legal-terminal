@@ -53,6 +53,7 @@ const ctx={exports:serviceExports,console,process,Buffer,AbortController,URL,URL
     if(name==='./agentMcp')return mcp
     if(name==='./projectMcpConfig')return projectMcp
     if(name==='../projectAgent')return{releaseProjectMcp:()=>{},disposeProjectMcp:()=>{}}
+    if(name==='./antigravity')return{}
     if(name==='./agentExecutionLock')return executionLock
     if(name==='./remoteAgentTransport')return{RemoteAgentTransport:class{
       constructor(options){launches.push([options.sshBin,[...options.sshArgs,options.command]]);return nextProcess??new FakeProcess()}

@@ -144,6 +144,7 @@ function freshApp(usageHydration) {
     require: (name) => {
       if (name === './remoteAgentTransport') return { RemoteAgentTransport: TestTransport,
         probeRemoteAgentRun: (opts) => probeRemoteAgentRun({ ...opts, ...options(opts.identity) }) }
+      if (name === './antigravity') return {}
       if (name === './agentExecutionLock') return execution
       if (name === './agentProgress') return progress
       if (name === './agentMcp') return mcp

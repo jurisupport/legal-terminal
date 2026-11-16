@@ -53,6 +53,7 @@ import { listTodos, getAgentMcpConnection, agentMcpAccountEpoch, onAgentMcpAccou
 import { MANAGED_MCP, MANAGED_MCP_ENV, managedToolName, managedToolDecision, managedMcpApproval, managedDisallowedTools, claudeManagedServers, codexManagedConfig, redactManagedSecrets, type ManagedMcpConnection } from './agentMcp'
 import { acquireProjectMcp, releaseProjectMcp, disposeProjectMcp, getProjectAgentContext, getProjectWorkspace, forwardProjectMcp } from '../projectAgent'
 import { PROJECT_MCP, PROJECT_MCP_ENV, projectToolName, projectToolDecision, projectMcpToken, projectDisallowedTools, claudeProjectServers, codexProjectConfig, type ProjectMcpConnection } from './projectMcpConfig'
+import { ANTIGRAVITY_LOGIN_MESSAGE, runAntigravityTurn } from './antigravity'
 import { codexTurnRunStatus, codexWorkStepStatus } from './agentProgress'
 import { AGENT_BUSY_MESSAGE, agentExecutionArgs, agentExecutionCommand } from './agentExecutionLock'
 import { RemoteAgentTransport, probeRemoteAgentRun, type RemoteAgentOptions, type RemoteAgentRunInfo } from './remoteAgentTransport'
@@ -428,6 +429,7 @@ function durableProcess(proc: AgentProcess | undefined): proc is RemoteAgentTran
 }
 
 function remoteOptions(session: AgentSession): RemoteAgentOptions {
+  if (session.provider === 'antigravity') throw new Error('Antigravity는 이 컴퓨터의 로컬 대화에서만 사용할 수 있습니다.')
   if (!session.ssh) throw new Error('원격 연결 정보가 없습니다.')
   return {
     sshBin, sshArgs: sshArgs(session.ssh, { usage: 'interactive' }), env: cleanEnv(),
@@ -514,7 +516,7 @@ function restoreRemoteSession(session: AgentSession, retryDelay = 3000): void {
       session.claudeTurnUsageBase = { ...session.tokenUsage }
       session.claudeTurnUsageMessageIds = new Set()
       emit(session, { type: 'session:restored', sessionId: session.id, startedAt: info.startedAt })
-      emit(session, { type: 'message:user', sessionId: session.id,
+      emit(session, { type: 'message:user', sessionId: session.id, timestamp: info.startedAt,
         messageId: stringValue(meta.messageId) ?? `remote-${info.runId}`, text: session.lastUserText ?? '원격 작업', attachments: [] })
       emitAuthStatus(session, 'authenticated')
       emitCurrentSessionStatus(session)
@@ -577,7 +579,7 @@ function cliPermissionMode(mode: AgentPermissionMode): string {
 }
 
 function resolveAgentProvider(provider: AgentProvider | undefined, _source: AgentSource): AgentProvider {
-  return provider === 'codex' ? 'codex' : 'claude'
+  return provider === 'codex' || provider === 'antigravity' ? provider : 'claude'
 }
 
 function shq(value: string): string {
@@ -1586,7 +1588,8 @@ function attach(session: AgentSession, webContents: WebContents): void {
 function startAssistant(session: AgentSession, messageId: string): void {
   if (session.assistantMessages.has(messageId)) return
   session.assistantMessages.add(messageId)
-  emit(session, { type: 'message:assistant_start', sessionId: session.id, messageId })
+  emit(session, { type: 'message:assistant_start', sessionId: session.id, messageId,
+    timestamp: session.remoteReplay ? undefined : Date.now() })
 }
 
 function completeAssistant(session: AgentSession, messageId: string, transcriptId?: string): void {
@@ -4378,6 +4381,7 @@ export function startAgentAuthLogin(sessionId: string): AgentCommandResult {
   const session = sessions.get(sessionId)
   if (!session) return { ok: false, error: 'Agent 세션을 찾을 수 없습니다.' }
   if (projectWorkspaceUpdating(session)) return { ok: false, error: PROJECT_WORKSPACE_UPDATING }
+  if (session.provider === 'antigravity') return { ok: false, error: ANTIGRAVITY_LOGIN_MESSAGE }
   if (session.running) return { ok: false, error: 'Agent 작업 실행 중에는 로그인할 수 없습니다.' }
   const label = session.provider === 'codex' ? 'Codex' : 'Claude'
   if (session.authProcess) return { ok: false, error: `이미 ${label} 로그인 절차가 실행 중입니다.` }
@@ -4759,6 +4763,15 @@ function prefetchClaudeSlashCommands(session: AgentSession): void {
 export function createAgentSession(opts: AgentCreateOptions, webContents: WebContents): AgentCommandResult {
   const existing = sessions.get(opts.id)
   if (projectWorkspaceUpdating(existing ?? opts)) return { ok: false, error: PROJECT_WORKSPACE_UPDATING }
+  if (existing && opts.provider && existing.provider !== opts.provider &&
+      (existing.provider === 'antigravity' || opts.provider === 'antigravity')) {
+    return { ok: false, error: '실행 중인 대화와 선택한 Agent가 다릅니다. 새 대화에서 시작해 주세요.' }
+  }
+  if ((opts.provider ?? existing?.provider) === 'antigravity' &&
+      (opts.source === 'ssh' || opts.ssh || opts.workspaceContext?.kind === 'project' || opts.workspaceContext?.todoManagement !== undefined ||
+        opts.tools || opts.allowedTools || opts.disallowedTools)) {
+    return { ok: false, error: 'Antigravity는 로컬 일반·폴더·사건 대화에서 사용할 수 있습니다.' }
+  }
   const projectError = projectSessionError(existing ?? { source: opts.source ?? 'local', workspaceContext: opts.workspaceContext }, opts.workspaceContext)
   if (projectError) return { ok: false, error: projectError }
   if (existing) {
@@ -4808,7 +4821,7 @@ export function createAgentSession(opts: AgentCreateOptions, webContents: WebCon
     ssh: opts.ssh,
     context: opts.context?.trim() || undefined,
     workspaceContext: opts.workspaceContext,
-    authStatus: 'checking',
+    authStatus: provider === 'antigravity' ? undefined : 'checking',
     viewers: new Map(),
     pendingPermissions: new Map(),
     pendingDialogs: new Map(),
@@ -4933,6 +4946,7 @@ export async function listAgentModels(sessionId: string): Promise<AgentModelList
   if (!session) return { ok: false, error: 'Agent 세션을 찾을 수 없습니다.' }
   if (projectWorkspaceUpdating(session)) return { ok: false, error: PROJECT_WORKSPACE_UPDATING }
   if (session.remoteRestoring) return { ok: false, error: '원격 작업을 확인하고 있습니다. 연결 후 다시 열어 주세요.' }
+  if (session.provider === 'antigravity') return { ok: true, models: [] }
   if (session.provider === 'claude') {
     const abortController = new AbortController()
     try {
@@ -4990,6 +5004,7 @@ export async function listAgentModels(sessionId: string): Promise<AgentModelList
 export function setAgentModel(sessionId: string, model?: string, reasoningEffort?: string): AgentCommandResult {
   const session = sessions.get(sessionId)
   if (!session) return { ok: false, error: 'Agent 세션을 찾을 수 없습니다.' }
+  if (session.provider === 'antigravity') return { ok: false, error: '모델은 Antigravity CLI 설정을 따릅니다.' }
   if (session.provider === 'claude' && reasoningEffort && !claudeEffort(reasoningEffort)) {
     return { ok: false, error: '지원하지 않는 Claude reasoning effort입니다.' }
   }
@@ -5432,6 +5447,7 @@ function startAgentTurn(session: AgentSession, input: AgentSendInput, codexComma
   session.lastUserText = userDisplayText
   emit(session, {
     type: 'message:user',
+    timestamp: Date.now(),
     sessionId,
     messageId,
     text: userDisplayText,
@@ -5490,6 +5506,33 @@ function startAgentTurn(session: AgentSession, input: AgentSendInput, codexComma
         session.claudeTurnUsageBase = { ...session.tokenUsage }
         session.claudeTurnUsage = undefined
         session.claudeTurnUsageMessageIds = new Set()
+      }
+      if (session.provider === 'antigravity') {
+        await runAntigravityTurn(session, prompt, cleanEnv(), abortController.signal, (message) => {
+          if (message.event === 'init') {
+            session.resumeSessionId = stringValue(message.conversation_id) ?? session.resumeSessionId
+            emit(session, { type: 'session:init', sessionId, cwd: session.cwd, provider: session.provider, source: session.source })
+          } else if (message.event === 'step_update') {
+            const step = asRecord(message.step_update)
+            if (step?.step_type === 'agent_response' && typeof step.text_delta === 'string') {
+              appendAssistantText(session, assistantMessageId, step.text_delta)
+            } else if (step?.step_type === 'tool') {
+              const tool = asRecord(step.tool_info)
+              emitProcessEvent(session, `${assistantMessageId}-${step.step_index}`, stringValue(step.tool_name) ?? 'Antigravity 도구',
+                stringValue(asRecord(tool?.error)?.message), tool?.error ? 'error' : step.state === 'DONE' ? 'completed' : 'running')
+            }
+          } else if (message.event === 'result') {
+            const result = asRecord(message.result)
+            if (result?.status === 'SUCCESS' && typeof result.response === 'string') {
+              reconcileAssistantSnapshot(session, assistantMessageId, result.response)
+            }
+          }
+        })
+        if (abortController.signal.aborted) return
+        completeAssistant(session, assistantMessageId)
+        emit(session, { type: 'status', sessionId, status: 'done' })
+        emit(session, { type: 'status', sessionId, status: 'idle' })
+        return
       }
       if (session.provider === 'codex') {
         await runCodexAgentMessage(session, prompt, abortController, codexCommand, codexExecution)
@@ -5611,7 +5654,7 @@ function startAgentTurn(session: AgentSession, input: AgentSendInput, codexComma
     } catch (error) {
       if (!abortController.signal.aborted) {
         const message = localExecutionError ?? (error instanceof Error ? error.message : String(error))
-        if (isAuthFailureOutput(message)) {
+        if (session.provider !== 'antigravity' && isAuthFailureOutput(message)) {
           emitAuthStatus(session, 'unauthenticated', message)
         }
         emit(session, {
@@ -5650,6 +5693,9 @@ export function sendAgentMessage(sessionId: string, input: AgentSendInput): Agen
   const session = sessions.get(sessionId)
   if (!session) return { ok: false, error: 'Agent 세션을 찾을 수 없습니다.' }
   if (projectWorkspaceUpdating(session)) return { ok: false, error: PROJECT_WORKSPACE_UPDATING }
+  if (session.provider === 'antigravity' && (input.workspaceContext?.kind === 'project' || input.workspaceContext?.todoManagement !== undefined)) {
+    return { ok: false, error: 'Antigravity는 로컬 일반·폴더·사건 대화에서 사용할 수 있습니다.' }
+  }
   const projectError = projectSessionError(session, input.workspaceContext)
   if (projectError) return { ok: false, error: projectError }
   if (session.authProcess) return { ok: false, error: '로그인 절차가 진행 중입니다.' }
@@ -5694,6 +5740,7 @@ export function sendAgentMessage(sessionId: string, input: AgentSendInput): Agen
 export function inspectAgentMcpStatus(sessionId: string): AgentCommandResult {
   const session = sessions.get(sessionId)
   if (!session) return { ok: false, error: 'Agent 세션을 찾을 수 없습니다.' }
+  if (session.provider === 'antigravity') return { ok: false, error: 'Antigravity 대화에서는 MCP 상태 확인을 지원하지 않습니다.' }
   if (session.workspaceContext?.kind === 'project') {
     emitProcessEvent(session, 'project-mcp-status', '프로젝트 자료 연결', session.projectMcpReady
       ? '최근 요청에서 프로젝트 도구 연결을 확인했습니다. 매 요청마다 최신 목표·메모·연결 자료를 확인합니다.'
@@ -5721,6 +5768,7 @@ export function inspectAgentMcpStatus(sessionId: string): AgentCommandResult {
   session.running = abortController
   emit(session, {
     type: 'message:user',
+    timestamp: Date.now(),
     sessionId,
     messageId: userMessageId,
     text: '/mcp',

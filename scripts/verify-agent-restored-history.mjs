@@ -36,9 +36,9 @@ assert.deepEqual(transcript.messages.map((message) => message.timestamp), [
 assert.equal(Object.hasOwn(transcript.messages.at(-1), 'timestamp'), false)
 
 const helpers = compile(functions(panel, [
-  'transcriptToTimeline', 'historyBeforeRestoredTurn', 'reduceTimeline', 'upsertItem'
+  'transcriptToTimeline', 'historyBeforeRestoredTurn', 'reduceTimeline', 'upsertItem', 'agentNoticeDetail'
 ]), { ...values, messageQuote: () => undefined, normalizeAgentAttachments: () => [] },
-  '({ transcriptToTimeline, historyBeforeRestoredTurn, reduceTimeline })')
+  '({ transcriptToTimeline, historyBeforeRestoredTurn, reduceTimeline, agentNoticeDetail })')
 const component = panel.statements.find((node) => node.name?.text === 'AgentPanel')
 const effect = (marker) => component.body.statements.find((node) =>
   ts.isExpressionStatement(node) && node.getText(panel).startsWith('useEffect(') &&
@@ -53,7 +53,7 @@ for (const loadOrder of ['history-first', 'restore-first', 'late-session-id']) {
   let resolveHistory
   const history = new Promise((resolve) => { resolveHistory = resolve })
   const context = {
-    ...values, ...helpers,
+    ...values, ...helpers, noticeContextRef: { current: {} },
     useEffect: (callback) => callback(), window: { lt: { agent: { onEvent: (callback) => { emit = callback } } } },
     eventSessionId: (event) => event.sessionId, id: 'panel-id', agentLabel: 'Claude', provider: 'claude',
     cwd: '/tmp', profileId: undefined, ssh: undefined, onStatus: undefined, workspaceContext: undefined,
@@ -70,7 +70,7 @@ for (const loadOrder of ['history-first', 'restore-first', 'late-session-id']) {
   compile(effect('const historyKey ='), context)
   const restore = () => {
     emit({ type: 'session:restored', sessionId: 'panel-id', startedAt })
-    const user = { type: 'message:user', sessionId: 'panel-id', messageId: 'remote-user-1', text: '현재 요청' }
+    const user = { type: 'message:user', sessionId: 'panel-id', messageId: 'remote-user-1', timestamp: startedAt, text: '현재 요청' }
     emit(user)
     emit(user)
   }
@@ -87,6 +87,7 @@ for (const loadOrder of ['history-first', 'restore-first', 'late-session-id']) {
     '이전 요청', '이전 답변', '시간 없는 이전 기록'
   ], `native history must omit the replayed turn: ${loadOrder}`)
   assert.equal(items.filter((item) => item.id === 'remote-user-1').length, 1)
+  assert.equal(items.find((item) => item.id === 'remote-user-1').timestamp, startedAt)
   assert.equal(items.find((item) => item.id === permission.id), permission)
   assert.equal(items.find((item) => item.id === process.id), process)
 }
@@ -101,7 +102,7 @@ for (const ssh of [undefined, { host: 'example.invalid', user: 'test' }]) {
     { id: 'native-assistant', role: 'assistant', text: '첫 답변' }
   ] }
   const context = {
-    ...values, ...helpers,
+    ...values, ...helpers, noticeContextRef: { current: {} },
     useEffect: (callback) => callback(), window: { lt: { agent: { onEvent: (callback) => { emit = callback } } } },
     eventSessionId: (event) => event.sessionId, id: 'new-panel', agentLabel: 'Claude', provider: 'claude',
     cwd: '/tmp', profileId: undefined, ssh, onStatus: undefined, workspaceContext: undefined,
@@ -150,7 +151,7 @@ for (const [ssh, clockOffset, failHistory, cancelHistory] of [
   let sends = 0
   const history = new Promise((resolve, reject) => { resolveHistory = resolve; rejectHistory = reject })
   const context = {
-    ...values, ...helpers, startTransition: (callback) => callback(),
+    ...values, ...helpers, noticeContextRef: { current: {} }, startTransition: (callback) => callback(),
     useEffect: (callback) => { cleanupHistory = callback() }, window: { lt: { agent: {
       onEvent: (callback) => { emit = callback },
       send: async () => {
@@ -160,7 +161,7 @@ for (const [ssh, clockOffset, failHistory, cancelHistory] of [
         return { ok: true }
       }
     } } },
-    eventSessionId: (event) => event.sessionId, id: 'resumed-panel', agentLabel: 'Claude', provider: 'claude',
+    eventSessionId: (event) => event.sessionId, id: 'resumed-panel', isAntigravity: false, agentLabel: 'Claude', provider: 'claude',
     cwd: '/tmp', profileId: undefined, ssh, onStatus: undefined, workspaceContext: undefined,
     resumeSessionId: 'existing-session', loadedHistoryKeyRef: { current: null },
     restoredTurnStartedAtRef: { current: undefined }, hasLiveMessagesRef: { current: false },

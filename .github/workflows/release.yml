@@ -105,6 +105,7 @@ jobs:
           npm run verify:workspace-sessions
           npm run verify:agent-handover
           npm run verify:agent-execution-lock
+          npm run verify:agent-antigravity
 
       - name: Verify durable remote Agent recovery
         run: |

@@ -119,14 +119,14 @@ function runApp({ root, temp, screenshotDir, provider, mode, remote }) {
       return { ok: true, sessionId: options.id }
     }
     if (channel === 'agent:snapshot') return { ok: true, session: agents.get(args[0]) }
-    if (channel === 'sessions:transcript') return { sessionId: args[0].sessionId, messages: [{ role: 'user', text: '휴대폰에서 먼저 물어본 질문입니다.' }, { role: 'assistant', text: '이 대화는 컴퓨터에서도 이어갈 수 있습니다.' }] }
+    if (channel === 'sessions:transcript') return { sessionId: args[0].sessionId, messages: [{ role: 'user', timestamp: Date.UTC(2025, 2, 3, 4, 5), text: '휴대폰에서 먼저 물어본 질문입니다.' }, { role: 'assistant', text: '이 대화는 컴퓨터에서도 이어갈 수 있습니다.' }] }
     if (['agent:close', 'agent:setModel', 'agent:slashCommand'].includes(channel)) return { ok: true }
     if (channel === 'agent:send') {
       const { sessionId, input } = args[0]
       const send = message => event.sender.send('agent:event', { sessionId, ...message })
       send({ type: 'status', status: 'working' })
-      send({ type: 'message:user', messageId: `user-${calls.length}`, text: input.text, attachments: [] })
-      send({ type: 'message:assistant_start', messageId: `answer-${calls.length}` })
+      send({ type: 'message:user', timestamp: Date.UTC(2026, 2, 3, 4, 5), messageId: `user-${calls.length}`, text: input.text, attachments: [] })
+      send({ type: 'message:assistant_start', timestamp: Date.UTC(2026, 2, 3, 4, 6), messageId: `answer-${calls.length}` })
       send({ type: 'message:assistant_delta', messageId: `answer-${calls.length}`, text: '안녕하세요. 사건을 선택하지 않아도 일반적인 질문을 하실 수 있습니다.' })
       send({ type: 'message:assistant_done', messageId: `answer-${calls.length}` })
       send({ type: 'status', status: 'done' })
@@ -226,6 +226,12 @@ function runApp({ root, temp, screenshotDir, provider, mode, remote }) {
     assert.equal(layout.overflow, false, 'unified conversation fits the window')
     assert.equal(await evaluate(`document.querySelectorAll('.agent-browser-toggle, .browser-workspace, .agent-browser').length`), 0, 'removed browser UI is absent in local and remote conversations')
     assert.equal(await evaluate(`typeof window.lt.browser`), 'undefined', 'removed browser API is not exposed')
+    assert.equal(await evaluate(`!!window.visibleComposer().closest('.agent-panel').querySelector('.agent-provider-select option[value="antigravity"]')`), !remote, 'Antigravity is offered only for local chat')
+    if (provider === 'antigravity') {
+      assert.equal(await evaluate(`window.visibleComposer().closest('.agent-panel').querySelector('.agent-provider-select').value`), provider)
+      assert.equal(await evaluate(`!!window.visibleComposer().closest('.agent-panel').querySelector('.agent-mode-trigger, .agent-auth-btn')`), false)
+      assert.equal(calls.some(call => call.channel === 'agent:models'), false)
+    }
     return layout
   }
   const checkScope = (agent, profile = phoneProfile) => {
@@ -282,6 +288,7 @@ function runApp({ root, temp, screenshotDir, provider, mode, remote }) {
           await evaluate(`(() => { const button = document.querySelector('.case-sidebar-group.active .case-sidebar-toggle'); if (button?.getAttribute('aria-expanded') !== 'true') button?.click() })()`)
           await wait(() => evaluate(`!!document.querySelector('.case-sidebar-task-origin[title="폰에서 시작한 작업"]')`), 'phone origin label')
           await wait(() => evaluate(`window.visibleComposer()?.closest('.agent-panel').textContent.includes('휴대폰에서 먼저 물어본 질문입니다.')`), 'phone transcript shown')
+          assert.deepEqual(await evaluate(`[...window.visibleComposer().closest('.agent-panel').querySelectorAll('.agent-msg time')].map(el => el.dateTime)`), ['2025-03-03T04:05:00.000Z'])
         })
         await checkDictation()
         await test('continues the phone conversation through its restored session', async () => {
@@ -439,6 +446,7 @@ function runApp({ root, temp, screenshotDir, provider, mode, remote }) {
           await evaluate(`(() => { const button = window.visibleComposer().closest('.agent-panel').querySelector('.agent-send-btn'); button.focus(); button.click() })()`)
           await wait(() => evaluate(`document.activeElement === window.visibleComposer()`), 'composer refocused after clicking send for macOS Dictation')
           await wait(() => evaluate(`window.visibleComposer().closest('.agent-panel').textContent.includes('안녕하세요. 사건을 선택하지 않아도')`), 'mocked answer rendered')
+          assert.deepEqual(await evaluate(`[...window.visibleComposer().closest('.agent-panel').querySelectorAll('.agent-msg time')].map(el => el.dateTime)`), ['2026-03-03T04:05:00.000Z', '2026-03-03T04:06:00.000Z'])
           const sent = calls.find(call => call.channel === 'agent:send').args[0]
           assert.equal(sent.sessionId, first.id)
           assert.equal(sent.input.text, '일반 질문은 어떻게 시작하나요?')
@@ -493,7 +501,7 @@ const env = { ...process.env }
 delete env.ELECTRON_RUN_AS_NODE
 try {
   const scenarios = process.argv.includes('--remote') ? [{ provider: 'codex', mode: '', remote: true }]
-    : [{ provider: 'codex', mode: '' }, { provider: 'claude', mode: '' }, { provider: 'codex', mode: 'docOnly' }, { provider: 'codex', mode: 'termOnly' }, { provider: 'codex', mode: 'navigate' }]
+    : [{ provider: 'codex', mode: '' }, { provider: 'claude', mode: '' }, { provider: 'antigravity', mode: '' }, { provider: 'codex', mode: 'docOnly' }, { provider: 'codex', mode: 'termOnly' }, { provider: 'codex', mode: 'navigate' }]
   for (const scenario of scenarios) {
     const scenarioTemp = path.join(temp, `${scenario.provider}-${scenario.mode || 'main'}`)
     await fs.mkdir(scenarioTemp)
