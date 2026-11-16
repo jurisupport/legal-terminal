@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
-import { spawn } from 'node:child_process'
+import { execFile, spawn } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createRequire } from 'node:module'
@@ -20,21 +20,51 @@ import json, os, sys, time, uuid
 def emit(event, **fields):
     print(json.dumps({'event':event, **fields}), flush=True)
 args = sys.argv[1:]
+if args == ['models']:
+    if 'LT_REMOTE_AGY_CWD' in os.environ:
+        assert os.path.samefile(os.getcwd(), os.environ['LT_REMOTE_AGY_CWD'])
+    host = 'server' if 'LT_REMOTE_AGY_CWD' in os.environ else 'local'
+    print('Fetching available models...', file=sys.stderr)
+    print(host + '-gemini-high\tGemini (High)')
+    sys.exit(0)
 assert args[args.index('--output-format')+1] == 'stream-json'
 assert '--dangerously-skip-permissions' not in args
 settings = json.loads(args[args.index('--settings')+1])
-assert settings['toolPermission'] == 'strict' and settings['allowNonWorkspaceAccess'] is False
-assert {'write_file(*)', 'command(*)', 'read_url(*)', 'execute_url(*)', 'mcp(*)', 'read_file(private/**)'} <= set(settings['permissions']['deny'])
+prompt = json.load(sys.stdin)['message']['content']
+assert settings['allowNonWorkspaceAccess'] is False
+denied = set(settings['permissions']['deny'])
+assert {'read_url(*)', 'execute_url(*)', 'mcp(*)', 'read_file(private/**)'} <= denied
+if 'simulate-edit' in prompt:
+    assert args[args.index('--mode')+1] == 'accept-edits' and '--sandbox' in args
+    assert args[args.index('--model')+1] == "mock-model '$HOME'"
+    assert ('write_file(*)' in denied) == ('strict-policy' in prompt)
+    native_files_only = any(character in os.getcwd() for character in '*?[]')
+    assert ('command(*)' in denied) == (native_files_only or 'strict-policy' in prompt)
+    assert 'write_file(protected/**)' in denied and 'command(rm)' in denied
+    assert {'command(git)', 'write_file(needs-review/)'} <= set(settings['permissions']['ask'])
+    assert {'command(git)', 'write_file(needs-review/)'} <= denied
+    expected = 'strict' if 'strict-policy' in prompt else ('request-review' if 'review-policy' in prompt else 'proceed-in-sandbox')
+    assert settings['toolPermission'] == expected
+    target = './' if native_files_only else os.path.realpath(os.getcwd())
+    assert settings['permissions']['allow'] == ([] if expected == 'strict' else ['write_file(' + target + ')'])
+    assert 'unsandboxed(*)' in denied
+else:
+    assert {'write_file(*)', 'command(*)'} <= denied
+    assert settings['permissions']['allow'] == []
+    assert '--mode' not in args
+    assert settings['toolPermission'] == 'strict'
 assert 'read_file(drafts/**)' in settings['permissions']['ask']
 if 'LT_REMOTE_AGY_CWD' in os.environ:
     assert os.path.samefile(os.getcwd(), os.environ['LT_REMOTE_AGY_CWD'])
     assert 'read_file(remote-only/**)' in settings['permissions']['deny']
 native = args[args.index('--conversation')+1] if '--conversation' in args else str(uuid.uuid4())
-prompt = json.load(sys.stdin)['message']['content']
 if 'simulate-login' in prompt:
     print('Authentication required: https://accounts.google.com/o/oauth2/auth?state=private-test-state', file=sys.stderr, flush=True)
     sys.exit(1)
 emit('init', conversation_id=native)
+if 'simulate-empty-success' in prompt:
+    emit('result', result={'status':'SUCCESS','response':'','denied_actions':[{'action':'write_file'}]})
+    sys.exit(0)
 if 'simulate-denial' in prompt:
     emit('result', result={'status':'ERROR', 'error':'403: Agent Platform API is disabled in test-project.'})
     sys.exit(3)
@@ -61,7 +91,7 @@ async function waitFor(predicate) {
   assert.fail('Timed out. Events: ' + JSON.stringify(events))
 }
 
-const caseFolder = join(root, "원격 사건 '인용' $HOME")
+const caseFolder = join(root, "원격 사건 '인용' [(*)] $HOME")
 const hostHome = join(root, 'ssh-home')
 const fakeSsh = join(root, 'ssh.py')
 const asRemoteHost = (options) => ({
@@ -94,6 +124,16 @@ try {
   })
   api = await load('agent-service', {
     './antigravity': adapter,
+    'child_process': { execFile(bin, args, options, cb) {
+      assert.ok(options.timeout > 0)
+      if (bin === 'ssh') {
+        assert.ok(args.includes('test@example.invalid'))
+        return execFile('python3', [fakeSsh, args.at(-1)], { ...options, env: asRemoteHost({}).env }, cb)
+      }
+      assert.ok(bin === 'agy' || bin === 'agy.exe')
+      assert.deepEqual(Array.from(args), ['models'])
+      return execFile(process.platform === 'win32' ? 'python' : 'python3', [fixture, ...args], options, cb)
+    } },
     './remoteAgentTransport': {
       RemoteAgentTransport: class extends remote.RemoteAgentTransport {
         constructor(options) { super(asRemoteHost(options)) }
@@ -106,20 +146,31 @@ try {
   })
   const options = { cwd: root, provider: 'antigravity' }
   const create = (id, extra = {}) => assert.equal(api.createAgentSession({ ...options, id, ...extra }, viewer).ok, true)
-  const send = (id, text) => {
+  const send = (id, text, permissionMode) => {
     events.length = 0
-    const result = api.sendAgentMessage(id, { text })
+    const result = api.sendAgentMessage(id, { text, permissionMode })
     assert.equal(result.ok, true, result.error)
   }
-  const reply = async (id) => {
-    send(id, '검사')
+  const reply = async (id, text = '검사', permissionMode) => {
+    send(id, text, permissionMode)
     await waitFor(e => e.type === 'status' && e.status === 'idle')
     assert.equal(events.filter(e => e.type === 'message:assistant_delta').map(e => e.text).join(''), '응답 완료')
     assert.equal(events.filter(e => e.type === 'message:assistant_done').length, 1)
     assert.equal(events.some(e => e.type === 'error'), false)
     return api.getAgentSessionSnapshot(id).session.resumeSessionId
   }
+  const checkCatalog = async (id, host) => {
+    const model = host + '-gemini-high'
+    const list = await api.listAgentModels(id)
+    assert.equal(list.ok, true, list.error)
+    assert.deepEqual(JSON.parse(JSON.stringify(list.models)), [{ id: model, model, displayName: 'Gemini (High)' }])
+    assert.equal(api.setAgentModel(id, model).ok, true)
+    assert.equal((await api.listAgentModels(id)).selectedModel, model)
+    assert.equal(api.setAgentModel(id).ok, true)
+    assert.equal((await api.listAgentModels(id)).selectedModel, undefined)
+  }
   create('initial')
+  await checkCatalog('initial', 'local')
   const native = await reply('initial')
   assert.match(native, /^[a-f0-9-]{36}$/)
   api.closeAgentSession('initial')
@@ -128,11 +179,36 @@ try {
   send('restored', 'simulate-denial')
   await waitFor(e => e.type === 'error' && /403.*test-project/.test(e.message))
   assert.equal(events.some(e => e.type === 'auth:status' && e.state === 'unauthenticated'), false)
+  send('restored', 'simulate-empty-success')
+  await waitFor(e => e.type === 'error' && /권한/.test(e.message))
+  assert.ok(!events.some(e => e.type === 'status' && e.status === 'done'))
   send('restored', 'simulate-interrupt')
   await waitFor(e => e.type === 'message:assistant_delta')
   assert.equal(api.interruptAgentSession('restored').ok, true)
   await waitFor(e => e.type === 'session:interrupted')
   assert.equal(await reply('restored'), native, 'interruption must release the native conversation lock')
+  const testEditable = async (sessionId, config, extra, hostDeny = []) => {
+    const permissions = { allow: ['unsandboxed(*)', 'write_file(*)'], deny: [
+      'read_file(private/**)', 'write_file(protected/**)', 'command(rm)', ...hostDeny
+    ], ask: ['command(git)', 'read_file(drafts/**)', 'write_file(needs-review/)'] }
+    const file = join(config, 'settings.json')
+    const original = await readFile(file)
+    try {
+      await writeFile(file, JSON.stringify({ permissions }))
+      create(sessionId, { ...extra, model: "mock-model '$HOME'" })
+      const editId = await reply(sessionId, 'simulate-edit', 'acceptEdits')
+      for (const [policy, marker] of [['strict', 'strict-policy'], ['request-review', 'review-policy']]) {
+        await writeFile(file, JSON.stringify({ toolPermission: policy, permissions }))
+        assert.equal(await reply(sessionId, 'simulate-edit ' + marker, 'acceptEdits'), editId)
+      }
+      await writeFile(file, original)
+      assert.equal(await reply(sessionId, '읽기 전용으로 전환', 'ask'), editId)
+    } finally {
+      api.closeAgentSession(sessionId)
+      await writeFile(file, original)
+    }
+  }
+  await testEditable('editable-local', config, {})
   if (process.platform !== 'win32') {
     const serverConfig = join(hostHome, '.gemini', 'antigravity-cli')
     const serverBin = join(hostHome, '.local', 'bin')
@@ -146,8 +222,10 @@ try {
     // Replace only the SSH connection; the broker, execution lock, host launcher and stream are real.
     await writeFile(fakeSsh, "import os, shlex, sys\nos.execl('/bin/sh', 'sh', '-c', shlex.split(sys.argv[-1])[-1])\n")
     const opts = { source: 'ssh', ssh: { host: 'example.invalid', user: 'test' }, cwd: caseFolder }
+    await testEditable('editable-ssh', serverConfig, opts, ['read_file(remote-only/**)'])
     create('remote', opts)
     const remoteId = await reply('remote')
+    await checkCatalog('remote', 'server')
     assert.match(remoteId, /^[a-f0-9-]{36}$/)
     assert.equal(await reply('remote'), remoteId)
     send('remote', 'simulate-login')

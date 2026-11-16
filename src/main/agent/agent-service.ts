@@ -53,7 +53,7 @@ import { listTodos, getAgentMcpConnection, agentMcpAccountEpoch, onAgentMcpAccou
 import { MANAGED_MCP, MANAGED_MCP_ENV, managedToolName, managedToolDecision, managedMcpApproval, managedDisallowedTools, claudeManagedServers, codexManagedConfig, redactManagedSecrets, type ManagedMcpConnection } from './agentMcp'
 import { acquireProjectMcp, releaseProjectMcp, disposeProjectMcp, getProjectAgentContext, getProjectWorkspace, forwardProjectMcp } from '../projectAgent'
 import { PROJECT_MCP, PROJECT_MCP_ENV, projectToolName, projectToolDecision, projectMcpToken, projectDisallowedTools, claudeProjectServers, codexProjectConfig, type ProjectMcpConnection } from './projectMcpConfig'
-import { ANTIGRAVITY_LOGIN_MESSAGE, ANTIGRAVITY_REMOTE_LOGIN_MESSAGE, remoteAntigravityCommand, runAntigravityTurn, runRemoteAntigravityTurn } from './antigravity'
+import { ANTIGRAVITY_LOGIN_MESSAGE, ANTIGRAVITY_REMOTE_LOGIN_MESSAGE, antigravityExecutable, remoteAntigravityCommand, runAntigravityTurn, runRemoteAntigravityTurn } from './antigravity'
 import { codexTurnRunStatus, codexWorkStepStatus } from './agentProgress'
 import { AGENT_BUSY_MESSAGE, agentExecutionArgs, agentExecutionCommand } from './agentExecutionLock'
 import { RemoteAgentTransport, probeRemoteAgentRun, type RemoteAgentOptions, type RemoteAgentRunInfo } from './remoteAgentTransport'
@@ -527,7 +527,7 @@ function restoreRemoteSession(session: AgentSession, retryDelay = 3000): void {
         emit(session, { type: 'status', sessionId: session.id, status: 'error' })
       }
       const work = session.provider === 'antigravity'
-        ? runAntigravityMessage(session, '', running, info)
+        ? runAntigravityMessage(session, '', running, session.model, info)
         : session.provider === 'claude' ? runRemoteAgentMessage(session, '', running, info) : restoreRemoteCodexMessage(session, running, info)
       let failed = false
       void work.catch((error) => {
@@ -4129,10 +4129,11 @@ function isMissingClaudeSessionError(message: string): boolean {
 }
 
 async function runAntigravityMessage(
-  session: AgentSession, prompt: string, running: AbortController, restoring?: RemoteAgentRunInfo
+  session: AgentSession, prompt: string, running: AbortController, model: string | undefined, restoring?: RemoteAgentRunInfo
 ): Promise<void> {
   const sessionId = session.id
   const assistantMessageId = session.turnAssistantMessageId!
+  const launch = { ...session, model }
   const onEvent = (message: Record<string, unknown>): void => {
     if (running.signal.aborted || session.detached || session.running !== running) return
     if (message.event === 'init') {
@@ -4156,7 +4157,7 @@ async function runAntigravityMessage(
   }
   if (session.source === 'ssh') {
     const proc = new RemoteAgentTransport({ ...remoteOptions(session), ...(restoring ? { runId: restoring.runId }
-      : { command: remoteAntigravityCommand(session), metadata: session.remoteRunMetadata }) })
+      : { command: remoteAntigravityCommand(launch), metadata: session.remoteRunMetadata }) })
     session.remoteProcess = proc
     watchRemoteConnection(session, proc)
     proc.once('replayComplete', () => {
@@ -4171,7 +4172,7 @@ async function runAntigravityMessage(
       if (session.remoteProcess === proc) session.remoteProcess = undefined
     }
   } else {
-    await runAntigravityTurn(session, prompt, cleanEnv(), running.signal, onEvent)
+    await runAntigravityTurn(launch, prompt, cleanEnv(), running.signal, onEvent)
   }
   if (running.signal.aborted || session.detached || session.running !== running) return
   completeAssistant(session, assistantMessageId)
@@ -4995,12 +4996,41 @@ function claudeModelOption(value: unknown): AgentModelOption | undefined {
   }
 }
 
+function listAntigravityModels(session: AgentSession): Promise<AgentModelListResult> {
+  const remote = session.source === 'ssh'
+  if (remote && !session.ssh) return Promise.resolve({ ok: false, error: 'SSH 연결 정보가 없습니다.' })
+  const command = `cd ${shq(session.cwd)} && exec env PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH" agy models`
+  const args = remote ? [...sshArgs(session.ssh!), `exec $SHELL -ilc ${shq(command)}`] : ['models']
+  return new Promise(resolve => {
+    execFile(remote ? sshBin : antigravityExecutable(), args, {
+      cwd: remote ? undefined : session.cwd, env: cleanEnv(), timeout: 30_000, windowsHide: true, maxBuffer: 256 * 1024
+    }, (error, stdout, stderr) => {
+      if (error) {
+        const host = remote ? 'SSH 서버' : '이 컴퓨터'
+        const login = isAuthFailureOutput(stderr) || /authentication required|accounts\.google\.com/i.test(stderr)
+        const detail = login ? (remote ? ANTIGRAVITY_REMOTE_LOGIN_MESSAGE : ANTIGRAVITY_LOGIN_MESSAGE)
+          : error.killed ? 'Antigravity 모델 목록을 불러오는 시간이 초과되었습니다.'
+          : `${host}에서 agy models를 실행할 수 없습니다. CLI 설치와 연결 상태를 확인해 주세요.`
+        resolve({ ok: false, error: detail })
+        return
+      }
+      const models: AgentModelOption[] = []
+      for (const line of cleanProcessText(stdout).split('\n')) {
+        const match = /^([^\s]+)\t([^\t]+)$/.exec(line.trim())
+        if (match) models.push({ id: match[1], model: match[1], displayName: match[2].trim() })
+      }
+      resolve(models.length ? { ok: true, models, selectedModel: session.model }
+        : { ok: false, error: 'Antigravity CLI가 선택 가능한 모델을 반환하지 않았습니다.' })
+    }).stdin?.end()
+  })
+}
+
 export async function listAgentModels(sessionId: string): Promise<AgentModelListResult> {
   const session = sessions.get(sessionId)
   if (!session) return { ok: false, error: 'Agent 세션을 찾을 수 없습니다.' }
   if (projectWorkspaceUpdating(session)) return { ok: false, error: PROJECT_WORKSPACE_UPDATING }
   if (session.remoteRestoring) return { ok: false, error: '원격 작업을 확인하고 있습니다. 연결 후 다시 열어 주세요.' }
-  if (session.provider === 'antigravity') return { ok: true, models: [] }
+  if (session.provider === 'antigravity') return listAntigravityModels(session)
   if (session.provider === 'claude') {
     const abortController = new AbortController()
     try {
@@ -5058,11 +5088,16 @@ export async function listAgentModels(sessionId: string): Promise<AgentModelList
 export function setAgentModel(sessionId: string, model?: string, reasoningEffort?: string): AgentCommandResult {
   const session = sessions.get(sessionId)
   if (!session) return { ok: false, error: 'Agent 세션을 찾을 수 없습니다.' }
-  if (session.provider === 'antigravity') return { ok: false, error: '모델은 Antigravity CLI 설정을 따릅니다.' }
+  if (session.provider === 'antigravity' && reasoningEffort) {
+    return { ok: false, error: 'Antigravity의 추론 수준은 모델 목록에서 선택해 주세요.' }
+  }
   if (session.provider === 'claude' && reasoningEffort && !claudeEffort(reasoningEffort)) {
     return { ok: false, error: '지원하지 않는 Claude reasoning effort입니다.' }
   }
   const nextModel = model?.trim() || undefined
+  if (session.provider === 'antigravity' && nextModel && (nextModel.startsWith('-') || /[\x00-\x1f\x7f]/.test(nextModel))) {
+    return { ok: false, error: '올바른 Antigravity 모델 ID를 입력해 주세요.' }
+  }
   if (session.model !== nextModel) {
     session.contextUsage = undefined
     emitUsageUpdate(session)
@@ -5071,12 +5106,12 @@ export function setAgentModel(sessionId: string, model?: string, reasoningEffort
   session.reasoningEffort = reasoningEffort?.trim() || undefined
   const label = [
     `모델: ${session.model ?? '기본값'}`,
-    `Effort: ${session.reasoningEffort ?? '기본값'}`
+    ...(session.provider === 'antigravity' ? [] : [`Effort: ${session.reasoningEffort ?? '기본값'}`])
   ].join('\n')
   emitProcessEvent(
     session,
     `${session.provider}-model-${Date.now()}`,
-    `${session.provider === 'codex' ? 'Codex' : 'Claude'} 모델`,
+    `${session.provider === 'antigravity' ? 'Antigravity' : session.provider === 'codex' ? 'Codex' : 'Claude'} 모델`,
     label,
     'done'
   )
@@ -5484,6 +5519,7 @@ function startAgentTurn(session: AgentSession, input: AgentSendInput, codexComma
   session.commandProbe?.abort()
   session.commandProbe = undefined
   if (input.permissionMode) session.permissionMode = input.permissionMode
+  const turnModel = session.model
   const sessionId = session.id
   const messageId = randomUUID()
   const assistantMessageId = randomUUID()
@@ -5549,7 +5585,7 @@ function startAgentTurn(session: AgentSession, input: AgentSendInput, codexComma
       const prompt = prependAgentContext(context, renderPrompt(input))
       if (session.source === 'ssh') {
         session.remoteRunMetadata = {
-          cwd: session.cwd, permissionMode: session.permissionMode, model: session.model,
+          cwd: session.cwd, permissionMode: session.permissionMode, model: session.provider === 'antigravity' ? turnModel : session.model,
           reasoningEffort: session.reasoningEffort, messageId, assistantMessageId,
           userText: userDisplayText, tokenUsage: session.tokenUsage,
           ...(workspaceContext?.kind === 'project' ? { projectId: workspaceContext.projectId, clientRequired: true } : {}),
@@ -5562,7 +5598,7 @@ function startAgentTurn(session: AgentSession, input: AgentSendInput, codexComma
         session.claudeTurnUsageMessageIds = new Set()
       }
       if (session.provider === 'antigravity') {
-        await runAntigravityMessage(session, prompt, abortController)
+        await runAntigravityMessage(session, prompt, abortController, turnModel)
         return
       }
       if (session.provider === 'codex') {

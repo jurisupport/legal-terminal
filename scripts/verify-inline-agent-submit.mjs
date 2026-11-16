@@ -14,7 +14,7 @@ const effect = (fragment) => {
 }
 const session = panel.body.statements.flatMap((node) => ts.isVariableStatement(node) ? [...node.declarationList.declarations] : [])
   .find((node) => node.name.getText(ast) === 'inlineSession')
-const helpers = ['mergePromptHistory', 'expandSlashInput', 'slashCommandName']
+const helpers = ['mergePromptHistory', 'expandSlashInput', 'slashCommandName', 'agentRequestMode']
 const helperSource = ast.statements.filter((node) => helpers.includes(node.name?.text)).map((node) => node.getText(ast)).join('\n')
 const bridgeEffect = panel.body.statements.find((node) => node.getText(ast).includes('onInlineActions?.(id, actions)'))
 assert.equal(bridgeEffect.expression.arguments[1].getText(ast), '[id, onInlineActions]', 'draft changes must not unregister the bridge')
@@ -115,6 +115,11 @@ const antigravity = fixture(undefined, 'antigravity')
 antigravity.ctx.inlineStateRef.current.mode = 'plan'
 assert.equal((await antigravity.actions.submit(request)).ok, true)
 assert.equal(antigravity.sent[0].payload.permissionMode, 'ask')
+antigravity.ctx.inlineStateRef.current.mode = 'acceptEdits'
+antigravity.ctx.inlineStateRef.current.queuesNewInput = true
+assert.equal((await antigravity.actions.submit(request)).ok, true)
+assert.equal(antigravity.sent[1].payload.permissionMode, 'acceptEdits')
+assert.equal(antigravity.sent[1].payload.delivery, 'queue')
 
 const prepared = deferred()
 const queued = fixture()

@@ -36,9 +36,9 @@ assert.deepEqual(transcript.messages.map((message) => message.timestamp), [
 assert.equal(Object.hasOwn(transcript.messages.at(-1), 'timestamp'), false)
 
 const helpers = compile(functions(panel, [
-  'transcriptToTimeline', 'historyBeforeRestoredTurn', 'reduceTimeline', 'upsertItem', 'agentNoticeDetail'
+  'transcriptToTimeline', 'historyBeforeRestoredTurn', 'reduceTimeline', 'upsertItem', 'agentNoticeDetail', 'agentRequestMode'
 ]), { ...values, messageQuote: () => undefined, normalizeAgentAttachments: () => [] },
-  '({ transcriptToTimeline, historyBeforeRestoredTurn, reduceTimeline, agentNoticeDetail })')
+  '({ transcriptToTimeline, historyBeforeRestoredTurn, reduceTimeline, agentNoticeDetail, agentRequestMode })')
 const component = panel.statements.find((node) => node.name?.text === 'AgentPanel')
 const effect = (marker) => component.body.statements.find((node) =>
   ts.isExpressionStatement(node) && node.getText(panel).startsWith('useEffect(') &&

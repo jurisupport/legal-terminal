@@ -293,6 +293,15 @@ const modeLabels: { value: AgentPermissionMode; label: string; title: string }[]
   { value: 'dontAsk', label: '거절', title: '승인되지 않은 작업을 거절합니다' }
 ]
 
+const antigravityModes: typeof modeLabels = [
+  { value: 'ask', label: '읽기 전용', title: '작업 폴더의 파일을 읽고 답합니다' },
+  { value: 'acceptEdits', label: '작업 폴더 편집', title: '현재 작업 폴더의 파일을 생성하고 편집합니다' }
+]
+
+function agentRequestMode(provider: AgentProvider, mode: AgentPermissionMode): AgentPermissionMode {
+  return provider === 'antigravity' && mode !== 'acceptEdits' ? 'ask' : mode
+}
+
 export const agentProviderLabels: Record<AgentProvider, string> = {
   claude: 'Claude',
   codex: 'Codex',
@@ -385,7 +394,6 @@ const slashCommands: SlashCommand[] = [
   },
   {
     name: '/model',
-    providers: ['claude', 'codex'],
     label: '모델',
     description: '모델과 추론 정도를 선택합니다'
   },
@@ -2096,7 +2104,9 @@ export default function AgentPanel({
   const [input, setInput] = useState(() => initialDraft?.input ?? '')
   const [dictationBusy, setDictationBusy] = useState(false)
   const [quotedMessage, setQuotedMessage] = useState<PendingAgentQuote | null>(() => initialDraft?.quote ?? null)
-  const [mode, setMode] = useState<AgentPermissionMode>(DEFAULT_AGENT_PERMISSION_MODE)
+  const [defaultMode, setDefaultMode] = useState<AgentPermissionMode>(DEFAULT_AGENT_PERMISSION_MODE)
+  const [antigravityMode, setAntigravityMode] = useState<AgentPermissionMode>('ask')
+  const mode = isAntigravity ? antigravityMode : defaultMode
   const [status, setStatus] = useState<AgentPanelStatus>('idle')
   const [error, setError] = useState('')
   const [forking, setForking] = useState(false)
@@ -2228,9 +2238,11 @@ export default function AgentPanel({
     setQuotedMessage(null)
     setAuthStatus(usesAgentAuth ? 'checking' : 'unavailable')
     setAuthStatusMessage('')
+    setAntigravityMode('ask')
     setModelOptions([])
     modelLoadStartedRef.current = false
     setModelPickerOpen(false)
+    setModelLoading(false)
     setSelectedModel(undefined)
     setSelectedReasoningEffort(undefined)
     setResumedModel(undefined)
@@ -2386,10 +2398,14 @@ export default function AgentPanel({
 
   const selectPermissionMode = useCallback(
     (nextMode: AgentPermissionMode, persist = true): void => {
-      setMode(nextMode)
-      if (persist) persistPermissionMode(nextMode)
+      if (isAntigravity) {
+        setAntigravityMode(agentRequestMode(provider, nextMode))
+      } else {
+        setDefaultMode(nextMode)
+        if (persist) persistPermissionMode(nextMode)
+      }
     },
-    [persistPermissionMode]
+    [isAntigravity, provider, persistPermissionMode]
   )
 
   const scrollTimelineToBottom = useCallback((): void => {
@@ -2536,7 +2552,7 @@ export default function AgentPanel({
         provider,
         model: resumeSessionId ? undefined : defaultModel,
         resumeSessionId,
-        permissionMode: isAntigravity ? 'ask' : mode,
+        permissionMode: mode,
         source: ssh ? 'ssh' : 'local',
         ssh,
         context: caseContext,
@@ -2684,7 +2700,7 @@ export default function AgentPanel({
     const applySettings = (settings: AppSettings): void => {
       if (!alive) return
       setAgentFontSize(clampAgentFontSize(settings.agentFontSize))
-      setMode(resolveAgentPermissionMode(settings.agentDefaultPermissionMode))
+      setDefaultMode(resolveAgentPermissionMode(settings.agentDefaultPermissionMode))
       setDefaultModels({
         ...(typeof settings.agentDefaultModels?.claude === 'string'
           ? { claude: settings.agentDefaultModels.claude }
@@ -2772,15 +2788,15 @@ export default function AgentPanel({
   const newSessionModel = currentAgentModel(modelOptions, defaultModel)
   const resumedModelDisplay = resumedModel ? currentAgentModel(modelOptions, resumedModel) : undefined
   const accountDefaultOption = modelOptions.find((model) => model.isDefault)
-  const resumedModelLabel = resumeSessionId && !selectedModel
+  const resumedModelLabel = !isAntigravity && resumeSessionId && !selectedModel
     ? (resumedModelDisplay?.modelLabel ?? (resumedModel === null ? '모델 정보 없음' : '모델 확인 중'))
     : undefined
   const accountDefaultSelected =
-    (!resumeSessionId && !selectedModel) ||
+    ((isAntigravity || !resumeSessionId) && !selectedModel) ||
     Boolean(selectedModel && selectedModel === accountDefaultOption?.model)
   const modelButtonLabel = modelLoading && modelOptions.length === 0
     ? '모델 확인 중'
-    : resumedModelLabel ?? currentModel.buttonLabel
+    : isAntigravity && !selectedModel ? '모델 선택' : resumedModelLabel ?? currentModel.buttonLabel
   const escInterruptHint = `Esc ${Math.round(ESC_INTERRUPT_ARM_MS / 1000)}초 안에 한 번 더 누르면 중지`
   const statusLabel = escInterruptArmed ? `${baseStatusLabel}, ${escInterruptHint}` : baseStatusLabel
   const statusAccessibleLabel = [
@@ -2992,7 +3008,7 @@ export default function AgentPanel({
 
   const applySlashCommand = (command: SlashCommand): void => {
     resetPromptHistoryCursor()
-    if (command.mode && slashAtInputStart) setMode(command.mode)
+    if (command.mode && slashAtInputStart) selectPermissionMode(command.mode, false)
     const next = slashState
       ? replaceSlashToken(input, slashState, command.name)
       : { text: `${command.name} `, caret: command.name.length + 1 }
@@ -3229,14 +3245,14 @@ export default function AgentPanel({
             text: handoff ? `${handoff.preamble}\n${expanded.text}` : expanded.text,
             ...(handoff ? { displayText: expanded.text } : {}),
             attachments: [prepared],
-            permissionMode: session.provider === 'antigravity' ? 'ask' : expanded.mode ?? state.mode,
+            permissionMode: agentRequestMode(session.provider, expanded.mode ?? state.mode),
             delivery: state.queuesNewInput ? 'queue' : 'normal'
           })
           if (!result.ok) return { ok: false, error: result.error ?? 'Agent 요청을 보낼 수 없습니다.' }
           if (isCurrent()) {
             // Inline history must not reset the normal input's history draft/cursor.
             promptHistoryRef.current = mergePromptHistory(promptHistoryRef.current, [rawText])
-            if (expanded.mode && session.provider !== 'antigravity') state.selectPermissionMode(expanded.mode, false)
+            if (expanded.mode) state.selectPermissionMode(expanded.mode, false)
             if (handoff && inlineStateRef.current.pendingHandoff === handoff) {
               setPendingHandoff((current) => current === handoff ? null : current)
               state.onHandoffConsumed?.()
@@ -3262,7 +3278,7 @@ export default function AgentPanel({
     const sendAttachments = attachments
     const commandName = rawText ? slashCommandName(rawText) : undefined
     const slashArgument = rawText.match(/^\/[^\s]+(?:\s+([\s\S]*))?$/)?.[1]?.trim() ?? ''
-    if (isAntigravity && (commandName === '/model' || commandName === '/mcp')) {
+    if (isAntigravity && commandName === '/mcp') {
       setError(`Antigravity 채팅에서 지원하지 않는 명령입니다: ${commandName}`)
       return
     }
@@ -3279,6 +3295,7 @@ export default function AgentPanel({
         setError(sendBlockedReason)
         return
       }
+      setError('')
       const tokens = slashArgument.split(/\s+/).filter(Boolean)
       const effortFlagIndex = tokens.findIndex((token) => token === 'effort' || token === '--effort')
       const requestedModel = tokens[0]
@@ -3293,7 +3310,6 @@ export default function AgentPanel({
       rememberPrompts([rawText])
       setInput('')
       setAttachments([])
-      setError('')
       return
     }
     if (
@@ -3360,7 +3376,7 @@ export default function AgentPanel({
     if (pendingHistorySendRef.current) return
     scrollTimelineToBottom()
     const nextMode = expanded.mode ?? mode
-    if (expanded.mode && !isAntigravity) selectPermissionMode(expanded.mode, false)
+    if (expanded.mode) selectPermissionMode(expanded.mode, false)
     if (rawText) rememberPrompts([rawText])
     setInput('')
     setAttachments([])
@@ -3402,7 +3418,7 @@ export default function AgentPanel({
           }
         : {}),
       attachments: outgoingAttachments,
-      permissionMode: isAntigravity ? 'ask' : nextMode,
+      permissionMode: agentRequestMode(provider, nextMode),
       delivery: nextDelivery
     }).catch((error) => ({ ok: false, error: error instanceof Error ? error.message : String(error) }))
     if (!result.ok) {
@@ -3704,7 +3720,10 @@ export default function AgentPanel({
     if (modelLoadStartedRef.current) return
     modelLoadStartedRef.current = true
     setModelLoading(true)
-    const result = await window.lt.agent.models(id)
+    const result = await window.lt.agent.models(id).catch((error): Awaited<ReturnType<typeof window.lt.agent.models>> => ({
+      ok: false, error: String(error instanceof Error ? error.message : error)
+    }))
+    if (!inlineSession.active) return
     setModelLoading(false)
     if (!result.ok) {
       modelLoadStartedRef.current = false
@@ -3716,12 +3735,12 @@ export default function AgentPanel({
     if (models.length === 0) modelLoadStartedRef.current = false
     setSelectedModel(result.selectedModel)
     setSelectedReasoningEffort(result.selectedReasoningEffort)
-  }, [agentLabel, id])
+  }, [agentLabel, id, inlineSession])
 
   useEffect(() => {
-    if (isAntigravity || !settingsLoaded || !visible || (usesAgentAuth && authStatus !== 'authenticated')) return
+    if (isAntigravity || !sessionReady || !settingsLoaded || !visible || (usesAgentAuth && authStatus !== 'authenticated')) return
     void loadModelOptions()
-  }, [authStatus, isAntigravity, loadModelOptions, settingsLoaded, usesAgentAuth, visible])
+  }, [authStatus, isAntigravity, loadModelOptions, sessionReady, settingsLoaded, usesAgentAuth, visible])
 
   const openModelPicker = async (): Promise<void> => {
     setError('')
@@ -3730,7 +3749,7 @@ export default function AgentPanel({
   }
 
   const chooseModel = async (model?: string, reasoningEffort?: string): Promise<void> => {
-    const sessionModel = !model && (resumeSessionId || provider === 'codex')
+    const sessionModel = provider !== 'antigravity' && !model && (resumeSessionId || provider === 'codex')
       ? (accountDefaultOption?.model ?? (provider === 'claude' ? 'default' : undefined))
       : model
     const sessionEffort = !model && provider === 'codex'
@@ -3743,6 +3762,12 @@ export default function AgentPanel({
     }
     setSelectedModel(sessionModel)
     setSelectedReasoningEffort(sessionEffort)
+    if (provider === 'antigravity') {
+      setModelPickerOpen(false)
+      setError('')
+      showTransientFeedback(`이 대화의 다음 요청 모델: ${model || 'CLI 기본값'}`)
+      return
+    }
     const nextDefaultModels = { ...defaultModels }
     if (model) nextDefaultModels[provider] = model
     else delete nextDefaultModels[provider]
@@ -3951,7 +3976,8 @@ export default function AgentPanel({
       return next
     })
   }
-  const currentMode = modeLabels.find((option) => option.value === mode) ?? modeLabels[0]
+  const availableModes = isAntigravity ? antigravityModes : modeLabels
+  const currentMode = availableModes.find((option) => option.value === mode) ?? availableModes[0]
   const authButtonLabel =
     authActive
       ? '로그인 중'
@@ -4700,9 +4726,9 @@ export default function AgentPanel({
             <button type="button" onClick={() => setModelPickerOpen(false)}>닫기</button>
           </div>
           <div className="agent-model-current">
-            현재 세션: {resumedModelLabel ?? currentModel.modelLabel}
+            {isAntigravity ? '다음 요청 모델: ' : '현재 세션: '}{isAntigravity && !selectedModel ? 'CLI 기본값' : resumedModelLabel ?? currentModel.modelLabel}
             {!resumedModelLabel && currentModel.effort ? ` · 추론 정도 ${currentModel.effort}` : ''}
-            {' · '}새 세션 기본값: {newSessionModel.modelLabel}
+            {!isAntigravity && <> · 새 세션 기본값: {newSessionModel.modelLabel}</>}
           </div>
           {modelLoading ? (
             <div className="agent-model-loading">모델 목록 로드 중</div>
@@ -4713,8 +4739,8 @@ export default function AgentPanel({
                 className={`agent-model-default ${accountDefaultSelected ? 'selected' : ''}`}
                 onClick={() => void chooseModel(undefined, undefined)}
               >
-                <span>계정 기본값</span>
-                <small>{agentLabel} 계정이 지정한 기본 모델을 현재 및 새 세션에 적용</small>
+                <span>{isAntigravity ? 'CLI 기본값' : '계정 기본값'}</span>
+                <small>{isAntigravity ? '실행 위치의 Antigravity 기본 모델을 사용합니다' : `${agentLabel} 계정이 지정한 기본 모델을 현재 및 새 세션에 적용`}</small>
               </button>
               {modelOptions.filter((model) => provider === 'codex' || !model.isDefault).map((model) => {
                 const efforts = model.supportedReasoningEfforts ?? []
@@ -4770,7 +4796,7 @@ export default function AgentPanel({
                     defaultValue={selectedModel && !modelOptions.some((model) => model.model === selectedModel)
                       ? selectedModel
                       : ''}
-                    placeholder="예: claude-sonnet-5"
+                    placeholder={isAntigravity ? 'Antigravity 모델 ID' : '모델 ID'}
                     autoComplete="off"
                     spellCheck={false}
                   />
@@ -5123,46 +5149,42 @@ export default function AgentPanel({
             >
               <IconMention size={14} />
             </button>
-            {isAntigravity ? (
-              <span className="muted small" title="Antigravity는 현재 폴더의 자료를 읽고 채팅으로 답합니다">읽기 전용</span>
-            ) : (
-              <div className="agent-mode-menu" ref={modeMenuRef}>
-                <button
-                  type="button"
-                  className={`agent-mode-trigger ${modeMenuOpen ? 'active' : ''}`}
-                  title={currentMode.title}
-                  aria-haspopup="menu"
-                  aria-expanded={modeMenuOpen}
-                  onClick={() => setModeMenuOpen((open) => !open)}
-                >
-                  {currentMode.label}
-                  <span className="agent-mode-caret" aria-hidden="true">
-                    ▾
-                  </span>
-                </button>
-                {modeMenuOpen && (
-                  <div className="agent-mode-popover" role="menu">
-                    {modeLabels.map((option) => (
-                      <button
-                        key={option.value}
-                        type="button"
-                        className={mode === option.value ? 'active' : ''}
-                        title={option.title}
-                        role="menuitemradio"
-                        aria-checked={mode === option.value}
-                        onClick={() => {
-                          selectPermissionMode(option.value)
-                          setModeMenuOpen(false)
-                        }}
-                      >
-                        <span>{option.label}</span>
-                        <small>{option.title}</small>
-                      </button>
-                    ))}
-                  </div>
-                )}
-              </div>
-            )}
+            <div className="agent-mode-menu" ref={modeMenuRef}>
+              <button
+                type="button"
+                className={`agent-mode-trigger ${modeMenuOpen ? 'active' : ''}`}
+                title={currentMode.title}
+                aria-haspopup="menu"
+                aria-expanded={modeMenuOpen}
+                onClick={() => setModeMenuOpen((open) => !open)}
+              >
+                {currentMode.label}
+                <span className="agent-mode-caret" aria-hidden="true">
+                  ▾
+                </span>
+              </button>
+              {modeMenuOpen && (
+                <div className="agent-mode-popover" role="menu">
+                  {availableModes.map((option) => (
+                    <button
+                      key={option.value}
+                      type="button"
+                      className={mode === option.value ? 'active' : ''}
+                      title={option.title}
+                      role="menuitemradio"
+                      aria-checked={mode === option.value}
+                      onClick={() => {
+                        selectPermissionMode(option.value)
+                        setModeMenuOpen(false)
+                      }}
+                    >
+                      <span>{option.label}</span>
+                      <small>{option.title}</small>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
             <select
               className="agent-provider-select"
               value={provider}
@@ -5179,17 +5201,15 @@ export default function AgentPanel({
               <option value="codex">Codex</option>
               {offersAntigravity && <option value="antigravity">Antigravity</option>}
             </select>
-            {!isAntigravity && (
-              <button
-                type="button"
-                className="agent-auth-btn agent-model-btn"
-                disabled={authActive || queuesNewInput || (usesAgentAuth && authStatus !== 'authenticated')}
-                title={`현재 모델: ${currentModel.modelLabel}${currentModel.effort ? ` / 추론 정도: ${currentModel.effort}` : ''}`}
-                onClick={() => void openModelPicker()}
-              >
-                {modelButtonLabel}
-              </button>
-            )}
+            <button
+              type="button"
+              className="agent-auth-btn agent-model-btn"
+              disabled={!sessionReady || authActive || (!isAntigravity && queuesNewInput) || (usesAgentAuth && authStatus !== 'authenticated')}
+              title={`다음 요청 모델: ${isAntigravity && !selectedModel ? 'CLI 기본값' : currentModel.modelLabel}${currentModel.effort ? ` / 추론 정도: ${currentModel.effort}` : ''}`}
+              onClick={() => void openModelPicker()}
+            >
+              {modelButtonLabel}
+            </button>
             {usesAgentAuth && (
               <button
                 className="agent-auth-btn"

@@ -44,7 +44,7 @@ function runApp({ root, temp, screenshotDir, provider, mode, remote }) {
     terminals: [...mobileSnapshot.terminals, { ...mobileSnapshot.terminals[0], id: 'old-server-cached', title: '이전 서버 캐시', resumeSessionId: 'old-session' }]
       .map(term => ({ ...term, profileId: phoneProfile.id, ssh: phoneProfile }))
   }
-  const settings = { sshProfiles: remote ? [phoneProfile] : [], caseOpenTarget: remote ? 'remote:phone-host' : 'local', notifyDone: false, agentDefaultProvider: provider }
+  const settings = { sshProfiles: remote ? [phoneProfile] : [], caseOpenTarget: remote ? 'remote:phone-host' : 'local', notifyDone: false, agentDefaultProvider: provider, agentDefaultPermissionMode: 'bypassPermissions' }
   let releaseSettings
   const settingsReady = new Promise(resolve => { releaseSettings = resolve })
   app.setPath('userData', path.join(temp, 'profile'))
@@ -107,7 +107,8 @@ function runApp({ root, temp, screenshotDir, provider, mode, remote }) {
     if (channel === 'workspace:autoSave') return { ok: true }
     if (channel === 'workspace:autoObserve') return
     if (channel === 'workspace:list') return { ok: true, entries: [] }
-    if (channel === 'agent:models') return { ok: true, models: [] }
+    if (channel === 'agent:models') return { ok: true, models: agents.get(args[0])?.provider === 'antigravity'
+      ? [{ id: 'gemini-test', model: 'gemini-test', displayName: 'Gemini Test' }] : [] }
     if (channel === 'agent:create') {
       const options = args[0]
       agents.set(options.id, options)
@@ -175,13 +176,24 @@ function runApp({ root, temp, screenshotDir, provider, mode, remote }) {
         window.testMicStream = output.stream;
         window.originalGetUserMedia = navigator.mediaDevices.getUserMedia;
         navigator.mediaDevices.getUserMedia = async () => output.stream;
+        window.originalMicSource = AudioContext.prototype.createMediaStreamSource;
+        AudioContext.prototype.createMediaStreamSource = function(stream) {
+          const source = window.originalMicSource.call(this, stream);
+          window.testMicProbe = this.createAnalyser();
+          source.connect(window.testMicProbe);
+          return source;
+        };
       })()`)
       await evaluate(`new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))`)
       await evaluate(`(() => { const input = window.visibleComposer(); input.focus(); input.setSelectionRange(2, 2); window.dictationButton().click() })()`)
       await wait(() => evaluate(`window.dictationButton().getAttribute('aria-pressed') === 'true'`), 'recording started')
       assert.equal(await evaluate(`window.visibleComposer().closest('.agent-panel').querySelector('.agent-send-btn').disabled`), true)
       assert.equal(await evaluate(`window.visibleComposer().closest('.agent-panel').querySelector('.agent-provider-select').disabled`), true)
-      await evaluate(`new Promise(resolve => setTimeout(resolve, 350))`)
+      await wait(() => evaluate(`(() => {
+        const samples = new Float32Array(window.testMicProbe.fftSize);
+        window.testMicProbe.getFloatTimeDomainData(samples);
+        return samples.some(sample => Math.abs(sample) > 0.05);
+      })()`), 'recorder receives non-silent microphone frames')
       assert.equal(await evaluate(`(() => {
         const input = window.visibleComposer();
         const notice = input.closest('.agent-panel').querySelector('.agent-dictation-status');
@@ -196,6 +208,7 @@ function runApp({ root, temp, screenshotDir, provider, mode, remote }) {
       assert.equal(await evaluate(`window.testMicStream.getTracks().every(track => track.readyState === 'ended')`), true)
       await evaluate(`(async () => {
         navigator.mediaDevices.getUserMedia = window.originalGetUserMedia;
+        AudioContext.prototype.createMediaStreamSource = window.originalMicSource;
         await window.testAudio.close();
         const input = window.visibleComposer();
         Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set.call(input, '');
@@ -229,10 +242,31 @@ function runApp({ root, temp, screenshotDir, provider, mode, remote }) {
     assert.equal(await evaluate(`!!window.visibleComposer().closest('.agent-panel').querySelector('.agent-provider-select option[value="antigravity"]')`), true, 'Antigravity is offered in local and remote chat')
     if (provider === 'antigravity') {
       assert.equal(await evaluate(`window.visibleComposer().closest('.agent-panel').querySelector('.agent-provider-select').value`), provider)
-      assert.equal(await evaluate(`!!window.visibleComposer().closest('.agent-panel').querySelector('.agent-mode-trigger, .agent-auth-btn')`), false)
-      assert.equal(calls.some(call => call.channel === 'agent:models'), false)
+      assert.equal(await evaluate(`!!window.visibleComposer().closest('.agent-panel').querySelector('.agent-model-btn')`), true)
     }
     return layout
+  }
+  const selectAgyModelAndMode = async (agent) => {
+    const panel = "window.visibleComposer().closest('.agent-panel')"
+    assert.equal(agent.permissionMode, 'ask', 'Antigravity starts read-only regardless of the global mode')
+    assert.match(await evaluate(`${panel}.querySelector('.agent-mode-trigger').textContent`), /읽기 전용/)
+    await evaluate(`${panel}.querySelector('.agent-mode-trigger').click()`)
+    assert.equal(await evaluate(`${panel}.querySelectorAll('.agent-mode-popover button').length`), 2)
+    await evaluate(`[...${panel}.querySelectorAll('.agent-mode-popover button')].find(b => b.textContent.includes('작업 폴더 편집')).click()`)
+    if (agent.source === 'ssh') {
+      await evaluate(`(() => { const el = window.visibleComposer(); Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set.call(el, '/model'); el.dispatchEvent(new Event('input', { bubbles: true })); })()`)
+      await wait(() => evaluate(`!${panel}.querySelector('.agent-send-btn').disabled`), 'model command ready')
+      await evaluate(`${panel}.querySelector('.agent-send-btn').click()`)
+    } else {
+      await evaluate(`${panel}.querySelector('.agent-model-btn').click()`)
+    }
+    await wait(() => evaluate(`!!${panel}.querySelector('.agent-model-main')`), 'available Antigravity models')
+    await evaluate(`${panel}.querySelector('.agent-model-main').click()`)
+    await wait(() => evaluate(`${panel}.querySelector('.agent-model-btn').textContent === 'Gemini Test'`), 'selected Antigravity model')
+    assert.ok(calls.some(call => call.channel === 'agent:setModel' && call.args[0].sessionId === agent.id && call.args[0].model === 'gemini-test'))
+    assert.equal(calls.some(call => call.channel === 'settings:set' && call.args[0].agentDefaultModels), false, 'model stays in this session and on its own host')
+    assert.equal(settings.agentDefaultPermissionMode, 'bypassPermissions', 'Antigravity mode is scoped to the current panel')
+    assert.match(await evaluate(`${panel}.querySelector('.agent-mode-trigger').textContent`), /작업 폴더 편집/)
   }
   const checkScope = (agent, profile = phoneProfile, expectedProvider = remote ? 'claude' : provider) => {
     assert.equal(agent.provider, expectedProvider)
@@ -373,6 +407,11 @@ function runApp({ root, temp, screenshotDir, provider, mode, remote }) {
           assert.equal(agents.size, before, 'switching between servers reuses each server conversation')
           assert.equal(await evaluate(`window.visibleComposer().closest('.agent-panel').querySelector('.agent-provider-select').value`), 'antigravity')
           assert.ok((await evaluate(`window.visibleComposer().closest('.agent-panel').querySelector('.agent-title-sub').textContent`)).includes(replacementProfile.host))
+          await selectAgyModelAndMode(replacementAgent)
+          await evaluate(`(() => { const el = window.visibleComposer(); Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set.call(el, 'out/에 저장해 주세요'); el.dispatchEvent(new Event('input', { bubbles:true })) })()`)
+          await wait(() => evaluate(`!window.visibleComposer().closest('.agent-panel').querySelector('.agent-send-btn').disabled`), 'remote edit ready')
+          await evaluate(`window.visibleComposer().closest('.agent-panel').querySelector('.agent-send-btn').click()`)
+          await wait(() => calls.some(call => call.channel === 'agent:send' && call.args[0].sessionId === replacementAgent.id && call.args[0].input.permissionMode === 'acceptEdits'), 'edit submitted on selected SSH host')
           await capture('replacement-server-remote')
         })
       } else if (mode) {
@@ -400,6 +439,7 @@ function runApp({ root, temp, screenshotDir, provider, mode, remote }) {
           await checkUnifiedChat()
           await capture(`initial-${provider}`)
         })
+        if (provider === 'antigravity') await test('selects a CLI model and workspace edit mode', () => selectAgyModelAndMode(first))
         await checkDictation()
         await test('keeps one input and preserves its draft in a narrow window', async () => {
           await evaluate(`(() => { const input = window.visibleComposer(); Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set.call(input, '아직 전송하지 않은 일반 질문'); input.dispatchEvent(new Event('input', { bubbles: true })) })()`)
@@ -451,6 +491,7 @@ function runApp({ root, temp, screenshotDir, provider, mode, remote }) {
           await wait(() => evaluate(`window.visibleComposer().closest('.agent-panel').textContent.includes('안녕하세요. 사건을 선택하지 않아도')`), 'mocked answer rendered')
           assert.deepEqual(await evaluate(`[...window.visibleComposer().closest('.agent-panel').querySelectorAll('.agent-msg time')].map(el => el.dateTime)`), ['2026-03-03T04:05:00.000Z', '2026-03-03T04:06:00.000Z'])
           const sent = calls.find(call => call.channel === 'agent:send').args[0]
+          if (provider === 'antigravity') assert.equal(sent.input.permissionMode, 'acceptEdits')
           assert.equal(sent.sessionId, first.id)
           assert.equal(sent.input.text, '일반 질문은 어떻게 시작하나요?')
           checkScope({ ...first, workspaceContext: sent.input.workspaceContext })
