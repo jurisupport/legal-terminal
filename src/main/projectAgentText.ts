@@ -1,7 +1,7 @@
 import { extname } from 'node:path'
 import { decodeTextBuffer } from './textEncoding.ts'
 
-const TEXT_EXTENSIONS = new Set(['.md', '.mdx', '.txt', '.json', '.csv', '.tsv', '.log', '.yml', '.yaml', '.html', '.htm', '.xml', '.js', '.ts', '.tsx', '.jsx', '.css', '.py', '.sh', '.ini', '.toml', '.sql'])
+const TEXT_EXTENSIONS = new Set(['.md', '.mdx', '.txt', '.srt', '.json', '.csv', '.tsv', '.log', '.yml', '.yaml', '.html', '.htm', '.xml', '.js', '.ts', '.tsx', '.jsx', '.css', '.py', '.sh', '.ini', '.toml', '.sql'])
 const MAX_TEXT = 200_000
 
 export async function projectDocumentText(
