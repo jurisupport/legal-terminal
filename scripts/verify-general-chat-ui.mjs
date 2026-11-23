@@ -45,6 +45,7 @@ function runApp({ root, temp, screenshotDir, provider, mode, remote, restart }) 
       .map(term => ({ ...term, profileId: phoneProfile.id, ssh: phoneProfile }))
   }
   const settings = { sshProfiles: remote ? [phoneProfile] : [], caseOpenTarget: remote ? 'remote:phone-host' : 'local', notifyDone: false, agentDefaultProvider: provider, agentDefaultPermissionMode: 'bypassPermissions' }
+  if (remote && mode === 'navigate') settings.draftsRoot = caseDir
   let releaseSettings
   const settingsReady = new Promise(resolve => { releaseSettings = resolve })
   app.setPath('userData', path.join(temp, 'profile'))
@@ -65,8 +66,17 @@ function runApp({ root, temp, screenshotDir, provider, mode, remote, restart }) 
   const handle = ipcMain.handle.bind(ipcMain), on = ipcMain.on.bind(ipcMain)
   ipcMain.on = (channel, callback) => on(channel, channel.startsWith('fs:') || channel.startsWith('pty:') ? () => {} : callback)
   ipcMain.handle = (channel, handler) => handle(channel, async (event, ...args) => {
-    if (channel === 'workBoard:counts') return {}
+    if (channel === 'workBoard:counts') return remote ? { [caseDir]: 1 } : {}
     calls.push({ channel, args })
+    if (channel === 'workBoard:open' || channel === 'workBoard:snapshot') return {
+      tasks: [], agents: [], teams: [], workspace: args[0], folder: args[0] + '/_업무지시',
+      settings: { concurrency: 1, maxReviews: 2, restart: 'requeue', dailyTime: '17:00' }
+    }
+    if (channel === 'ssh:listDir') {
+      assert.equal(args[0].profile.id, phoneProfile.id)
+      return { ok: true, cwd: '/home/lawyer', entries: [] }
+    }
+    if (channel === 'dialog:pickFolder' && mode === 'navigate') return { path: caseDir, name: '기존 거래대금 사건' }
     if (remote && channel === 'app:generalChatDirectory') {
       assert.equal(args[0], phoneProfile.id, 'general chat targets the configured phone server')
       return remoteCwd
@@ -307,6 +317,36 @@ function runApp({ root, temp, screenshotDir, provider, mode, remote, restart }) 
     assert.equal(calls.some(call => call.channel === 'settings:set' && 'agentDefaultPermissionMode' in call.args[0]), false)
     assert.ok((await evaluate(`${panel}.querySelector('.agent-mode-trigger').textContent`)).includes(selectedMode))
   }
+  async function checkRemoteBoard(fromPicker) {
+    const boardSelect = `document.querySelector('select[aria-label="업무 보드 작업 폴더"]')`
+    const setFolder = value => evaluate(`(() => { const select = ${boardSelect}; select.value = ${JSON.stringify(value)}; select.dispatchEvent(new Event('change', { bubbles: true })) })()`)
+    const pickRemote = async () => {
+      await wait(() => evaluate(`[...document.querySelectorAll('.remote-picker button')].some(b => b.textContent.includes('이 폴더로 업무 보드 열기') && !b.disabled)`), 'remote folder picker')
+      assert.equal(await evaluate(`(() => {
+        const button = [...document.querySelectorAll('.remote-picker button')].find(b => b.textContent.includes('이 폴더로 업무 보드 열기'))
+        const box = button.getBoundingClientRect()
+        return button.contains(document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2))
+      })()`), true, 'the visible remote picker receives pointer input above the board')
+      await evaluate(`[...document.querySelectorAll('.remote-picker button')].find(b => b.textContent.includes('이 폴더로 업무 보드 열기')).click()`)
+    }
+    await evaluate(`document.querySelector('.workspace-todo-header .work-board-links button').click()`)
+    if (fromPicker) await pickRemote()
+    else await wait(() => evaluate(`${boardSelect}?.value === ${JSON.stringify('ssh://phone-host' + remoteCwd)}`), 'remote general chat board')
+    await setFolder('')
+    await pickRemote()
+    await wait(() => evaluate(`${boardSelect}?.value === 'ssh://phone-host/home/lawyer'`), 'selected SSH workspace')
+    await evaluate(`document.querySelector('.work-board-window .work-board-links button:nth-child(2)').click()`)
+    await wait(() => evaluate("!!document.querySelector('.wb-page')"), 'approvals')
+    assert.equal(await evaluate(`${boardSelect}.value`), 'ssh://phone-host/home/lawyer', 'global badge does not change hosts')
+    assert.equal(calls.some(x => x.channel === 'dialog:pickFolder'), false, 'remote board selection never opens the local picker')
+    if (fromPicker) {
+      await setFolder(caseDir)
+      await wait(() => evaluate(`${boardSelect}.value === ${JSON.stringify(caseDir)}`), 'deliberate cross-host selection')
+      await setFolder('')
+      await wait(() => calls.some(x => x.channel === 'dialog:pickFolder'), 'local picker for a local board')
+    }
+    await evaluate(`document.querySelector('[aria-label="작업 공간으로 돌아가기"]').click()`)
+  }
   const checkScope = (agent, profile = phoneProfile, expectedProvider = remote ? 'claude' : provider) => {
     assert.equal(agent.provider, expectedProvider)
     assert.equal(agent.source, remote ? 'ssh' : 'local')
@@ -355,6 +395,7 @@ function runApp({ root, temp, screenshotDir, provider, mode, remote, restart }) 
           await evaluate(`new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))`)
           assert.equal(await evaluate(`!!document.querySelector('.todo-dash')`), true)
           assert.equal(agents.size, 0, 'background preparation must not steal the selected view')
+          if (remote) await checkRemoteBoard(true)
         })
       } else if (remote) {
         await test('opens shared general questions with Android-compatible Claude', async () => {
@@ -366,6 +407,7 @@ function runApp({ root, temp, screenshotDir, provider, mode, remote, restart }) 
           await checkUnifiedChat()
           await capture('initial-remote')
         })
+        await test('opens remote board workspaces on the active host', () => checkRemoteBoard(false))
         await test('restores the phone conversation in the same general-question workspace', async () => {
           await wait(() => evaluate(`[...document.querySelectorAll('.work-right .tab-title')].some(el => el.textContent.includes('휴대폰 일반 질문'))`), 'phone conversation tab restored')
           await evaluate(`[...document.querySelectorAll('.work-right .tab-title')].find(el => el.textContent.includes('휴대폰 일반 질문')).click()`)
@@ -598,9 +640,9 @@ function runApp({ root, temp, screenshotDir, provider, mode, remote, restart }) 
 const env = { ...process.env }
 delete env.ELECTRON_RUN_AS_NODE
 try {
-  const scenarios = process.argv.includes('--remote') ? [{ provider: 'codex', mode: '', remote: true }]
+  const scenarios = process.argv.includes('--remote') ? [{ provider: 'codex', mode: '', remote: true }, { provider: 'codex', mode: 'navigate', remote: true }]
     : [{ provider: 'codex', mode: '' }, { provider: 'claude', mode: '' }, { provider: 'antigravity', mode: '' }, { provider: 'codex', mode: 'docOnly' }, { provider: 'codex', mode: 'termOnly' }, { provider: 'codex', mode: 'navigate' }]
-  for (const scenario of scenarios.flatMap(s => s.remote || s.provider === 'antigravity' ? [s, { ...s, restart: true }] : [s])) {
+  for (const scenario of scenarios.flatMap(s => (s.remote && !s.mode) || s.provider === 'antigravity' ? [s, { ...s, restart: true }] : [s])) {
     const scenarioTemp = path.join(temp, `${scenario.provider}-${scenario.mode || 'main'}`)
     await fs.mkdir(scenarioTemp, { recursive: true })
     const entry = path.join(scenarioTemp, 'main.cjs')

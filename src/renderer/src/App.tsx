@@ -4737,6 +4737,7 @@ export default function App(): JSX.Element {
       ? remoteUri(activeTermTab.profileId, activeTermTab.cwd)
       : (activeTermTab?.cwd ?? currentCase?.drafts)
   const [board, setBoard] = useState<OpenBoard | null>(null)
+  const [boardPicker, setBoardPicker] = useState<{ profile: SshProfile; startPath?: string; view: WorkBoardView } | null>(null)
   const [boardCounts, setBoardCounts] = useState<Record<string, number>>({})
   const boardDialog = useRef<HTMLDialogElement>(null)
   useEffect(() => {
@@ -4763,13 +4764,50 @@ export default function App(): JSX.Element {
   useEffect(() => {
     if (boardOpen) boardDialog.current?.showModal()
   }, [boardOpen])
-  const openBoard = async (view: WorkBoardView, workspace?: string, bulkSeed?: string): Promise<void> => {
-    let target = workspace || board?.workspace || activeDraftsFolder || draftsRoot
-    if (view === 'approvals' && !workspace && !boardCounts[target ?? '']) {
-      target = Object.keys(boardCounts).find(key => boardCounts[key] > 0) ?? target
+  const boardTermFolder = (term?: TermTab): string | undefined => {
+    if (!term) return undefined
+    const uri = parseRemoteUri(term.cwd)
+    const profileId = term.profileId ?? uri?.profileId
+    if (!profileId && !term.ssh) return term.cwd
+    const path = uri?.path ?? term.cwd
+    if (!path.startsWith('/')) return undefined
+    const matches = sshProfiles.filter(p =>
+      (!profileId || p.id === profileId) &&
+      (!term.ssh || (workspaceHostKey(p) === workspaceHostKey(term.ssh) && p.identityFile === term.ssh.identityFile))
+    )
+    return matches.length === 1 ? remoteUri(matches[0].id, path) : undefined
+  }
+  const sessionCaseSource = currentCaseSessionSource(currentCase, sshProfiles)
+  const boardSource = activeTermTab ?? sessionCaseSource
+  const boardSourceFolder = boardTermFolder(boardSource)
+  const pickBoardFolder = async (view: WorkBoardView, profileId?: string, startPath?: string): Promise<void> => {
+    if (profileId) {
+      const profile = sshProfiles.find(p => p.id === profileId)
+      if (profile) setBoardPicker({ profile, view, startPath })
+      else await window.lt.dialog.alert('업무 보드의 SSH 연결을 설정에서 확인해 주세요.')
+      return
     }
-    if (!target) target = Object.keys(boardCounts)[0] || (await window.lt.dialog.pickFolder({ title: '업무 보드 작업 폴더 선택' }))?.path
+    const picked = await window.lt.dialog.pickFolder({ title: '업무 보드 작업 폴더 선택', defaultPath: startPath || draftsRoot })
+    if (picked) setBoard({ workspace: picked.path, view })
+  }
+  const openBoard = async (view: WorkBoardView, term?: TermTab, bulkSeed?: string): Promise<void> => {
+    const source = term ?? boardSource
+    const folder = term ? boardTermFolder(term) : board?.workspace || boardSourceFolder
+    if (source && !folder) {
+      await window.lt.dialog.alert('이 업무 폴더의 SSH 연결을 확인할 수 없습니다. 설정에서 프로필을 확인해 주세요.')
+      return
+    }
+    const profileId = folder ? parseRemoteUri(folder)?.profileId : caseOpenProfileId(caseOpenTarget)
+    const profile = sshProfiles.find(p => p.id === profileId)
+    const known = Object.keys(boardCounts).filter(path => parseRemoteUri(path)?.profileId === profileId)
+    const defaultRoot = profileId && profile?.draftsRoot?.startsWith('/') ? remoteUri(profileId, profile.draftsRoot) : undefined
+    let target = folder || (profileId ? defaultRoot : draftsRoot)
+    if (view === 'approvals' && !term && !boardCounts[target ?? '']) {
+      target = known.find(path => boardCounts[path] > 0) ?? target
+    }
+    target ||= known[0]
     if (target) setBoard({ workspace: target, view, bulkSeed })
+    else await pickBoardFolder(view, profileId)
   }
   const activeRecordsFolder = activeTermTab?.recordsFolder ?? currentCase?.records
   const activeSuggestedRecords = activeTermTab?.suggestedRecords ?? currentCase?.suggestedRecords
@@ -4844,7 +4882,6 @@ export default function App(): JSX.Element {
     resolveCaseOpenTarget(caseOpenTarget, sshProfiles)
   )
   const isViewer = mode === 'viewer'
-  const sessionCaseSource = currentCaseSessionSource(currentCase, sshProfiles)
 
   const handleAgentDraftChange = (termId: string, draft: AgentDraftState): void => {
     setAgentDrafts((current) => {
@@ -8951,7 +8988,7 @@ export default function App(): JSX.Element {
                 caseContext={agentCaseContextForTerm(t)}
                 workspaceContext={agentWorkspaceContextForTerm(t, contextAppVersion)}
                 onTasksChanged={() => setTodoNonce((value) => value + 1)}
-                onBulkInstructions={(text) => void openBoard('bulk', historyDraftsForTerm(t), text)}
+                onBulkInstructions={(text) => void openBoard('bulk', t, text)}
                 visible={t.id === activeTerm}
                 focusNonce={termFocusNonce[t.id] ?? 0}
                 initialDraft={agentDrafts[t.id]}
@@ -9345,7 +9382,7 @@ export default function App(): JSX.Element {
                   caseContext={agentCaseContextForTerm(t)}
                 workspaceContext={agentWorkspaceContextForTerm(t, contextAppVersion)}
                 onTasksChanged={() => setTodoNonce((value) => value + 1)}
-                onBulkInstructions={(text) => void openBoard('bulk', historyDraftsForTerm(t), text)}
+                onBulkInstructions={(text) => void openBoard('bulk', t, text)}
                   visible={t.id === visibleTermId}
                   focusNonce={termFocusNonce[t.id] ?? 0}
                   initialDraft={agentDrafts[t.id]}
@@ -9688,12 +9725,13 @@ export default function App(): JSX.Element {
   const approvalCount = Object.values(boardCounts).reduce((sum, count) => sum + count, 0)
   const boardNavigation = (
     <nav className="work-board-links" aria-label="업무지시">
-      <button type="button" aria-pressed={board?.view === 'board' || board?.view === 'bulk'} onClick={() => void openBoard('board')}>업무 보드</button>
-      <button type="button" aria-pressed={board?.view === 'approvals'} onClick={() => void openBoard('approvals')}>결재함 <span>{approvalCount}</span></button>
-      <button type="button" aria-pressed={board?.view === 'daily'} onClick={() => void openBoard('daily')}>일일 보고</button>
+      <button type="button" aria-pressed={board?.view === 'board' || board?.view === 'bulk'} disabled={!workspaceSettingsReady} onClick={() => void openBoard('board')}>업무 보드</button>
+      <button type="button" aria-pressed={board?.view === 'approvals'} disabled={!workspaceSettingsReady} onClick={() => void openBoard('approvals')}>결재함 <span>{approvalCount}</span></button>
+      <button type="button" aria-pressed={board?.view === 'daily'} disabled={!workspaceSettingsReady} onClick={() => void openBoard('daily')}>일일 보고</button>
     </nav>
   )
-  const boardPanel = board && (
+  const boardPanel = <>
+    {board && (
     <dialog ref={boardDialog} className="work-board-window" aria-label="업무지시" onCancel={event => { if (event.target === event.currentTarget) setBoard(null) }}>
       <header>
         <b>legal-terminal</b>
@@ -9704,10 +9742,13 @@ export default function App(): JSX.Element {
           작업 폴더
           <select aria-label="업무 보드 작업 폴더" title={board.workspace} value={board.workspace} onChange={async event => {
             const value = event.currentTarget.value
-            const workspace = value || (await window.lt.dialog.pickFolder({ title: '업무 보드 작업 폴더 선택' }))?.path
-            if (workspace) setBoard({ workspace, view: board.view })
+            if (value) setBoard({ workspace: value, view: board.view })
+            else {
+              const remote = parseRemoteUri(board.workspace)
+              await pickBoardFolder(board.view, remote?.profileId, remote?.path ?? board.workspace)
+            }
           }}>
-            {[...new Set([board.workspace, activeDraftsFolder, ...Object.keys(boardCounts)])].filter((path): path is string => !!path).map(path =>
+            {[...new Set([board.workspace, boardSourceFolder, ...Object.keys(boardCounts)])].filter((path): path is string => !!path).map(path =>
               <option key={path} value={path}>{fileNameFromPath(path) || path}{boardCounts[path] ? ` (결재 ${boardCounts[path]})` : ''} · {path}</option>
             )}
             <option value="">다른 폴더 선택…</option>
@@ -9717,7 +9758,7 @@ export default function App(): JSX.Element {
       <WorkBoard key={board.workspace} {...board}
         onView={view => setBoard({ workspace: board.workspace, view })}
         onOpenFile={path => {
-          if (termOnly || board.workspace !== activeDraftsFolder) {
+          if (termOnly || board.workspace !== boardSourceFolder) {
             void window.lt.app.newWindow({ tabs: [{ kind: 'doc', path, title: fileNameFromPath(path) }] })
           } else {
             setBoard(null)
@@ -9725,8 +9766,22 @@ export default function App(): JSX.Element {
           }
         }}
       />
-    </dialog>
-  )
+    </dialog>)}
+    {boardPicker && <dialog aria-label="원격 업무 보드 폴더 선택"
+      ref={el => { if (el && !el.open) el.showModal() }} onCancel={() => setBoardPicker(null)}>
+      <RemoteFolderPicker profile={boardPicker.profile} startPath={boardPicker.startPath}
+        title="업무 보드 작업 폴더 선택" confirmLabel="이 폴더로 업무 보드 열기"
+        onCancel={() => setBoardPicker(null)}
+        onPick={path => {
+          if (!path.startsWith('/')) {
+            void window.lt.dialog.alert('원격 폴더의 전체 경로를 선택하세요.')
+            return
+          }
+          setBoard({ workspace: remoteUri(boardPicker.profile.id, path), view: boardPicker.view })
+          setBoardPicker(null)
+        }} />
+    </dialog>}
+  </>
 
   // 탭을 창 밖으로 찢어낸 '문서 전용 창': 터미널·탐색기·액티비티바 없이 문서만.
   if (docOnly) {
@@ -14538,7 +14593,7 @@ function RemoteFolderPicker({
   title?: string
   startPath?: string
   confirmLabel?: string
-  onSync: (init: SyncModalInit) => void
+  onSync?: (init: SyncModalInit) => void
   onPick: (remotePath: string) => void
   onCancel: () => void
 }): JSX.Element {
@@ -14784,7 +14839,7 @@ function RemoteFolderPicker({
                 </option>
               ))}
             </select>
-            <button
+            {onSync && <button
               className="header-btn"
               type="button"
               disabled={!canSyncOneDrive}
@@ -14806,7 +14861,7 @@ function RemoteFolderPicker({
               }}
             >
               OneDrive 최신화
-            </button>
+            </button>}
           </div>
           <div className="remote-quick">
             <span className="muted small">빠른 시작</span>

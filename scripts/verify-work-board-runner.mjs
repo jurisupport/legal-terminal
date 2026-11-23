@@ -1,6 +1,6 @@
 // Actual bundled Claude process, with an isolated agent definition and a loopback-only inference fixture.
 import assert from 'node:assert/strict'
-import { createServer } from 'node:http'
+import { boardInference } from './fixtures/work-board-inference.mjs'
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -11,32 +11,14 @@ import { boardPermission, boardRelativePath, readBoardPolicy } from '../src/main
 const directory = await mkdtemp(join(tmpdir(), 'board-runner-'))
 const compiled = await mkdtemp(join(process.cwd(), 'node_modules', '.board-runner-'))
 let scenario = '', toolCalled = false, observedTools, sawNamedAgent = false
-const server = createServer(async (req, res) => {
-  if (!req.url?.startsWith('/v1/messages') || req.url.includes('count_tokens')) {
-    res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ input_tokens: 3 }))
-    return
-  }
-  let body = ''
-  for await (const chunk of req) body += chunk
-  const input = JSON.parse(body)
+const server = boardInference(input => {
   observedTools = input.tools?.map(t => t.name)
   sawNamedAgent ||= JSON.stringify(input.system).includes('SYNTHETIC_AGENT_MARKER')
   const useTool = !toolCalled && scenario !== 'report'
   const name = scenario === 'draft' ? 'mcp__board__case_draft' : 'mcp__board__request_action'
   const args = scenario === 'draft' ? { name: '초안.md', text: '검수 본문' } : {name:'Bash',args:{command:'echo approved'}}
   if (useTool) toolCalled = true
-  const answer = '## 결론\n검수 완료'
-  const stop = useTool ? 'tool_use' : 'end_turn'
-  const message = {id:'msg_fixture',type:'message',role:'assistant',model:input.model,content:[],stop_reason:null,stop_sequence:null,usage:{input_tokens:8,output_tokens:8}}
-  res.writeHead(200, { 'content-type': 'text/event-stream' })
-  function event(type, value) { res.write(`event: ${type}\ndata: ${JSON.stringify({type, ...value})}\n\n`) }
-  event('message_start',{message})
-  event('content_block_start',{index:0,content_block:useTool ? {type:'tool_use',id:'toolu_fixture',name,input:{}} : {type:'text',text:''}})
-  event('content_block_delta',{index:0,delta:useTool ? {type:'input_json_delta',partial_json:JSON.stringify(args)} : {type:'text_delta',text:answer}})
-  event('content_block_stop',{index:0})
-  event('message_delta',{delta:{stop_reason:stop,stop_sequence:null},usage:{output_tokens:8}})
-  event('message_stop',{})
-  res.end()
+  return useTool ? {name,args} : {text:'## 결론\n검수 완료'}
 })
 try {
   await new Promise(resolve => server.listen(0,'127.0.0.1',resolve))
@@ -63,10 +45,11 @@ try {
   const stubs = {
     './agent/agent-service': 'export const cleanEnv=()=>(' + JSON.stringify(fixtureEnv) + '); export const packagedClaudeAgentSdkExecutable=()=>undefined;',
     './projectAgent': 'export function readWorkspaceDocument(){throw Error("unexpected read")}',
-    './remoteFs': 'export const isRemote=()=>false; export function remote(){throw Error("unexpected SSH")} export {remote as rfsList,remote as rfsRealpath,remote as rfsMkdir,remote as rfsWriteText,remote as rfsBoardApprovedCommand}'
+    './remoteFs': 'export const isRemote=()=>false; export function remote(){throw Error("unexpected SSH")} export {remote as rfsBoardAgentSources,remote as rfsBoardClaudeConnection,remote as rfsList,remote as rfsRealpath,remote as rfsMkdir,remote as rfsWriteText,remote as rfsBoardApprovedCommand}'
   }
   const file = join(compiled,'runner.mjs')
   await build({entryPoints:['src/main/workBoardRunner.ts'],outfile:file,format:'esm',platform:'node',bundle:true,packages:'external',plugins:[{ name:'local-fixtures',setup(b) {
+    b.onResolve({filter:/^\.\.\/remoteFs$/},()=>({path:'./remoteFs',namespace:'stub'}))
     b.onResolve({filter:/^\.\//},a=>Object.hasOwn(stubs,a.path)?{path:a.path,namespace:'stub'}:null)
     b.onLoad({filter:/.*/,namespace:'stub'},a=>({contents:stubs[a.path]}))
   }}]})

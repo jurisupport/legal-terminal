@@ -1,4 +1,4 @@
-import { Client, type ClientChannel, type SFTPWrapper, type Stats, type TcpConnectionDetails, utils } from 'ssh2'
+import { Client, type ClientChannel, type FileEntryWithStats, type SFTPWrapper, type Stats, type TcpConnectionDetails, utils } from 'ssh2'
 import { connect as connectSocket, type Socket } from 'net'
 import { createHash, randomUUID } from 'crypto'
 import { open, readFile, rm } from 'fs/promises'
@@ -464,15 +464,15 @@ function getConnection(profileId: string): Promise<SshConnection> {
   return connectionPool.get(profileId)
 }
 
-export async function rfsProjectWorkspace(profileId: string, projectId: string): Promise<{ cwd: string; ssh: AgentSshConn; profileId: string }> {
-  if (!/^[a-zA-Z0-9_-]{1,128}$/.test(projectId)) throw new Error('프로젝트 ID가 작업 폴더 이름으로 안전하지 않습니다.')
+async function privateAgentDirectory(profileId: string, namespace: string, id: string) {
+  if (!/^[a-zA-Z0-9_-]{1,128}$/.test(id)) throw new Error('프로젝트 ID가 작업 폴더 이름으로 안전하지 않습니다.')
   const profile = projectSsh(await getProfile(profileId))
   const connection = await getConnection(profileId)
   await verifyProjectConnection(profileId, profile, connection)
   const { sftp } = connection
   let cwd = await sftpRequest<string>(sftp, (done) => sftp.realpath('.', done))
   if (!posix.isAbsolute(cwd) || posix.normalize(cwd) !== cwd || cwd.includes('\0')) throw new Error('원격 홈 폴더 경로를 확인할 수 없습니다.')
-  for (const name of ['.legal-terminal', 'project-workspaces', projectId]) {
+  for (const name of ['.legal-terminal', namespace, id]) {
     cwd = posix.join(cwd, name)
     const inspect = (): Promise<Stats> => sftpRequest(sftp, (done) => sftp.lstat(cwd, done))
     let info = await inspect().catch((error: Error & { code?: number }) => {
@@ -491,7 +491,21 @@ export async function rfsProjectWorkspace(profileId: string, projectId: string):
     }
   }
   await verifyProjectConnection(profileId, profile, connection)
+  return { cwd, profile, client: connection.client }
+}
+
+
+export async function rfsProjectWorkspace(profileId: string, projectId: string): Promise<{ cwd: string; ssh: AgentSshConn; profileId: string }> {
+  const { cwd, profile } = await privateAgentDirectory(profileId, 'project-workspaces', projectId)
   return { cwd, profileId, ssh: profile }
+}
+
+export async function rfsBoardClaudeConnection(uri: string) {
+  const { profileId, path } = parseRemote(uri)
+  if (!isRemote(uri) || !profileId || !posix.isAbsolute(path)) throw new Error('업무 보드의 SSH 작업 폴더를 확인하세요.')
+  const id = createHash('sha256').update(path).digest('hex')
+  const { cwd, client } = await privateAgentDirectory(profileId, 'board-sessions', id)
+  return { cwd, client }
 }
 
 type ForwardHandler = (accept: () => ClientChannel, reject: () => void) => void
@@ -1448,6 +1462,95 @@ export class RemoteFileConflict extends Error {
     super('파일이 외부에서 변경되어 저장을 중단했습니다.')
     this.stat = current && { size: current.size, mtimeMs: current.mtime * 1000 }
   }
+}
+
+// Share discovery between boards for one authenticated SSH connection.
+const boardAgentCache = new WeakMap<Client, {until: number; sources: Promise<string[]>}>()
+
+export async function rfsBoardAgentSources(workspace: string): Promise<string[]> {
+  const {profileId} = parseRemote(workspace)
+  const connection = await getConnection(profileId)
+  const profile = projectSsh(await getProfile(profileId))
+  await verifyProjectConnection(profileId, profile, connection)
+  const cached = boardAgentCache.get(connection.client)
+  if (cached && cached.until > Date.now()) return cached.sources
+  const sources = loadRemoteBoardAgents(profileId, connection.sftp)
+  boardAgentCache.set(connection.client, {until: Date.now() + 120_000, sources})
+  try {
+    const result = await sources
+    await verifyProjectConnection(profileId, profile, connection)
+    return result
+  } catch (error) {
+    if (boardAgentCache.get(connection.client)?.sources === sources) boardAgentCache.delete(connection.client)
+    throw error
+  }
+}
+
+async function loadRemoteBoardAgents(profileId: string, sftp: SFTPWrapper): Promise<string[]> {
+  // SFTP-only accounts expose their home through realpath(".") even when exec is unavailable.
+  const { boardRemoteShell } = await import('./agent/boardRemoteShell')
+  const lookup = boardRemoteShell('printf %s "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"')
+  const override = await execRemoteCommand(profileId, lookup, {
+    timeoutMs: 3000, maxOutputBytes: 4096, timeoutMessage: '원격 Claude 설정 위치 조회 시간 초과'
+  }).then(result => result.code === 0 ? result.stdout.toString('utf8') : '', () => '')
+  const deadline = Date.now() + 15_000
+  const request = <T>(op: (done: (err?: Error | null, value?: T) => void) => void): Promise<T> => {
+    const remaining = deadline - Date.now()
+    if (remaining <= 0) return Promise.reject(new Error('원격 에이전트 목록 조회 시간이 초과되었습니다.'))
+    return sftpRequest(sftp, op, remaining)
+  }
+  const config = override || posix.join(await request<string>(done => sftp.realpath('.', done)), '.claude')
+  if (!posix.isAbsolute(config) || /[\x00-\x1f]/u.test(config)) throw new Error('원격 Claude 설정 경로를 확인해 주세요.')
+  const canonicalConfig = await request<string>(done => sftp.realpath(config, done)).catch(error => {
+    if (error.code === 2) return null
+    throw error
+  })
+  if (!canonicalConfig) return []
+  const directory = posix.join(canonicalConfig, 'agents')
+  const definitions: string[] = []
+  const directoryStat = await request<Stats>(done => sftp.lstat(directory, done)).catch(error => {
+    if (error.code === 2) return null
+    throw error
+  })
+  if (!directoryStat) return []
+  if (!directoryStat.isDirectory() || await request<string>(done => sftp.realpath(directory, done)) !== directory) {
+    throw new Error('원격 에이전트 폴더의 실제 경로를 확인해 주세요.')
+  }
+  const readSource = async ({filename, attrs}: FileEntryWithStats): Promise<string | undefined> => {
+    const path = posix.join(directory, filename)
+    if (await request<string>(done => sftp.realpath(path, done)) !== path) return
+    const file = await request<Buffer>(done => sftp.open(path, 'r', done))
+    try {
+      const current = await request<Stats>(done => sftp.fstat(file, done))
+      if (!current.isFile() || current.size !== attrs.size) return
+      const data = Buffer.alloc(current.size)
+      const bytes = await request<number>(done => sftp.read(file, data, 0, data.length, 0, done))
+      if (bytes === data.length) return data.toString('utf8')
+    } finally { await sftpRequest<void>(sftp, done => sftp.close(file, done), 2000) }
+  }
+  const handle = await request<Buffer>(done => sftp.opendir(directory, done))
+  let seen = 0
+  let totalBytes = 0
+  try {
+    for (;;) {
+      const batch = await request<FileEntryWithStats[]>(done => sftp.readdir(handle, done)).catch(error => {
+        if (error.code === 1) return null
+        throw error
+      })
+      if (batch === null) break
+      seen += batch.length
+      if (seen > 2048) throw new Error('원격 에이전트 폴더의 파일이 너무 많습니다.')
+      const files = batch.filter(({filename, attrs}) => filename.endsWith('.md') && attrs.isFile() &&
+        filename === posix.basename(filename) && !filename.includes('\0') && attrs.size > 0 && attrs.size <= 256 * 1024)
+      totalBytes += files.reduce((bytes, file) => bytes + file.attrs.size, 0)
+      if (totalBytes > 2 * 1024 * 1024 || definitions.length + files.length > 256) throw new Error('원격 에이전트 정의 크기나 개수의 한도를 초과했습니다.')
+      for (let i = 0; i < files.length; i += 4) {
+        const sources = await Promise.all(files.slice(i, i + 4).map(readSource))
+        for (const source of sources) if (source) definitions.push(source)
+      }
+    }
+  } finally { await sftpRequest<void>(sftp, done => sftp.close(handle, done), 2000) }
+  return definitions
 }
 
 /** Uncached metadata for board files; missing is distinct from a disconnected server. */

@@ -9,21 +9,30 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import { z } from 'zod'
 import type { BoardAgent, BoardTask } from '../shared/workBoard'
+import { prepareBoardRemoteClaude } from './agent/boardRemoteClaude'
 import { cleanEnv, packagedClaudeAgentSdkExecutable } from './agent/agent-service'
-import { isRemote, rfsBoardApprovedCommand, rfsList, rfsMkdir, rfsRealpath, rfsWriteText } from './remoteFs'
+import { isRemote, rfsBoardAgentSources, rfsBoardApprovedCommand, rfsList, rfsMkdir, rfsRealpath, rfsWriteText } from './remoteFs'
 import { readWorkspaceDocument } from './projectAgent'
 import { boardFileTools, boardPermission, boardRelativePath, readBoardPolicy } from './workBoardPolicy'
 
-async function definitions(): Promise<Map<string, BoardAgent & { prompt: string }>> {
+async function localAgentSources(): Promise<string[]> {
   const directory = join(process.env.CLAUDE_CONFIG_DIR || join(homedir(), '.claude'), 'agents')
-  const result = new Map<string, BoardAgent & { prompt: string }>()
+  const sources: string[] = []
   const entries = await readdir(directory, { withFileTypes: true }).catch(err => {
     if (err.code === 'ENOENT') return []
     throw err
   })
   for (const entry of entries) {
     if (!entry.isFile() || !entry.name.endsWith('.md')) continue
-    const text = await readFile(join(directory, entry.name), 'utf8')
+    sources.push(await readFile(join(directory, entry.name), 'utf8'))
+  }
+  return sources
+}
+
+async function definitions(workspace: string): Promise<Map<string, BoardAgent & { prompt: string }>> {
+  const sources = isRemote(workspace) ? await rfsBoardAgentSources(workspace) : await localAgentSources()
+  const result = new Map<string, BoardAgent & { prompt: string }>()
+  for (const text of sources) {
     const parts = /^\uFEFF?---\r?\n([\s\S]*?)\r?\n---\r?\n([\s\S]*)$/.exec(text)
     if (!parts) continue
     let data: Partial<BoardAgent> | null
@@ -36,8 +45,8 @@ async function definitions(): Promise<Map<string, BoardAgent & { prompt: string 
   return result
 }
 
-export async function listBoardAgents(): Promise<BoardAgent[]> {
-  return [...(await definitions()).values()].map(({ name, description }) => ({ name, description }))
+export async function listBoardAgents(workspace = ''): Promise<BoardAgent[]> {
+  return [...(await definitions(workspace)).values()].map(({ name, description }) => ({ name, description }))
 }
 
 export interface BoardRunInput {
@@ -56,7 +65,7 @@ export async function runBoardAgent(input: BoardRunInput) {
   signal.throwIfAborted()
   const policy = await readBoardPolicy(input.policyDir)
   const name = phase === 'review' ? task.review_agent : task.agent
-  const agent = name ? (await definitions()).get(name) : undefined
+  const agent = name ? (await definitions(task.cwd)).get(name) : undefined
   if (name && !agent) throw new Error('등록된 담당 에이전트를 찾지 못했습니다: ' + name)
   const remote = isRemote(task.cwd)
   const canonical = remote ? rfsRealpath : realpath
@@ -157,9 +166,13 @@ export async function runBoardAgent(input: BoardRunInput) {
   await mkdir(sandbox, { recursive: true, mode: 0o700 })
   const tools = [...boardFileTools, 'request_action'].map(n => 'mcp__board__' + n)
   const binding = join(sandbox, task.id + '-' + phase + '.session')
-  if (input.resume && (await readFile(binding, 'utf8').catch(() => '')) !== input.resume) {
-    throw new Error('이 업무에 연결된 세션을 확인할 수 없습니다.')
+  const sessionBinding = (id: string) => remote ? 'ssh:' + id : id
+  if (input.resume && (await readFile(binding, 'utf8').catch(() => '')) !== sessionBinding(input.resume)) {
+    throw new Error(remote ? '이전 세션을 이 SSH 서버와 연결할 수 없습니다. 기존 로컬 실행 기록을 확인한 뒤 ‘다시 대기열에 넣기’를 선택하세요.' : '이 업무에 연결된 세션을 확인할 수 없습니다.')
   }
+  let remoteFailure: Error | undefined
+  const transport = remote ? await prepareBoardRemoteClaude(root, error => { remoteFailure = error }) : {}
+
   let result = ''
   let sessionId = ''
   const summaries = new Set<string>()
@@ -171,7 +184,7 @@ export async function runBoardAgent(input: BoardRunInput) {
       prompt: '다음 업무지시를 수행하고 최종 답변을 Markdown으로 작성하세요. 파일 경로는 case_list/read의 상대 경로를 사용하세요. 외부 작업 또는 사용자 답변이 필요하면 request_action을 호출하세요.\n' +
         input.prompt + reviewFormat + (phase === 'execute' ? '\n이 지시에 승인된 도구 목록: ' + JSON.stringify([...grants]) : ''),
       options: {
-        cwd: sandbox, env: cleanEnv(), pathToClaudeCodeExecutable: packagedClaudeAgentSdkExecutable(),
+        ...transport, cwd: sandbox, env: cleanEnv(), pathToClaudeCodeExecutable: packagedClaudeAgentSdkExecutable(),
         abortController: controller, resume: input.resume,
         ...(agent ? { agent: agent.name, agents: { [agent.name]: { description: agent.description || agent.name, prompt: agent.prompt } } } : {}),
         tools: [], skills: [], plugins: [], settingSources: [], strictMcpConfig: true,
@@ -187,14 +200,17 @@ export async function runBoardAgent(input: BoardRunInput) {
       for await (const message of session) {
         if ('session_id' in message && message.session_id && message.session_id !== sessionId) {
           sessionId = message.session_id
-          await writeFile(binding, sessionId, { mode: 0o600 })
-          onProgress('세션 시작 · ' + (name || '기본 에이전트'), sessionId)
+          await writeFile(binding, sessionBinding(sessionId), { mode: 0o600 })
+          onProgress((remote ? 'SSH 서버에서 세션 시작 · ' : '세션 시작 · ') + (name || '기본 에이전트'), sessionId)
         }
         const summary = (message.type === 'tool_use_summary' ? message.summary
           : message.type === 'system' && message.subtype === 'task_progress' ? message.summary || message.description : '')?.slice(0, 500)
         if (summary && summaries.size < 100 && !summaries.has(summary)) {
           summaries.add(summary)
           onProgress(summary)
+        }
+        if (remote && message.type === 'assistant' && (message.error === 'authentication_failed' || message.error === 'oauth_org_not_allowed')) {
+          throw new Error('SSH 서버의 Claude 인증을 확인하세요. 서버에서 claude auth login 후 다시 시도하세요.')
         }
         if (message.type === 'result') {
           if (message.subtype !== 'success') throw new Error(message.errors.join('\n') || message.subtype)
@@ -204,7 +220,13 @@ export async function runBoardAgent(input: BoardRunInput) {
       }
     } finally { session.close() }
   } catch (error) {
-    if (!notes.size || signal.aborted) throw error
+    if (!notes.size || signal.aborted) {
+      if (remoteFailure && !signal.aborted) throw remoteFailure
+      if (remote && error instanceof Error && /not logged in|authentication (?:failed|required)|invalid .*api.?key|please run .*login/i.test(error.message)) {
+        throw new Error('SSH 서버의 Claude 인증을 확인하세요. 서버에서 claude auth login 후 다시 시도하세요.')
+      }
+      throw error
+    }
   } finally { signal.removeEventListener('abort', cancel) }
   await rm(binding, { force: true })
   for (const action of failedActions) notes.add('실행 결과 확인 필요 · ' + action)

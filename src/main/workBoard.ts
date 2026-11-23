@@ -133,7 +133,10 @@ export class WorkBoard {
     if (wasWritable && !this.writable) for (const controller of this.active.values()) controller.abort()
     const tasks = await this.store.list()
     const teams = await this.store.teams()
-    const agents = await listBoardAgents()
+    const agents = await listBoardAgents(this.workspace).catch(error => {
+      this.store.warnings.push('담당자 목록 · ' + (error instanceof Error ? error.message : String(error)))
+      return []
+    })
     const warnings = this.store.warnings.join('\n')
     if (warnings !== this.warnings) {
       this.warnings = warnings
