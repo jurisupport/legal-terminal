@@ -1,6 +1,6 @@
 {
   "name": "legal-terminal",
-  "version": "0.1.346",
+  "version": "0.1.347",
   "description": "대한민국 송무 변호사를 위한 AI 통합 작업환경 — Claude Code + 준비서면 에디터 + 전자소송기록 뷰어 + 사건 대시보드 + 원격(SSH) 작업",
   "main": "./out/main/index.js",
   "author": "lawpid",
@@ -13,6 +13,9 @@
     "dev": "electron-vite dev",
     "build": "electron-vite build",
     "preview": "electron-vite preview",
+    "verify:work-board": "node --experimental-strip-types --no-warnings scripts/verify-work-board-store.mjs && node --experimental-strip-types --no-warnings scripts/verify-work-board-daily.mjs && node --experimental-strip-types --no-warnings scripts/verify-work-board-flow.mjs && node --experimental-strip-types --no-warnings scripts/verify-work-board-runner.mjs",
+    "verify:work-board-ui": "electron-vite build && node scripts/verify-work-board-ui.mjs",
+    "verify:work-board-ssh": "node scripts/verify-work-board-ssh.mjs",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "verify:agent-token": "node --experimental-strip-types --no-warnings scripts/verify-agent-token.mjs",
     "verify:setup-check": "node --experimental-strip-types --no-warnings scripts/verify-setup-check.mjs",

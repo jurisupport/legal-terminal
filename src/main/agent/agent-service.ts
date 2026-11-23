@@ -619,7 +619,7 @@ function unsetClaudeAuthEnvCommand(): string {
   return `unset ${Array.from(CLAUDE_AUTH_ENV_KEYS).join(' ')}`
 }
 
-function packagedClaudeAgentSdkExecutable(): string | undefined {
+export function packagedClaudeAgentSdkExecutable(): string | undefined {
   const binaryName = CLAUDE_AGENT_SDK_BINARY_BY_PLATFORM[process.platform]
   const resourcesPath = (process as NodeJS.Process & { resourcesPath?: string }).resourcesPath
   if (!binaryName || !resourcesPath) return undefined
@@ -784,7 +784,7 @@ function remoteClaudeAuthStatusCommand(): string {
   return `exec $SHELL -ilc ${shq(inner)}`
 }
 
-function cleanEnv(): Record<string, string | undefined> {
+export function cleanEnv(): Record<string, string | undefined> {
   const env: Record<string, string | undefined> = {}
   for (const [key, value] of Object.entries(process.env)) {
     if (key === 'CLAUDECODE') continue

@@ -40,6 +40,7 @@ function runApp({ root, temp, screenshotDir }) {
   const handle = ipcMain.handle.bind(ipcMain), on = ipcMain.on.bind(ipcMain)
   ipcMain.on = (channel, callback) => on(channel, channel.startsWith('fs:') || channel.startsWith('pty:') ? () => {} : callback)
   ipcMain.handle = (channel, handler) => handle(channel, async (event, ...args) => {
+    if (channel === 'workBoard:counts') return {}
     calls.push({ channel, args })
     if (['app:info', 'app:setWindowTitle', 'tabs:ready', 'caseManagement:get', 'caseManagement:update'].includes(channel)) return handler(event, ...args)
     if (channel === 'app:generalChatDirectory') { assert.equal(args[0], profile.id); return remoteCwd }

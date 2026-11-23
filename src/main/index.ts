@@ -1,3 +1,4 @@
+import { registerWorkBoards } from './workBoardIpc'
 import { applySharedUi, readSharedUi } from './sharedUi'
 import type { SharedUiOperation } from '../shared/sharedUiState'
 import { openRemotionPreview, closeRemotionPreview, disposeRemotionPreviews } from './remotionPreview'
@@ -3048,7 +3049,9 @@ ipcMain.on('pty:resize', (_e, { id, cols, rows }: { id: string; cols: number; ro
 ipcMain.on('pty:detach', (e, { id }: { id: string }) => detachPty(id, e.sender))
 ipcMain.on('pty:kill', (_e, { id }: { id: string }) => killPty(id))
 
+let stopWorkBoards: (() => void) | undefined
 app.on('before-quit', () => {
+  stopWorkBoards?.()
   disposeClaudeRemoteControls()
   void disposeProjectMcp()
   disposeRemotionPreviews()
@@ -3059,6 +3062,7 @@ app.on('before-quit', () => {
 })
 
 app.whenReady().then(() => {
+  stopWorkBoards = registerWorkBoards()
   powerMonitor.on('resume', reconnectAgentSessions)
   registerMediaProtocol(session.defaultSession)
   registerMediaIpc(ipcMain)

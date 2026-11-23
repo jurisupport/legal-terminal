@@ -85,6 +85,8 @@ interface RemoteExecResult {
 }
 
 interface RemoteExecOptions {
+  signal?: AbortSignal
+  maxOutputBytes?: number
   timeoutMs: number
   timeoutMessage: string
   onStdout?: (chunk: Buffer) => void
@@ -591,6 +593,7 @@ async function execRemoteCommand(
   opts: RemoteExecOptions
 ): Promise<RemoteExecResult> {
   const { client } = await getConnection(profileId)
+  opts.signal?.throwIfAborted()
   return await new Promise<RemoteExecResult>((resolve, reject) => {
     const stdout: Buffer[] = []
     const stderr: Buffer[] = []
@@ -599,16 +602,19 @@ async function execRemoteCommand(
     let timer: ReturnType<typeof setTimeout> | undefined
     let killTimer: ReturnType<typeof setTimeout> | undefined
     let timeoutError: Error | undefined
+    let bytes = 0
 
     const finish = (err?: Error, result?: RemoteExecResult): void => {
       if (settled) return
       settled = true
       if (timer) clearTimeout(timer)
       if (killTimer) clearTimeout(killTimer)
+      opts.signal?.removeEventListener('abort', terminate)
       if (err) reject(err)
       else resolve(result ?? { stdout: Buffer.concat(stdout), stderr: Buffer.concat(stderr), code: 0 })
     }
     const terminate = (): void => {
+      if (timeoutError || settled) return
       timeoutError = new Error(opts.timeoutMessage)
       if (!stream) {
         finish(timeoutError)
@@ -634,6 +640,17 @@ async function execRemoteCommand(
       }, 2_000)
     }
     timer = setTimeout(terminate, opts.timeoutMs)
+    opts.signal?.addEventListener('abort', terminate, { once: true })
+    const collect = (list: Buffer[], chunk: Buffer | string): Buffer | undefined => {
+      const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
+      bytes += buf.length
+      if (opts.maxOutputBytes && bytes > opts.maxOutputBytes) {
+        terminate()
+        return
+      }
+      list.push(buf)
+      return buf
+    }
 
     client.exec(command, (err, channel) => {
       if (err) {
@@ -641,13 +658,18 @@ async function execRemoteCommand(
         return
       }
       stream = channel
+      if (settled) {
+        channel.on('error', () => {})
+        try { channel.signal('TERM') } catch { /* already closed */ }
+        channel.close()
+        return
+      }
       channel.on('data', (chunk: Buffer | string) => {
-        const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
-        stdout.push(buf)
-        opts.onStdout?.(buf)
+        const buf = collect(stdout, chunk)
+        if (buf) opts.onStdout?.(buf)
       })
       channel.stderr.on('data', (chunk: Buffer | string) => {
-        stderr.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk))
+        collect(stderr, chunk)
       })
       channel.on('error', (streamErr: unknown) => {
         finish(streamErr instanceof Error ? streamErr : new Error(String(streamErr)))
@@ -668,6 +690,16 @@ async function execRemoteCommand(
   })
 }
 
+export async function rfsBoardApprovedCommand(cwd: string, command: string, signal: AbortSignal): Promise<string> {
+  const { profileId, path } = parseRemote(cwd)
+  const result = await execRemoteCommand(profileId, `cd ${shq(path)} && /bin/sh -c ${shq(command)}`, {
+    signal, timeoutMs: 60_000, maxOutputBytes: 1024 * 1024,
+    timeoutMessage: '승인된 원격 명령이 중단되었습니다. 원격 실행 결과를 확인하세요.'
+  })
+  if (result.code !== 0) throw remoteExitError(result, '승인된 명령의 실행 결과를 확인해 주세요.')
+  return result.stdout.toString('utf8') + result.stderr.toString('utf8')
+}
+
 export function disposeRemote(profileId?: string): void {
   invalidateRemoteDirCache(profileId)
   connectionPool.dispose(profileId)
@@ -683,6 +715,7 @@ interface Entry {
   path: string
   isDir: boolean
   mtimeMs?: number
+  size?: number
 }
 
 export interface RfsReadProgress {
@@ -875,7 +908,7 @@ async function readRemoteDir(profileId: string, path: string, prefetch = true, f
   let localListed = false
   try {
     actualPath = await resolveRemotePath(sftp, path)
-    const list = await new Promise<{ filename: string; attrs: { mode: number; mtime?: number } }[]>(
+    const list = await new Promise<{ filename: string; attrs: { mode: number; mtime?: number; size?: number } }[]>(
       (resolve, reject) =>
         sftp.readdir(actualPath, (err, l) => (err ? reject(err) : resolve(l as never)))
     )
@@ -892,6 +925,7 @@ async function readRemoteDir(profileId: string, path: string, prefetch = true, f
         name: e.filename,
         path: makeRemote(profileId, remotePath),
         isDir,
+        size: e.attrs.size,
         mtimeMs: e.attrs.mtime ? e.attrs.mtime * 1000 : undefined
       })
     }
@@ -1416,15 +1450,39 @@ export class RemoteFileConflict extends Error {
   }
 }
 
+/** Uncached metadata for board files; missing is distinct from a disconnected server. */
+export async function rfsBoardStat(uri: string): Promise<{size: number; directory: boolean; mtimeMs: number} | null> {
+  const { profileId, path } = parseRemote(uri)
+  const sftp = await getSftp(profileId)
+  let stat: Stats
+  try {
+    stat = await sftpRequest<Stats>(sftp, (done) => sftp.lstat(path, done))
+  } catch (error) {
+    if ((error as {code?: number}).code === 2) return null
+    throw error
+  }
+  if (!stat.isDirectory() && !stat.isFile()) throw new Error('업무 보드에서는 일반 파일과 폴더만 사용할 수 있습니다.')
+  return { size: stat.size, directory: stat.isDirectory(), mtimeMs: stat.mtime * 1000 }
+}
+
+/** Board transitions can have identical size and second-resolution mtimes. */
+export async function rfsReadBoardText(uri: string): Promise<string> {
+  const { profileId, path } = parseRemote(uri)
+  const sftp = await getSftp(profileId)
+  const data = await sftpRequest<Buffer>(sftp, (done) => sftp.readFile(path, done))
+  return data.toString('utf8')
+}
+
 export async function rfsWriteText(
   uri: string,
   content: string,
-  expected?: RemoteFileSignature
+  expected?: RemoteFileSignature | null,
+  followSymlinks = true
 ): Promise<RemoteFileSignature> {
   const { profileId, path: requestedPath } = parseRemote(uri)
   const sftp = await getSftp(profileId)
   // Follow existing symlinks instead of replacing the link itself.
-  const path = await sftpRequest<string>(sftp, (done) =>
+  const path = !followSymlinks || expected === null ? requestedPath : await sftpRequest<string>(sftp, (done) =>
     sftp.realpath(requestedPath, (err, resolved) => {
       if (err && (err as Error & { code?: number }).code !== 2) done(err)
       else done(undefined, err ? requestedPath : resolved)
@@ -1434,7 +1492,9 @@ export async function rfsWriteText(
     if (err.code === 2) return undefined
     throw err
   })
+  if (expected === null && await rfsBoardStat(uri)) throw new RemoteFileConflict()
   const original = await readCurrent()
+  if (expected === null && original) throw new RemoteFileConflict(original)
   if (expected && (!original || original.size !== expected.size ||
     Math.abs(original.mtime * 1000 - (expected.mtimeMs ?? 0)) >= 1)) {
     throw new RemoteFileConflict(original)

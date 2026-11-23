@@ -65,6 +65,7 @@ function runApp({ root, temp, screenshotDir, provider, mode, remote, restart }) 
   const handle = ipcMain.handle.bind(ipcMain), on = ipcMain.on.bind(ipcMain)
   ipcMain.on = (channel, callback) => on(channel, channel.startsWith('fs:') || channel.startsWith('pty:') ? () => {} : callback)
   ipcMain.handle = (channel, handler) => handle(channel, async (event, ...args) => {
+    if (channel === 'workBoard:counts') return {}
     calls.push({ channel, args })
     if (remote && channel === 'app:generalChatDirectory') {
       assert.equal(args[0], phoneProfile.id, 'general chat targets the configured phone server')

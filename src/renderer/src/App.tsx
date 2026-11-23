@@ -15,6 +15,7 @@ import {
 } from 'react'
 import Terminal from './terminal/Terminal'
 import NotificationHistory from './NotificationHistory'
+import { WorkBoard, type WorkBoardView } from './dashboard/WorkBoard'
 import { notificationTitle, notificationBody, NOTIFICATION_HISTORY_KEY, limitNotificationHistory, notificationEventId, readNotificationHistory, writeNotificationHistory, readNotificationOutbox, saveNotificationOperation, removeNotificationOperation, type NotificationEntry } from './notificationHistoryStore'
 import CaseSidebar, { type SidebarCase, type SidebarTask } from './CaseSidebar'
 import AgentPanel, {
@@ -284,6 +285,8 @@ const NOTIFICATION_TONES: Record<Exclude<NotificationSound, 'none'>, Notificatio
     { frequency: 1480, start: 0.02, duration: 0.14, type: 'sine', gain: 0.11 }
   ]
 }
+
+interface OpenBoard { workspace: string; view: WorkBoardView; bulkSeed?: string }
 
 const normalizePasteForPty = (text: string): string =>
   text.replace(/\r\n/g, '\n').replace(/\r/g, '\n').replace(/\n/g, '\r')
@@ -4733,6 +4736,41 @@ export default function App(): JSX.Element {
     activeTermTab && activeTermTab.ssh && activeTermTab.profileId
       ? remoteUri(activeTermTab.profileId, activeTermTab.cwd)
       : (activeTermTab?.cwd ?? currentCase?.drafts)
+  const [board, setBoard] = useState<OpenBoard | null>(null)
+  const [boardCounts, setBoardCounts] = useState<Record<string, number>>({})
+  const boardDialog = useRef<HTMLDialogElement>(null)
+  useEffect(() => {
+    const api = window.lt.workBoard
+    if (!api || docOnly) return
+    let active = true
+    let request = 0
+    let timer: number | undefined
+    const refresh = async (): Promise<void> => {
+      const seq = ++request
+      try {
+        const counts = await api.counts()
+        if (active && seq === request) setBoardCounts(counts)
+      } catch { /* Keep the last known count while a board reconnects. */ }
+    }
+    const unsubscribe = api.onChange(() => {
+      if (timer !== undefined) return
+      timer = window.setTimeout(() => { timer = undefined; void refresh() }, 250)
+    })
+    void refresh()
+    return () => { active = false; clearTimeout(timer); unsubscribe() }
+  }, [docOnly])
+  const boardOpen = board !== null
+  useEffect(() => {
+    if (boardOpen) boardDialog.current?.showModal()
+  }, [boardOpen])
+  const openBoard = async (view: WorkBoardView, workspace?: string, bulkSeed?: string): Promise<void> => {
+    let target = workspace || board?.workspace || activeDraftsFolder || draftsRoot
+    if (view === 'approvals' && !workspace && !boardCounts[target ?? '']) {
+      target = Object.keys(boardCounts).find(key => boardCounts[key] > 0) ?? target
+    }
+    if (!target) target = Object.keys(boardCounts)[0] || (await window.lt.dialog.pickFolder({ title: '업무 보드 작업 폴더 선택' }))?.path
+    if (target) setBoard({ workspace: target, view, bulkSeed })
+  }
   const activeRecordsFolder = activeTermTab?.recordsFolder ?? currentCase?.records
   const activeSuggestedRecords = activeTermTab?.suggestedRecords ?? currentCase?.suggestedRecords
   const activeSuggestedRecordOptions = activeTermTab?.suggestedRecordOptions ?? currentCase?.suggestedRecordOptions
@@ -8913,6 +8951,7 @@ export default function App(): JSX.Element {
                 caseContext={agentCaseContextForTerm(t)}
                 workspaceContext={agentWorkspaceContextForTerm(t, contextAppVersion)}
                 onTasksChanged={() => setTodoNonce((value) => value + 1)}
+                onBulkInstructions={(text) => void openBoard('bulk', historyDraftsForTerm(t), text)}
                 visible={t.id === activeTerm}
                 focusNonce={termFocusNonce[t.id] ?? 0}
                 initialDraft={agentDrafts[t.id]}
@@ -9306,6 +9345,7 @@ export default function App(): JSX.Element {
                   caseContext={agentCaseContextForTerm(t)}
                 workspaceContext={agentWorkspaceContextForTerm(t, contextAppVersion)}
                 onTasksChanged={() => setTodoNonce((value) => value + 1)}
+                onBulkInstructions={(text) => void openBoard('bulk', historyDraftsForTerm(t), text)}
                   visible={t.id === visibleTermId}
                   focusNonce={termFocusNonce[t.id] ?? 0}
                   initialDraft={agentDrafts[t.id]}
@@ -9645,6 +9685,49 @@ export default function App(): JSX.Element {
     <SlashCommandPalette commands={slashCommands} onClose={() => setSlashCommandsOpen(false)} />
   ) : null
 
+  const approvalCount = Object.values(boardCounts).reduce((sum, count) => sum + count, 0)
+  const boardNavigation = (
+    <nav className="work-board-links" aria-label="업무지시">
+      <button type="button" aria-pressed={board?.view === 'board' || board?.view === 'bulk'} onClick={() => void openBoard('board')}>업무 보드</button>
+      <button type="button" aria-pressed={board?.view === 'approvals'} onClick={() => void openBoard('approvals')}>결재함 <span>{approvalCount}</span></button>
+      <button type="button" aria-pressed={board?.view === 'daily'} onClick={() => void openBoard('daily')}>일일 보고</button>
+    </nav>
+  )
+  const boardPanel = board && (
+    <dialog ref={boardDialog} className="work-board-window" aria-label="업무지시" onCancel={event => { if (event.target === event.currentTarget) setBoard(null) }}>
+      <header>
+        <b>legal-terminal</b>
+        <button type="button" onClick={() => setBoard(null)} aria-label="작업 공간으로 돌아가기">작업 공간</button>
+        {boardNavigation}
+        <span id="work-board-actions" />
+        <label>
+          작업 폴더
+          <select aria-label="업무 보드 작업 폴더" title={board.workspace} value={board.workspace} onChange={async event => {
+            const value = event.currentTarget.value
+            const workspace = value || (await window.lt.dialog.pickFolder({ title: '업무 보드 작업 폴더 선택' }))?.path
+            if (workspace) setBoard({ workspace, view: board.view })
+          }}>
+            {[...new Set([board.workspace, activeDraftsFolder, ...Object.keys(boardCounts)])].filter((path): path is string => !!path).map(path =>
+              <option key={path} value={path}>{fileNameFromPath(path) || path}{boardCounts[path] ? ` (결재 ${boardCounts[path]})` : ''} · {path}</option>
+            )}
+            <option value="">다른 폴더 선택…</option>
+          </select>
+        </label>
+      </header>
+      <WorkBoard key={board.workspace} {...board}
+        onView={view => setBoard({ workspace: board.workspace, view })}
+        onOpenFile={path => {
+          if (termOnly || board.workspace !== activeDraftsFolder) {
+            void window.lt.app.newWindow({ tabs: [{ kind: 'doc', path, title: fileNameFromPath(path) }] })
+          } else {
+            setBoard(null)
+            openFile(path, fileNameFromPath(path))
+          }
+        }}
+      />
+    </dialog>
+  )
+
   // 탭을 창 밖으로 찢어낸 '문서 전용 창': 터미널·탐색기·액티비티바 없이 문서만.
   if (docOnly) {
     return (
@@ -9684,6 +9767,7 @@ export default function App(): JSX.Element {
   if (termOnly && !docTabs.some(tab => tab.kind === 'remote-control')) {
     return (
       <div className="shell-terminalonly" {...shellDragProps}>
+        {boardPanel}
         {terminalPanel}
         <div className="statusbar">
           <span className="status-left">legal-terminal · 터미널</span>
@@ -9710,7 +9794,9 @@ export default function App(): JSX.Element {
       style={shellStyle}
       {...shellDragProps}
     >
+      {boardPanel}
       <div className="workspace-todo-header">
+        {boardNavigation}
         <TodoHeaderBadge snapshot={todoSnapshot} onOpen={() => openTodoSummary('overdue')} />
         {selectedWorkspaceTask && <div className="todo-actions" aria-label="현재 사건의 다음 행동">
           <span>내 다음 행동: {selectedWorkspaceTask.title}</span>

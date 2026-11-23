@@ -40,6 +40,7 @@ function runApp({ root, temp, chosenDir, screenshot }) {
   ipcMain.on = (channel, callback) => originalOn(channel, channel === 'fs:watch' || channel.startsWith('pty:') ? () => {} : callback)
   const realChannels = new Set(['app:generalChatDirectory', 'app:info', 'app:setWindowTitle', 'tabs:ready', 'workspace:save', 'workspace:list', 'workspace:load', 'caseManagement:get', 'caseManagement:update'])
   ipcMain.handle = (channel, handler) => register(channel, async (event, ...args) => {
+    if (channel === 'workBoard:counts') return {}
     const call = { channel, args }
     calls.push(call)
     // Opening todos during startup must win over the later general-chat directory response.

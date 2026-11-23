@@ -1,3 +1,4 @@
+import type { BoardApi } from '../shared/workBoard'
 import type { SharedUiOperation, SharedUiResult } from '../shared/sharedUiState'
 import type { JsUpcomingHearing, TodoAssigneesParams } from '../main/jurisupport'
 import type { CaseManagementState, CaseManagementPatch } from '../shared/caseManagement'
@@ -801,7 +802,25 @@ const media: MediaApi = {
   }
 }
 
+const workBoard: BoardApi = {
+  open: (workspace, folder) => ipcRenderer.invoke('workBoard:open', workspace, folder),
+  snapshot: workspace => ipcRenderer.invoke('workBoard:snapshot', workspace),
+  add: (workspace, drafts, batchId) => ipcRenderer.invoke('workBoard:add', workspace, drafts, batchId),
+  decide: (workspace, id, action, reason, expectedRevision) => ipcRenderer.invoke('workBoard:decide', workspace, id, action, reason, expectedRevision),
+  reorder: (workspace, ids) => ipcRenderer.invoke('workBoard:reorder', workspace, ids),
+  configure: (workspace, patch) => ipcRenderer.invoke('workBoard:configure', workspace, patch),
+  detail: (workspace, id) => ipcRenderer.invoke('workBoard:detail', workspace, id),
+  daily: workspace => ipcRenderer.invoke('workBoard:daily', workspace),
+  counts: () => ipcRenderer.invoke('workBoard:counts'),
+  onChange: listener => {
+    const changed = (_event: Electron.IpcRendererEvent, workspace: string, message?: string) => listener(workspace, message)
+    ipcRenderer.on('workBoard:changed', changed)
+    return () => ipcRenderer.removeListener('workBoard:changed', changed)
+  }
+}
+
 const api = {
+  workBoard,
   claudeRemoteControl: {
     open: (input) => ipcRenderer.invoke('claudeRemoteControl:open', input),
     bounds: (id, bounds) => ipcRenderer.invoke('claudeRemoteControl:bounds', id, bounds),

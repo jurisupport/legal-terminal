@@ -45,6 +45,7 @@ function runApp({ root, temp, chosenDir, screenshot }) {
       return result
     }
     if (channel === 'setup:status') return { items: [], ready: true }
+    if (channel === 'workBoard:counts') return {}
     if (channel === 'settings:get') return settings
     if (channel === 'settings:set') return Object.assign(settings, args[0])
     if (channel === 'ssh:listDir') {

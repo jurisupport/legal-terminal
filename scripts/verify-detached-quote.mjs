@@ -44,6 +44,7 @@ function runApp({ root, temp }) {
     'caseManagement:get', 'caseManagement:update'
   ])
   ipcMain.handle = (channel, handler) => handle(channel, async (event, ...args) => {
+    if (channel === 'workBoard:counts') return {}
     calls.push({ channel, windowId: BrowserWindow.fromWebContents(event.sender)?.id, args })
     if (real.has(channel)) return handler(event, ...args)
     // The quote fixture opens its conversation while startup is still loading.

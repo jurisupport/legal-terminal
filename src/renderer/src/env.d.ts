@@ -3,6 +3,7 @@ import type { SharedUiOperation, SharedUiResult } from '../../shared/sharedUiSta
 import type { DictationBackup, DictationBackupQuery } from '../../shared/dictationRecovery'
 import type { ClaudeRemoteControlApi, RemoteControlConnection } from '../../shared/claudeRemoteControl'
 import type { CaseManagementState, CaseManagementPatch } from '../../shared/caseManagement'
+import type { BoardApi } from '../../shared/workBoard'
 import type { RemotionPreviewOptions, RemotionPreviewSelection, RemotionPreviewResult } from '../../shared/remotionPreview'
 import type { MediaApi, MediaSelection, MediaViewState } from '../../shared/media'
 import type { AgentWorkspaceContext } from '../../shared/agentWorkspaceContext'
@@ -835,6 +836,7 @@ export interface TodoTerminalResult {
 }
 
 export interface LtApi {
+  workBoard: BoardApi
   claudeRemoteControl: ClaudeRemoteControlApi
   remotion: {
     open(options: RemotionPreviewOptions): Promise<RemotionPreviewResult>

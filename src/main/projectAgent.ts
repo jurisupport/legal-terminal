@@ -182,6 +182,10 @@ async function resolveFile(source: Source, path: unknown = ''): Promise<string> 
 
 async function readDocument(source: Source, path: string): Promise<{ text: string; truncated: boolean; path: string; size: number; mtimeMs?: number }> {
   const file = await resolveFile(source, path)
+  return readWorkspaceDocument(file)
+}
+
+export async function readWorkspaceDocument(file: string) {
   const info = await deps().stat(file)
   if (info.isDir) throw new Error('파일 대신 폴더가 지정되었습니다. project_list_files를 사용하세요.')
   if (info.size > MAX_FILE_BYTES) throw new Error('파일이 10MB를 초과합니다. 필요한 부분을 작은 문서로 나누어 주세요.')

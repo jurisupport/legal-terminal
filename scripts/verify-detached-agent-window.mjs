@@ -60,6 +60,7 @@ function runApp({ root, temp, closeMode }) {
     'caseManagement:get', 'caseManagement:update'
   ])
   ipcMain.handle = (channel, handler) => handle(channel, async (event, ...args) => {
+    if (channel === 'workBoard:counts') return {}
     const windowId = BrowserWindow.fromWebContents(event.sender)?.id
     calls.push({ channel, windowId, args, at: Date.now() })
     if (real.has(channel)) {

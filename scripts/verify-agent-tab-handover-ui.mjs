@@ -54,6 +54,7 @@ function runApp({ root, temp, appMain, syncBaseline }) {
   ipcMain.on = (channel, callback) => on(channel, channel.startsWith('fs:') || channel.startsWith('pty:') ? () => {} : callback)
   const real = new Set(['app:info', 'app:setWindowTitle', 'tabs:ready', 'caseManagement:get', 'caseManagement:update'])
   ipcMain.handle = (channel, handler) => handle(channel, async (event, ...args) => {
+    if (channel === 'workBoard:counts') return {}
     calls.push({ channel, args })
     // The user opens a case while the general-chat directory is still loading.
     if (channel === 'app:generalChatDirectory') return new Promise(() => {})

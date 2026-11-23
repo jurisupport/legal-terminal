@@ -146,6 +146,7 @@ interface AgentPanelProps {
   caseTabId?: string
   caseContext?: string
   workspaceContext?: AgentWorkspaceContext
+  onBulkInstructions?: (text: string) => void
   onTasksChanged?: () => void
   visible: boolean
   focusNonce?: number
@@ -2071,6 +2072,7 @@ export default function AgentPanel({
   caseContext,
   workspaceContext,
   onTasksChanged,
+  onBulkInstructions,
   visible,
   focusNonce = 0,
   initialDraft,
@@ -5217,6 +5219,11 @@ export default function AgentPanel({
             )}
           </div>
           <div className="agent-composer-right">
+            {onBulkInstructions && input.trim() && (
+              <button type="button" title="작성한 내용을 업무별로 나누고 담당자를 지정합니다" onClick={() => onBulkInstructions(input)}>
+                일괄 지시
+              </button>
+            )}
             <AgentDictationButton
               active={visible && !authActive}
               onBusyChange={setDictationBusy}
