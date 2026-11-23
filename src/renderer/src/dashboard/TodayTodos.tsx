@@ -10,7 +10,25 @@ import { TodoResolution } from './TodoDetails'
 
 export default function TodayTodos({ snapshot, caseUi, onChanged, onStartTask, onAskNextAction, onOpenTodos }: TaskActionProps & { snapshot: TodoSnapshot; caseUi?: CaseManagementUiController; onChanged?: () => void; onOpenTodos?: () => void }): JSX.Element {
   const [completing, setCompleting] = useState<JsTodo | null>(null)
+  const [startingId, setStartingId] = useState<string | null>(null)
   const [error, setError] = useState('')
+  const changed = (): void => {
+    snapshot.refresh()
+    onChanged?.()
+  }
+  const startTodo = async (todo: JsTodo): Promise<void> => {
+    setStartingId(todo.id)
+    setError('')
+    try {
+      const result = await window.lt.todo.update(todo.id, { status: 'in_progress', version: todo.version })
+      if (!result.ok) throw new Error(result.error || '진행중 변경 실패')
+      changed()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setStartingId(null)
+    }
+  }
   const model = buildCaseManagement([], snapshot.todos ?? [], caseUi?.state?.ui ?? emptyCaseManagementUi())
   const focusIds = model.ui.focus?.taskIds ?? []
   const toggleFocus = (id: string): void => {
@@ -18,9 +36,15 @@ export default function TodayTodos({ snapshot, caseUi, onChanged, onStartTask, o
     void caseUi.update({ focus: { date: model.today, taskIds: focusIds.includes(id) ? focusIds.filter((value) => value !== id) : [...focusIds, id] }, previousFocus: model.ui.previousFocus })
   }
   const rows = (todos: JsTodo[]): JSX.Element => <ul className="agenda todo-agenda">{todos.map((todo) => <li key={todo.id} className="agenda-row todo-agenda-row">
-    <button className="todo-check" aria-label={`${todo.title} 완료`} onClick={() => setCompleting(todo)}>✓</button>
+    <button className="todo-check" disabled={startingId !== null} aria-label={`${todo.title} 완료`} onClick={() => setCompleting(todo)}>✓</button>
     <span className="agenda-body"><span className="agenda-note">{todo.title}</span><span className="agenda-case">{[todo.caseNumber, todo.caseName].filter(Boolean).join(' · ') || '사건 미연결'}</span><span className="agenda-court">{taskReasons(todo).join(' · ')}{todo.dueDate ? ` · 기한 ${kstDateKey(todo.dueDate) || '날짜 확인 필요'}` : ''}{todo.waitingFor ? ` · ${todo.waitingFor}` : ''}</span>
-      <span className="todo-actions">{onStartTask && <button className="todo-small" onClick={() => { setError(''); void Promise.resolve().then(() => onStartTask(todo)).catch((e) => setError(String(e))) }}>지금 시작</button>}{caseUi && <button className="todo-small" aria-pressed={focusIds.includes(todo.id)} disabled={caseUi.busy || !caseUi.state} onClick={() => toggleFocus(todo.id)}>{focusIds.includes(todo.id) ? '오늘 선택 해제' : '오늘 선택'}</button>}{onAskNextAction && <button className="todo-small" onClick={() => onAskNextAction(todo)}>AI 다음 행동</button>}</span>
+      <span className="todo-actions">
+        {todo.status === 'in_progress' ? <span className="todo-status st-in_progress">진행중</span> : (
+          <button className="todo-small" aria-label={`${todo.title} 진행중으로 변경`} disabled={startingId !== null || snapshot.loading} onClick={() => void startTodo(todo)}>
+            {startingId === todo.id ? '변경 중…' : '진행 시작'}
+          </button>
+        )}
+        {onStartTask && <button className="todo-small" onClick={() => { setError(''); void Promise.resolve().then(() => onStartTask(todo)).catch((e) => setError(String(e))) }}>지금 시작</button>}{caseUi && <button className="todo-small" aria-pressed={focusIds.includes(todo.id)} disabled={caseUi.busy || !caseUi.state} onClick={() => toggleFocus(todo.id)}>{focusIds.includes(todo.id) ? '오늘 선택 해제' : '오늘 선택'}</button>}{onAskNextAction && <button className="todo-small" onClick={() => onAskNextAction(todo)}>AI 다음 행동</button>}</span>
     </span>
   </li>)}</ul>
   const undated = model.openTasks.filter((todo) => !todo.dueDate)
@@ -33,6 +57,6 @@ export default function TodayTodos({ snapshot, caseUi, onChanged, onStartTask, o
     <details><summary>앞으로 7일 마감 · {model.upcomingTasks.length}건</summary>{rows(model.upcomingTasks)}</details>
     <details><summary>계획 미정 · {undated.length}건</summary>{rows(undated)}</details>
     {onOpenTodos && <button className="todo-small" onClick={onOpenTodos}>전체 할일 보기</button>}
-    {completing && <TodoResolution todo={completing} action="complete" onClose={() => setCompleting(null)} onSaved={() => { setCompleting(null); snapshot.refresh(); onChanged?.() }} />}
+    {completing && <TodoResolution todo={completing} action="complete" onClose={() => setCompleting(null)} onSaved={() => { setCompleting(null); changed() }} />}
   </div>
 }
