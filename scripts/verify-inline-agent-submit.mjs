@@ -120,6 +120,9 @@ antigravity.ctx.inlineStateRef.current.queuesNewInput = true
 assert.equal((await antigravity.actions.submit(request)).ok, true)
 assert.equal(antigravity.sent[1].payload.permissionMode, 'acceptEdits')
 assert.equal(antigravity.sent[1].payload.delivery, 'queue')
+antigravity.ctx.inlineStateRef.current.mode = 'bypassPermissions'
+assert.equal((await antigravity.actions.submit(request)).ok, true)
+assert.equal(antigravity.sent[2].payload.permissionMode, 'bypassPermissions')
 
 const prepared = deferred()
 const queued = fixture()

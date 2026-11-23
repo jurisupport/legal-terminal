@@ -295,11 +295,12 @@ const modeLabels: { value: AgentPermissionMode; label: string; title: string }[]
 
 const antigravityModes: typeof modeLabels = [
   { value: 'ask', label: '읽기 전용', title: '작업 폴더의 파일을 읽고 답합니다' },
-  { value: 'acceptEdits', label: '작업 폴더 편집', title: '현재 작업 폴더의 파일을 생성하고 편집합니다' }
+  { value: 'acceptEdits', label: '작업 폴더 편집', title: '현재 작업 폴더의 파일을 생성하고 편집합니다' },
+  { value: 'bypassPermissions', label: '전체 접근', title: '작업 폴더 밖의 파일 편집과 명령 실행도 별도 확인 없이 허용합니다' }
 ]
 
 function agentRequestMode(provider: AgentProvider, mode: AgentPermissionMode): AgentPermissionMode {
-  return provider === 'antigravity' && mode !== 'acceptEdits' ? 'ask' : mode
+  return provider === 'antigravity' && mode !== 'acceptEdits' && mode !== 'bypassPermissions' ? 'ask' : mode
 }
 
 export const agentProviderLabels: Record<AgentProvider, string> = {
@@ -2238,7 +2239,6 @@ export default function AgentPanel({
     setQuotedMessage(null)
     setAuthStatus(usesAgentAuth ? 'checking' : 'unavailable')
     setAuthStatusMessage('')
-    setAntigravityMode('ask')
     setModelOptions([])
     modelLoadStartedRef.current = false
     setModelPickerOpen(false)
@@ -2385,27 +2385,21 @@ export default function AgentPanel({
     copyFeedbackTimerRef.current = setTimeout(() => setCopyFeedback(''), 1400)
   }, [])
 
-  const persistPermissionMode = useCallback((nextMode: AgentPermissionMode): void => {
-    window.lt.settings
-      .set({ agentDefaultPermissionMode: nextMode })
-      .then((settings) => {
-        window.dispatchEvent(new CustomEvent<AppSettings>(SETTINGS_UPDATED_EVENT, { detail: settings }))
-      })
-      .catch(() => {
-        /* 권한 모드 저장 실패는 현재 세션 동작을 막지 않는다. */
-      })
-  }, [])
-
   const selectPermissionMode = useCallback(
     (nextMode: AgentPermissionMode, persist = true): void => {
-      if (isAntigravity) {
-        setAntigravityMode(agentRequestMode(provider, nextMode))
-      } else {
-        setDefaultMode(nextMode)
-        if (persist) persistPermissionMode(nextMode)
-      }
+      const selected = agentRequestMode(provider, nextMode)
+      const antigravity = provider === 'antigravity'
+      if (antigravity) setAntigravityMode(selected)
+      else setDefaultMode(selected)
+      if (!persist) return
+      window.lt.settings
+        .set(antigravity ? { antigravityPermissionMode: selected } : { agentDefaultPermissionMode: selected })
+        .then((settings) => {
+          window.dispatchEvent(new CustomEvent<AppSettings>(SETTINGS_UPDATED_EVENT, { detail: settings }))
+        })
+        .catch(() => setError('현재 대화에 권한을 적용했지만 기본 권한을 저장하지 못했습니다.'))
     },
-    [isAntigravity, provider, persistPermissionMode]
+    [provider]
   )
 
   const scrollTimelineToBottom = useCallback((): void => {
@@ -2701,6 +2695,7 @@ export default function AgentPanel({
       if (!alive) return
       setAgentFontSize(clampAgentFontSize(settings.agentFontSize))
       setDefaultMode(resolveAgentPermissionMode(settings.agentDefaultPermissionMode))
+      setAntigravityMode(agentRequestMode('antigravity', resolveAgentPermissionMode(settings.antigravityPermissionMode)))
       setDefaultModels({
         ...(typeof settings.agentDefaultModels?.claude === 'string'
           ? { claude: settings.agentDefaultModels.claude }

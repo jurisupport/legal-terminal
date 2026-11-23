@@ -30,6 +30,10 @@ type AntigravitySession = AgentExecutionIdentity & {
 function turnArgs(session: AntigravitySession): string[] {
   const args = ['--input-format', 'stream-json', '--output-format', 'stream-json', '--disable-slash-commands']
   if (session.permissionMode === 'acceptEdits') args.push('--mode', 'accept-edits', '--sandbox')
+  if (session.permissionMode === 'bypassPermissions') {
+    args.push('--mode', 'accept-edits', '--dangerously-skip-permissions', '--settings',
+      JSON.stringify({ allowNonWorkspaceAccess: true, enableTerminalSandbox: false }))
+  }
   if (session.model) args.push('--model', session.model)
   if (session.resumeSessionId) args.push('--conversation', session.resumeSessionId)
   return args
@@ -88,8 +92,11 @@ if not os.access(binary, os.X_OK):
     binary = shutil.which('agy')
 if not binary:
     sys.exit('SSH 서버에서 Antigravity CLI를 찾을 수 없습니다. 서버에 agy를 설치한 뒤 다시 보내 주세요.')
-policy = json.loads(sys.argv[1])
 cwd = os.getcwd()
+os.environ['PWD'] = cwd
+if not sys.argv[1]:
+    os.execv(binary, [str(binary)] + sys.argv[2:])
+policy = json.loads(sys.argv[1])
 editable = policy['toolPermission'] == 'proceed-in-sandbox'
 if editable:
     if cwd == '/' or any(character in cwd for character in ('\r', '\n', '\0')):
@@ -115,13 +122,13 @@ except FileNotFoundError:
     pass
 except (OSError, ValueError, AttributeError, TypeError):
     sys.exit('SSH 서버에서 Antigravity 권한 설정을 읽을 수 없습니다. 서버의 CLI 설정 파일을 확인해 주세요.')
-os.environ['PWD'] = cwd
 os.execv(binary, [str(binary), '--settings', json.dumps(policy)] + sys.argv[2:])
 `
 
 export function remoteAntigravityCommand(session: AntigravitySession): string {
   const quote = (value: string): string => `'${value.replace(/'/g, "'\\''")}'`
-  const args = [JSON.stringify(panelSettings(session)), ...turnArgs(session)]
+  const restrictedPolicy = session.permissionMode === 'bypassPermissions' ? '' : JSON.stringify(panelSettings(session))
+  const args = [restrictedPolicy, ...turnArgs(session)]
   return `cd ${quote(session.cwd)} && exec ${agentExecutionCommand(session)} python3 -c ${quote(remoteLaunch)} ${args.map(quote).join(' ')}`
 }
 
@@ -136,7 +143,8 @@ export async function runAntigravityTurn(
 ): Promise<void> {
   const bin = antigravityExecutable()
   const cwd = await realpath(session.cwd)
-  const args = [...turnArgs(session), '--settings', await chatSettings(session, cwd)]
+  const args = turnArgs(session)
+  if (session.permissionMode !== 'bypassPermissions') args.push('--settings', await chatSettings(session, cwd))
   if (signal.aborted) return
   const wrapped = process.platform !== 'win32'
   const proc = spawn(wrapped ? 'python3' : bin, wrapped ? [...agentExecutionArgs(session), bin, ...args] : args, {
@@ -197,7 +205,7 @@ function readTurn(
         completed = event.result?.status === 'SUCCESS'
         const hasAnswer = typeof event.result?.response === 'string' && event.result.response.trim()
         if (completed && !hasAnswer && Array.isArray(event.result.denied_actions) && event.result.denied_actions.length) {
-          failure = 'Antigravity가 작업에 필요한 권한을 받지 못했습니다. 파일 저장은 작업 폴더 편집 모드를 선택하고, 같은 문제가 계속되면 실행 중인 컴퓨터의 CLI 권한 설정을 확인해 주세요.'
+          failure = 'Antigravity가 작업에 필요한 권한을 받지 못했습니다. 선택한 권한 범위와 실행 중인 컴퓨터의 Antigravity CLI 권한 설정을 확인해 주세요.'
         } else if (!completed) {
           const error = typeof event.result?.error === 'string' ? event.result.error : ''
           if (!checkLogin(error)) failure = error || `Antigravity 응답이 중단되었습니다 (${event.result?.status ?? 'unknown'}).`

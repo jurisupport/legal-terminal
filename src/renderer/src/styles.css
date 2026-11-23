@@ -5248,6 +5248,9 @@ button.agent-attachment-chip {
   padding: 0 9px;
 }
 .agent-model-list {
+  max-height: min(40vh, 24rem);
+  overflow-y: auto;
+  overscroll-behavior-y: contain;
   display: grid;
   gap: 6px;
 }

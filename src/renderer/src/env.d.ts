@@ -510,6 +510,7 @@ export interface AppSettings {
   mdFontSize?: number
   agentFontSize?: number
   agentDefaultPermissionMode?: AgentPermissionMode
+  antigravityPermissionMode?: AgentPermissionMode
   agentDefaultProvider?: AgentProvider
   agentDefaultModels?: Partial<Record<AgentProvider, string>>
   explorerSortMode?: string

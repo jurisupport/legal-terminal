@@ -81,6 +81,7 @@ export interface Settings {
   agentFontSize?: number
   /** Agent Panel 기본 권한 모드 */
   agentDefaultPermissionMode?: AgentPermissionMode
+  antigravityPermissionMode?: AgentPermissionMode
   /** 새 Agent Panel 기본 AI */
   agentDefaultProvider?: AgentProvider
   /** AI별 새 Agent 세션 기본 모델 */

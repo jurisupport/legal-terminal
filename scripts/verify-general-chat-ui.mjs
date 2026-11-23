@@ -12,7 +12,7 @@ const screenshotDir = path.join(temp, 'screenshots')
 await fs.mkdir(screenshotDir, { recursive: true })
 await fs.access(path.join(root, 'out/main/index.js'))
 
-function runApp({ root, temp, screenshotDir, provider, mode, remote }) {
+function runApp({ root, temp, screenshotDir, provider, mode, remote, restart }) {
   const { app, BrowserWindow, ipcMain, session } = require('electron')
   const fs = require('node:fs'), path = require('node:path'), assert = require('node:assert/strict')
   const calls = [], errors = [], unexpected = [], agents = new Map()
@@ -48,6 +48,11 @@ function runApp({ root, temp, screenshotDir, provider, mode, remote }) {
   let releaseSettings
   const settingsReady = new Promise(resolve => { releaseSettings = resolve })
   app.setPath('userData', path.join(temp, 'profile'))
+  const configPath = path.join(app.getPath('userData'), 'config.json')
+  if (!restart) {
+    fs.mkdirSync(app.getPath('userData'), { recursive: true })
+    fs.writeFileSync(configPath, JSON.stringify(settings))
+  }
   app.setPath('home', homeDir)
   BrowserWindow.prototype.show = function () {}
   // Startup maximization would override the hidden test window's requested viewport.
@@ -67,7 +72,8 @@ function runApp({ root, temp, screenshotDir, provider, mode, remote }) {
     }
     if (['app:info', 'app:generalChatDirectory', 'app:setWindowTitle', 'tabs:ready', 'caseManagement:get', 'caseManagement:update'].includes(channel)) return handler(event, ...args)
     if (channel === 'setup:status') return { items: [], ready: true }
-    if (channel === 'settings:get') { await settingsReady; return settings }
+    if (channel === 'settings:get') await settingsReady
+    if (channel === 'settings:get' || channel === 'settings:set') return handler(event, ...args)
     if (channel === 'case:history' || channel === 'case:addHistory') return history
     if (channel === 'js:tokenStatus') return 'missing'
     if (channel === 'js:hasToken') return false
@@ -108,7 +114,9 @@ function runApp({ root, temp, screenshotDir, provider, mode, remote }) {
     if (channel === 'workspace:autoObserve') return
     if (channel === 'workspace:list') return { ok: true, entries: [] }
     if (channel === 'agent:models') return { ok: true, models: agents.get(args[0])?.provider === 'antigravity'
-      ? [{ id: 'gemini-test', model: 'gemini-test', displayName: 'Gemini Test' }] : [] }
+      ? Array.from({ length: 36 }, (_, i) => ({
+        id: `gemini-${i}`, model: `gemini-${i}`, displayName: `Gemini ${i}`
+      })) : [] }
     if (channel === 'agent:create') {
       const options = args[0]
       agents.set(options.id, options)
@@ -256,8 +264,9 @@ function runApp({ root, temp, screenshotDir, provider, mode, remote }) {
     assert.equal(agent.permissionMode, 'ask', 'Antigravity starts read-only regardless of the global mode')
     assert.match(await evaluate(`${panel}.querySelector('.agent-mode-trigger').textContent`), /읽기 전용/)
     await evaluate(`${panel}.querySelector('.agent-mode-trigger').click()`)
-    assert.equal(await evaluate(`${panel}.querySelectorAll('.agent-mode-popover button').length`), 2)
-    await evaluate(`[...${panel}.querySelectorAll('.agent-mode-popover button')].find(b => b.textContent.includes('작업 폴더 편집')).click()`)
+    assert.deepEqual(await evaluate(`[...${panel}.querySelectorAll('.agent-mode-popover button span')].map(el => el.textContent)`), ['읽기 전용', '작업 폴더 편집', '전체 접근'])
+    const selectedMode = agent.source === 'ssh' ? '작업 폴더 편집' : '전체 접근'
+    await evaluate(`[...${panel}.querySelectorAll('.agent-mode-popover button')].find(b => b.textContent.includes(${JSON.stringify(selectedMode)})).click()`)
     if (agent.source === 'ssh') {
       await evaluate(`(() => { const el = window.visibleComposer(); Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set.call(el, '/model'); el.dispatchEvent(new Event('input', { bubbles: true })); })()`)
       await wait(() => evaluate(`!${panel}.querySelector('.agent-send-btn').disabled`), 'model command ready')
@@ -266,12 +275,36 @@ function runApp({ root, temp, screenshotDir, provider, mode, remote }) {
       await evaluate(`${panel}.querySelector('.agent-model-btn').click()`)
     }
     await wait(() => evaluate(`!!${panel}.querySelector('.agent-model-main')`), 'available Antigravity models')
-    await evaluate(`${panel}.querySelector('.agent-model-main').click()`)
-    await wait(() => evaluate(`${panel}.querySelector('.agent-model-btn').textContent === 'Gemini Test'`), 'selected Antigravity model')
-    assert.ok(calls.some(call => call.channel === 'agent:setModel' && call.args[0].sessionId === agent.id && call.args[0].model === 'gemini-test'))
+    const list = `${panel}.querySelector('.agent-model-list')`
+    const last = `[...${list}.querySelectorAll('.agent-model-main')].at(-1)`
+    const point = await evaluate(`(() => {
+      const rect = ${list}.getBoundingClientRect();
+      return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+    })()`)
+    assert.ok(await evaluate(`${last}.getBoundingClientRect().top > ${list}.getBoundingClientRect().bottom`))
+    const debuggerClient = win.webContents.debugger
+    debuggerClient.attach()
+    try {
+      await debuggerClient.sendCommand('Input.dispatchMouseEvent', { type: 'mouseWheel', ...point, deltaX: 0, deltaY: 5000 })
+      await wait(() => evaluate(`${last}.getBoundingClientRect().bottom <= ${list}.getBoundingClientRect().bottom`), 'wheel reaches the final model')
+      const target = await evaluate(`(() => {
+        const rect = ${last}.getBoundingClientRect();
+        return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+      })()`)
+      for (const type of ['mousePressed', 'mouseReleased']) {
+        await debuggerClient.sendCommand('Input.dispatchMouseEvent', { type, ...target, button: 'left', clickCount: 1 })
+      }
+    } finally {
+      debuggerClient.detach()
+    }
+    await wait(() => evaluate(`${panel}.querySelector('.agent-model-btn').textContent === 'Gemini 35'`), 'selected final Antigravity model')
+    assert.ok(calls.some(call => call.channel === 'agent:setModel' && call.args[0].sessionId === agent.id && call.args[0].model === 'gemini-35'))
     assert.equal(calls.some(call => call.channel === 'settings:set' && call.args[0].agentDefaultModels), false, 'model stays in this session and on its own host')
-    assert.equal(settings.agentDefaultPermissionMode, 'bypassPermissions', 'Antigravity mode is scoped to the current panel')
-    assert.match(await evaluate(`${panel}.querySelector('.agent-mode-trigger').textContent`), /작업 폴더 편집/)
+    const saved = JSON.parse(fs.readFileSync(configPath, 'utf8'))
+    assert.equal(saved.antigravityPermissionMode, agent.source === 'ssh' ? 'acceptEdits' : 'bypassPermissions')
+    assert.equal(saved.agentDefaultPermissionMode, 'bypassPermissions')
+    assert.equal(calls.some(call => call.channel === 'settings:set' && 'agentDefaultPermissionMode' in call.args[0]), false)
+    assert.ok((await evaluate(`${panel}.querySelector('.agent-mode-trigger').textContent`)).includes(selectedMode))
   }
   const checkScope = (agent, profile = phoneProfile, expectedProvider = remote ? 'claude' : provider) => {
     assert.equal(agent.provider, expectedProvider)
@@ -300,7 +333,22 @@ function runApp({ root, temp, screenshotDir, provider, mode, remote }) {
       })
       if (mode === 'navigate') await evaluate(`document.querySelector('.activity-item[title="할일"]').click()`)
       releaseSettings()
-      if (mode === 'navigate') {
+      if (restart) {
+        await test('restores the saved Antigravity permission after restarting the app', async () => {
+          await wait(() => [...agents.values()].some(agent => agent.provider === 'antigravity'), 'restored Antigravity default')
+          const fresh = [...agents.values()].find(agent => agent.provider === 'antigravity')
+          assert.equal(fresh.permissionMode, remote ? 'acceptEdits' : 'bypassPermissions')
+          assert.equal(fresh.source, remote ? 'ssh' : 'local')
+          await wait(() => evaluate(`window.visibleComposer()?.closest('.agent-panel').querySelector('.agent-mode-trigger')?.textContent.includes('${remote ? '작업 폴더 편집' : '전체 접근'}')`), 'restored permission shown')
+          const panel = "window.visibleComposer().closest('.agent-panel')"
+          await evaluate(`${panel}.querySelector('.agent-mode-trigger').click()`)
+          await evaluate(`[...${panel}.querySelectorAll('.agent-mode-popover button')].find(el => el.textContent.includes('읽기 전용')).click()`)
+          await wait(() => JSON.parse(fs.readFileSync(configPath, 'utf8')).antigravityPermissionMode === 'ask', 'read-only preference saved')
+          const existingIds = new Set(agents.keys())
+          await evaluate(`document.querySelector('.work-right button[title="새 대화"]').click()`)
+          await wait(() => [...agents.values()].some(agent => !existingIds.has(agent.id) && agent.provider === 'antigravity' && agent.permissionMode === 'ask'), 'new conversation uses latest read-only selection')
+        })
+      } else if (mode === 'navigate') {
         await test('does not replace a view chosen while startup is still loading', async () => {
           await wait(() => evaluate(`!document.querySelector('.general-chat-button').disabled`), 'general chat directory ready')
           await evaluate(`new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))`)
@@ -368,9 +416,8 @@ function runApp({ root, temp, screenshotDir, provider, mode, remote }) {
           originalCaseId = await evaluate(`document.querySelector('.case-sidebar-group.active').dataset.caseId`)
           const before = agents.size
           const directoryCalls = calls.filter(call => call.channel === 'app:generalChatDirectory').length
-          settings.sshProfiles = [replacementProfile]
-          settings.agentDefaultProvider = 'antigravity'
-          await evaluate(`window.dispatchEvent(new CustomEvent('lt:settings-updated', { detail: ${JSON.stringify(settings)} }))`)
+          const patch = { sshProfiles: [replacementProfile], agentDefaultProvider: 'antigravity' }
+          await evaluate(`(async () => window.dispatchEvent(new CustomEvent('lt:settings-updated', { detail: await window.lt.settings.set(${JSON.stringify(patch)}) })))()`)
           await wait(() => calls.filter(call => call.channel === 'app:generalChatDirectory').length > directoryCalls, 'replacement server directory prepared')
           await wait(() => evaluate(`!document.querySelector('.general-chat-button').disabled`), 'replacement server ready')
           await evaluate(`document.querySelector('.general-chat-button').click()`)
@@ -444,7 +491,7 @@ function runApp({ root, temp, screenshotDir, provider, mode, remote }) {
           await checkUnifiedChat()
           await capture(`initial-${provider}`)
         })
-        if (provider === 'antigravity') await test('selects a CLI model and workspace edit mode', () => selectAgyModelAndMode(first))
+        if (provider === 'antigravity') await test('selects a CLI model and full access', () => selectAgyModelAndMode(first))
         await checkDictation()
         await test('keeps one input and preserves its draft in a narrow window', async () => {
           await evaluate(`(() => { const input = window.visibleComposer(); Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set.call(input, '아직 전송하지 않은 일반 질문'); input.dispatchEvent(new Event('input', { bubbles: true })) })()`)
@@ -496,7 +543,7 @@ function runApp({ root, temp, screenshotDir, provider, mode, remote }) {
           await wait(() => evaluate(`window.visibleComposer().closest('.agent-panel').textContent.includes('안녕하세요. 사건을 선택하지 않아도')`), 'mocked answer rendered')
           assert.deepEqual(await evaluate(`[...window.visibleComposer().closest('.agent-panel').querySelectorAll('.agent-msg time')].map(el => el.dateTime)`), ['2026-03-03T04:05:00.000Z', '2026-03-03T04:06:00.000Z'])
           const sent = calls.find(call => call.channel === 'agent:send').args[0]
-          if (provider === 'antigravity') assert.equal(sent.input.permissionMode, 'acceptEdits')
+          if (provider === 'antigravity') assert.equal(sent.input.permissionMode, 'bypassPermissions')
           assert.equal(sent.sessionId, first.id)
           assert.equal(sent.input.text, '일반 질문은 어떻게 시작하나요?')
           checkScope({ ...first, workspaceContext: sent.input.workspaceContext })
@@ -509,6 +556,7 @@ function runApp({ root, temp, screenshotDir, provider, mode, remote }) {
           const second = [...agents.values()].find(agent => agent.id !== first.id)
           checkScope(second)
           assert.notEqual(second.id, first.id)
+          if (provider === 'antigravity') assert.equal(second.permissionMode, 'bypassPermissions')
           assert.equal(second.cwd, first.cwd)
           await wait(() => evaluate(`window.visibleComposer()?.closest('.agent-panel').textContent.includes('무엇이 궁금하신가요?')`), 'new conversation empty state')
           assert.equal(calls.some(call => call.channel.startsWith('dialog:')), false)
@@ -551,9 +599,9 @@ delete env.ELECTRON_RUN_AS_NODE
 try {
   const scenarios = process.argv.includes('--remote') ? [{ provider: 'codex', mode: '', remote: true }]
     : [{ provider: 'codex', mode: '' }, { provider: 'claude', mode: '' }, { provider: 'antigravity', mode: '' }, { provider: 'codex', mode: 'docOnly' }, { provider: 'codex', mode: 'termOnly' }, { provider: 'codex', mode: 'navigate' }]
-  for (const scenario of scenarios) {
+  for (const scenario of scenarios.flatMap(s => s.remote || s.provider === 'antigravity' ? [s, { ...s, restart: true }] : [s])) {
     const scenarioTemp = path.join(temp, `${scenario.provider}-${scenario.mode || 'main'}`)
-    await fs.mkdir(scenarioTemp)
+    await fs.mkdir(scenarioTemp, { recursive: true })
     const entry = path.join(scenarioTemp, 'main.cjs')
     await fs.writeFile(entry, `(${runApp.toString()})(${JSON.stringify({ root, temp: scenarioTemp, screenshotDir, ...scenario })})`)
     const code = await new Promise((resolve, reject) => {

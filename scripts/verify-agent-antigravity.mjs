@@ -28,35 +28,43 @@ if args == ['models']:
     print(host + '-gemini-high\tGemini (High)')
     sys.exit(0)
 assert args[args.index('--output-format')+1] == 'stream-json'
-assert '--dangerously-skip-permissions' not in args
+assert args.count('--settings') == 1
 settings = json.loads(args[args.index('--settings')+1])
 prompt = json.load(sys.stdin)['message']['content']
-assert settings['allowNonWorkspaceAccess'] is False
-denied = set(settings['permissions']['deny'])
-assert {'read_url(*)', 'execute_url(*)', 'mcp(*)', 'read_file(private/**)'} <= denied
-if 'simulate-edit' in prompt:
-    assert args[args.index('--mode')+1] == 'accept-edits' and '--sandbox' in args
-    assert args[args.index('--model')+1] == "mock-model '$HOME'"
-    assert ('write_file(*)' in denied) == ('strict-policy' in prompt)
-    native_files_only = any(character in os.getcwd() for character in '*?[]')
-    assert ('command(*)' in denied) == (native_files_only or 'strict-policy' in prompt)
-    assert 'write_file(protected/**)' in denied and 'command(rm)' in denied
-    assert {'command(git)', 'write_file(needs-review/)'} <= set(settings['permissions']['ask'])
-    assert {'command(git)', 'write_file(needs-review/)'} <= denied
-    expected = 'strict' if 'strict-policy' in prompt else ('request-review' if 'review-policy' in prompt else 'proceed-in-sandbox')
-    assert settings['toolPermission'] == expected
-    target = './' if native_files_only else os.path.realpath(os.getcwd())
-    assert settings['permissions']['allow'] == ([] if expected == 'strict' else ['write_file(' + target + ')'])
-    assert 'unsandboxed(*)' in denied
-else:
-    assert {'write_file(*)', 'command(*)'} <= denied
-    assert settings['permissions']['allow'] == []
-    assert '--mode' not in args
-    assert settings['toolPermission'] == 'strict'
-assert 'read_file(drafts/**)' in settings['permissions']['ask']
 if 'LT_REMOTE_AGY_CWD' in os.environ:
     assert os.path.samefile(os.getcwd(), os.environ['LT_REMOTE_AGY_CWD'])
-    assert 'read_file(remote-only/**)' in settings['permissions']['deny']
+if 'simulate-full' in prompt:
+    assert '--dangerously-skip-permissions' in args and '--sandbox' not in args
+    assert args[args.index('--mode')+1] == 'accept-edits'
+    assert settings == {'allowNonWorkspaceAccess': True, 'enableTerminalSandbox': False}
+    assert args[args.index('--model')+1] == "mock-model '$HOME'"
+else:
+    assert '--dangerously-skip-permissions' not in args
+    assert settings['allowNonWorkspaceAccess'] is False
+    denied = set(settings['permissions']['deny'])
+    assert {'read_url(*)', 'execute_url(*)', 'mcp(*)', 'read_file(private/**)'} <= denied
+    if 'simulate-edit' in prompt:
+        assert args[args.index('--mode')+1] == 'accept-edits' and '--sandbox' in args
+        assert args[args.index('--model')+1] == "mock-model '$HOME'"
+        assert ('write_file(*)' in denied) == ('strict-policy' in prompt)
+        native_files_only = any(character in os.getcwd() for character in '*?[]')
+        assert ('command(*)' in denied) == (native_files_only or 'strict-policy' in prompt)
+        assert 'write_file(protected/**)' in denied and 'command(rm)' in denied
+        assert {'command(git)', 'write_file(needs-review/)'} <= set(settings['permissions']['ask'])
+        assert {'command(git)', 'write_file(needs-review/)'} <= denied
+        expected = 'strict' if 'strict-policy' in prompt else ('request-review' if 'review-policy' in prompt else 'proceed-in-sandbox')
+        assert settings['toolPermission'] == expected
+        target = './' if native_files_only else os.path.realpath(os.getcwd())
+        assert settings['permissions']['allow'] == ([] if expected == 'strict' else ['write_file(' + target + ')'])
+        assert 'unsandboxed(*)' in denied
+    else:
+        assert {'write_file(*)', 'command(*)'} <= denied
+        assert settings['permissions']['allow'] == []
+        assert '--mode' not in args
+        assert settings['toolPermission'] == 'strict'
+    assert 'read_file(drafts/**)' in settings['permissions']['ask']
+    if 'LT_REMOTE_AGY_CWD' in os.environ:
+        assert 'read_file(remote-only/**)' in settings['permissions']['deny']
 native = args[args.index('--conversation')+1] if '--conversation' in args else str(uuid.uuid4())
 if 'simulate-login' in prompt:
     print('Authentication required: https://accounts.google.com/o/oauth2/auth?state=private-test-state', file=sys.stderr, flush=True)
@@ -201,6 +209,8 @@ try {
         await writeFile(file, JSON.stringify({ toolPermission: policy, permissions }))
         assert.equal(await reply(sessionId, 'simulate-edit ' + marker, 'acceptEdits'), editId)
       }
+      assert.equal(await reply(sessionId, 'simulate-full', 'bypassPermissions'), editId)
+      assert.equal(await reply(sessionId, 'simulate-edit review-policy', 'acceptEdits'), editId)
       await writeFile(file, original)
       assert.equal(await reply(sessionId, '읽기 전용으로 전환', 'ask'), editId)
     } finally {
