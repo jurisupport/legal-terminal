@@ -174,6 +174,7 @@ function runApp({ root, temp, screenshotDir, provider, mode, remote }) {
         const tone = window.testAudio.createOscillator();
         const output = window.testAudio.createMediaStreamDestination(); tone.connect(output); tone.start();
         window.testMicStream = output.stream;
+        window.toneStartedAt = undefined;
         window.originalGetUserMedia = navigator.mediaDevices.getUserMedia;
         navigator.mediaDevices.getUserMedia = async () => output.stream;
         window.originalMicSource = AudioContext.prototype.createMediaStreamSource;
@@ -192,8 +193,12 @@ function runApp({ root, temp, screenshotDir, provider, mode, remote }) {
       await wait(() => evaluate(`(() => {
         const samples = new Float32Array(window.testMicProbe.fftSize);
         window.testMicProbe.getFloatTimeDomainData(samples);
-        return samples.some(sample => Math.abs(sample) > 0.05);
-      })()`), 'recorder receives non-silent microphone frames')
+        if (!samples.some(sample => Math.abs(sample) > 0.05)) return false;
+        // The input analyser can see the tone before the newly connected recorder has processed its first block.
+        const context = window.testMicProbe.context;
+        window.toneStartedAt ??= context.currentTime;
+        return context.currentTime - window.toneStartedAt >= 0.5;
+      })()`), 'recorder receives a sustained microphone tone')
       assert.equal(await evaluate(`(() => {
         const input = window.visibleComposer();
         const notice = input.closest('.agent-panel').querySelector('.agent-dictation-status');
