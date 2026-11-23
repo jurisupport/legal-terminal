@@ -102,6 +102,7 @@ async function electronCheck({ root, temp, output }) {
     const labels = await run("return [...document.querySelectorAll('.agent-attachments.pending .agent-attachment-chip')].map(item=>({text:item.textContent,title:item.title}))")
     assert.ok(labels.some(item => item.text.includes('0:00.400–0:00.900')))
     assert.ok(labels.some(item => item.text.includes('화면 캡처')))
+    assert.equal(await run("return [...document.querySelectorAll('.agent-composer-right button')].some(b => b.textContent.trim() === '일괄 지시')"), false, 'Attachment prompts reserve the composer for the cited media')
     const captures = await fs.readdir(path.join(path.dirname(sample), '.legal-terminal/media-context'))
     assert.equal(captures.length, 1)
     const imagePath = path.join(path.dirname(sample), '.legal-terminal/media-context', captures[0])

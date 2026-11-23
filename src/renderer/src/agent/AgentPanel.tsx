@@ -5219,7 +5219,7 @@ export default function AgentPanel({
             )}
           </div>
           <div className="agent-composer-right">
-            {onBulkInstructions && input.trim() && (
+            {onBulkInstructions && attachments.length === 0 && !quotedMessage && input.trim() && (
               <button type="button" title="작성한 내용을 업무별로 나누고 담당자를 지정합니다" onClick={() => onBulkInstructions(input)}>
                 일괄 지시
               </button>
