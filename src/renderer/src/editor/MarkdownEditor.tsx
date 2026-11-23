@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type KeyboardEvent } from 'react'
+import { useEffect, useRef, useState, type KeyboardEvent, type MouseEvent as ReactMouseEvent } from 'react'
 import { Decoration, EditorView, keymap, drawSelection, dropCursor, type DecorationSet } from '@codemirror/view'
 import {
   EditorSelection,
@@ -13,6 +13,8 @@ import { defaultKeymap, history, historyKeymap, indentWithTab } from '@codemirro
 import { markdown } from '@codemirror/lang-markdown'
 import { GFM } from '@lezer/markdown'
 import { syntaxHighlighting, defaultHighlightStyle } from '@codemirror/language'
+import { markdownLinkAt } from './markdownCompat'
+import { resolveAgentMediaPath } from '../agent/mediaReferences'
 import { livePreview } from './livePreview'
 import MarkdownOutline, { markdownHeadings, type MarkdownHeading } from './MarkdownOutline'
 import { mdToPrintHtml, type PrintLayoutProfile } from './mdExport'
@@ -196,6 +198,7 @@ function dirnameOf(value?: string): string | undefined {
   const clean = value.replace(/[\\/]+$/, '')
   const slash = Math.max(clean.lastIndexOf('/'), clean.lastIndexOf('\\'))
   if (slash < 0) return undefined
+  if (/^ssh:\/\/[^/]+$/.test(clean.slice(0, slash))) return clean.slice(0, slash + 1)
   if (slash === 0) return clean.startsWith('/') ? '/' : undefined
   if (slash === 2 && /^[A-Za-z]:$/.test(clean.slice(0, slash))) return clean.slice(0, slash + 1)
   return clean.slice(0, slash)
@@ -526,6 +529,7 @@ export default function MarkdownEditor({
   defaultDir,
   plainText = false,
   onPath,
+  onOpenFile,
   onAsk,
   onSendToJuriSupport,
   onSaveHandler,
@@ -542,6 +546,7 @@ export default function MarkdownEditor({
   platform?: string
   defaultDir?: string
   plainText?: boolean
+  onOpenFile?: (path: string) => void
   onPath?: (path: string) => void
   onAsk?: (
     draftPath?: string,
@@ -1458,6 +1463,40 @@ export default function MarkdownEditor({
       .catch((e) => void window.lt.dialog.alert(`HWPX 내보내기 실패: ${String(e)}`))
   }
 
+  const openClickedLink = (event: ReactMouseEvent<HTMLDivElement>): void => {
+    if (plainText || !event.ctrlKey || event.button !== 0) return
+    const view = viewRef.current
+    const target = event.target
+    if (!view || !(target instanceof Element) || !view.contentDOM.contains(target)) return
+    const anchor = target.closest('a[href]')
+    const hit = !anchor && target.closest('.cm-line')
+      ? view.posAndSideAtCoords({ x: event.clientX, y: event.clientY }) : null
+    if (hit) {
+      const bounds = view.coordsForChar(hit.pos - (hit.assoc < 0 ? 1 : 0))
+      if (!bounds || event.clientX < bounds.left || event.clientX > bounds.right) return
+    }
+    const href = anchor?.getAttribute('href') ?? (hit && markdownLinkAt(view.state, hit.pos, hit.assoc))
+    if (!href) return
+    event.preventDefault()
+    event.stopPropagation()
+    if (href.startsWith('#')) {
+      let fragment: string
+      try { fragment = decodeURIComponent(href.slice(1)) } catch { return }
+      const heading = headingsRef.current.find(h =>
+        h.title.toLowerCase().replace(/[^\p{L}\p{N}_ -]/gu, '').replace(/ +/g, '-') === fragment.toLowerCase())
+      if (heading) view.dispatch({ selection: { anchor: heading.from }, effects: EditorView.scrollIntoView(heading.from) })
+      return
+    }
+    const url = href.startsWith('//') ? 'https:' + href : href
+    if (/^(?:https?:\/\/|mailto:|tel:)/i.test(url)) {
+      void window.lt.app.openExternal(url).catch(err => void window.lt.dialog.alert(String(err)))
+      return
+    }
+    const cwd = dirnameOf(pathRef.current) ?? defaultDir ?? ''
+    const file = resolveAgentMediaPath(href.split(/[?#]/)[0], { cwd }, true)
+    if (file) onOpenFile?.(file)
+  }
+
   return (
     <div className="text-doc" onKeyDownCapture={onEditorKeyDown}>
       <div className="text-toolbar">
@@ -1700,6 +1739,10 @@ export default function MarkdownEditor({
         )}
         <div
           className={`cm-host ${preview ? 'preview' : 'source'} ${remoteApplied ? 'remote-applied' : ''}`}
+          onMouseDownCapture={openClickedLink}
+          onClickCapture={(event) => {
+            if (event.target instanceof Element && event.target.closest('.cm-md-cell-content a')) event.preventDefault()
+          }}
           ref={hostRef}
         />
       </div>

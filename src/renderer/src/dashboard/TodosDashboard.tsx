@@ -5,6 +5,7 @@ import CaseContextMenu, { type CaseContextMenuState } from './CaseContextMenu'
 import { compareTodos, filterTodos, kstDateKey, setTodoDate, todoTags, type TodoFilter } from '../../../shared/todoSummary'
 import type { TodoSnapshot as SharedTodoSnapshot } from './useTodoSnapshot'
 import { TodoSnapshotState } from './TodoSummary'
+import TodoStatusButtons, { changeTodoStatus, type TodoButtonStatus } from './TodoStatusButtons'
 import TodoDetails, { TodoResolution } from './TodoDetails'
 import CaseTaskReview from './CaseTaskReview'
 import BulkTodoClosure from './BulkTodoClosure'
@@ -251,19 +252,10 @@ function TodosDashboardContent({
 
   const completeTodo = (todo: JsTodo): void => setResolution({ todo, action: 'complete' })
 
-  const reopenTodo = (todo: JsTodo): void => {
-    void runMutation(todo.id, async () => { const r = await window.lt.todo.update(todo.id, { status: 'pending' })
-      if (!r.ok) setErr(r.error ?? '예정 변경 실패')
-      else {
-        changed()
-      }
-    })
-  }
-
-  const startTodo = (todo: JsTodo): void => {
-    void runMutation(todo.id, async () => { const r = await window.lt.todo.update(todo.id, { status: 'in_progress' })
-      if (!r.ok) setErr(r.error ?? '진행중 변경 실패')
-      else {
+  const selectStatus = (todo: JsTodo, status: TodoButtonStatus): void => {
+    void runMutation(todo.id, async () => {
+      if (await changeTodoStatus(todo, status, () => completeTodo(todo), progressDrafts[todo.id]?.trim() || undefined)) {
+        if (status === 'completed') setProgressDrafts(drafts => ({ ...drafts, [todo.id]: '' }))
         changed()
       }
     })
@@ -411,6 +403,8 @@ function TodosDashboardContent({
                 {caseTitle && <span className="todo-case-context">{caseTitle}</span>}
               </div>
               <div className="todo-title">{todo.title || '(제목 없음)'}</div>
+              {!['archived', 'closed'].includes(todo.status) && <TodoStatusButtons todo={todo}
+                disabled={!!busyId || loading || snapshot.loading} onChange={status => selectStatus(todo, status)} />}
               <div className="todo-tags">{todoTags(todo).map((tag) => <span key={tag}>{tag}</span>)}</div>
               {caseContext && <button className="todo-small" onClick={(e) => { e.stopPropagation(); openDefault(todo) }}>사건 작업환경 열기</button>}
               <div className="todo-meta">
@@ -462,22 +456,7 @@ function TodosDashboardContent({
               <TodoDetails todo={todo} parentTitle={snapshot.todos?.find((parent) => parent.id === todo.parentId)?.title} capabilities={capabilities} onOpenEvidenceFile={onOpenEvidenceFile} onChanged={changed} onComplete={() => completeTodo(todo)} />
               <div className="todo-actions" onClick={(e) => e.stopPropagation()}>
                 {onAskNextAction && <button className="todo-small" onClick={() => onAskNextAction(todo)}>AI에게 다음 행동 제안받기</button>}
-                {todo.status === 'completed' || todo.status === 'done' ? (
-                  <button className="todo-small" onClick={() => reopenTodo(todo)}>
-                    예정으로
-                  </button>
-                ) : (
-                  <>
-                    {(todo.status === 'pending' || todo.status === 'open') && (
-                      <button className="todo-small" onClick={() => startTodo(todo)}>
-                        진행중
-                      </button>
-                    )}
-                    <button className="todo-small good" onClick={() => completeTodo(todo)}>
-                      완료
-                    </button>
-                  </>
-                )}
+                {['archived', 'closed'].includes(todo.status) && <button className="todo-small good" onClick={() => completeTodo(todo)}>완료</button>}
                 {todo.status !== 'archived' && todo.status !== 'closed' && (
                   <button className="todo-small" onClick={() => archiveTodo(todo)}>
                     종료

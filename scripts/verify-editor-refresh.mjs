@@ -29,7 +29,9 @@ const ask = text => {
   requestAnimationFrame(() => document.getElementById('agent-prompt')?.focus({ preventScroll: true }))
 }
 const ok = async () => ({ ok: true })
+const opened = []
 window.lt = {
+  app: { openExternal: async url => opened.push(url) },
   settings: { get: async () => ({ mdFontSize: 14 }) },
   fs: {
     readText: async () => ({ kind: 'text', text: disk, size: disk.length, mtimeMs: version }),
@@ -68,7 +70,7 @@ window.addEventListener('unhandledrejection', event => reportBrowserError(event.
 async function mount(plainText = false, text = original) {
   disk = text; version++
   root.render(<React.Fragment><MarkdownEditor key={++generation} path='/fixture/검토.claude-draft.md'
-    draftId={'fixture-' + generation} plainText={plainText}
+    draftId={'fixture-' + generation} plainText={plainText} onOpenFile={path => opened.push(path)}
     onSaveHandler={handler => save = handler} onDirty={value => dirty = value} /><SelectionAsk onAsk={ask} /></React.Fragment>)
   await wait(() => {
     const dom = document.querySelector('.cm-editor')
@@ -150,6 +152,27 @@ async function emptyDocument(view, apply, label) {
   check(view.scrollDOM.scrollTop === 0 && view.state.selection.main.to === 0, label + ' stays at top after layout settles', editorGeometry(view))
 }
 window.uiCheck = async () => {
+  const links = await mount(false, '첫 줄\n\n[웹 사이트](https://example.com) [기록](./기록.pdf)\n\n| 문서 |\n| --- |\n| [표 링크](./표.md) |')
+  const clickAt = async (x, y, ctrl) => {
+    await window.testInput(['mouseDown', 'mouseUp'].map(type => ({
+      type, x: Math.round(x), y: Math.round(y), button: 'left', clickCount: 1, modifiers: ctrl ? ['control'] : []
+    })))
+  }
+  const clickLabel = async (label, ctrl) => {
+    const box = links.coordsAtPos(links.state.doc.toString().indexOf(label) + 1)
+    await clickAt(box.left, (box.top + box.bottom) / 2, ctrl)
+  }
+  await clickLabel('웹 사이트', false)
+  check(opened.length === 0, 'Ordinary link click remains editable')
+  await clickLabel('웹 사이트', true)
+  check(opened.length === 1 && opened[0] === 'https://example.com', 'Ctrl-click opens web link once')
+  const tableLink = links.dom.querySelector('.cm-md-cell-content a').getBoundingClientRect()
+  await clickAt(tableLink.left + 4, tableLink.top + tableLink.height / 2, true)
+  check(opened[1] === '/fixture/표.md', 'Ctrl-click opens rendered table link')
+  document.querySelector('[title="원본(소스)"]').click()
+  await pause()
+  await clickLabel('기록', true)
+  check(opened.length === 3 && opened[2] === '/fixture/기록.pdf' && !dirty, 'Source mode opens relative file without editing')
   const pairs = [
     ['', '새 문서'], ['원래 문서', ''], ['변경 없음', '변경 없음'],
     ['첫째\n둘째\n마지막', '앞에 추가\n첫째\n바뀐 둘째\n마지막\n'],

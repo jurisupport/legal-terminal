@@ -48,10 +48,10 @@ const capabilities={queryFields:[],createFields:['priority','parentId','reviewAt
 window.lt = {
  todo:{
  capabilities:async()=>({ok:true,capabilities}),
- list:async(params)=>{window.calls.push(['list',params]);return {ok:true,todos:params.type==='memo'?memos:params.status==='completed'?completedRows:rows}},
+ list:async(params)=>{window.calls.push(['list',params]);return {ok:true,todos:params.type==='memo'?memos:params.status==='completed'?[...completedRows,...rows.filter(row=>row.status==='completed')]:rows}},
  get:async(id)=>({ok:true,todo:rows.find(r=>r.id===id)}),
  update:async(id,patch)=>{window.calls.push(['update',id,patch]); if(window.failUpdate)return {ok:false,error:'합성 저장 실패'}; const todo=[...rows,...memos].find(r=>r.id===id); Object.assign(todo,patch);return {ok:true,todo}},
- complete:async(id,text,context,options)=>{window.calls.push(['complete',id,options]);return {ok:true,todo:{...rows.find(r=>r.id===id),status:'completed'}}},
+ complete:async(id,text,context,options)=>{window.calls.push(['complete',id,options]);const todo=rows.find(r=>r.id===id);if(id==='child')todo.status='completed';return {ok:true,todo:{...todo,status:'completed'}}},
  archive:async(id,options)=>{window.calls.push(['archive',id,options]);memos=memos.filter(r=>r.id!==id);return {ok:true}},
  create:async(input)=>{window.calls.push(['create',input]); const todo={...input,id:'new-'+window.calls.length,status:'pending'}; if(input.type==='memo')memos.push(todo);return {ok:true,todo}},
  appendProgress:async()=>({ok:true}),
@@ -70,13 +70,27 @@ window.uiCheck = async () => {
  let checks=0; const check=(condition,message)=>{checks++;if(!condition)throw Error(message)};
  await wait(()=>document.querySelectorAll('.todo-card').length===3);
  const sidebarChild = [...document.querySelectorAll('.todo-agenda-row')].find(row=>row.textContent.includes('첨부서류 확인'));
- window.failUpdate=true; await click('진행 시작',sidebarChild);
- check(document.querySelector('[role="alert"]').textContent.includes('합성 저장 실패') && buttons('진행 시작',sidebarChild).length===1,'Failed sidebar start allows retry');
- window.failUpdate=false; await click('진행 시작',sidebarChild);
- await wait(()=>sidebarChild.querySelector('.st-in_progress'));
- check(window.calls.findLast(c=>c[0]==='update')[1]==='child' && window.calls.findLast(c=>c[0]==='update')[2].status==='in_progress','Sidebar starts selected todo');
- check(!buttons('진행 시작',sidebarChild).length && !sidebarChild.querySelector('.todo-check').disabled,'Started todo can still be completed');
- check([...document.querySelectorAll('.todo-card.todo-in_progress')].some(card=>card.textContent.includes('첨부서류 확인')),'Dashboard reflects sidebar start');
+ const childCard=()=>[...document.querySelectorAll('.todo-card')].find(row=>row.querySelector('.todo-title').textContent==='첨부서류 확인');
+ const selected=row=>row.querySelector('.todo-status-buttons [aria-pressed="true"]').textContent;
+ check(selected(sidebarChild)==='예정' && selected(childCard())==='예정','Both views show the initial status');
+ window.failUpdate=true; await click('진행중',sidebarChild);
+ check(document.querySelector('[role="alert"]').textContent.includes('합성 저장 실패') && selected(sidebarChild)==='예정','Failure retains status for retry');
+ window.failUpdate=false; await click('진행중',sidebarChild);
+ check(selected(sidebarChild)==='진행중' && selected(childCard())==='진행중','Both views reflect start');
+ await click('예정',childCard());
+ check(selected(sidebarChild)==='예정' && selected(childCard())==='예정','In-progress tasks can return to pending');
+ await click('완료',sidebarChild);
+ check(window.calls.findLast(c=>c[0]==='complete')?.[1]==='child' && !document.querySelector('dialog'),'Leaf task completes directly');
+ check(!window.calls.some(c=>c[0]==='workspace'),'Status controls do not open the workspace');
+ check(!childCard() && !sidebarChild.isConnected,'Completed leaf leaves both open lists');
+ await click('완료',document.querySelector('.todo-tabs'));
+ await wait(()=>childCard()); check(selected(childCard())==='완료','History shows the selected completed state');
+ await click('진행중',childCard());
+ await click('열린 할일',document.querySelector('.todo-tabs'));
+ await wait(()=>childCard() && selected(childCard())==='진행중');
+ check(window.calls.findLast(c=>c[0]==='update')[2].status==='in_progress','Completed task reopens directly in progress');
+ await click('예정',childCard());
+ const historyReads=window.calls.filter(c=>c[0]==='list').length;
  const prefix='mcp__legal_terminal_jurisupport__';
  for(const [tool,label] of Object.entries({list_tasks:'할일 목록 확인',get_task:'할일 상세 확인',create_task:'할일 추가',create_task_from_source:'원문에서 할일 추가',update_task:'할일 수정',update_task_from_source:'원문에서 할일 수정',update_task_status:'할일 상태 변경',get_task_evidence_suggestions:'완료 근거 확인',get_case_closure_preview:'사건 종결 전 할일 검토'}))check(toolDisplayName(prefix+tool)===label,'Managed tool label '+tool);
  check(!toolStepDisplay({id:'x',title:'',toolName:prefix+'get_task',input:JSON.stringify({id:'opaque-task-id',caseId:'opaque-case-id'}),text:'opaque-task-id'}).arg,'Opaque identifiers stay out of collapsed tool row');
@@ -96,7 +110,7 @@ window.uiCheck = async () => {
  window.setHearingState({summary:{todayCount:27,weekCount:42,fetchedAt:'2026-09-12T00:00:00Z'},error:'합성 기일 조회 실패'});await wait(()=>document.querySelector('.todo-summary').textContent.includes('이전 조회 결과입니다.'));check(hearingMetric('오늘 기일')==='27','Failed hearing refresh retains aggregate with stale warning');
  window.setHearingState({summary:null,error:'합성 기일 조회 실패'});await wait(()=>hearingMetric('오늘 기일')==='—');check(hearingMetric('앞으로 7일 기일')==='—','Missing hearing aggregate is not zero');
  window.setHearingState({summary:{todayCount:27,weekCount:42,fetchedAt:'2026-09-12T00:00:00Z'},error:''});await wait(()=>hearingMetric('오늘 기일')==='27');
- check(!window.calls.some(c=>c[0]==='list'),'Open snapshot must not be independently fetched');
+ check(window.calls.filter(c=>c[0]==='list').length===historyReads,'Open snapshot must not be independently fetched');
  await click('기한 없음'); check(document.querySelectorAll('.todo-card').length===1,'Undated filter');
  await click('전체 열린 할일');
  const toggle=document.querySelector('.todo-group-toggle');toggle.click();await new Promise(r=>setTimeout(r,30));check(toggle.getAttribute('aria-expanded')==='false','Group collapse');toggle.click();await new Promise(r=>setTimeout(r,30));

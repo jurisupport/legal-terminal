@@ -373,7 +373,7 @@ try {
     isGeneralChatDirectory,
     docOnly: false, termOnly: false,
     observedWorkspaceHostsRef: { current: new Set(['host']) }, workspaceHostKey: () => 'host',
-    pushSyncedTabsToast: count => syncedNotices.push(count),
+    pushSyncedTabsToast: (count, _tab, title) => syncedNotices.push([count, title]),
     modeRef: { current: 'explorer' },
     resolveCaseTabId: () => 'case', workspaceLocationKey: () => 'key', workspaceLocation: () => location,
     autoRestoreDoneRef: { current: new Set() }, autoRestoreInFlightRef: { current: new Map() },
@@ -434,9 +434,9 @@ try {
   assert.equal(restored, undefined, 'a late response cannot reopen a closed case')
 
   context.caseTabsRef.current = [{ id: 'case' }]
-  response = { ok: true, remote: { snapshot: snapshot([phone]) } }
+  response = { ok: true, remote: { snapshot: snapshot([{ ...phone, sessionTitle: '준비서면 검토' }]) } }
   await run({}, true)
-  assert.deepEqual(syncedNotices, [1], 'a new conversation received during refresh gets one notice')
+  assert.deepEqual(syncedNotices, [[1, '준비서면 검토']], 'a newly synced conversation is announced with its session title')
   assert.equal(observed[0], response.remote.snapshot, 'acknowledge the exact applied response without rereading')
   restored = undefined
   context.termTabsRef.current = [term('closing-agent')]

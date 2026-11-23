@@ -8614,6 +8614,7 @@ export default function App(): JSX.Element {
           platform={platform}
           defaultDir={draftsRoot}
           plainText={isPlainTextEditPath(tab.path)}
+          onOpenFile={path => openFile(path, fileNameFromPath(path), docSide(tab), caseIdForDoc(tab))}
           onPath={(p) => setDocPath(tab.id, p)}
           scrollKey={docScrollKey(tab)}
           initialScroll={scrollPositionForDoc(tab)}

@@ -3656,6 +3656,7 @@ body {
   padding: 8px 10px 0;
   background: var(--bg);
 }
+.todo-status-buttons { display: inline-flex; flex-wrap: wrap; gap: 4px; }
 .todo-tab.on {
   background: var(--accent);
   border-color: var(--accent);

@@ -1,4 +1,4 @@
-import { Marked, type Tokens } from 'marked'
+import { Lexer, Marked, type Tokens } from 'marked'
 import { ensureSyntaxTree, syntaxTree } from '@codemirror/language'
 import type { EditorState } from '@codemirror/state'
 
@@ -79,4 +79,22 @@ export function parseInlineMarkdown(md: string): string {
 
 export function completeMarkdownSyntaxTree(state: EditorState) {
   return ensureSyntaxTree(state, state.doc.length) ?? syntaxTree(state)
+}
+
+export function markdownLinkAt(state: EditorState, pos: number, side: -1 | 1): string | undefined {
+  const tree = ensureSyntaxTree(state, pos) ?? syntaxTree(state)
+  let node = tree.resolveInner(pos, side)
+  while (!['Link', 'Autolink', 'URL'].includes(node.name)) {
+    if (!node.parent) return undefined
+    node = node.parent
+  }
+  if (node.name === 'URL' && (node.parent?.name === 'Link' || node.parent?.name === 'Autolink')) {
+    node = node.parent
+  }
+  const lexer = new Lexer()
+  if (node.name === 'Link' && !node.getChild('URL')) {
+    lexer.tokens.links = markdown.lexer(state.doc.toString()).links
+  }
+  const token = lexer.inlineTokens(state.sliceDoc(node.from, node.to))[0]
+  return token?.type === 'link' ? token.href : undefined
 }
