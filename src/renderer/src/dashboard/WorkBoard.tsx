@@ -1,4 +1,4 @@
-import { boardRevision, explicitlyAllBoardTodos, isBoardTodoReview } from '../../../shared/workBoard'
+import { boardRevision, requestsCurrentBoardCase, isBoardTodoReview } from '../../../shared/workBoard'
 import DOMPurify from 'dompurify'
 import { marked, Renderer } from 'marked'
 import { createPortal } from 'react-dom'
@@ -140,11 +140,13 @@ function useTodoScopeOptions(needed: boolean, { caseIds, boundCase }: ScopeOptio
 }
 
 type ScopeList = ReturnType<typeof useTodoScopeOptions>
-function selectedScope(options: ScopeList, choice?: BoardTodoScope, explicitAll = false): BoardTodoScope | undefined {
+function selectedScope(options: ScopeList, choice?: BoardTodoScope, defaultToAll = false): BoardTodoScope | undefined {
   if (options.pinned) return { kind: 'case', caseId: options.pinned }
   if (choice?.kind === 'case') return options.cases.some(c => c.id === choice.caseId) ? choice : undefined
-  if (options.allowAll && (choice?.kind === 'all' || (explicitAll && !options.accountChanged))) return { kind: 'all' }
+  if (options.allowAll && (choice?.kind === 'all' || (defaultToAll && !options.accountChanged))) return { kind: 'all' }
 }
+
+const allTodosNotice = '현재 계정에서 볼 수 있는 전체 미완료 할일을 이 보드 폴더에 보고서로 저장합니다.'
 
 function ScopeField({ options, value, change }: { options: ScopeList; value?: BoardTodoScope; change: (scope: BoardTodoScope) => void }) {
   if (options.pinned) return <p className="wb-wide">할일 검토 범위 · {options.pinnedLabel}</p>
@@ -158,7 +160,6 @@ function ScopeField({ options, value, change }: { options: ScopeList; value?: Bo
           {options.allowAll && <option value="all">전체 미완료 할일</option>}
         </select>
       </label>
-      {value?.kind === 'all' && <small>현재 계정에서 볼 수 있는 미완료 할일을 이 보드의 보고서에 저장합니다.</small>}
       {options.error && <p role="alert">{options.error} <button type="button" className="wb-btn" onClick={options.retry}>다시 조회</button></p>}
     </div>
   )
@@ -192,7 +193,7 @@ function BulkForm({
       const { todoScope, ...draft } = d
       return draft
     }
-    return { ...d, todoScope: selectedScope(scopes, d.todoScope, explicitlyAllBoardTodos(d.body)) }
+    return { ...d, todoScope: selectedScope(scopes, d.todoScope, !requestsCurrentBoardCase(d.body)) }
   })
   const missingScope = ready.some((d, i) => reviewRows[i] && !d.todoScope)
   const options = agents.map((a) => (
@@ -351,6 +352,7 @@ function BulkForm({
         </div>
       )}
       <div className="wb-actions">
+        {ready.some(d => d.todoScope?.kind === 'all') && <small>{allTodosNotice}</small>}
         <button disabled={busy || !raw.trim() || missingScope} className="wb-btn wb-primary">
           {drafts.length ? drafts.length + '건 등록' : '지시별 담당 지정'}
         </button>
@@ -807,6 +809,7 @@ function Details({
               </label>
               {retryTodo && <ScopeField options={scopes} value={retryScope} change={setChosenScope} />}
               <div className="wb-actions">
+                {retryScope?.kind === 'all' && <small>{allTodosNotice}</small>}
                 <button
                   className="wb-btn"
                   disabled={busy || (retryTodo && !retryScope)}

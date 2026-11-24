@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { transformSync } from 'esbuild'
 import { createRequire } from 'node:module'
-import { isBoardTodoReview, explicitlyAllBoardTodos } from '../src/shared/workBoard.ts'
+import { isBoardTodoReview, requestsCurrentBoardCase } from '../src/shared/workBoard.ts'
 import { normalizeProjectWorkspacePath } from '../src/main/projectStore.ts'
 import { parseCasePairingFileText } from '../src/main/caseSyncData.ts'
 
@@ -13,8 +13,8 @@ for (const request of ['할일 검토', '미완료 할 일 점검', '할일 점�
 for (const request of ['할일 검토하고 메일 발송', '할일 검토를 위한 안내문 작성', '할일 완료 처리', '검토', '할일 검토\n기한을 내일로 변경']) {
   assert.equal(isBoardTodoReview(request), false, request)
 }
-assert.equal(explicitlyAllBoardTodos('전체 미완료 할 일 조회해줘'), true)
-assert.equal(explicitlyAllBoardTodos('미완료 할일 점검'), false)
+assert.equal(requestsCurrentBoardCase('이 사건 미완료 할 일 조회해줘'), true)
+assert.equal(requestsCurrentBoardCase('미완료 할일 점검'), false)
 
 const entries = {
   localA: {drafts:'/cases/a'}, otherLocal: {drafts:'/cases/ab'},

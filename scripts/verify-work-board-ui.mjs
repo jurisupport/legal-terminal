@@ -205,14 +205,25 @@ function run({ root, workspace, board, temp, home, profile, screenshot, bulk }) 
       })()`)
       await inputText('.wb-dialog textarea', '할일 검토')
       await click('.wb-dialog button', '지시별 담당 지정')
-      await visible('.wb-draft option[value="case:case-a"]')
-      const scope = `document.querySelector('.wb-draft option[value="all"]').parentElement`
-      assert.equal(await evaluate(scope + '.value'), '')
-      assert.equal(await evaluate("document.querySelector('.wb-dialog .wb-primary').disabled"), true)
-      assert.equal(taskReads.length, before, 'no read before choosing scope')
+      const notice = "document.querySelector('.wb-dialog .wb-primary').parentElement.textContent.includes('이 보드 폴더에 보고서로 저장')"
+      if (choice === 'pinned') {
+        await wait(() => evaluate("document.querySelector('.wb-draft')?.textContent.includes('할일 검토 범위 · case-a')"), 'linked case is fixed')
+        assert.equal(await evaluate("!!document.querySelector('.wb-draft option[value=all]')"), false)
+        assert.equal(await evaluate(notice), false)
+      } else {
+        await visible('.wb-draft option[value="case:case-a"]')
+        const scope = `document.querySelector('.wb-draft option[value="all"]').parentElement`
+        assert.equal(await evaluate(scope + '.value'), 'all')
+        assert.equal(await evaluate(notice), true)
+        if (choice !== 'all') {
+          await evaluate(`(() => { const select = ${scope}; select.value = ${JSON.stringify(choice)}
+            select.dispatchEvent(new Event('change', {bubbles:true})) })()`)
+          assert.equal(await evaluate(notice), false)
+        }
+      }
+      assert.equal(await evaluate("document.querySelector('.wb-dialog .wb-primary').disabled"), false)
       await inputText('.wb-draft input', title)
-      await evaluate(`(() => { const select = ${scope}; select.value = ${JSON.stringify(choice)}
-        select.dispatchEvent(new Event('change', {bubbles:true})) })()`)
+      assert.equal(taskReads.length, before, 'reads start only on registration')
       await click('.wb-dialog button', '1건 등록')
       await wait(() => evaluate("!document.querySelector('.wb-dialog')"), 'save ' + title)
       let task
@@ -240,7 +251,7 @@ function run({ root, workspace, board, temp, home, profile, screenshot, bulk }) 
           assert.ok(text.includes('D 자정 후 기한'))
           assert.ok(await evaluate("!!document.querySelector('.wb-todo-report table')"), 'report uses accessible tables')
           assert.equal(await evaluate("document.querySelectorAll('.wb-todo-report a, .wb-todo-report img').length"), 0, 'todo fields cannot introduce links or images')
-          if (choice !== 'all') {
+          if (choice === 'case:case-a') {
             await evaluate(`(async () => {
               document.querySelector('.wb-todo-report').closest('section').scrollIntoView({block:'start'})
               await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))
@@ -268,7 +279,13 @@ function run({ root, workspace, board, temp, home, profile, screenshot, bulk }) 
     assert.match(denied, /권한/)
     assert.doesNotMatch(denied, /미완료 할일 0건|ui-test-only/)
     listMode = 'empty'
-    const empty = await review('빈 사건 확인', 'case:case-a', 'awaiting_approval')
+    fs.writeFileSync(path.join(home, '.claude', 'legal-terminal-cases.json'), JSON.stringify({
+      version: 1, entries: [{ key: 'case-a', drafts: workspace, updatedAt: new Date().toISOString() }]
+    }))
+    await evaluate("document.querySelector('.work-board-window button[aria-label=\"작업 공간으로 돌아가기\"]').click()")
+    await click('.work-board-links button', '업무 보드')
+    await wait(() => evaluate("document.querySelectorAll('.wb-lane').length === 5"), 'reopen board with linked case')
+    const empty = await review('빈 사건 확인', 'pinned', 'awaiting_approval')
     assert.match(empty, /미완료 할일 0건/)
     console.log('PASS 할일 검토 · 사건 범위 · 전체 선택 · 조회 권한 거부 · 실제 0건')
     console.log('PASS 업무 보드 · 실제 IPC · 결재 · 일괄 입력 3건 · 보고 저장 · ' + screenshot)

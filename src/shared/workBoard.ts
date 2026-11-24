@@ -16,8 +16,9 @@ export function isBoardTodoReview(input: string): boolean {
     /^(?:보여줘|보여주세요)$/u.test(action)
 }
 
-export function explicitlyAllBoardTodos(input: string): boolean {
-  return isBoardTodoReview(input) && /^(?:전체|모든|미완료(?:전체|모든))/u.test(todoReviewText(input))
+// An unbound board cannot infer which case an explicitly case-scoped instruction refers to.
+export function requestsCurrentBoardCase(input: string): boolean {
+  return /(?:이|현재|이번)사건/u.test(todoReviewText(input))
 }
 
 export interface BoardDraft {
