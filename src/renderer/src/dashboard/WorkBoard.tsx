@@ -309,7 +309,7 @@ function InstructionForm({
               </label>}
               <label className="wb-wide">
                 {followUp ? '추가 지시 내용' : '지시 본문'}
-                <textarea required autoFocus={followUp} rows={followUp ? 4 : 2} value={d.body}
+                <textarea required ref={el => { if (followUp && el) el.autofocus = true }} rows={followUp ? 4 : 2} value={d.body}
                   placeholder={followUp ? '예: 기한 초과 건의 안내문 초안을 작성해 줘' : undefined}
                   onChange={(e) => update(i, { body: e.target.value })} />
               </label>
@@ -895,7 +895,7 @@ function Details({
   const followUpActions = <nav className="wb-followups" aria-label="추가 업무">
     <button className="wb-btn wb-followup-open" type="button" disabled={busy || !files} onClick={beginFollowUp}>추가 업무 지시</button>
     {task.followUp && (sourceTask
-      ? <button className="wb-btn" type="button" onClick={() => selectTask(sourceTask.id)}>원 지시 · {sourceTask.title}</button>
+      ? <button className="wb-btn" type="button" title={sourceTask.title} onClick={() => selectTask(sourceTask.id)}>원 지시 · {task.followUp.title}</button>
       : <details className="wb-followup-snapshot">
           <summary>원 지시 · {task.followUp.title} (보관된 내용)</summary>
           <p>원 지시가 현재 보드에 없어 등록 당시 보관한 내용을 표시합니다.</p>
