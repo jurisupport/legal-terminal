@@ -64,7 +64,7 @@ const source = buildSync({
   stdin: {contents: `
     export {WorkBoard} from './src/main/workBoard'
     export * from './src/main/workBoardDownload'
-    export {boardRevision} from './src/shared/workBoard'
+    export {boardRevision, boardFollowUpRevision} from './src/shared/workBoard'
     export {WorkBoardStore} from './src/main/workBoardStore'
     export {readBoardDocumentText} from './src/main/workBoardDocumentText'
     export {setJsPairing} from './src/main/caseStore'
@@ -247,6 +247,30 @@ try {
       assert.equal(existsSync(join(caseDir, '_업무지시', finalDraft.id + '.md')), false)
       assert.equal(sdkRuns, 0, 'editing or deleting the instruction must not execute it')
       console.log('동일 SSH 보드의 두 번째 PC에서 처리권 인수·결재·수정·보관 삭제 확인')
+      const original = (await second.snapshot()).tasks.find(task => task.id === review.id)
+      const requestId = randomUUID()
+      const originalRevision = await revision(original)
+      const expected = mod.exports.boardFollowUpRevision(original, await second.detail(original.id))
+      const next = {title:'새 조회 지시',body:'할일 점검',todoScope:{kind:'case',caseId:'case-a'}}
+      const followId = await second.addFollowUp(original.id,next,requestId,expected)
+      assert.equal(await second.addFollowUp(original.id,next,requestId,expected),followId)
+      const followBy = Date.now() + 15_000
+      let follow
+      do {
+        follow = (await second.snapshot()).tasks.find(task => task.id === followId)
+        if (follow?.status === 'done') break
+        await new Promise(resolve => setTimeout(resolve, 50))
+      } while (Date.now() < followBy)
+      assert.equal(follow?.status,'done',JSON.stringify(follow?.log))
+      assert.equal(follow.followUp.id,original.id)
+      assert.equal(follow.followUp.report,report)
+      assert.equal(follow.parentId,undefined)
+      assert.equal(follow.reportReceipt.state,'unread')
+      assert.equal(queries.length,2,'explicit new scope used once')
+      assert.equal(await revision((await second.snapshot()).tasks.find(task => task.id === original.id)),originalRevision)
+      assert.equal((await docStore.readTask(followId)).followUp.report,report)
+      console.log('SSH 원 지시에서 추가 업무 등록 · 중복 방지 · 별도 조회 동의와 확인 기록 보존')
+
     } finally {
       second.stop()
     }

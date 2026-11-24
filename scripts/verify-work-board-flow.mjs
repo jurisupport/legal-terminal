@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { createRequire } from 'node:module'
 import { build } from 'esbuild'
 import { WorkBoardStore } from '../src/main/workBoardStore.ts'
-import { boardRevision } from '../src/shared/workBoard.ts'
+import { boardFollowUpRevision, boardRevision } from '../src/shared/workBoard.ts'
 
 // Bundle the real dispatcher and store, replacing only the external Claude service.
 const dir = await mkdtemp(join(tmpdir(), 'work-board-flow-'))
@@ -52,7 +52,7 @@ let board
 let gate = null
 let afterNativeRead
 globalThis.boardRunFixture = async i => {
-  runs.push({ id: i.task.id, title: i.task.title, phase: i.phase, agent: i.task.agent, todoAccess:!!i.readTodos, resume: i.resume, tools: i.approvedTools })
+  runs.push({ id: i.task.id, title: i.task.title, phase: i.phase, agent: i.task.agent, todoAccess:!!i.readTodos, resume: i.resume, tools: i.approvedTools, prompt:i.prompt })
   i.onProgress('파일 읽음 · source.md', 'session-' + i.task.id)
   if (i.task.body === 'diagnostic-only') return {text:'결재 필요'}
   if (i.readTodos) {
@@ -149,17 +149,83 @@ try {
   const rerun = (await until(ts=>ts.some(t=>t.id===edited.id && t.status==='done'))).find(t=>t.id===edited.id)
   assert.equal(rerun.reportReceipt.state,'unread')
   assert.notEqual(rerun.reportReceipt.digest,originalReceipt.reportReceipt.digest)
+  const plain = {title:'링크 없는 지시',body:'직접 입력',followUp:{id:'injected',title:'가짜',body:'참고 아님'}}
+  await board.add([plain])
+  const unlinked = (await until(ts=>ts.some(t=>t.title===plain.title && t.status==='done'))).find(t=>t.title===plain.title)
+  assert.equal(unlinked.followUp,undefined)
+  const fromDiagnostic = await board.addFollowUp(diagnostic.id,{title:'원인 확인',body:'확인해 주세요'},'diag',
+    boardFollowUpRevision(diagnostic,await board.detail(diagnostic.id)))
+  assert.deepEqual((await board.snapshot()).tasks.find(t=>t.id===fromDiagnostic).followUp,
+    {id:diagnostic.id,title:diagnostic.title,body:diagnostic.body})
+
   await board.add(batch,'retry-001')
   await board.add(batch,'retry-001')
   await until(ts => ts.some(t => t.title === '보존' && t.status === 'done'))
   assert.equal(runs.filter(r => r.title === '보존').length,1)
-  await board.add([{ title: '승인', body: 'prepare', review_agent: 'reviewer', after_approval: 'deliver', allowed_tools: ['mcp__mail__send'] }])
+  await board.add([{ title: '승인', body: 'prepare', agent:'source-writer', review_agent: 'reviewer', after_approval: 'deliver', allowed_tools: ['mcp__mail__send'] }])
   tasks = await until(ts => ts.some(t => t.status === 'awaiting_approval'))
   const parent = tasks.find(t => t.title === '승인')
   assert.match((await board.detail(parent.id)).review, /review 보고/)
   assert.equal(runs.some(r => r.phase === 'execute'), false)
   await assert.rejects(board.decide(parent.id, 'approve', '', 'old'), /다시 확인/)
   await assert.rejects(board.decide(parent.id,'retryReport','',boardRevision(parent,await board.detail(parent.id))), /보고 전용/)
+  const parentDetail = await board.detail(parent.id)
+  const parentRevision = boardRevision(parent,parentDetail)
+  const viewedSource = boardFollowUpRevision(parent,parentDetail)
+  const childDraft = {title:'별도 후속 업무',body:'현재 요청만 처리'}
+  const reference = {id:parent.id,title:parent.title,body:parent.body,report:parentDetail.report}
+  const submitter = new WorkBoard(dir,folder,join(dir,'follow-up-submitter'),()=>{})
+  let childId
+  try {
+    await submitter.start()
+    assert.equal((await submitter.snapshot()).readOnly,true)
+    const reportPath = join(folder,parent.id+'.report.md')
+    await writeFile(reportPath,'바뀐 원 보고서')
+    await assert.rejects(submitter.addFollowUp(parent.id,childDraft,'attempt',viewedSource),/다시 확인/)
+    await writeFile(reportPath,parentDetail.report)
+    childId = await submitter.addFollowUp(parent.id,childDraft,'attempt',viewedSource)
+    assert.equal(await submitter.addFollowUp(parent.id,childDraft,'attempt',viewedSource),childId)
+    await assert.rejects(submitter.addFollowUp(parent.id,{...childDraft,body:'다른 작업'},'attempt',viewedSource),/요청 번호/)
+    const noConsent = await submitter.addFollowUp(parent.id,{title:'후속 할일',body:'할일 검토',todoScope:{kind:'all'}},'native-attempt',viewedSource)
+    const native = (await submitter.snapshot()).tasks.find(t=>t.id===noConsent)
+    assert.equal(native.status,'blocked')
+    assert.equal(runs.some(r=>r.id===noConsent),false)
+  } finally { submitter.stop(); await submitter.snapshot() }
+
+  board.stop()
+  await board.snapshot()
+  await open()
+  const linked = (await until(ts=>ts.some(t=>t.id===childId && t.status==='done'))).find(t=>t.id===childId)
+  assert.deepEqual(linked.followUp,reference)
+  for (const field of ['agent','review_agent','parentId','depends_on','after_approval','allowed_tools']) assert.equal(linked[field],undefined)
+  assert.equal(linked.approval,'none')
+  assert.equal(linked.reportReceipt.state,'unread')
+  const childRun = runs.find(r=>r.id===childId)
+  assert.deepEqual(childRun.tools,[])
+  assert.match(childRun.prompt,/원 지시.*참고자료/)
+  assert.ok(childRun.prompt.includes(JSON.stringify(reference)) && childRun.prompt.includes(childDraft.body))
+  assert.ok(!childRun.prompt.includes('mcp__mail__send') && !childRun.prompt.includes(parentDetail.review))
+  assert.equal(boardRevision((await board.snapshot()).tasks.find(t=>t.id===parent.id),await board.detail(parent.id)),parentRevision)
+
+  const linkedDetail = await board.detail(childId)
+  const linkedRevision = boardFollowUpRevision(linked,linkedDetail)
+  // Reading a report changes the receipt and timeline, but not the reference the user saw.
+  await board.decide(childId,'acknowledge','',boardRevision(linked,linkedDetail))
+  const viewed = (await board.snapshot()).tasks.find(t=>t.id===childId)
+  assert.notEqual(boardRevision(viewed,linkedDetail),boardRevision(linked,linkedDetail))
+  assert.equal(boardFollowUpRevision(viewed,linkedDetail),linkedRevision)
+  const nextDraft = {title:'두 번째 후속',body:'별도 수행'}
+  const nextId = await board.addFollowUp(childId,nextDraft,'next',linkedRevision)
+  const next = (await until(ts=>ts.some(t=>t.id===nextId && t.status==='done'))).find(t=>t.id===nextId)
+  assert.deepEqual(next.followUp,{id:childId,title:linked.title,body:linked.body,report:linkedDetail.report})
+  await board.updateTask(childId,{...childDraft,body:'수정된 지시',followUp:{id:'spoofed'}},boardRevision(viewed,linkedDetail))
+  const editedSource = (await board.snapshot()).tasks.find(t=>t.id===childId)
+  assert.deepEqual(editedSource.followUp,reference)
+  await assert.rejects(board.addFollowUp(childId,nextDraft,'stale-after-edit',linkedRevision),/다시 확인/)
+  await board.removeTask(childId,boardRevision(editedSource,await board.detail(childId)))
+  assert.equal(await board.addFollowUp(childId,nextDraft,'next',linkedRevision),nextId)
+  assert.deepEqual((await new WorkBoardStore(folder).readTask(nextId)).followUp,next.followUp)
+  await assert.rejects(board.addFollowUp(childId,nextDraft,'new',linkedRevision),/찾을 수 없습니다/)
   await approve(parent)
   await until(ts => ts.find(t => t.id === parent.id).status === 'done')
   assert.equal(runs.filter(r => r.phase === 'execute').length, 1)

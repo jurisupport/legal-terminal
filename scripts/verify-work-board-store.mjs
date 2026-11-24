@@ -77,6 +77,14 @@ status: queued
   assert.deepEqual((await receipts.readTask(id)).reportReceipt,unreadReportReceipt('수정된 업무 보고'))
   await receipts.writeText(id+'.report.md','## 할 일 조회 확인 필요\n범위를 선택하세요.')
   assert.equal((await receipts.list())[0].reportReceipt,undefined)
+  const origin = {id:'original',title:'원 지시',body:'여러 줄\n원문',report:'## 결론\n' + '인용 "자료"'}
+  const linkedTask = {...legacy,id:'follow-up',followUp:origin}
+  await receipts.save(linkedTask)
+  assert.deepEqual((await new WorkBoardStore(receipts.root).readTask(linkedTask.id)).followUp,origin)
+  for (const invalid of [{...origin,id:'../other'},{...origin,id:linkedTask.id},{...origin,allowed_tools:['Bash']},
+      {...origin,followUp:origin},{...origin,report:42},{...origin,body:'가'.repeat(160_001)}]) {
+    await assert.rejects(receipts.save({...linkedTask,followUp:invalid}),/원 지시/)
+  }
   await verifyBoardStorage(WorkBoardStore,join(directory,'인계'),join(directory,'인계'))
   console.log('업무지시 저장·재시작·충돌·배분기 소유권·경로 보호 확인')
 } finally {

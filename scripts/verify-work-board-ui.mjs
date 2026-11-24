@@ -162,6 +162,10 @@ function run({ root, workspace, board, temp, home, profile, screenshot, bulk, fo
   let holdFollowup = false
   let finishFollowup
   const followupGate = new Promise(resolve => { finishFollowup = resolve })
+  const childTitle = '제출기한 확인 메모'
+  const childBody = childTitle + '\n이전 검토 결과를 바탕으로 확인할 일정을 정리해 주세요.'
+  const sourceFinding = '원 보고서의 검토 사항은 송달일 대조입니다.'
+  const childFinding = '송달일부터 제출기한까지의 일정 확인을 별도 업무로 정리했습니다.'
   const queries = []
   require.cache[sdkId].exports = { ...sdk, query({ options, prompt }) {
     assert.ok(options.cwd.startsWith(temp + path.sep))
@@ -170,7 +174,8 @@ function run({ root, workspace, board, temp, home, profile, screenshot, bulk, fo
       await gate
       if (holdFollowup) await followupGate
       let result = '## 결론\n합성 수행 보고서'
-      if (prompt.includes('준비서면 쟁점 정리')) result += '\n\n## 산출물 경로\n- 검토의견.hwpx\n- 초안.md'
+      if (prompt.includes(childTitle)) result = '## 추가 업무 결과\n' + childFinding
+      else if (prompt.includes('준비서면 쟁점 정리')) result += '\n' + sourceFinding + '\n\n## 산출물 경로\n- 검토의견.hwpx\n- 초안.md'
       yield { type:'result', subtype:'success', is_error:false, result }
     } }
   } }
@@ -181,7 +186,7 @@ function run({ root, workspace, board, temp, home, profile, screenshot, bulk, fo
   const boardMutations = []
   const register = ipcMain.handle.bind(ipcMain)
   ipcMain.handle = (key, handler) => register(key, async (event, ...args) => {
-    if (['workBoard:updateTask', 'workBoard:removeTask', 'workBoard:takeOwnership'].includes(key)) boardMutations.push({key, args})
+    if (['workBoard:updateTask', 'workBoard:removeTask', 'workBoard:takeOwnership', 'workBoard:addFollowUp'].includes(key)) boardMutations.push({key, args})
     if (key === 'window:new') {
       assert.equal(args[0]?.tabs?.length, 1)
       const viewerFiles = ['검토서.pdf','검토의견.hwpx','참고자료.docx'].map(name=>path.join(workspace,name))
@@ -245,7 +250,7 @@ function run({ root, workspace, board, temp, home, profile, screenshot, bulk, fo
   const snap = w => evaluate(`window.lt.workBoard.snapshot(${JSON.stringify(w)})`)
   const navBadge = label => evaluate(`Number([...document.querySelectorAll('.work-board-window .work-board-links button')]
     .find(b=>b.textContent.trim().startsWith(${JSON.stringify(label)}))?.querySelector('span')?.textContent || 0)`)
-  const manifest = tasks => tasks.map(t=>[t.id,t.status,t.parentId ?? null,t.reportReceipt ?? null]).sort(([a],[b])=>a.localeCompare(b))
+  const manifest = tasks => tasks.map(t=>[t.id,t.status,t.parentId ?? null,t.reportReceipt ?? null,t.followUp ?? null]).sort(([a],[b])=>a.localeCompare(b))
   const receiptState = path.join(temp,'receipts-on-restart.json')
   ;(async () => {
     await ready
@@ -255,6 +260,12 @@ function run({ root, workspace, board, temp, home, profile, screenshot, bulk, fo
         const loaded = await evaluate(`window.lt.workBoard.open(${JSON.stringify(folder)})`)
         assert.deepEqual(manifest(loaded.tasks),tasks,'persisted tasks/receipts and no new follow-up after restart')
       }
+      const restoredBoard = await snap(workspace)
+      const child = restoredBoard.tasks.find(t=>t.title===childTitle)
+      const source = restoredBoard.tasks.find(t=>t.id===child?.followUp?.id)
+      assert.ok(source && child.reportReceipt.state==='read' && source.reportReceipt.state==='read')
+      const restoredDetail = await evaluate(`window.lt.workBoard.detail(${JSON.stringify(workspace)},${JSON.stringify(child.id)})`)
+      assert.ok(restoredDetail.report.includes(childFinding) && child.followUp.report.includes(sourceFinding),'independent reports and context survive restart')
       assert.equal(queries.length,0,'restart does not execute a received report')
       assert.deepEqual(toolsCalled,[],'restart does not re-read or mutate source tasks')
       console.log('PASS 새 앱 프로세스 · 보고서 확인 기록 복구 · 추가 실행 없음')
@@ -408,6 +419,66 @@ function run({ root, workspace, board, temp, home, profile, screenshot, bulk, fo
     await wait(() => reportWindow.isDestroyed(),'office document closed')
     assert.equal(await evaluate("document.querySelector('.wb-dialog[open]')?.getAttribute('aria-label')"),reportTitle)
     assert.equal((await row(reportTitle)).reportReceipt.state,'unread','opening a document does not acknowledge receipt')
+    const source = await row(reportTitle)
+    const sourceReportFile = path.join(board,source.id + '.report.md')
+    const sourceReport = fs.readFileSync(sourceReportFile,'utf8')
+    const beforeFollowup = (await snap(workspace)).tasks.length
+    await click('.wb-dialog button','추가 업무 지시')
+    const followForm = 'dialog[open][aria-label="추가 업무 지시"]'
+    await visible(followForm + ' textarea')
+    await evaluate(`(() => {
+      const form = document.querySelector(${JSON.stringify(followForm)})
+      const options = form.querySelector('details.wb-draft-options')
+      if (!options || options.open || !options.querySelector('summary')?.textContent.includes('보고서 받기')) throw Error('후속 지시의 기본값은 보고서 받기입니다.')
+      const input = form.querySelector('textarea')
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value').set.call(input,${JSON.stringify(childBody)})
+      input.dispatchEvent(new Event('input',{bubbles:true}))
+    })()`)
+    await wait(() => evaluate(`[...document.querySelectorAll(${JSON.stringify(followForm + ' button')})].some(b => !b.disabled && b.textContent.includes('추가 지시 등록'))`),'additional instruction ready')
+    await evaluate('new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))')
+    fs.writeFileSync(path.join(path.dirname(screenshot),'followup-entry.png'),(await win.webContents.capturePage()).toPNG())
+    await evaluate(`(() => {
+      const submit = [...document.querySelectorAll(${JSON.stringify(followForm + ' button')})].find(b=>b.textContent.includes('추가 지시 등록'))
+      submit.click()
+      submit.click()
+    })()`)
+    await wait(() => evaluate(`!document.querySelector(${JSON.stringify(followForm)})`),'extra instruction registered')
+    await wait(async () => (await row(childTitle))?.reportReceipt?.state==='unread','separate job produces its own report')
+    const childTask = await row(childTitle)
+    const registration = boardMutations.find(m=>m.key==='workBoard:addFollowUp')
+    assert.ok(registration)
+    assert.equal(await evaluate(`window.lt.workBoard.addFollowUp(...${JSON.stringify(registration.args)})`),childTask.id,'replayed registration returns original child')
+    assert.equal((await snap(workspace)).tasks.length,beforeFollowup + 1,'double click and replay create a single task')
+    assert.equal(childTask.body,childBody)
+    assert.equal(childTask.approval,'none')
+    assert.ok(!childTask.parentId && !childTask.after_approval && !childTask.allowed_tools?.length && !childTask.depends_on?.length)
+    assert.deepEqual(childTask.followUp,{id:source.id, title:source.title, body:source.body, report:sourceReport})
+    assert.equal(childTask.cwd,source.cwd)
+    assert.deepEqual((await row(reportTitle)).reportReceipt,source.reportReceipt,'creation leaves unread source receipt intact')
+    assert.equal(fs.readFileSync(sourceReportFile,'utf8'),sourceReport)
+    const runs = queries.filter(q=>q.prompt.includes(childTitle))
+    assert.equal(runs.length,1)
+    assert.ok(runs[0].prompt.includes(sourceFinding) && runs[0].prompt.includes(source.title) && runs[0].prompt.includes(childBody))
+    assert.ok(!runs[0].prompt.includes('12월 블로그·쇼츠 편집 캘린더'),'unrelated workspace instructions stay outside follow-up context')
+    await click('.wb-followups button',childTitle)
+    await visible('dialog[aria-label="' + childTitle + '"][open]')
+    await wait(()=>evaluate(`document.querySelector('.wb-report-preview')?.innerText.includes(${JSON.stringify(childFinding)})`),'child shows only own result')
+    assert.ok(!await evaluate(`document.querySelector('.wb-report-preview').innerText.includes(${JSON.stringify(sourceFinding)})`))
+    await evaluate('new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))')
+    fs.writeFileSync(path.join(path.dirname(screenshot),'followup-result.png'),(await win.webContents.capturePage()).toPNG())
+    await click('.wb-dialog button','원 지시 · ' + reportTitle)
+    await wait(()=>evaluate(`document.querySelector('.wb-report-preview')?.innerText.includes(${JSON.stringify(sourceFinding)})`),'return to original report')
+    assert.equal((await row(reportTitle)).reportReceipt.state,'unread')
+    await evaluate(`(async () => {
+      const linked = document.querySelector('.wb-dialog .wb-followups')
+      linked.scrollIntoView({block:'nearest'})
+      await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))
+    })()`)
+    fs.writeFileSync(path.join(path.dirname(screenshot),'followup-linked-report.png'),(await win.webContents.capturePage()).toPNG())
+    await click('.wb-followups button',childTitle)
+    await confirmReceipt(workspace,childTask.id)
+    assert.equal((await row(reportTitle)).reportReceipt.state,'unread','receiving child does not receive source')
+    await click('.wb-dialog button','원 지시 · ' + reportTitle)
     await confirmReceipt(workspace,(await row(reportTitle)).id)
     await wait(async () => await navBadge('결재함') === 4 && await navBadge('보고서함') === 4, 'ack reduces only report badge')
     await dismissReceipt()
@@ -810,6 +881,7 @@ function run({ root, workspace, board, temp, home, profile, screenshot, bulk, fo
     fs.writeFileSync(receiptState,JSON.stringify(savedBoards))
     assert.equal(JSON.stringify(todoRows),originalTodos)
     assert.ok(toolsCalled.every(name => name === 'list_tasks'),'entire review is read-only')
+    console.log('PASS 원 보고서 → 추가 업무 지시 → 독립 보고서 · 양방향 탐색 · 원문·확인 상태 유지')
     console.log('PASS 보고서함 · 기본 전달 · 수신 확인 · 최종안 승인 · 승인 후 실행 구분')
     console.log('PASS 기존 할일 지시 2건 · 차단 사유 · 원본 참고 파일 열람/저장/취소 · 재수행 · 보고서 열람/저장/확인')
     console.log('PASS 이전 장치 보드 · 읽기 전용 조회 · 관리 인수 · 수정 충돌 차단 · 삭제 확인 · 새 기기 결재')

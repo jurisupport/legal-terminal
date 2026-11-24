@@ -1,4 +1,4 @@
-import { boardResultKind, isBoardReport, isBoardDecisionPending, canRetryAsReport, boardReferencePaths, boardDocumentPaths, boardMutationIssue, boardReportAvailable, boardRevision, requestsCurrentBoardCase, isBoardTodoReview } from '../../../shared/workBoard'
+import { boardFollowUpRevision, boardResultKind, isBoardReport, isBoardDecisionPending, canRetryAsReport, boardReferencePaths, boardDocumentPaths, boardMutationIssue, boardReportAvailable, boardRevision, requestsCurrentBoardCase, isBoardTodoReview } from '../../../shared/workBoard'
 import DOMPurify from 'dompurify'
 import { marked, Renderer } from 'marked'
 import { createPortal } from 'react-dom'
@@ -204,6 +204,7 @@ function InstructionForm({
   agents,
   seed,
   existing,
+  followUp = false,
   issue,
   scopeOptions,
   submit
@@ -211,6 +212,7 @@ function InstructionForm({
   agents: BoardAgent[]
   seed?: string
   existing?: BoardTask
+  followUp?: boolean
   issue?: string
   scopeOptions: ScopeOptions
   submit: (drafts: BoardDraft[], batchId: string) => Promise<void>
@@ -225,7 +227,7 @@ function InstructionForm({
     depends_on: existing.depends_on,
     after_approval: boardResultKind(existing) === 'action' ? existing.after_approval : undefined,
     allowed_tools: boardResultKind(existing) === 'action' ? existing.allowed_tools : undefined
-  }] : [])
+  }] : followUp ? [{ title: '', body: '', resultKind: 'report' }] : [])
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const update = (index: number, patch: Partial<FormDraft>) =>
@@ -234,16 +236,19 @@ function InstructionForm({
   const scopes = useTodoScopeOptions(reviewRows.includes(true), scopeOptions, () => {
     setDrafts(rows => rows.map(({ todoScope, ...draft }) => draft))
   })
+  const DraftSettings = followUp ? 'details' : 'div'
   const ready: BoardDraft[] = drafts.map(({ resultKind, todoScope, after_approval, allowed_tools, ...draft }, i) => {
     const originalMode = existing && resultKind === boardResultKind(existing)
     return {
       ...draft,
+      title: followUp ? draft.body.trim().split(/\r?\n/, 1)[0].slice(0, 120) : draft.title,
       approval: resultKind === 'report' ? 'none' : 'required',
       after_approval: resultKind === 'action' ? after_approval : originalMode ? existing.after_approval : undefined,
       allowed_tools: resultKind === 'action' ? allowed_tools : originalMode ? existing.allowed_tools : undefined,
-      todoScope: reviewRows[i] ? selectedScope(scopes, todoScope, !requestsCurrentBoardCase(draft.body)) : undefined
+      todoScope: reviewRows[i] ? selectedScope(scopes, todoScope, !requestsCurrentBoardCase(draft.body) && (!followUp || /전체|모든/u.test(draft.body.replace(/\s+/gu, '')))) : undefined
     }
   })
+  const emptyFollowUp = followUp && !drafts[0]?.body.trim()
   const missingAction = drafts.some(d => d.resultKind === 'action' && !d.after_approval?.trim())
   const missingScope = ready.some((d, i) => reviewRows[i] && !d.todoScope)
   const options = agents.map((a) => (
@@ -253,7 +258,7 @@ function InstructionForm({
     </option>
   ))
   return (
-    <form
+    <form className={followUp ? 'wb-followup-form' : undefined}
       onSubmit={async (e) => {
         e.preventDefault()
         if (!drafts.length) {
@@ -267,7 +272,7 @@ function InstructionForm({
           )
           return
         }
-        if (busy || issue || missingScope || missingAction) return
+        if (busy || issue || emptyFollowUp || missingScope || missingAction) return
         setBusy(true)
         setError('')
         try {
@@ -296,20 +301,24 @@ function InstructionForm({
       ) : (
         drafts.map((d, i) => (
           <fieldset key={i} className="wb-draft" disabled={busy}>
-            <legend>
-              {existing ? '지시 내용' : `${i + 1}. ${d.title}`}
-            </legend>
+            {!followUp && <legend>{existing ? '지시 내용' : `${i + 1}. ${d.title}`}</legend>}
             <div className="wb-fields">
-              <label className="wb-wide">
+              {!followUp && <label className="wb-wide">
                 제목
                 <input required value={d.title} onChange={(e) => update(i, { title: e.target.value })} />
-              </label>
+              </label>}
               <label className="wb-wide">
-                지시 본문
-                <textarea required rows={2} value={d.body} onChange={(e) => update(i, { body: e.target.value })} />
+                {followUp ? '추가 지시 내용' : '지시 본문'}
+                <textarea required autoFocus={followUp} rows={followUp ? 4 : 2} value={d.body}
+                  placeholder={followUp ? '예: 기한 초과 건의 안내문 초안을 작성해 줘' : undefined}
+                  onChange={(e) => update(i, { body: e.target.value })} />
               </label>
               {reviewRows[i] && <ScopeField options={scopes} value={ready[i].todoScope}
                 change={todoScope => update(i, { todoScope })} />}
+            </div>
+            <DraftSettings className="wb-draft-options">
+              {followUp && <summary>업무 설정 · {resultLabels[d.resultKind]}</summary>}
+              <div className="wb-fields">
               <label>
                 담당 에이전트
                 <select value={d.agent || ''} onChange={(e) => update(i, { agent: e.target.value })}>
@@ -387,6 +396,7 @@ function InstructionForm({
                 </label>
               </div>
             </details>
+            </DraftSettings>
           </fieldset>
         ))
       )}
@@ -399,8 +409,8 @@ function InstructionForm({
       {existing && <p className="wb-muted">내용을 변경하면 확인 필요 상태로 저장됩니다. 수정한 지시를 수행하려면 다시 대기열에 넣으세요.</p>}
       <div className="wb-actions">
         {ready.some(d => d.todoScope?.kind === 'all') && <small>{allTodosNotice}</small>}
-        <button disabled={busy || !!issue || (!existing && !raw.trim()) || missingScope || missingAction} className="wb-btn wb-primary">
-          {existing ? '변경 저장' : drafts.length ? drafts.length + '건 등록' : '지시 내용 확인'}
+        <button disabled={busy || !!issue || emptyFollowUp || (!existing && !followUp && !raw.trim()) || missingScope || missingAction} className="wb-btn wb-primary">
+          {existing ? '변경 저장' : followUp ? '추가 지시 등록' : drafts.length ? drafts.length + '건 등록' : '지시 내용 확인'}
         </button>
       </div>
     </form>
@@ -802,6 +812,14 @@ function Details({
   const openMutation = (kind: 'update' | 'remove') => {
     if (files) setMutation({ kind, task, revision: boardRevision(task, files) })
   }
+  const [followUp, setFollowUp] = useState<{ revision: string; title: string } | null>(null)
+  const [newFollowUpId, setNewFollowUpId] = useState('')
+  const followUps = tasks.filter(item => item.followUp?.id === task.id)
+  const sourceTask = task.followUp && tasks.find(item => item.id === task.followUp?.id)
+  const sourceRevision = useMemo(() => files ? boardFollowUpRevision(task, files) : null, [task, files])
+  const beginFollowUp = () => {
+    if (sourceRevision) setFollowUp({ revision: sourceRevision, title: task.title })
+  }
   const [reason, setReason] = useState('')
   const [chosenScope, setChosenScope] = useState<BoardTodoScope>()
   const retryTodo = !readOnly && canRetry && isBoardTodoReview(task.body)
@@ -872,6 +890,24 @@ function Details({
   const receipt = isBoardReport(task) ? task.reportReceipt : undefined
   const actionChild = resultKind === 'action' ? tasks.filter(t => t.parentId === task.id)
     .sort((a,b) => b.createdAt.localeCompare(a.createdAt))[0] : undefined
+  const nearReport = isBoardReport(task) && reportAvailable && !task.editedNeedsRun
+  const nearDecision = !readOnly && isBoardDecisionPending(task) && !recovery
+  const followUpActions = <nav className="wb-followups" aria-label="추가 업무">
+    <button className="wb-btn wb-followup-open" type="button" disabled={busy || !files} onClick={beginFollowUp}>추가 업무 지시</button>
+    {task.followUp && (sourceTask
+      ? <button className="wb-btn" type="button" onClick={() => selectTask(sourceTask.id)}>원 지시 · {sourceTask.title}</button>
+      : <details className="wb-followup-snapshot">
+          <summary>원 지시 · {task.followUp.title} (보관된 내용)</summary>
+          <p>원 지시가 현재 보드에 없어 등록 당시 보관한 내용을 표시합니다.</p>
+          <p className="wb-notes">{task.followUp.body}</p>
+          {task.followUp.report && <><strong>당시 보고서</strong><p className="wb-notes">{task.followUp.report}</p></>}
+        </details>)}
+    {followUps.map(item => <button className={item.id === newFollowUpId ? 'wb-btn wb-followup-added' : 'wb-btn'} type="button" key={item.id} onClick={() => selectTask(item.id)}>
+      추가 지시 · {item.title}
+    </button>)}
+    {newFollowUpId && <span role="status">추가 지시를 등록했습니다.</span>}
+    {newFollowUpId && !followUps.some(item => item.id === newFollowUpId) && <button type="button" className="wb-btn" onClick={() => void refresh()}>추가 지시 목록 다시 조회</button>}
+  </nav>
   return (
     <Dialog title={task.title} close={close}>
       <div className="wb-detail-meta">
@@ -879,6 +915,7 @@ function Details({
         {task.agent && <span>{agentName(task)}</span>}
         {task.due && <span>기한 {task.due}</span>}
       </div>
+      {!nearReport && !nearDecision && followUpActions}
       {recovery && files && <section className="wb-recovery" aria-label="다음 행동">
         {readOnly ? <>
           <h3>이 PC에서 업무를 처리하려면</h3>
@@ -940,6 +977,7 @@ function Details({
           {receipt?.state === 'read' && <span role="status">보고서 확인됨</span>}
         </div>}
         {reportAvailable && !task.editedNeedsRun && <DownloadButton key={detailKey} name="보고서" report save={() => window.lt.workBoard.downloadReport(workspace, task.id)} />}
+        {nearReport && followUpActions}
         {task.editedNeedsRun && <p className="wb-muted">수정된 지시의 보고서는 다시 수행한 뒤 확인할 수 있습니다.</p>}
       </section>}
       {files && (files.review || task.review_agent) && <section className="wb-review-preview">
@@ -995,6 +1033,7 @@ function Details({
               </div>
             </ApprovalControls>
           )}
+          {nearDecision && followUpActions}
           {canSubmit && files && !pendingChildren.length && <div className="wb-actions">
             <small className="wb-muted">{resultKind === 'action' ? '부분 보고서를 결재함에 보냅니다. 후속 작업은 승인 뒤에 요청됩니다.'
               : '부분 보고서를 최종안 승인 대상으로 결재함에 보냅니다.'}</small>
@@ -1047,6 +1086,32 @@ function Details({
         {editIssue && <p>{editIssue}</p>}
         {removeIssue && removeIssue !== editIssue && <p>{removeIssue}</p>}
       </div>}
+      {followUp && <Dialog title="추가 업무 지시" close={() => { if (!busy) setFollowUp(null) }}>
+        <p className="wb-followup-source">원 지시 · {followUp.title}</p>
+        <p className="wb-muted">원 지시의 자료를 참고하고 결과는 새 지시에 저장합니다.</p>
+        {files && followUp.revision !== sourceRevision && <details className="wb-followup-review">
+          <summary>작성 중 변경된 원 지시 확인</summary>
+          <strong>{task.title}</strong><p className="wb-notes">{task.body}</p>
+          {files.report && <><strong>현재 보고서</strong><p className="wb-notes">{files.report}</p></>}
+          {files.review && <><strong>현재 검토 결과</strong><p className="wb-notes">{files.review}</p></>}
+          <button type="button" className="wb-btn" onClick={beginFollowUp}>이 내용을 참고해 계속 작성</button>
+        </details>}
+        <InstructionForm agents={agents} followUp scopeOptions={scopeOptions}
+          issue={sourceRevision && followUp.revision !== sourceRevision ? '변경된 원 지시를 확인한 뒤 등록하세요.' : undefined}
+          submit={async ([draft], requestId) => {
+            setBusy(true)
+            try {
+              const childId = await window.lt.workBoard.addFollowUp(workspace, task.id, draft, requestId, followUp.revision)
+              setFollowUp(null)
+              setNewFollowUpId(childId)
+              await refresh()
+            } catch (err) {
+              setReadAttempt(n => n + 1)
+              await refresh()
+              throw err
+            } finally { setBusy(false) }
+          }} />
+      </Dialog>}
       {mutation?.kind === 'update' && <Dialog title="지시 수정" close={() => { if (!busy) setMutation(null) }}>
         <InstructionForm agents={agents} existing={mutation.task} scopeOptions={scopeOptions} issue={changeIssue}
           submit={async ([draft]) => {

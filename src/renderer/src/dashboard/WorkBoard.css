@@ -154,3 +154,18 @@
 .wb-receipt { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 12px 0; }
 .wb-receipt p { margin: 0; }
 .wb-receipt [role="status"] { color: #225c49; }
+
+.wb-followup-open { border-color: #aabdd0; }
+.wb-followups { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 8px 0 12px; }
+.wb-followups button { max-width: 100%; text-align: left; overflow-wrap: anywhere; }
+.wb-followups p, .wb-followups [role="status"] { margin: 0; font-size: 12px; color: var(--wb-muted); }
+.wb-followup-source { margin: 0; font-weight: 600; overflow-wrap: anywhere; }
+
+.wb-draft-options { margin-top: 8px; }
+.wb-draft-options > summary, .wb-followup-review > summary, .wb-followup-snapshot > summary { cursor: pointer; }
+details.wb-draft-options > .wb-fields { margin-top: 8px; }
+.wb-followup-review, .wb-followup-snapshot[open] { padding: 8px; border: 1px solid var(--wb-border); border-radius: 6px; }
+.wb-followup-review .wb-notes, .wb-followup-snapshot .wb-notes { margin: 6px 0; max-height: 20vh; overflow: auto; color: var(--wb-ink); }
+
+.wb-followup-form .wb-draft { padding: 0; border: 0; }
+.wb-followup-added { background: #edf6ef; border-color: #8daa95; }

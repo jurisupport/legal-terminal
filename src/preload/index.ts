@@ -809,6 +809,8 @@ const workBoard: BoardApi = {
   takeOwnership: (workspace, expectedOwner) => ipcRenderer.invoke('workBoard:takeOwnership', workspace, expectedOwner),
   updateTask: (workspace, id, draft, revision) => ipcRenderer.invoke('workBoard:updateTask', workspace, id, draft, revision),
   removeTask: (workspace, id, revision) => ipcRenderer.invoke('workBoard:removeTask', workspace, id, revision),
+  addFollowUp: (workspace, sourceId, draft, requestId, expectedRevision) =>
+    ipcRenderer.invoke('workBoard:addFollowUp', workspace, sourceId, draft, requestId, expectedRevision),
   add: (workspace, drafts, batchId) => ipcRenderer.invoke('workBoard:add', workspace, drafts, batchId),
   decide: (workspace, id, action, reason, expectedRevision, todoScope) => ipcRenderer.invoke('workBoard:decide', workspace, id, action, reason, expectedRevision, todoScope),
   reorder: (workspace, ids) => ipcRenderer.invoke('workBoard:reorder', workspace, ids),

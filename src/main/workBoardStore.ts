@@ -34,6 +34,24 @@ function date(value: unknown): value is string {
   return typeof value === 'string' && Number.isFinite(Date.parse(value))
 }
 
+// Use the same text budget as an agent-panel context attachment. Never silently truncate a saved reference.
+const maxFollowUpChars = 160_000
+
+export function followUpSnapshot(input: unknown, childId: string): NonNullable<BoardTask['followUp']> {
+  const value = record(input)
+  if (!validId(value.id) || value.id === childId || typeof value.title !== 'string' || !value.title.trim() ||
+      typeof value.body !== 'string' || (value.report !== undefined && typeof value.report !== 'string') ||
+      Object.keys(value).some(key => !['id', 'title', 'body', 'report'].includes(key))) {
+    throw new Error('후속 지시의 원 지시 자료 형식을 확인해 주세요.')
+  }
+  const report = value.report
+  if (value.title.length + value.body.length + (report?.length ?? 0) > maxFollowUpChars) {
+    throw new Error('원 지시의 제목·본문·보고서가 16만 자를 넘어 후속 지시의 참고자료로 저장할 수 없습니다.')
+  }
+  if (report !== undefined && !boardReportAvailable(report)) throw new Error('원 지시의 유효한 업무 보고서가 아닙니다.')
+  return { id: value.id, title: value.title, body: value.body, ...(report !== undefined && {report}) }
+}
+
 function parseTask(id: string, source: string, fallbackDate = new Date().toISOString()): BoardTask | null {
   if (!/^\uFEFF?---\r?\n/.test(source)) return null
   const match = /^\uFEFF?---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)([\s\S]*)$/.exec(source)
@@ -60,6 +78,7 @@ function parseTask(id: string, source: string, fallbackDate = new Date().toISOSt
   // YAML null is common in unfilled optional fields.
   const optionalKeys = ['agent', 'review_agent', 'due', 'after_approval', 'sessionId', 'parentId', 'depends_on', 'allowed_tools', 'approval', 'order', 'attempts', 'createdAt', 'updatedAt', 'editedNeedsRun']
   const fields = Object.fromEntries(optionalKeys.filter(k => v[k] != null).map(k => [k, v[k]]))
+  if (v.followUp != null) fields.followUp = followUpSnapshot(v.followUp, id)
   if (v.reportReceipt != null) {
     const receipt = record(v.reportReceipt)
     if ((receipt.state !== 'read' && receipt.state !== 'unread') ||

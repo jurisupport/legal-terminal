@@ -45,6 +45,7 @@ export interface BoardTask extends BoardDraft {
   createdAt: string
   updatedAt: string
   attempts: number
+  followUp?: { id: string; title: string; body: string; report?: string }
   reportReceipt?: { state: 'unread' | 'read'; digest: string }
   editedNeedsRun?: true
   log: { at: string; text: string }[]
@@ -78,6 +79,7 @@ export interface BoardApi {
   takeOwnership(workspace: string, expectedOwner: string): Promise<void>
   updateTask(workspace: string, id: string, draft: BoardDraft, revision: string): Promise<void>
   removeTask(workspace: string, id: string, revision: string): Promise<void>
+  addFollowUp(workspace: string, sourceId: string, draft: BoardDraft, requestId: string, expectedRevision: string): Promise<string>
   add(workspace: string, drafts: BoardDraft[], batchId?: string): Promise<void>
   decide(workspace: string, id: string, action: BoardDecision, reason?: string, expectedRevision?: string, todoScope?: BoardTodoScope): Promise<void>
   reorder(workspace: string, ids: string[]): Promise<void>
@@ -144,6 +146,16 @@ export function boardReportAvailable(report: string): boolean {
   const details = text.slice(notice[0].length).trim()
   if (/^(?:Bash\s*\(|mcp__[\w.-]+__[\w.-]+(?:\s|$)|실행 결과 확인 필요 · )/u.test(details)) return false
   return /^#{1,6} [^\n]+\r?\n+\s*[^#\s]/mu.test(details)
+}
+
+export function boardFollowUpContext(task: BoardTask, detail: { report: string }): NonNullable<BoardTask['followUp']> {
+  const source = { id: task.id, title: task.title, body: task.body }
+  return !task.editedNeedsRun && boardReportAvailable(detail.report) ? { ...source, report: detail.report } : source
+}
+
+export function boardFollowUpRevision(task: BoardTask, detail: { report: string }): string {
+  // Queue order, receipt and progress updates do not change the source material the user saw.
+  return JSON.stringify(boardFollowUpContext(task, detail))
 }
 
 export function boardRevision(task: BoardTask, detail?: { report: string; review: string }): string {
