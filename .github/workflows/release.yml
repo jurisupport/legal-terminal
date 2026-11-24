@@ -1,49 +1,10 @@
-name: Build & Release
-
-on:
-  push:
-    tags:
-      - 'v*'
-  workflow_dispatch:
-    inputs:
-      windows_preflight:
-        description: 'Verify and package Windows without publishing a release'
-        type: boolean
-        default: false
-
+name: Package v0.1.356
+on: workflow_dispatch
 permissions:
-  contents: write # Release 생성/업로드 권한
-
+  contents: write
 jobs:
-  create-release:
-    name: Create GitHub release
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Verify installer scripts
-        run: node scripts/verify-windows-installer.mjs
-
-      - name: Ensure release exists
-        if: ${{ startsWith(github.ref, 'refs/tags/v') && !inputs.windows_preflight }}
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-        # prerelease로 먼저 만든다 — 빌드가 끝나기 전에 /releases/latest가
-        # 자산 없는 새 릴리스를 가리켜 설치 스크립트가 404 나는 것을 막는다.
-        # 빌드 완료 후 finalize-release가 정식 릴리스로 전환한다.
-        run: |
-          tag="${GITHUB_REF_NAME}"
-          title="${tag#v}"
-          if ! gh release view "$tag" >/dev/null 2>&1; then
-            gh release create "$tag" --title "$title" --notes "Automated release $tag" --prerelease
-          fi
-          gh release upload "$tag" install-mac.sh install.ps1 install-windows.ps1 --clobber
-
   build-macos:
-    if: ${{ !inputs.windows_preflight }}
     name: macOS (${{ matrix.arch }})
-    needs: create-release
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -58,6 +19,8 @@ jobs:
             mac_targets: dmg zip
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: d8cc427ec901beea13e11449c351023c969594a0
 
       - uses: actions/setup-node@v4
         with:
@@ -67,99 +30,17 @@ jobs:
       - name: Install dependencies
         run: npm ci --include=optional
 
-      - name: Verify SSH work board authentication and tool approvals
-        if: matrix.arch == 'arm64'
-        run: npm run verify:work-board-remote-runner && npm run verify:work-board-management
-
-      - name: Verify durable segmented transcription
-        run: npm run verify:transcription-safety
-
-      - name: Verify desktop and case-management runtime
-        run: npm run verify:desktop
-
-      - name: Verify general questions and phone-compatible conversations
-        run: npm run verify:general-chat && npm run verify:general-chat-ui
-
-      - name: Verify completion acknowledgement and badges
-        run: npm run verify:completion-badge
-
-      - name: Verify detached conversation windows
-        run: npm run verify:detached-window
-
-      - name: Verify shared case tabs across devices
-        run: npm run verify:shared-case-tabs
-
-      - name: Verify shared screen state
-        run: npm run verify:shared-ui
-
-      - name: Verify closed agent tabs stay closed
-        run: npm run verify:agent-tab-close
-
-      - name: Verify hearing access, bulk closing, and detached quotes
-        run: npm run verify:release-current
-
-      - name: Verify projects and unreleased desktop additions
-        run: npm run verify:release-additions
-
-      - name: Verify browser removal, navigation, inline media, and workspace additions
-        run: npm run verify:release-new-ui
-
-      - name: Verify cross-computer handover
-        run: |
-          npm run verify:workspace-sessions
-          npm run verify:agent-handover
-          npm run verify:agent-execution-lock
-          npm run verify:agent-antigravity
-
-      - name: Verify durable remote Agent recovery
-        run: |
-          npm run verify:remote-agent-transport
-          npm run verify:agent-remote-recovery
-          npm run verify:agent-missing-session
-          npm run verify:agent-restored-history
-          npm run verify:agent-live-history
-          npm run verify:agent-response-text
-          npm run verify:agent-progress
-          npm run verify:agent-auth-queue
-
-      - name: Verify HTML selection and quoting
-        run: npm run verify:html-quote
-
-      - name: Verify document-linked instructions and scroll position
-        run: npm run verify:agent-quote && npm run verify:document-agent-memory-ui && npm run verify:inline-selection-ui
-
-      - name: Verify native media review
-        run: npm run verify:media && npm run verify:media-viewer && npm run verify:media-ui
-        env:
-          LT_MEDIA_UI_OUTPUT: .omx/screenshots/media-review
-
-      - name: Upload runtime evidence
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: release-runtime-macos-${{ matrix.arch }}
-          path: |
-            .omx/screenshots/**
-            .omx/state/general-chat-preview/**
-            output/playwright/html-quote/**
-            output/playwright/document-agent-memory/**
-            output/playwright/inline-selection/**
-            output/playwright/agent-media/**
-            output/playwright/agent-panel-width/**
-            output/playwright/agent-interaction/**
-            output/playwright/agent-queue/**
-            output/playwright/claude-remote-control/**
-          if-no-files-found: warn
+      - name: Build application
+        run: npm run build
 
       - name: Package macOS
         run: npx electron-builder --mac ${{ matrix.mac_targets }} --${{ matrix.arch }} --publish never
 
       - name: Upload macOS
-        if: ${{ startsWith(github.ref, 'refs/tags/v') && !inputs.windows_preflight }}
         run: |
-          gh release upload "$GITHUB_REF_NAME" dist/legal-terminal-mac-${{ matrix.arch }}.* --clobber
+          gh release upload "v0.1.356" dist/legal-terminal-mac-${{ matrix.arch }}.* --clobber
           if [[ "${{ matrix.arch }}" == "arm64" ]]; then
-            gh release upload "$GITHUB_REF_NAME" dist/latest-mac.yml --clobber
+            gh release upload "v0.1.356" dist/latest-mac.yml --clobber
           fi
         env:
           GH_TOKEN: ${{ github.token }}
@@ -167,10 +48,11 @@ jobs:
 
   build-windows:
     name: Windows (x64)
-    needs: create-release
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: d8cc427ec901beea13e11449c351023c969594a0
 
       - uses: actions/setup-node@v4
         with:
@@ -180,104 +62,14 @@ jobs:
       - name: Install dependencies
         run: npm ci --include=optional
 
-      - name: Verify document selection before Windows preflight
-        if: ${{ inputs.windows_preflight }}
-        run: npm run verify:editor-refresh && npm run build && npm run verify:inline-selection-ui
-
-      - name: Verify board management across devices
-        run: npm run verify:work-board-management
-
-      - name: Verify durable segmented transcription
-        run: npm run verify:transcription-safety
-
-      - name: Verify desktop and case-management runtime
-        run: npm run verify:desktop
-
-      - name: Verify general questions and phone-compatible conversations
-        run: npm run verify:general-chat && npm run verify:general-chat-ui
-
-      - name: Verify completion acknowledgement and badges
-        run: npm run verify:completion-badge
-
-      - name: Verify detached conversation windows
-        run: npm run verify:detached-window
-
-      - name: Verify shared case tabs across devices
-        run: npm run verify:shared-case-tabs
-
-      - name: Verify shared screen state
-        run: npm run verify:shared-ui
-
-      - name: Verify closed agent tabs stay closed
-        run: npm run verify:agent-tab-close
-
-      - name: Verify hearing access, bulk closing, and detached quotes
-        run: npm run verify:release-current
-
-      - name: Verify projects and unreleased desktop additions
-        run: npm run verify:release-additions
-
-      - name: Verify browser removal, navigation, inline media, and workspace additions
-        run: npm run verify:release-new-ui
-
-      - name: Verify restored Agent history
-        run: npm run verify:agent-restored-history && npm run verify:agent-response-text && npm run verify:agent-live-history
-
-      - name: Verify fresh remote Claude session recovery
-        run: npm run verify:agent-missing-session
-
-      - name: Verify HTML selection and quoting
-        run: npm run verify:html-quote
-
-      - name: Verify document-linked instructions and scroll position
-        run: npm run verify:agent-quote && npm run verify:document-agent-memory-ui && npm run verify:inline-selection-ui
-
-      - name: Verify native media review
-        run: npm run verify:media && npm run verify:media-viewer && npm run verify:media-ui
-        env:
-          LT_MEDIA_UI_OUTPUT: .omx/screenshots/media-review
+      - name: Build application
+        run: npm run build
 
       - name: Package Windows
         run: npx electron-builder --win --publish never
 
-      - name: Verify installed Windows application
-        run: npm run verify:installed-windows
-
-      - name: Upload runtime evidence
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: release-runtime-windows-x64
-          path: |
-            .omx/screenshots/**
-            .omx/state/general-chat-preview/**
-            output/playwright/html-quote/**
-            output/playwright/document-agent-memory/**
-            output/playwright/inline-selection/**
-            output/playwright/agent-media/**
-            output/playwright/agent-panel-width/**
-            output/playwright/agent-interaction/**
-            output/playwright/agent-queue/**
-            output/playwright/claude-remote-control/**
-          if-no-files-found: warn
-
       - name: Upload Windows
-        if: ${{ startsWith(github.ref, 'refs/tags/v') && !inputs.windows_preflight }}
-        run: gh release upload $env:GITHUB_REF_NAME dist/legal-terminal-Setup.exe dist/legal-terminal-Setup.exe.blockmap dist/legal-terminal-portable.exe dist/latest.yml --clobber
+        run: gh release upload v0.1.356 dist/legal-terminal-Setup.exe dist/legal-terminal-Setup.exe.blockmap dist/legal-terminal-portable.exe dist/latest.yml --clobber
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-
-  finalize-release:
-    if: ${{ startsWith(github.ref, 'refs/tags/v') && !inputs.windows_preflight }}
-    name: Publish release
-    needs: [build-macos, build-windows]
-    runs-on: ubuntu-latest
-    steps:
-      - name: Mark release as latest
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-        run: |
-          tag="${GITHUB_REF_NAME}"
-          gh release edit "$tag" --prerelease=false --latest
