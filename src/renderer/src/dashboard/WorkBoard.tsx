@@ -1,4 +1,4 @@
-import { boardReferencePaths, boardDocumentPaths, boardMutationIssue, boardReportAvailable, boardRevision, requestsCurrentBoardCase, isBoardTodoReview } from '../../../shared/workBoard'
+import { boardResultKind, isBoardReport, isBoardDecisionPending, canRetryAsReport, boardReferencePaths, boardDocumentPaths, boardMutationIssue, boardReportAvailable, boardRevision, requestsCurrentBoardCase, isBoardTodoReview } from '../../../shared/workBoard'
 import DOMPurify from 'dompurify'
 import { marked, Renderer } from 'marked'
 import { createPortal } from 'react-dom'
@@ -18,7 +18,7 @@ import { isBoardDueSoon, isBoardRunning } from '../../../shared/workBoardSummary
 import { JS_TOKEN_UPDATED_EVENT } from './CasesDashboard'
 import './WorkBoard.css'
 
-export type WorkBoardView = 'board' | 'approvals' | 'daily' | 'bulk'
+export type WorkBoardView = 'board' | 'reports' | 'approvals' | 'daily' | 'bulk'
 interface Props {
   workspace: string
   view: WorkBoardView
@@ -48,7 +48,7 @@ const lanes: { title: string; statuses: BoardStatus[] }[] = [
 ]
 const stats = [
   { label: '수행 중', matches: isBoardRunning, color: '#2161c7' },
-  { label: '결재 대기', matches: (t: BoardTask) => t.status === 'awaiting_approval', color: '#ad660d' },
+  { label: '결재 대기', matches: isBoardDecisionPending, color: '#ad660d' },
   { label: '기한 임박 (3일 이내)', matches: (t: BoardTask) => isBoardDueSoon(t), color: '#bd3037' },
   { label: '실패', matches: (t: BoardTask) => t.status === 'failed', color: '#172033' }
 ]
@@ -189,6 +189,17 @@ function ScopeField({ options, value, change }: { options: ScopeList; value?: Bo
   )
 }
 
+type FormDraft = BoardDraft & { resultKind: ReturnType<typeof boardResultKind> }
+const resultLabels = { report: '보고서 받기', final: '최종안 승인받기', action: '승인 후 실행' } as const
+
+function approvalLabel(instruction: string) {
+  // Label only an explicit delivery request. This never changes the allowed tools.
+  const send = /(?:발송|전송|송부)(?:하기|한다|합니다|하세요|해(?:라|줘|주세요|주십시오)?|할것)?[.!]?$/u
+  const compact = instruction.replace(/\s+/gu, '')
+  return send.test(compact) && !/(?:금지|말고|마세요|보류|모의)/u.test(compact)
+    ? '승인하고 발송 요청' : '승인하고 실행 요청'
+}
+
 function InstructionForm({
   agents,
   seed,
@@ -207,26 +218,33 @@ function InstructionForm({
   const [batchId] = useState(() => crypto.randomUUID())
   const [raw, setRaw] = useState(seed || '')
   const [blocks, setBlocks] = useState(false)
-  const [drafts, setDrafts] = useState<BoardDraft[]>(() => existing ? [{
+  const [drafts, setDrafts] = useState<FormDraft[]>(() => existing ? [{
+    resultKind: boardResultKind(existing),
     title: existing.title, body: existing.body, agent: existing.agent, due: existing.due,
     approval: existing.approval ?? 'required', review_agent: existing.review_agent,
-    depends_on: existing.depends_on, after_approval: existing.after_approval, allowed_tools: existing.allowed_tools
+    depends_on: existing.depends_on,
+    after_approval: boardResultKind(existing) === 'action' ? existing.after_approval : undefined,
+    allowed_tools: boardResultKind(existing) === 'action' ? existing.allowed_tools : undefined
   }] : [])
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
-  const update = (index: number, patch: Partial<BoardDraft>) =>
+  const update = (index: number, patch: Partial<FormDraft>) =>
     setDrafts((prev) => prev.map((d, i) => (i === index ? { ...d, ...patch } : d)))
   const reviewRows = drafts.map(d => !existing && isBoardTodoReview(d.body))
   const scopes = useTodoScopeOptions(reviewRows.includes(true), scopeOptions, () => {
     setDrafts(rows => rows.map(({ todoScope, ...draft }) => draft))
   })
-  const ready: BoardDraft[] = drafts.map((d, i) => {
-    if (!reviewRows[i]) {
-      const { todoScope, ...draft } = d
-      return draft
+  const ready: BoardDraft[] = drafts.map(({ resultKind, todoScope, after_approval, allowed_tools, ...draft }, i) => {
+    const originalMode = existing && resultKind === boardResultKind(existing)
+    return {
+      ...draft,
+      approval: resultKind === 'report' ? 'none' : 'required',
+      after_approval: resultKind === 'action' ? after_approval : originalMode ? existing.after_approval : undefined,
+      allowed_tools: resultKind === 'action' ? allowed_tools : originalMode ? existing.allowed_tools : undefined,
+      todoScope: reviewRows[i] ? selectedScope(scopes, todoScope, !requestsCurrentBoardCase(draft.body)) : undefined
     }
-    return { ...d, todoScope: selectedScope(scopes, d.todoScope, !requestsCurrentBoardCase(d.body)) }
   })
+  const missingAction = drafts.some(d => d.resultKind === 'action' && !d.after_approval?.trim())
   const missingScope = ready.some((d, i) => reviewRows[i] && !d.todoScope)
   const options = agents.map((a) => (
     <option key={a.name} value={a.name} title={a.description}>
@@ -245,11 +263,11 @@ function InstructionForm({
             .map((line) => line.trim())
             .filter(Boolean)
           setDrafts(
-            parts.map((body) => ({ body, title: body.split('\n')[0].slice(0, 120), approval: 'required' }))
+            parts.map((body) => ({ body, title: body.split('\n')[0].slice(0, 120), resultKind: 'report' }))
           )
           return
         }
-        if (busy || issue || missingScope) return
+        if (busy || issue || missingScope || missingAction) return
         setBusy(true)
         setError('')
         try {
@@ -304,9 +322,43 @@ function InstructionForm({
                 기한
                 <input type="date" value={d.due || ''} onChange={(e) => update(i, { due: e.target.value })} />
               </label>
+              <label className="wb-wide">
+                업무 결과
+                <select value={d.resultKind} onChange={e => update(i, { resultKind: e.target.value as FormDraft['resultKind'] })}>
+                  {(['report', 'final', 'action'] as const).map(kind => <option key={kind} value={kind}>{resultLabels[kind]}</option>)}
+                </select>
+                <small>{d.resultKind === 'report' ? '업무가 끝나면 보고서함에서 결과를 확인합니다.'
+                  : d.resultKind === 'final' ? '결재함에서 보고서와 산출물을 읽고 최종안을 승인하거나 수정을 요청합니다.'
+                  : '승인하면 아래에 적은 후속 작업을 대기열에 넣습니다.'}</small>
+              </label>
+              {d.resultKind === 'action' && (
+                <>
+                  <label className="wb-wide">
+                    승인 후 실행할 지시
+                    <textarea
+                      required value={d.after_approval || ''}
+                      onChange={(e) => update(i, { after_approval: e.target.value })}
+                    />
+                  </label>
+                  <label className="wb-wide">
+                    승인 후 허용할 도구 (정확한 MCP 도구명 또는 Bash(명령), 한 줄씩)
+                    <textarea
+                      defaultValue={d.allowed_tools?.join('\n')}
+                      onChange={(e) =>
+                        update(i, {
+                          allowed_tools: e.target.value
+                            .split('\n')
+                            .map((x) => x.trim())
+                            .filter(Boolean)
+                        })
+                      }
+                    />
+                  </label>
+                </>
+              )}
             </div>
             <details>
-              <summary>검토 · 결재 · 선행 지시</summary>
+              <summary>검토 · 선행 지시</summary>
               <div className="wb-fields">
                 <label>
                   검토 담당
@@ -317,23 +369,6 @@ function InstructionForm({
                     <option value="">검토 생략</option>
                     {d.review_agent && !agents.some(a => a.name === d.review_agent) && <option value={d.review_agent}>{d.review_agent} (현재 미등록)</option>}
                     {options}
-                  </select>
-                </label>
-                <label>
-                  결재
-                  <select
-                    value={d.approval}
-                    onChange={(e) =>
-                      update(i, {
-                        approval: e.target.value as BoardDraft['approval'],
-                        ...(e.target.value === 'none'
-                          ? { after_approval: undefined, allowed_tools: undefined }
-                          : {})
-                      })
-                    }
-                  >
-                    <option value="required">필요</option>
-                    <option value="none">생략</option>
                   </select>
                 </label>
                 <label className="wb-wide">
@@ -350,31 +385,6 @@ function InstructionForm({
                     }
                   />
                 </label>
-                {d.approval === 'required' && (
-                  <>
-                    <label className="wb-wide">
-                      승인 후 실행할 지시
-                      <textarea
-                        value={d.after_approval || ''}
-                        onChange={(e) => update(i, { after_approval: e.target.value })}
-                      />
-                    </label>
-                    <label className="wb-wide">
-                      승인 후 허용할 도구 (정확한 MCP 도구명 또는 Bash(명령), 한 줄씩)
-                      <textarea
-                        defaultValue={d.allowed_tools?.join('\n')}
-                        onChange={(e) =>
-                          update(i, {
-                            allowed_tools: e.target.value
-                              .split('\n')
-                              .map((x) => x.trim())
-                              .filter(Boolean)
-                          })
-                        }
-                      />
-                    </label>
-                  </>
-                )}
               </div>
             </details>
           </fieldset>
@@ -389,8 +399,8 @@ function InstructionForm({
       {existing && <p className="wb-muted">내용을 변경하면 확인 필요 상태로 저장됩니다. 수정한 지시를 수행하려면 다시 대기열에 넣으세요.</p>}
       <div className="wb-actions">
         {ready.some(d => d.todoScope?.kind === 'all') && <small>{allTodosNotice}</small>}
-        <button disabled={busy || !!issue || (!existing && !raw.trim()) || missingScope} className="wb-btn wb-primary">
-          {existing ? '변경 저장' : drafts.length ? drafts.length + '건 등록' : '지시별 담당 지정'}
+        <button disabled={busy || !!issue || (!existing && !raw.trim()) || missingScope || missingAction} className="wb-btn wb-primary">
+          {existing ? '변경 저장' : drafts.length ? drafts.length + '건 등록' : '지시 내용 확인'}
         </button>
       </div>
     </form>
@@ -574,6 +584,7 @@ function TaskCard({
       <strong>
         {isBoardRunning(t) && <i className="wb-dot" />}
         {t.title}
+        {isBoardReport(t) && t.reportReceipt?.state === 'unread' && <span className="wb-report-unread">미확인</span>}
       </strong>
       <div className="wb-split-label">
         <span className="wb-team-label">{team?.name || agentName(t)}</span>
@@ -581,7 +592,7 @@ function TaskCard({
       </div>
       <small>
         {team && agentName(t) + ' · '}
-        {statusLabel[t.status]} · {elapsed(t)}
+        {t.status === 'approved' && boardResultKind(t) === 'action' ? '승인됨 · 실행 결과 대기' : statusLabel[t.status]} · {elapsed(t)}
       </small>
     </button>
   )
@@ -637,8 +648,8 @@ function DownloadButton({ name, report = false, save }: { name: string; report?:
   </div>
 }
 
-function DocumentList({ workspace, id, paths, references = false, previous = false, onOpenFile }: {
-  workspace: string; id: string; paths: string[]; references?: boolean; previous?: boolean; onOpenFile: Props['onOpenFile']
+function DocumentList({ workspace, id, paths, references = false, previous = false, reportOnly = false, onOpenFile }: {
+  workspace: string; id: string; paths: string[]; references?: boolean; previous?: boolean; reportOnly?: boolean; onOpenFile: Props['onOpenFile']
 }) {
   const [selected, setSelected] = useState(references ? '' : paths[0])
   const [offsets, setOffsets] = useState([0])
@@ -690,7 +701,7 @@ function DocumentList({ workspace, id, paths, references = false, previous = fal
     }
   }
 
-  const heading = references ? '작업 중 읽은 참고 문서' : previous ? '수정 전 결재 대상 문서' : '결재 대상 문서'
+  const heading = references ? '작업 중 읽은 참고 문서' : reportOnly ? (previous ? '수정 전 산출물' : '보고 산출물') : previous ? '수정 전 결재 대상 문서' : '결재 대상 문서'
   return <section className={references ? 'wb-reference-documents' : 'wb-target-documents'} aria-label={heading}>
     <h3>{heading}</h3>
     <div className="wb-target-list">
@@ -768,12 +779,14 @@ function Details({
   onDecision: (task: BoardTask, action: BoardDecision, reason: string, revision?: string, todoScope?: BoardTodoScope) => Promise<void>
   reorder?: () => Promise<void>
 }) {
-  const detailKey = JSON.stringify([workspace, task.id, task.updatedAt])
+  const detailKey = JSON.stringify([workspace, task.id, task.updatedAt, task.reportReceipt?.digest])
   const [loaded, setLoaded] = useState<{ key: string; report: string; review: string } | null>(null)
   const [readError, setReadError] = useState('')
   const [readAttempt, setReadAttempt] = useState(0)
   const files = loaded?.key === detailKey ? loaded : null
   const reportAvailable = !!files && boardReportAvailable(files.report)
+  const resultKind = boardResultKind(task)
+  const retryAsReport = canRetryAsReport(task, tasks)
   const missingApprovalReport = task.status === 'awaiting_approval' && !!files && !reportAvailable
   const canRetry = !task.parentId && (['failed', 'blocked', 'rejected'].includes(task.status) || missingApprovalReport)
   const [mutation, setMutation] = useState<{ kind: 'update' | 'remove'; task: BoardTask; revision: string } | null>(null)
@@ -822,7 +835,7 @@ function Details({
       setBusy(false)
     }
   }
-  const history = task.log.filter(l => /^(?:승인$|반려 · |수정 지시 등록 · )/.test(l.text))
+  const history = task.log.filter(l => /^(?:(?:승인|최종안 승인|승인 후 실행 요청)$|반려 · |수정 지시 등록 · )/.test(l.text))
   const permissions = task.log.filter(l => /^(?:결재 필요 · |권한 확인 또는 추가 답변 필요$|승인된 실행 · )/.test(l.text))
   const todoReview = isBoardTodoReview(task.body)
   const storedReason = files && !reportAvailable ? files.report.trim().replace(/^#{1,6}\s*(?:결재 필요|할\s*일 조회 확인 필요)\s*(?:\n+|$)/u, '').trim() : ''
@@ -855,11 +868,14 @@ function Details({
     ? tasks.filter(t => t.parentId === task.id && ['failed', 'blocked'].includes(t.status)) : []
   const canSubmit = !task.parentId && task.status === 'blocked' && !task.editedNeedsRun && reportAvailable && !!files && (!todoReview || !!task.review_agent)
   const ApprovalControls = missingApprovalReport ? 'details' : 'div'
-  const reportIsTarget = reportAvailable && paths.length === 0 && !task.editedNeedsRun
+  const reportIsTarget = resultKind !== 'report' && reportAvailable && paths.length === 0 && !task.editedNeedsRun
+  const receipt = isBoardReport(task) ? task.reportReceipt : undefined
+  const actionChild = resultKind === 'action' ? tasks.filter(t => t.parentId === task.id)
+    .sort((a,b) => b.createdAt.localeCompare(a.createdAt))[0] : undefined
   return (
     <Dialog title={task.title} close={close}>
       <div className="wb-detail-meta">
-        <span className={recovery ? 'wb-needs-action' : ''}>{statusLabel[task.status]}</span>
+        <span className={recovery ? 'wb-needs-action' : ''}>{resultKind === 'action' && task.status === 'approved' ? '승인됨 · 실행 결과 대기' : statusLabel[task.status]}</span>
         {task.agent && <span>{agentName(task)}</span>}
         {task.due && <span>기한 {task.due}</span>}
       </div>
@@ -883,15 +899,16 @@ function Details({
         </> : <form onSubmit={e => {
           e.preventDefault()
           if (busy || (retryTodo && !retryScope)) return
-          void act(() => onDecision(task, 'retry', reason.trim(), undefined, retryScope), true)
+          void act(() => onDecision(task, retryAsReport ? 'retryReport' : 'retry', reason.trim(), retryAsReport ? boardRevision(task, files) : undefined, retryScope), true)
         }}>
           <h3>{retryTodo ? (retryScope ? '할일을 다시 조회하세요' : '조회할 할일을 선택하세요') : canSubmit ? '지금까지의 결과를 확인하세요' : '업무를 다시 실행하세요'}</h3>
           <p>{retryTodo && (toolBlocked || bashBlocked)
-            ? '할일 목록을 가져오기 전에 멈췄습니다. 다시 조회하면 이 카드에 보고서가 표시됩니다.'
+            ? (retryAsReport ? '이전 실행은 할일 목록 조회 단계에서 멈췄습니다.' : '할일 목록을 가져오기 전에 멈췄습니다. 다시 조회하면 이 카드에 보고서가 표시됩니다.')
             : blockReason || (task.editedNeedsRun ? '저장한 수정 내용으로 실행합니다.' :
               missingApprovalReport ? '보고서가 없어 결재를 진행할 수 없습니다.' :
               task.status === 'rejected' ? '반려 사유를 확인한 뒤 필요한 내용을 보완하세요.' :
               canSubmit ? '보고서를 읽고 결재를 요청하거나 남은 작업을 다시 실행할 수 있습니다.' : '필요한 답변이나 수정 사항을 반영해 다시 시작할 수 있습니다.')}</p>
+          {retryAsReport && <p>다시 조회한 결과는 보고서함에 도착합니다. 원본 할일 상태는 그대로 유지됩니다.</p>}
           <div className="wb-recovery-action">
             {retryTodo && <ScopeField options={scopes} value={retryScope} change={setChosenScope} />}
             <button type="submit" className="wb-btn wb-primary" disabled={busy}>{retryTodo ? '할일 다시 조회' : '다시 실행'}</button>
@@ -905,7 +922,7 @@ function Details({
         {error && <p className="wb-error" role="alert">{error}</p>}
       </section>}
       {paths.length > 0 && <DocumentList key={JSON.stringify([detailKey, paths])}
-        workspace={workspace} id={task.id} paths={paths} previous={!!task.editedNeedsRun} onOpenFile={onOpenFile} />}
+        workspace={workspace} id={task.id} paths={paths} previous={!!task.editedNeedsRun} reportOnly={resultKind === 'report'} onOpenFile={onOpenFile} />}
       {(!files || reportAvailable || !recovery) && <section className={reportIsTarget ? 'wb-report-preview wb-target-documents' : 'wb-report-preview'}
         aria-label={reportIsTarget ? '결재 대상 문서' : '업무 보고서'}>
         <h3>{reportIsTarget ? '결재 대상 문서' : task.editedNeedsRun && reportAvailable ? '수정 전 보고서' : '업무 보고서'}</h3>
@@ -916,7 +933,12 @@ function Details({
         </div> : !files ? <p role="status">보고서를 불러오는 중…</p>
           : reportAvailable ? <ReportMarkdown text={files.report} todo={todoReview} />
           : <p className="wb-muted" role="status">{task.status === 'queued' ? '실행을 기다리는 중입니다.' :
-            task.status === 'running' ? (todoReview ? '할일을 조회하고 있습니다.' : '업무를 수행하고 있습니다.') : '아직 결재할 업무 보고서가 없습니다.'}</p>}
+            task.status === 'running' ? (todoReview ? '할일을 조회하고 있습니다.' : '업무를 수행하고 있습니다.') : resultKind === 'report' ? '아직 도착한 업무 보고서가 없습니다.' : '아직 결재할 업무 보고서가 없습니다.'}</p>}
+        {reportAvailable && !task.editedNeedsRun && (receipt || (resultKind === 'report' && todoReview)) && <div className="wb-receipt">
+          {todoReview && <p>조회 결과를 확인해도 원본 할일 상태는 그대로 유지됩니다.</p>}
+          {receipt?.state === 'unread' && files && <button type="button" className="wb-btn wb-primary" disabled={busy} onClick={() => act(() => onDecision(task, 'acknowledge', '', boardRevision(task, files)), true)}>보고서 확인</button>}
+          {receipt?.state === 'read' && <span role="status">보고서 확인됨</span>}
+        </div>}
         {reportAvailable && !task.editedNeedsRun && <DownloadButton key={detailKey} name="보고서" report save={() => window.lt.workBoard.downloadReport(workspace, task.id)} />}
         {task.editedNeedsRun && <p className="wb-muted">수정된 지시의 보고서는 다시 수행한 뒤 확인할 수 있습니다.</p>}
       </section>}
@@ -926,21 +948,26 @@ function Details({
       </section>}
       {referencePaths.length > 0 && <DocumentList key={JSON.stringify([detailKey, referencePaths])}
         workspace={workspace} id={task.id} paths={referencePaths} references onOpenFile={onOpenFile} />}
-      {task.after_approval && (
+      {resultKind === 'action' && task.after_approval && (
         <section>
-          <h3>승인 후 실행</h3>
+          <h3>승인 후 실행할 작업</h3>
           <p className="wb-notes">{task.after_approval}</p>
           <strong>허용 도구</strong>
           <p className="wb-notes">{task.allowed_tools?.join('\n') || '추가 허용 없음'}</p>
+          {task.status === 'awaiting_approval' && <p className="wb-muted">승인하면 위 작업을 새 지시로 등록합니다. 실행 결과는 후속 지시에서 확인할 수 있습니다.</p>}
+          {actionChild && <button type="button" className="wb-btn" onClick={() => selectTask(actionChild.id)}>
+            후속 지시 확인 · {statusLabel[actionChild.status]}
+          </button>}
         </section>
       )}
       {!readOnly && (
         <div className="wb-form">
-          {task.status === 'awaiting_approval' && (
+          {isBoardDecisionPending(task) && (
             <ApprovalControls className="wb-approval-controls">
-              {missingApprovalReport && <summary>반려 또는 수정 지시</summary>}
+              {missingApprovalReport && <summary>반려 또는 수정 요청</summary>}
+              {reportAvailable && resultKind === 'final' && <p className="wb-muted">최종안 승인 이력이 남고 이 지시가 완료됩니다.</p>}
               <label>
-                반려 사유 또는 수정 지시
+                반려 사유 또는 수정 요청
                 <textarea value={reason} rows={2} onChange={(e) => setReason(e.target.value)} />
               </label>
               <div className="wb-actions">
@@ -949,7 +976,7 @@ function Details({
                   disabled={busy || !reason.trim()}
                   onClick={() => act(() => onDecision(task, 'revise', reason.trim()))}
                 >
-                  수정 지시
+                  수정 요청
                 </button>
                 <button
                   className="wb-btn"
@@ -961,16 +988,18 @@ function Details({
                 {reportAvailable && !task.editedNeedsRun && files && <button
                   className="wb-btn wb-primary"
                   disabled={busy}
-                  onClick={() => act(() => onDecision(task, 'approve', '', boardRevision(task, files)))}
+                  onClick={() => act(() => onDecision(task, 'approve', '', boardRevision(task, files)), resultKind === 'action')}
                 >
-                  승인
+                  {resultKind === 'action' ? approvalLabel(task.after_approval || '') : '최종안 승인'}
                 </button>}
               </div>
             </ApprovalControls>
           )}
           {canSubmit && files && !pendingChildren.length && <div className="wb-actions">
+            <small className="wb-muted">{resultKind === 'action' ? '부분 보고서를 결재함에 보냅니다. 후속 작업은 승인 뒤에 요청됩니다.'
+              : '부분 보고서를 최종안 승인 대상으로 결재함에 보냅니다.'}</small>
             <button className="wb-btn" disabled={busy} onClick={() => act(() => onDecision(task, 'submit', '', boardRevision(task, files)))}>
-              현재 보고서로 결재 요청
+              부분 보고서로 결재 요청
             </button>
           </div>}
           {reorder && (
@@ -1145,7 +1174,10 @@ function BoardWorkspace({ workspace, view, onView, bulkSeed, boundCase, onOpenFi
       }
     />
   )
-  const approvalCount = ordered.filter(stats[1].matches).length
+  const approvals = ordered.filter(isBoardDecisionPending)
+  const approvalCount = approvals.length
+  const reports = ordered.filter(isBoardReport).sort((a,b) => b.updatedAt.localeCompare(a.updatedAt))
+  const unreadCount = reports.filter(t => t.reportReceipt?.state === 'unread').length
   const ownerRevision = data?.ownerRevision
   const requestTakeover = ownerRevision ? () => setTakeover(ownerRevision) : undefined
   const actionHost = onView && data ? document.getElementById('work-board-actions') : null
@@ -1170,12 +1202,14 @@ function BoardWorkspace({ workspace, view, onView, bulkSeed, boundCase, onOpenFi
               {(
                 [
                   ['board', '업무 보드'],
+                  ['reports', '보고서함'],
                   ['approvals', '결재함'],
                   ['daily', '일일 보고']
                 ] as const
               ).map(([key, label]) => (
                 <button key={key} aria-current={tab === key ? 'page' : undefined} onClick={() => navigate(key)}>
                   {label}{' '}
+                  {key === 'reports' && unreadCount > 0 && <span className="wb-count">{unreadCount}</span>}
                   {key === 'approvals' && approvalCount > 0 && <span className="wb-count">{approvalCount}</span>}
                 </button>
               ))}
@@ -1232,7 +1266,10 @@ function BoardWorkspace({ workspace, view, onView, bulkSeed, boundCase, onOpenFi
                 <div className="wb-columns">
                   {lanes.map((lane) => {
                     const items = ordered.filter(
-                      (t) => lane.statuses.includes(t.status) && (filter === null || stats[filter].matches(t))
+                      (t) => {
+                        const status = t.status === 'approved' && boardResultKind(t) === 'action' ? 'running' : t.status
+                        return lane.statuses.includes(status) && (filter === null || stats[filter].matches(t))
+                      }
                     )
                     return (
                       <section key={lane.title} className="wb-lane">
@@ -1249,12 +1286,17 @@ function BoardWorkspace({ workspace, view, onView, bulkSeed, boundCase, onOpenFi
               <Organization data={data} />
             </div>
           )}
+          {tab === 'reports' && <main className="wb-page" aria-label="보고서함">
+            <div className="wb-page-head"><h2>보고서함 · {reports.length}건</h2>{unreadCount > 0 && <span className="wb-report-unread">미확인 {unreadCount}건</span>}</div>
+            {reports.map(card)}
+            {!reports.length && <p className="wb-muted">아직 도착한 보고서가 없습니다.</p>}
+          </main>}
           {tab === 'approvals' && (
             <main className="wb-page">
               <div className="wb-page-head">
                 <h2>결재함 · {approvalCount}건</h2>
               </div>
-              {ordered.filter(stats[1].matches).map(card)}
+              {approvals.map(card)}
               {!approvalCount && <p className="wb-muted">결재를 기다리는 지시가 없습니다.</p>}
             </main>
           )}

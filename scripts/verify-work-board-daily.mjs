@@ -13,7 +13,7 @@ for (const [due, expected] of [['2026-12-31', false], ['2027-01-01', true], ['20
   assert.equal(isBoardDueSoon(task('문서', 'blocked', due), at), expected)
 }
 const { markdown, html, date } = buildBoardDaily([
-  task('<script> & ![x](foo)', 'in_review', '2027-01-04'), task('서류', 'awaiting_approval', '2027-01-05'),
+  task('<script> & ![x](foo)', 'in_review', '2027-01-04'), {...task('서류', 'awaiting_approval', '2027-01-05'),approval:'required'},
   task('완료', 'done', '2027-01-01'), task('검토', 'failed', '2027-01-01')
 ], at)
 assert.equal(date, '2027-01-01')

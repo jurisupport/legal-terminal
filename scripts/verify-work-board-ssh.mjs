@@ -188,10 +188,12 @@ try {
     const deadline = Date.now() + 15_000
     do {
       review = (await workflow.snapshot()).tasks[0]
-      if (['awaiting_approval','failed','blocked'].includes(review?.status)) break
+      if (['done','failed','blocked'].includes(review?.status)) break
       await new Promise(resolve => setTimeout(resolve, 50))
     } while (Date.now() < deadline)
-    assert.equal(review?.status,'awaiting_approval',JSON.stringify(review?.log))
+    assert.equal(review?.status,'done',JSON.stringify(review?.log))
+    assert.equal(review.reportReceipt?.state,'unread')
+    assert.equal(workflow.approvalCount(),0)
     assert.ok(!review.agent && !review.review_agent)
     assert.deepEqual(queries,[{name:'list_tasks',arguments:{type:'todo',includeClosed:false,fields:'compact',page:1,limit:100,caseId:'case-a'}}])
     assert.equal(configLookups,execsBeforeAdd,'no SSH exec channel opened by the instruction')
@@ -205,31 +207,44 @@ try {
     for (const value of ['미완료 할일 2건','기한 초과 1건','기한 임박 1건','담당자 미지정 1건','A 제출 준비','B 의뢰인 면담']) assert.ok(report.includes(value),value)
     assert.doesNotMatch(report,/C 종료한 일|X 별건 초안|loopback-test/)
     console.log('원격 사건 할일 검토 · 범위 확인 · 단일 읽기 · SSH 지시서와 실제 보고서 바이트 일치')
+    const finalDraft = {...review, id:'draft-to-approve', body:'최종안 검토', title:'최종안', approval:'required', status:'awaiting_approval', log:[]}
+    delete finalDraft.reportReceipt
+    await docStore.save(finalDraft)
+    await docStore.writeText(finalDraft.id + '.report.md','검토가 끝난 최종안입니다.')
     const second = new mod.exports.WorkBoard(remoteCase, remoteCase + '/_업무지시', join(root, 'second-device'), () => {})
     try {
       await second.start()
       const viewer = await second.snapshot()
       assert.equal(viewer.readOnly, true)
       const revision = async task => mod.exports.boardRevision(task, await second.detail(task.id))
+      const receiptTask = viewer.tasks.find(t => t.id === review.id)
+      await second.decide(review.id, 'acknowledge', '', await revision(receiptTask))
+      const acknowledged = await second.snapshot()
+      assert.equal(acknowledged.tasks.find(t => t.id === review.id).reportReceipt.state, 'read')
+      assert.ok(acknowledged.readOnly)
+      assert.equal(acknowledged.tasks.length,viewer.tasks.length)
+      assert.equal(queries.length,1,'report confirmation does not read or mutate source tasks')
+      assert.equal(second.unreadReportCount(),0)
+      assert.equal(second.approvalCount(),1,'only final draft needs a decision')
       await second.takeOwnership(viewer.ownerRevision)
       assert.equal((await second.snapshot()).readOnly, false)
       await assert.rejects(workflow.configure({ concurrency: 2 }), /기기|관리|배분/)
-      await second.decide(review.id, 'approve', '', await revision(review))
+      await second.decide(finalDraft.id, 'approve', '', await revision(viewer.tasks.find(t => t.id === finalDraft.id)))
       let approved
       const finishBy = Date.now() + 15_000
       do {
-        approved = (await second.snapshot()).tasks.find(task => task.id === review.id)
+        approved = (await second.snapshot()).tasks.find(task => task.id === finalDraft.id)
         if (approved.status === 'done') break
         await new Promise(resolve => setTimeout(resolve, 50))
       } while (Date.now() < finishBy)
       assert.equal(approved.status, 'done')
       await second.updateTask(approved.id, {title:'수정된 지시', body:'새 지시 내용'}, await revision(approved))
-      const changed = (await second.snapshot()).tasks.find(task => task.id === review.id)
+      const changed = (await second.snapshot()).tasks.find(task => task.id === finalDraft.id)
       assert.equal(changed.status, 'blocked')
       assert.equal(changed.body, '새 지시 내용')
       await second.removeTask(changed.id, await revision(changed))
-      assert.equal((await second.snapshot()).tasks.some(task => task.id === review.id), false)
-      assert.equal(existsSync(join(caseDir, '_업무지시', review.id + '.md')), false)
+      assert.equal((await second.snapshot()).tasks.some(task => task.id === finalDraft.id), false)
+      assert.equal(existsSync(join(caseDir, '_업무지시', finalDraft.id + '.md')), false)
       assert.equal(sdkRuns, 0, 'editing or deleting the instruction must not execute it')
       console.log('동일 SSH 보드의 두 번째 PC에서 처리권 인수·결재·수정·보관 삭제 확인')
     } finally {

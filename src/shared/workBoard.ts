@@ -45,6 +45,7 @@ export interface BoardTask extends BoardDraft {
   createdAt: string
   updatedAt: string
   attempts: number
+  reportReceipt?: { state: 'unread' | 'read'; digest: string }
   editedNeedsRun?: true
   log: { at: string; text: string }[]
   sessionId?: string
@@ -70,7 +71,7 @@ export interface BoardSnapshot {
   agents: BoardAgent[]
   folder: string
 }
-export type BoardDecision = 'approve' | 'reject' | 'revise' | 'retry' | 'complete' | 'submit'
+export type BoardDecision = 'acknowledge' | 'retryReport' | 'approve' | 'reject' | 'revise' | 'retry' | 'complete' | 'submit'
 export interface BoardApi {
   open(workspace: string, folder?: string): Promise<BoardSnapshot>
   snapshot(workspace: string): Promise<BoardSnapshot>
@@ -88,7 +89,28 @@ export interface BoardApi {
   documentText(workspace: string, id: string, path: string, offset?: number): Promise<{text: string; nextOffset: number | null; size: number}>
   daily(workspace: string): Promise<string>
   onChange(listener: (workspace: string, message?: string) => void): () => void
-  counts(): Promise<Record<string, number>>
+  counts(inbox?: 'approvals' | 'reports'): Promise<Record<string, number>>
+}
+
+type BoardResultFields = Pick<BoardDraft, 'approval' | 'after_approval'>
+
+export function boardResultKind(task: BoardResultFields): 'report' | 'final' | 'action' {
+  if (task.after_approval?.trim()) return 'action'
+  return task.approval === 'required' ? 'final' : 'report'
+}
+
+export function isBoardReport(task: BoardResultFields & Pick<BoardTask, 'status' | 'parentId'>): boolean {
+  return task.status === 'done' && !task.parentId && boardResultKind(task) === 'report'
+}
+
+export function isBoardDecisionPending(task: BoardResultFields & Pick<BoardTask, 'status' | 'parentId'>): boolean {
+  return task.status === 'awaiting_approval' && !task.parentId && boardResultKind(task) !== 'report'
+}
+
+export function canRetryAsReport(task: BoardTask, tasks: readonly BoardTask[]): boolean {
+  return !task.parentId && isBoardTodoReview(task.body) && boardResultKind(task) === 'final' &&
+    !task.allowed_tools?.length && ['blocked', 'failed', 'rejected', 'awaiting_approval'].includes(task.status) &&
+    !tasks.some(other => other.parentId === task.id)
 }
 
 export function boardMutationIssue(task: BoardTask, tasks: readonly BoardTask[], action: 'update' | 'remove'): string | undefined {

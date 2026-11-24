@@ -2,10 +2,10 @@ import { createHash, randomUUID } from 'node:crypto'
 import { lstat, mkdir, readFile, realpath, rename, rm, writeFile } from 'node:fs/promises'
 import { join, resolve, sep } from 'node:path'
 import type { BoardAgent, BoardDecision, BoardDraft, BoardSettings, BoardSnapshot, BoardTask, BoardTeam, BoardTodoScope } from '../shared/workBoard'
-import { boardDocumentPaths, boardReferencePaths, boardMutationIssue, boardReportAvailable, boardRevision, isBoardDocumentPath, isBoardTodoReview } from '../shared/workBoard'
+import { boardDocumentPaths, boardReferencePaths, boardMutationIssue, boardReportAvailable, boardResultKind, boardRevision, canRetryAsReport, isBoardReport, isBoardDecisionPending, isBoardDocumentPath, isBoardTodoReview } from '../shared/workBoard'
 import { workspaceDocumentPath } from '../shared/workBoardDocuments'
 import { kstDateKey } from '../shared/todoSummary'
-import { WorkBoardStore } from './workBoardStore'
+import { WorkBoardStore, unreadReportReceipt } from './workBoardStore'
 import { runBoardAgent, listBoardAgents } from './workBoardRunner'
 import { getBoardTodoAccount, readBoardTodos } from './workBoardTodos'
 import { verifyBoardTodoScope } from './workBoardScope'
@@ -261,7 +261,9 @@ export class WorkBoard {
     }
   }
 
-  approvalCount() { return this.tasks.filter(t => t.status === 'awaiting_approval').length }
+  approvalCount() { return this.tasks.filter(isBoardDecisionPending).length }
+
+  unreadReportCount() { return this.tasks.filter(t => isBoardReport(t) && t.reportReceipt?.state === 'unread').length }
 
   private find(id: string) {
     const t = this.tasks.find(t => t.id === id)
@@ -343,6 +345,7 @@ export class WorkBoard {
   private async transition(previous: BoardTask, status: BoardTask['status'], text: string) {
     const task = structuredClone(previous)
     task.status = status
+    if (status !== 'done') delete task.reportReceipt
     append(task, text)
     await this.save(task)
   }
@@ -399,7 +402,8 @@ export class WorkBoard {
       const validated = inputs.map(draft)
       for (const input of validated) for (const dependency of input.depends_on ?? []) this.find(dependency)
       for (const [index, input] of validated.entries()) {
-        const task = this.newTask(input)
+        // Keep using the legacy normalized draft in the batch key so upgrade retries remain idempotent.
+        const task = this.newTask({ ...input, approval: inputs[index].approval ?? (input.after_approval ? 'required' : 'none') })
         const scope = isBoardTodoReview(task.body) ? inputs[index].todoScope : undefined
         if (batchId) {
           task.id = 'batch-' + createHash('sha256').update(JSON.stringify(scope ? [batchId, index, input, scope] : [batchId, index, input])).digest('hex')
@@ -517,6 +521,7 @@ export class WorkBoard {
     await this.serialOwner(async () => {
       const { task, detail } = await this.mutationTarget(id, 'update', expectedRevision)
       const fields = draft(input)
+      if (input.approval === undefined && !fields.after_approval) fields.approval = task.approval ?? 'required'
       if (input.depends_on === undefined) fields.depends_on = task.depends_on
       else {
         if (fields.depends_on?.length !== input.depends_on.length) throw new Error('선행 업무가 중복되었습니다.')
@@ -537,6 +542,7 @@ export class WorkBoard {
       const cwd = this.epoch ? this.workspace : task.cwd
       if (cwd === task.cwd && JSON.stringify(fields) === JSON.stringify(draft(task))) return
       const edited: BoardTask = { ...structuredClone(task), ...fields, cwd, status: 'blocked', editedNeedsRun: true, attempts: 0 }
+      delete edited.reportReceipt
       delete edited.sessionId
       delete edited.todoScope
       append(edited, '지시 수정 · 다시 대기열에 넣으면 수정한 내용으로 수행합니다.')
@@ -572,8 +578,29 @@ export class WorkBoard {
     return join(this.privatePath, this.epoch + 'approval-' + createHash('sha256').update(parent).digest('hex') + '.json')
   }
 
+  private async acknowledge(id: string, expectedRevision?: string) {
+    await this.reloadTaskList()
+    const task = structuredClone(this.find(id))
+    const detail = await this.detail(id)
+    const receipt = unreadReportReceipt(detail.report)
+    if (!isBoardReport(task) || !receipt || task.reportReceipt?.digest !== receipt.digest)
+      throw new Error('확인할 업무 보고서가 없습니다. 현재 보드를 다시 확인해 주세요.')
+    if (expectedRevision !== boardRevision(task, detail)) {
+      // A repeated click may carry the exact pre-acknowledgment revision.
+      const previous = { ...task, reportReceipt:receipt, log:task.log.slice(0,-1) }
+      if (task.reportReceipt.state === 'read' && task.log.at(-1)?.text === '보고서 확인' && expectedRevision === boardRevision(previous,detail)) return
+      throw new Error('보고서나 지시가 변경되었습니다. 현재 내용을 다시 확인해 주세요.')
+    }
+    if (task.reportReceipt.state === 'read') return
+    task.reportReceipt = { state:'read', digest:receipt.digest }
+    task.log.push({ at:new Date().toISOString(), text:'보고서 확인' })
+    await this.save(task)
+  }
+
   async decide(id: string, action: BoardDecision, reason = '', expectedRevision?: string, todoScope?: BoardTodoScope) {
+    if (action === 'acknowledge') return this.serial(() => this.lockedAs(this.observedOwner, () => this.acknowledge(id, expectedRevision)))
     await this.serialOwner(async () => {
+      if (action === 'retryReport') await this.reloadTaskList()
       const task = structuredClone(this.find(id))
       if (task.parentId && ['blocked', 'failed'].includes(task.status) && (action === 'complete' || action === 'reject')) {
         if (!reason.trim()) throw new Error('외부 실행 결과를 확인하고 근거를 입력해 주세요.')
@@ -602,10 +629,17 @@ export class WorkBoard {
         await this.transition(task, 'reported', '저장된 보고서로 검토·결재 요청')
         return
       }
-      if (action === 'retry') {
+      if (action === 'retry' || action === 'retryReport') {
         if (this.tasks.some(t => t.parentId === id && ['failed', 'blocked'].includes(t.status)))
           throw new Error('승인 후 실행 지시에서 외부 실행 여부를 먼저 확인해 주세요.')
-        const missingReport = task.status === 'awaiting_approval' && !boardReportAvailable((await this.detail(id)).report)
+        const detail = action === 'retryReport' || task.status === 'awaiting_approval' ? await this.detail(id) : undefined
+        const missingReport = task.status === 'awaiting_approval' && !boardReportAvailable(detail?.report ?? '')
+        if (action === 'retryReport') {
+          if (!canRetryAsReport(task,this.tasks) || (task.status === 'awaiting_approval' && !missingReport))
+            throw new Error('이 지시는 보고 전용으로 재시도할 수 없습니다.')
+          if (expectedRevision !== boardRevision(task,detail)) throw new Error('지시나 보고서가 변경되었습니다. 다시 확인해 주세요.')
+          task.approval = 'none'
+        }
         if ((!missingReport && !['failed', 'blocked', 'rejected'].includes(task.status)) || task.parentId) throw new Error('이 지시는 재실행할 수 없습니다.')
         if (task.editedNeedsRun) {
           // Finish any interrupted archival before a fresh result can replace the edit marker.
@@ -616,7 +650,8 @@ export class WorkBoard {
         if (isBoardTodoReview(task.body)) await this.authorizeTodos(task, todoScope)
         else if (reason.trim()) task.body += '\n\n추가 지시\n' + reason.trim()
         delete task.sessionId
-        await this.transition(task, 'queued', '재시도 요청' + (reason.trim() ? ' · ' + reason.trim() : ''))
+        delete task.reportReceipt
+        await this.transition(task, 'queued', (action === 'retryReport' ? '보고 전용 재시도 요청' : '재시도 요청') + (reason.trim() ? ' · ' + reason.trim() : ''))
         return
       }
       if (task.status !== 'awaiting_approval') throw new Error('결재 대기 상태에서 처리할 수 있습니다.')
@@ -641,11 +676,11 @@ export class WorkBoard {
           // Only the local approver can issue a grant. The runner later consumes it exactly once.
           const file = this.grantFile(task.id)
           await replace(file + '.pending', JSON.stringify(child))
-          await this.transition(task, 'approved', '승인')
+          await this.transition(task, 'approved', '승인 후 실행 요청')
           await rename(file + '.pending', file)
           return
         }
-        await this.transition(task, 'approved', '승인')
+        await this.transition(task, 'approved', '최종안 승인')
       } else throw new Error('결재 동작을 확인해 주세요.')
     })
     this.tick()
@@ -718,13 +753,15 @@ export class WorkBoard {
       await this.transition(task, 'blocked', '승인 후 실행 결과 확인 필요')
   }
 
-  private async finishReport(task: BoardTask) {
-    const needsApproval = task.approval !== 'none' || !!task.after_approval
-    if (needsApproval && !boardReportAvailable((await this.detail(task.id)).report)) {
-      await this.transition(task, 'blocked', '결재할 업무 보고서가 없습니다. 지시를 다시 수행해 주세요.')
+  private async finishReport(task: BoardTask, report?: string) {
+    const needsApproval = boardResultKind(task) !== 'report'
+    const receipt = unreadReportReceipt(report ?? (await this.detail(task.id)).report)
+    if (!receipt) {
+      await this.transition(task, 'blocked', '업무 결과가 담긴 보고서가 없습니다. 지시를 다시 수행해 주세요.')
       return
     }
-    await this.transition(task, needsApproval ? 'awaiting_approval' : 'done', needsApproval ? '결재 요청' : '업무 완료')
+    const completed = !needsApproval && !task.parentId ? { ...task, reportReceipt:receipt } : task
+    await this.transition(completed, needsApproval ? 'awaiting_approval' : 'done', needsApproval ? '결재 요청' : '업무 완료')
   }
 
   private async launch(task: BoardTask, phase: 'execute' | 'work' | 'review') {
@@ -835,6 +872,8 @@ export class WorkBoard {
             await this.transition(current, current.attempts <= this.prefs.maxReviews ? 'queued' : 'failed',
               current.attempts <= this.prefs.maxReviews ? '검토 반려 · 사유를 첨부해 재배분' : '검토 반려 · 재배분 상한 도달')
           } else if (phase === 'review') await this.finishReport(current)
+          else if (phase === 'work' && !current.review_agent && boardResultKind(current) === 'report')
+            await this.finishReport(current,result.text)
           else await this.transition(current, phase === 'execute' ? 'done' : 'reported', '보고서 저장')
         })
       } catch (err) {

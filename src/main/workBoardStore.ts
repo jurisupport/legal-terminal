@@ -5,6 +5,7 @@ import { dirname, isAbsolute, join, posix } from 'node:path'
 import { hostname } from 'node:os'
 import { createHash, randomUUID } from 'node:crypto'
 import { dump, JSON_SCHEMA, load } from 'js-yaml'
+import { boardReportAvailable, isBoardReport } from '../shared/workBoard.ts'
 import type { BoardStatus, BoardTask, BoardTeam } from '../shared/workBoard'
 
 const statuses: BoardStatus[] = ['queued', 'running', 'blocked', 'reported', 'in_review', 'awaiting_approval', 'approved', 'rejected', 'done', 'failed']
@@ -59,6 +60,12 @@ function parseTask(id: string, source: string, fallbackDate = new Date().toISOSt
   // YAML null is common in unfilled optional fields.
   const optionalKeys = ['agent', 'review_agent', 'due', 'after_approval', 'sessionId', 'parentId', 'depends_on', 'allowed_tools', 'approval', 'order', 'attempts', 'createdAt', 'updatedAt', 'editedNeedsRun']
   const fields = Object.fromEntries(optionalKeys.filter(k => v[k] != null).map(k => [k, v[k]]))
+  if (v.reportReceipt != null) {
+    const receipt = record(v.reportReceipt)
+    if ((receipt.state !== 'read' && receipt.state !== 'unread') ||
+        typeof receipt.digest !== 'string' || !/^[a-f0-9]{64}$/.test(receipt.digest)) throw new Error('보고서 확인 기록의 형식을 확인해 주세요.')
+    fields.reportReceipt = { state: receipt.state, digest: receipt.digest }
+  }
   if (Array.isArray(v.log)) fields.log = v.log.map(({at, text}) => ({at, text}))
   return { approval: 'required', order: 0, attempts: 0, log: [], createdAt: fallbackDate, updatedAt: fallbackDate, ...fields,
     id, title: v.title, cwd: v.cwd, status: v.status as BoardStatus, body: match[2] } as BoardTask
@@ -66,6 +73,10 @@ function parseTask(id: string, source: string, fallbackDate = new Date().toISOSt
 
 function revision(source: string) {
   return createHash('sha256').update(source).digest('hex')
+}
+
+export function unreadReportReceipt(report: string) {
+  return boardReportAvailable(report) ? {state:'unread' as const, digest:revision(report)} : undefined
 }
 
 interface ArchivedTask {
@@ -320,11 +331,21 @@ export class WorkBoardStore {
     try { return {text: await handle.readFile('utf8'), mtimeMs: stat.mtimeMs} } finally { await handle.close() }
   }
 
+  private async currentReceipt(task: BoardTask) {
+    if (!task.reportReceipt) return
+    const eligible = isBoardReport(task) && !task.editedNeedsRun
+    const receipt = eligible ? unreadReportReceipt((await this.read(task.id + '.report.md'))?.text ?? '') : undefined
+    if (!receipt) delete task.reportReceipt
+    else if (receipt.digest !== task.reportReceipt.digest) task.reportReceipt = receipt
+  }
+
   async readTask(id: string): Promise<BoardTask | null> {
     if (!validId(id)) throw new Error('올바르지 않은 지시 ID입니다.')
     const file = await this.read(id + '.md')
     if (!file || await this.isArchived(id)) return null
-    return parseTask(id, file.text, new Date(file.mtimeMs).toISOString())
+    const task = parseTask(id, file.text, new Date(file.mtimeMs).toISOString())
+    if (task) await this.currentReceipt(task)
+    return task
   }
 
   async readText(name: string): Promise<string | null> {
@@ -358,6 +379,7 @@ export class WorkBoardStore {
     const entries: {name: string; size?: number; mtimeMs?: number}[] = this.remote
       ? (await (await import('./remoteFs')).rfsList(this.root, {refresh: true, prefetch: false, followSymlinks: false})).filter(e => !e.isDir)
       : (await readdir(this.root, {withFileTypes: true})).filter(e => e.isFile())
+    const reportEntries = new Map(entries.filter(entry => entry.name.endsWith('.report.md')).map(entry => [entry.name,entry]))
     const stored = (await this.stat(this.location('_보관')))?.directory
       ? new Set(await (await this.control()).names('_보관')) : new Set<string>()
     const tasks: BoardTask[] = []
@@ -371,7 +393,9 @@ export class WorkBoardStore {
       const id = name.endsWith('.md') ? name.slice(0, -3) : ''
       if (!validId(id) || stored.has(id)) continue
       present.add(id)
-      const signature = entry.size !== undefined && entry.mtimeMs !== undefined ? entry.size + '/' + entry.mtimeMs : ''
+      const report = reportEntries.get(id + '.report.md')
+      const signature = entry.size !== undefined && entry.mtimeMs !== undefined
+        ? [entry.size, entry.mtimeMs, report?.size, report?.mtimeMs].join('/') : ''
       const cached = this.archived.get(id)
       if (!forceFresh && signature && cached?.signature === signature && !audit.has(id)) {
         tasks.push(structuredClone(cached.task))
@@ -385,6 +409,7 @@ export class WorkBoardStore {
         try { task = parseTask(id, file.text, new Date(file.mtimeMs).toISOString()) }
         catch (error) { throw new BoardFileError(error instanceof Error ? error.message : String(error)) }
         if (!task) continue
+        await this.currentReceipt(task)
         tasks.push(task)
         this.revisions.set(id, revision(file.text))
         if (signature && ['done', 'rejected', 'failed'].includes(task.status)) {

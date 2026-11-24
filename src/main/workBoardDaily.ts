@@ -1,4 +1,4 @@
-import type { BoardTask } from '../shared/workBoard'
+import { isBoardDecisionPending, type BoardTask } from '../shared/workBoard.ts'
 import { kstDateKey } from '../shared/todoSummary.ts'
 import { isBoardDueSoon, isBoardRunning } from '../shared/workBoardSummary.ts'
 
@@ -8,7 +8,7 @@ export function boardReportDue(dailyTime: string, lastDate: string | null, now =
   return !!today && lastDate !== today && now.getTime() >= Date.parse(`${today}T${dailyTime}:00+09:00`)
 }
 
-type ReportTask = Pick<BoardTask, 'title' | 'agent' | 'due' | 'status'>
+type ReportTask = Pick<BoardTask, 'title' | 'agent' | 'due' | 'status' | 'parentId' | 'approval' | 'after_approval'>
 
 function entry(task: ReportTask): string {
   return [task.title, task.agent, task.due && `기한 ${task.due}`].filter(Boolean).join(' · ').replace(/\s+/gu, ' ')
@@ -23,7 +23,7 @@ export function buildBoardDaily(tasks: ReportTask[], now = new Date()) {
   if (!date) throw new Error('보고 날짜를 확인해 주세요.')
   const sections = [
     { label: '수행 중', rows: tasks.filter(isBoardRunning) },
-    { label: '결재 대기', rows: tasks.filter(t => t.status === 'awaiting_approval') },
+    { label: '결재 대기', rows: tasks.filter(isBoardDecisionPending) },
     { label: '기한 임박 (3일 이내)', rows: tasks.filter(t => isBoardDueSoon(t, now)) },
     { label: '실패', rows: tasks.filter(t => t.status === 'failed') }
   ]

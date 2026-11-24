@@ -819,7 +819,7 @@ const workBoard: BoardApi = {
   documentPath: (workspace, id, path) => ipcRenderer.invoke('workBoard:documentPath', workspace, id, path),
   documentText: (workspace, id, path, offset) => ipcRenderer.invoke('workBoard:documentText', workspace, id, path, offset),
   daily: workspace => ipcRenderer.invoke('workBoard:daily', workspace),
-  counts: () => ipcRenderer.invoke('workBoard:counts'),
+  counts: inbox => ipcRenderer.invoke('workBoard:counts', inbox),
   onChange: listener => {
     const changed = (_event: Electron.IpcRendererEvent, workspace: string, message?: string) => listener(workspace, message)
     ipcRenderer.on('workBoard:changed', changed)

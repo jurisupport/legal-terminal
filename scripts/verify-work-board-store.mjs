@@ -5,7 +5,7 @@ import assert from 'node:assert/strict'
 import { mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { WorkBoardStore } from '../src/main/workBoardStore.ts'
+import { WorkBoardStore, unreadReportReceipt } from '../src/main/workBoardStore.ts'
 
 const directory = await mkdtemp(join(tmpdir(), 'legal-board-'))
 try {
@@ -60,6 +60,23 @@ status: queued
   await symlink(join(directory, 'outside'), join(board.root, 'bad.md'))
   await assert.rejects(board.writeText('bad.md', 'outside'))
   await assert.rejects(readFile(join(directory, 'outside')), {code: 'ENOENT'})
+  // An old completed file stays unmodified even if a report already exists.
+  const receipts = new WorkBoardStore(join(directory, '보고서 확인'))
+  await receipts.init()
+  const legacy = {...task, status:'done', approval:'none'}
+  await receipts.save(legacy)
+  await receipts.writeText(id+'.report.md','기존 업무 보고')
+  const archivedSource = await readFile(join(receipts.root,id+'.md'),'utf8')
+  assert.equal((await receipts.list())[0].reportReceipt,undefined)
+  assert.equal(await readFile(join(receipts.root,id+'.md'),'utf8'),archivedSource)
+  await assert.rejects(receipts.save({...legacy,reportReceipt:{state:'read',digest:'invalid'}}), /확인 기록/)
+  const digest = unreadReportReceipt('기존 업무 보고').digest
+  await receipts.save({...legacy, reportReceipt:{state:'read',digest}})
+  assert.deepEqual((await new WorkBoardStore(receipts.root).list())[0].reportReceipt,{state:'read',digest})
+  await receipts.writeText(id+'.report.md','수정된 업무 보고')
+  assert.deepEqual((await receipts.readTask(id)).reportReceipt,unreadReportReceipt('수정된 업무 보고'))
+  await receipts.writeText(id+'.report.md','## 할 일 조회 확인 필요\n범위를 선택하세요.')
+  assert.equal((await receipts.list())[0].reportReceipt,undefined)
   await verifyBoardStorage(WorkBoardStore,join(directory,'인계'),join(directory,'인계'))
   console.log('업무지시 저장·재시작·충돌·배분기 소유권·경로 보호 확인')
 } finally {

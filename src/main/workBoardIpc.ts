@@ -160,7 +160,9 @@ export function registerWorkBoards(): () => void {
     return downloadBoardReport(await open(w), id, win)
   })
   handle('daily', async (w: string) => (await open(w)).daily())
-  handle('counts', () => Object.fromEntries([...boards].map(([w, b]) => [w, b.approvalCount()])))
+  handle('counts', (inbox?: 'approvals' | 'reports') => Object.fromEntries(
+    [...boards].map(([workspace, board]) => [workspace, inbox === 'reports' ? board.unreadReportCount() : board.approvalCount()])
+  ))
   // Restore independently of the selected window so queued work survives an app restart.
   const restoring = new Set<string>()
   async function restore() {

@@ -149,3 +149,8 @@
 
 .wb-approval-controls > label { margin-bottom: 8px; }
 .wb-approval-controls > summary { cursor: pointer; }
+
+.wb-report-unread { display: inline-block; margin-left: 6px; padding: 1px 6px; border-radius: 4px; background: #dfeefd; color: #214f78; font-size: 11px; font-weight: 650; }
+.wb-receipt { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 12px 0; }
+.wb-receipt p { margin: 0; }
+.wb-receipt [role="status"] { color: #225c49; }

@@ -66,7 +66,7 @@ function runApp({ root, temp, screenshotDir, provider, mode, remote, restart }) 
   const handle = ipcMain.handle.bind(ipcMain), on = ipcMain.on.bind(ipcMain)
   ipcMain.on = (channel, callback) => on(channel, channel.startsWith('fs:') || channel.startsWith('pty:') ? () => {} : callback)
   ipcMain.handle = (channel, handler) => handle(channel, async (event, ...args) => {
-    if (channel === 'workBoard:counts') return remote ? { [caseDir]: 1 } : {}
+    if (channel === 'workBoard:counts') return remote ? { [caseDir]: args[0] === 'reports' ? 0 : 1 } : {}
     calls.push({ channel, args })
     if (channel === 'workBoard:open' || channel === 'workBoard:snapshot') return {
       tasks: [], agents: [], teams: [], workspace: args[0], folder: args[0] + '/_업무지시',
@@ -335,7 +335,7 @@ function runApp({ root, temp, screenshotDir, provider, mode, remote, restart }) 
     await setFolder('')
     await pickRemote()
     await wait(() => evaluate(`${boardSelect}?.value === 'ssh://phone-host/home/lawyer'`), 'selected SSH workspace')
-    await evaluate(`document.querySelector('.work-board-window .work-board-links button:nth-child(2)').click()`)
+    await evaluate(`[...document.querySelectorAll('.work-board-window .work-board-links button')].find(b => b.textContent.includes('결재함')).click()`)
     await wait(() => evaluate("!!document.querySelector('.wb-page')"), 'approvals')
     assert.equal(await evaluate(`${boardSelect}.value`), 'ssh://phone-host/home/lawyer', 'global badge does not change hosts')
     assert.equal(calls.some(x => x.channel === 'dialog:pickFolder'), false, 'remote board selection never opens the local picker')

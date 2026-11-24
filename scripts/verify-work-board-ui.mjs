@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import fs from 'node:fs/promises'
 import { spawn } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { createRequire } from 'node:module'
 import os from 'node:os'
 import path from 'node:path'
@@ -19,7 +20,7 @@ const formerOwner = 'fb202658-7bf0-4d44-9d8f-a5ab203dce1d'
 const home = path.join(temp, 'home')
 const agentDir = path.join(home, '.claude/agents')
 const profile = path.join(temp, 'profile')
-const bulk = ['준비서면 쟁점 정리', '제출 서류 목록 작성', '계약 변경 사항 요약'].join('\n')
+const bulk = ['준비서면 쟁점 정리', '제출 서류 최종안 검토', '발송할 안내 메일 작성'].join('\n')
 
 async function seed() {
   for (const dir of [board, formerBoard, profile, agentDir, path.dirname(screenshot)]) await fs.mkdir(dir, { recursive: true })
@@ -42,7 +43,7 @@ async function seed() {
     ['done-b', 'AI 검색 인용 점검', 'ai-search', 'done']
   ]
   for (const [order, [id, title, agent, status, due]] of fixtures.entries()) {
-    const task = { id, cwd: workspace, title, agent, status, order, due, approval: 'required',
+    const task = { id, cwd: workspace, title, agent, status, order, due, approval: status === 'awaiting_approval' ? 'required' : 'none',
       depends_on: id.startsWith('waiting-') ? ['hold'] : [], createdAt: new Date().toISOString() }
     const front = Object.entries(task).filter(([, v]) => v !== undefined).map(([k, v]) => k + ': ' + JSON.stringify(v)).join('\n')
     await fs.writeFile(path.join(board, id + '.md'), '---\n' + front + '\n---\n' + title)
@@ -50,6 +51,7 @@ async function seed() {
   }
   await fs.writeFile(path.join(board, 'approve-a.report.md'), '## 결론\n검토용 보고서입니다.\n## 산출물 경로\n- 초안.md\n- 검토서.pdf\n- 검토의견.hwpx\n- 참고자료.docx\n')
   await fs.writeFile(path.join(board, 'approve-b.report.md'), '## 첨부 파일\n- 누락된 검토서.pdf\n')
+  await fs.writeFile(path.join(board, 'approve-c.report.md'), '## 쇼츠 최종안\n제목과 썸네일을 함께 검토해 주세요.')
   await fs.writeFile(path.join(board, 'approve-a.review.md'), '준법감시 검토 완료')
   await fs.writeFile(path.join(workspace, '초안.md'), '## 발송 전 검토본\n\n안내 메일을 발송하기 전에 대상자와 첨부 목록을 확인해 주세요.')
   await fs.writeFile(path.join(workspace, '검토의견.hwpx'), createHwpxFromMarkdown(
@@ -62,6 +64,10 @@ async function seed() {
   ]) cfbUtils.cfb_add(word,name,Buffer.from(xml))
   await fs.writeFile(path.join(workspace, '참고자료.docx'), writeCfb(word, {type:'buffer',fileType:'zip'}))
   await fs.writeFile(path.join(formerBoard, '_배분기'), formerOwner)
+  const deskReport = '## 이전 기기의 보고서\n\n사건 일정 정리를 마쳤습니다.'
+  const deskReceipt = {state:'unread',digest:createHash('sha256').update(deskReport).digest('hex')}
+  await fs.writeFile(path.join(formerBoard,'desk-report.md'), `---\nid: desk-report\ntitle: 이전 기기의 보고서\ncwd: '.'\nstatus: done\napproval: none\nreportReceipt: ${JSON.stringify(deskReceipt)}\n---\n사건 일정 점검`)
+  await fs.writeFile(path.join(formerBoard,'desk-report.report.md'),deskReport)
   const oldTitle = '쥬리서포트 할일 점검하기'
   await fs.writeFile(path.join(formerBoard, 'legacy-todos.md'),
     `---\nid: legacy-todos\ntitle: ${oldTitle}\ncwd: '.'\napproval: required\nstatus: blocked\n---\n${oldTitle}`)
@@ -98,7 +104,7 @@ function run({ root, workspace, board, temp, home, profile, screenshot, bulk, fo
   const { app, BrowserWindow, dialog, ipcMain, session, shell } = require('electron')
   const fs = require('node:fs'), path = require('node:path'), assert = require('node:assert/strict')
   const downloads = path.join(temp, 'downloads')
-  fs.mkdirSync(downloads)
+  fs.mkdirSync(downloads,{recursive:true})
   app.setPath('downloads', downloads)
   let saveRequest = null
   dialog.showSaveDialog = async (parent, options) => {
@@ -127,6 +133,8 @@ function run({ root, workspace, board, temp, home, profile, screenshot, bulk, fo
     { id: 'E', title: 'E 별건 메모 검토', caseId: 'case-b', type: 'todo', status: 'pending', dueDate: today, assigneeName: '박담당' },
     { id: 'F', title: 'F 기한 없는 점검', caseId: 'case-b', type: 'todo', status: 'pending', dueDate: null, reviewAt: today, assigneeName: '[김담당](https://example.invalid)' }
   ]
+  const originalTodos = JSON.stringify(todoRows)
+  const toolsCalled = []
   global.fetch = async (url, options) => {
     assert.equal(url, 'https://api.jurisupport.com/mcp')
     assert.equal(options.headers.Authorization, 'Bearer ui-test-only')
@@ -136,6 +144,7 @@ function run({ root, workspace, board, temp, home, profile, screenshot, bulk, fo
     })
     if (rpc.method === 'initialize' || rpc.method === 'notifications/initialized') return respond({})
     assert.equal(rpc.method, 'tools/call')
+    toolsCalled.push(rpc.params.name)
     assert.equal(rpc.params.name, 'list_tasks')
     const args = rpc.params.arguments
     taskReads.push(args)
@@ -150,13 +159,19 @@ function run({ root, workspace, board, temp, home, profile, screenshot, bulk, fo
   const sdk = projectRequire(sdkId)
   let release
   const gate = new Promise(resolve => { release = resolve })
+  let holdFollowup = false
+  let finishFollowup
+  const followupGate = new Promise(resolve => { finishFollowup = resolve })
   const queries = []
   require.cache[sdkId].exports = { ...sdk, query({ options, prompt }) {
     assert.ok(options.cwd.startsWith(temp + path.sep))
     queries.push({ prompt, agent: options.agent })
     return { close() {}, async *[Symbol.asyncIterator]() {
       await gate
-      yield { type: 'result', subtype: 'success', is_error: false, result: '## 결론\n합성 수행 보고서' }
+      if (holdFollowup) await followupGate
+      let result = '## 결론\n합성 수행 보고서'
+      if (prompt.includes('준비서면 쟁점 정리')) result += '\n\n## 산출물 경로\n- 검토의견.hwpx\n- 초안.md'
+      yield { type:'result', subtype:'success', is_error:false, result }
     } }
   } }
 
@@ -227,8 +242,25 @@ function run({ root, workspace, board, temp, home, profile, screenshot, bulk, fo
     button.click()
     return true
   })()`), 'enabled ' + label)
+  const snap = w => evaluate(`window.lt.workBoard.snapshot(${JSON.stringify(w)})`)
+  const navBadge = label => evaluate(`Number([...document.querySelectorAll('.work-board-window .work-board-links button')]
+    .find(b=>b.textContent.trim().startsWith(${JSON.stringify(label)}))?.querySelector('span')?.textContent || 0)`)
+  const manifest = tasks => tasks.map(t=>[t.id,t.status,t.parentId ?? null,t.reportReceipt ?? null]).sort(([a],[b])=>a.localeCompare(b))
+  const receiptState = path.join(temp,'receipts-on-restart.json')
   ;(async () => {
     await ready
+    if (process.env.LT_TEST_RECEIPT_RESTART === '1') {
+      const expected = JSON.parse(fs.readFileSync(receiptState,'utf8'))
+      for (const [folder, tasks] of expected) {
+        const loaded = await evaluate(`window.lt.workBoard.open(${JSON.stringify(folder)})`)
+        assert.deepEqual(manifest(loaded.tasks),tasks,'persisted tasks/receipts and no new follow-up after restart')
+      }
+      assert.equal(queries.length,0,'restart does not execute a received report')
+      assert.deepEqual(toolsCalled,[],'restart does not re-read or mutate source tasks')
+      console.log('PASS 새 앱 프로세스 · 보고서 확인 기록 복구 · 추가 실행 없음')
+      app.exit(0)
+      return
+    }
     const paper = new BrowserWindow({show:false})
     try {
       await paper.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(
@@ -246,7 +278,7 @@ function run({ root, workspace, board, temp, home, profile, screenshot, bulk, fo
     await evaluate(`window.lt.workBoard.configure(${JSON.stringify(workspace)}, {concurrency:4})`)
     await wait(() => queries.length === 4, 'four independent provider sessions')
     await wait(() => evaluate("JSON.stringify([...document.querySelectorAll('.wb-stat strong')].map(el=>el.textContent)) === '[\"4\",\"3\",\"2\",\"0\"]'"), 'summary counts')
-    await wait(() => evaluate("document.querySelector('.work-board-window .work-board-links span')?.textContent === '3'"), 'header badge')
+    await wait(async () => (await navBadge('결재함')) === 3,'approval header badge')
     assert.equal(await evaluate("document.querySelectorAll('.wb-org .wb-team').length"), 6)
     fs.writeFileSync(screenshot, (await win.webContents.capturePage()).toPNG())
     await click('.wb-stat', '기한 임박')
@@ -268,7 +300,7 @@ function run({ root, workspace, board, temp, home, profile, screenshot, bulk, fo
       })()`)
       assert.equal(state.title, '안내 메일 발송 설계')
       assert.equal(state.reason, decisionReason)
-      for (const label of ['승인','반려','수정 지시']) assert.ok(state.actions.includes(label), label)
+      for (const label of ['최종안 승인','반려','수정 요청']) assert.ok(state.actions.includes(label), label)
     }
     await click('.wb-target-documents button', '초안.md 열기')
     await wait(() => evaluate("document.querySelector('.wb-artifact h2')?.textContent === '발송 전 검토본'"), 'read rendered Markdown draft')
@@ -301,7 +333,7 @@ function run({ root, workspace, board, temp, home, profile, screenshot, bulk, fo
     win.setContentSize(reviewWidth, Math.max(950,reviewHeight))
     await evaluate(`(async () => {
       document.querySelector('.wb-dialog').scrollTop = 0
-      const button = [...document.querySelectorAll('.wb-dialog .wb-form button')].find(b=>b.textContent.trim()==='승인')
+      const button = [...document.querySelectorAll('.wb-dialog .wb-form button')].find(b=>b.textContent.trim()==='최종안 승인')
       button.scrollIntoView({block:'nearest'})
       await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))
     })()`)
@@ -312,7 +344,7 @@ function run({ root, workspace, board, temp, home, profile, screenshot, bulk, fo
       const snap = await evaluate(`window.lt.workBoard.snapshot(${JSON.stringify(workspace)})`)
       return snap.tasks.some(t => t.id === 'approve-a' && t.status === 'rejected' && t.log.some(entry=>entry.text.includes(decisionReason)))
     }, 'reject with the reason entered before opening documents')
-    await wait(() => evaluate("document.querySelector('.work-board-window .work-board-links span')?.textContent === '2'"), 'decision decrements global badge')
+    await wait(async () => (await navBadge('결재함')) === 2,'decision decrements approval badge')
     await wait(() => evaluate("!document.querySelector('.wb-dialog[open]')"), 'rejected card closed')
     await click('.wb-page .wb-card', '판결 보도자료 초안')
     await click('.wb-target-documents button', '누락된 검토서.pdf 열기')
@@ -328,18 +360,108 @@ function run({ root, workspace, board, temp, home, profile, screenshot, bulk, fo
     await click('.agent-composer button', '일괄 지시')
     await visible('.wb-dialog textarea')
     assert.equal(await evaluate("document.querySelector('.wb-dialog textarea').value"), bulk)
-    await click('.wb-dialog button', '지시별 담당 지정')
+    await click('.wb-dialog button', '지시 내용 확인')
     assert.equal(await evaluate("document.querySelectorAll('.wb-draft').length"), 3)
-    await evaluate("const field = document.querySelector('.wb-draft select'); field.value = 'compliance'; field.dispatchEvent(new Event('change', {bubbles:true}))")
+    await evaluate(`(() => {
+      const drafts = [...document.querySelectorAll('.wb-draft')]
+      const field = (d,label) => [...d.querySelectorAll('label')].find(el=>el.textContent.trim().startsWith(label)).querySelector('select')
+      const set = (select,value) => { select.value=value; select.dispatchEvent(new Event('change',{bubbles:true})) }
+      for (const draft of drafts) {
+        const choice = field(draft,'업무 결과')
+        if (!choice.offsetWidth || choice.value !== 'report') throw Error('새 지시는 보이는 업무 결과 선택란에서 보고서 받기로 시작해야 합니다.')
+      }
+      set(field(drafts[0],'담당 에이전트'),'compliance')
+      set(field(drafts[1],'업무 결과'),'final')
+      set(field(drafts[2],'업무 결과'),'action')
+    })()`)
+    await wait(() => evaluate("document.querySelector('.wb-dialog .wb-primary').disabled"), 'action requires a defined follow-up')
+    await evaluate(`(() => {
+      const field = [...document.querySelectorAll('.wb-draft label')].find(el=>el.textContent.trim().startsWith('승인 후 실행할 지시')).querySelector('textarea')
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value').set.call(field, '검토된 합성 안내 메일을 발송해 주세요.')
+      field.dispatchEvent(new Event('input',{bubbles:true}))
+      const tools = [...document.querySelectorAll('.wb-draft label')].find(el=>el.textContent.trim().startsWith('승인 후 허용할 도구')).querySelector('textarea')
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value').set.call(tools, 'mcp__fixture_mail__send_message')
+      tools.dispatchEvent(new Event('input',{bubbles:true}))
+    })()`)
     await click('.wb-dialog button', '3건 등록')
     await wait(() => evaluate("!document.querySelector('.wb-dialog')"), 'three instructions submitted')
     release()
-    await wait(() => fs.readdirSync(board).filter(s=>/\.report\.md$/.test(s)).length === 9, 'seven reports persisted')
+    await wait(() => fs.readdirSync(board).filter(s=>/\.report\.md$/.test(s) && fs.readFileSync(path.join(board,s),'utf8').includes('합성 수행 보고서')).length === 7, 'seven reports persisted')
     assert.ok(queries.find(q=>q.agent === 'compliance' && q.prompt.includes('준비서면 쟁점 정리')))
+    const [reportTitle, finalTitle, actionTitle] = bulk.split('\n')
+    const row = async title => (await snap(workspace)).tasks.find(t=>t.title===title)
+    await wait(async () => (await row(reportTitle))?.reportReceipt?.state==='unread' &&
+      (await row(finalTitle))?.status==='awaiting_approval' && (await row(actionTitle))?.status==='awaiting_approval', 'three requested delivery modes')
+    await wait(async () => await navBadge('결재함') === 4 && await navBadge('보고서함') === 5, 'report and approval badges count independent queues')
+    await click('.work-board-window .work-board-links button','보고서함')
+    await wait(() => evaluate(`document.querySelector('.wb-page')?.innerText.includes(${JSON.stringify(reportTitle)})`),'report inbox available')
+    assert.ok(!await evaluate(`document.querySelector('.wb-page').innerText.includes(${JSON.stringify(actionTitle)})`))
+    await click('.wb-page .wb-card',reportTitle)
+    await click('.wb-dialog button','검토의견.hwpx 열기')
+    let reportWindow
+    await wait(async () => {
+      reportWindow = BrowserWindow.getAllWindows().find(w => w !== win)
+      return reportWindow?.webContents.getURL().includes('#docOnly') &&
+        await reportWindow.webContents.executeJavaScript("document.querySelector('.shell-doconly pre')?.textContent.includes('발송 전 첨부 목록과 회신 기한을 확인합니다.')")
+    },'real office document opens from report inbox')
+    reportWindow.close()
+    await wait(() => reportWindow.isDestroyed(),'office document closed')
+    assert.equal(await evaluate("document.querySelector('.wb-dialog[open]')?.getAttribute('aria-label')"),reportTitle)
+    assert.equal((await row(reportTitle)).reportReceipt.state,'unread','opening a document does not acknowledge receipt')
+    await confirmReceipt(workspace,(await row(reportTitle)).id)
+    await wait(async () => await navBadge('결재함') === 4 && await navBadge('보고서함') === 4, 'ack reduces only report badge')
+    await dismissReceipt()
+    await click('.work-board-window .work-board-links button','결재함')
+    assert.ok(!await evaluate(`document.querySelector('.wb-page').innerText.includes(${JSON.stringify(reportTitle)})`))
+    await click('.wb-page .wb-card',finalTitle)
+    await click('.wb-dialog button','최종안 승인')
+    await wait(async () => (await row(finalTitle)).status==='done','final document approved')
+    const finalId = (await row(finalTitle)).id
+    assert.ok(!(await snap(workspace)).tasks.some(t=>t.parentId===finalId),'final document approval does not perform an external action')
+    await wait(() => evaluate("!document.querySelector('.wb-dialog[open]')"), 'final decision closed')
+    await click('.wb-page .wb-card',actionTitle)
+    await visible('.wb-dialog[open]')
+    const actionId = (await row(actionTitle)).id
+    assert.ok(!(await snap(workspace)).tasks.some(t=>t.parentId===actionId),'execution waits for explicit authorization')
+    await wait(() => evaluate("[...document.querySelectorAll('.wb-dialog button')].some(b=>b.textContent.trim()==='승인하고 발송 요청' && !b.disabled)"), 'decision names the follow-up')
+    await wait(async () => await navBadge('결재함') === 3,'approval badges settle after final decision')
+    await evaluate("document.querySelector('.wb-dialog .wb-primary').scrollIntoView({block:'nearest'})")
+    fs.writeFileSync(path.join(path.dirname(screenshot),'delivery-action-decision.png'),(await win.webContents.capturePage()).toPNG())
+    holdFollowup = true
+    await click('.wb-dialog button','승인하고 발송 요청')
+    await wait(async () => (await row(actionTitle)).status === 'approved' &&
+      (await snap(workspace)).tasks.some(t=>t.parentId===actionId && t.status==='running'),'authorization requests execution, not completion')
+    await wait(() => evaluate("document.querySelector('.wb-dialog')?.innerText.includes('승인됨 · 실행 결과 대기')"), 'action waiting state visible')
+    fs.writeFileSync(path.join(path.dirname(screenshot),'delivery-execution-requested.png'),(await win.webContents.capturePage()).toPNG())
+    holdFollowup = false
+    finishFollowup()
+    await wait(async () => (await row(actionTitle)).status==='done','authorized synthetic follow-up finished')
+    assert.deepEqual((await snap(workspace)).tasks.filter(t=>t.parentId===actionId).map(t=>t.status),['done'],'exactly one authorized follow-up')
+    assert.equal(await evaluate("document.querySelector('.wb-dialog[open]')?.getAttribute('aria-label')"),actionTitle,'external decision remains available for following its execution')
+    await dismissReceipt()
     await click('.work-board-window .work-board-links button', '일일 보고')
     await click('.wb-page button', '오늘 보고서 저장')
     await wait(() => fs.existsSync(path.join(board,'_일일보고')) && fs.readdirSync(path.join(board,'_일일보고')).some(name=>name.endsWith('.html')), 'daily HTML')
     const providerRuns = queries.length
+    async function dismissReceipt() {
+      if (await evaluate("!!document.querySelector('.wb-dialog[open]')")) await click('.wb-dialog button','닫기')
+      await wait(() => evaluate("!document.querySelector('.wb-dialog[open]')"),'receipt detail closed')
+    }
+    async function confirmReceipt(folder,id) {
+      const before = (await snap(folder)).tasks
+      const executions = queries.length
+      const reads = toolsCalled.length
+      await wait(() => evaluate("[...document.querySelectorAll('.wb-dialog button')].some(b=>b.textContent.trim()==='보고서 확인' && !b.disabled)"),'receipt acknowledgement available')
+      const buttons = await evaluate("[...document.querySelectorAll('.wb-dialog button')].map(b=>b.textContent.trim())")
+      assert.ok(!buttons.some(b=>['승인','최종안 승인','반려','수정 요청'].includes(b) || b.startsWith('승인하고')), 'reports are acknowledged, never approved')
+      await click('.wb-dialog button','보고서 확인')
+      await wait(async () => (await snap(folder)).tasks.find(t=>t.id===id)?.reportReceipt?.state==='read','acknowledgement persisted')
+      const after = (await snap(folder)).tasks
+      assert.deepEqual(after.map(t=>t.id).sort(), before.map(t=>t.id).sort(), 'receipt does not create any task')
+      assert.ok(!after.some(t=>t.parentId===id) && after.find(t=>t.id===id).status==='done')
+      assert.equal(queries.length,executions)
+      assert.equal(toolsCalled.length,reads,'no source operation during receipt')
+    }
     async function review(title, choice, expectedStatus) {
       const before = taskReads.length
       await click('.work-board-window button', '일괄 지시')
@@ -350,7 +472,7 @@ function run({ root, workspace, board, temp, home, profile, screenshot, bulk, fo
         el.dispatchEvent(new Event('input', {bubbles:true}))
       })()`)
       await inputText('.wb-dialog textarea', '할일 검토')
-      await click('.wb-dialog button', '지시별 담당 지정')
+      await click('.wb-dialog button', '지시 내용 확인')
       const notice = "document.querySelector('.wb-dialog .wb-primary').parentElement.textContent.includes('이 보드 폴더에 보고서로 저장')"
       if (choice === 'pinned') {
         await wait(() => evaluate("document.querySelector('.wb-draft')?.textContent.includes('할일 검토 범위 · case-a')"), 'linked case is fixed')
@@ -368,6 +490,7 @@ function run({ root, workspace, board, temp, home, profile, screenshot, bulk, fo
         }
       }
       assert.equal(await evaluate("document.querySelector('.wb-dialog .wb-primary').disabled"), false)
+      assert.ok(await evaluate("[...document.querySelectorAll('.wb-draft label')].find(el=>el.textContent.trim().startsWith('업무 결과'))?.querySelector('select')?.value === 'report'"),'native todo review defaults to report only')
       await inputText('.wb-draft input', title)
       assert.equal(taskReads.length, before, 'reads start only on registration')
       await click('.wb-dialog button', '1건 등록')
@@ -384,14 +507,16 @@ function run({ root, workspace, board, temp, home, profile, screenshot, bulk, fo
       const reads = taskReads.slice(before)
       assert.deepEqual(reads, [{ page: 1, limit: 100, type: 'todo', includeClosed: false, fields: 'compact',
         ...(choice === 'all' ? {} : { caseId: 'case-a' }) }])
-      await click('.work-board-window .work-board-links button', '업무 보드')
+      await click('.work-board-window .work-board-links button', expectedStatus === 'done' ? '보고서함' : '업무 보드')
       await click('.wb-card', title)
       const report = fs.readFileSync(path.join(board, task.id + '.report.md'), 'utf8')
       if (expectedStatus === 'blocked') {
         await wait(() => evaluate("document.querySelector('.wb-dialog')?.textContent.includes('권한')"), 'read failure displayed')
       } else {
         await wait(() => evaluate("!!document.querySelector('.wb-dialog .wb-todo-report')?.textContent.trim()"), 'report rendered')
-        assert.ok(await evaluate("!!document.querySelector('.wb-target-documents.wb-report-preview .wb-todo-report')"), 'report is the approval target when there are no attachments')
+        assert.equal(task.reportReceipt?.state,'unread')
+        assert.equal(task.approval,'none')
+        assert.ok(await evaluate("!!document.querySelector('.wb-report-preview .wb-todo-report')"), 'report body is directly readable without attachments')
         const text = await evaluate("document.querySelector('.wb-todo-report').innerText")
         if (listMode === 'empty') assert.match(text, /미완료 할일 0건/)
         else {
@@ -410,15 +535,30 @@ function run({ root, workspace, board, temp, home, profile, screenshot, bulk, fo
           }
         }
       }
-      await click('.wb-dialog button', '닫기')
+      if (expectedStatus === 'done') {
+        if (choice === 'case:case-a') {
+          await wait(async () => await navBadge('보고서함') === (await snap(workspace)).tasks.filter(t=>t.reportReceipt?.state==='unread').length, 'inbox badge settled')
+          const [width,height] = win.getContentSize()
+          win.setContentSize(width,Math.max(height,950))
+          await evaluate(`(async () => {
+            document.querySelector('.wb-dialog').scrollTop = 0
+            await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))
+          })()`)
+          fs.writeFileSync(path.join(path.dirname(screenshot),'report-receipt.png'),(await win.webContents.capturePage()).toPNG())
+          win.setContentSize(width,height)
+        }
+        await confirmReceipt(workspace,task.id)
+      }
+      await dismissReceipt()
+      if (expectedStatus === 'done') await click('.work-board-window .work-board-links button','업무 보드')
       return report
     }
-    const scoped = await review('사건 미완료 목록', 'case:case-a', 'awaiting_approval')
+    const scoped = await review('사건 미완료 목록', 'case:case-a', 'done')
     for (const value of ['미완료 할일 3건', '기한 초과 1건', '기한 임박 2건', '담당자 미지정 1건', 'A 준비서면 제출', 'B 의뢰인 면담', 'D 자정 후 기한']) assert.ok(scoped.includes(value), value)
     const midnightRow = scoped.split('\n').find(line => line.includes('D 자정 후 기한'))
     assert.ok(midnightRow.includes(today) && !midnightRow.includes('기한 초과'), 'UTC 15:30 belongs to today in Seoul')
     assert.doesNotMatch(scoped, /별건 메모|종료한 지시|F 기한 없는 점검/)
-    const all = await review('전체 미완료 목록', 'all', 'awaiting_approval')
+    const all = await review('전체 미완료 목록', 'all', 'done')
     assert.ok(all.includes('미완료 할일 5건') && all.includes(todoRows[4].title))
     for (const label of ['기한 없음 1건', '재확인일 도래 1건', 'F 기한 없는 점검']) assert.ok(all.includes(label), label)
     listMode = 'denied'
@@ -432,7 +572,7 @@ function run({ root, workspace, board, temp, home, profile, screenshot, bulk, fo
     await evaluate("document.querySelector('.work-board-window button[aria-label=\"작업 공간으로 돌아가기\"]').click()")
     await click('.work-board-links button', '업무 보드')
     await wait(() => evaluate("document.querySelectorAll('.wb-lane').length === 5"), 'reopen board with linked case')
-    const empty = await review('빈 사건 확인', 'pinned', 'awaiting_approval')
+    const empty = await review('빈 사건 확인', 'pinned', 'done')
     assert.match(empty, /미완료 할일 0건/)
     await click('.wb-card', '연결 확인')
     await wait(() => evaluate("document.querySelector('.wb-recovery')?.innerText.includes('할일을 다시 조회하세요')"), 'linked case already has a scope')
@@ -449,9 +589,16 @@ function run({ root, workspace, board, temp, home, profile, screenshot, bulk, fo
     await wait(() => evaluate("document.querySelector('.work-board')?.textContent.includes('이 PC에서 관리')"), 'read-only shared board')
     const shared = () => evaluate(`window.lt.workBoard.snapshot(${JSON.stringify(formerBoardWorkspace)})`)
     assert.equal((await shared()).readOnly, true)
+    await click('.work-board-window .work-board-links button','보고서함')
+    await click('.wb-page .wb-card','이전 기기의 보고서')
+    await confirmReceipt(formerBoardWorkspace,'desk-report')
+    assert.equal((await shared()).readOnly,true,'shared report receipt does not move execution ownership')
+    assert.equal(fs.readFileSync(path.join(formerBoard,'_배분기'),'utf8'),formerOwner)
+    await dismissReceipt()
+    await click('.work-board-window .work-board-links button','업무 보드')
     await click('.wb-card', '이전 장치 결재 건')
     await wait(() => evaluate("document.querySelector('.wb-dialog')?.textContent.includes('결재 건 보고서 원문')"), 'read original report')
-    assert.equal(await evaluate("[...document.querySelectorAll('.wb-dialog button')].some(b=>b.textContent.trim()==='승인' && !b.disabled)"), false)
+    assert.equal(await evaluate("[...document.querySelectorAll('.wb-dialog button')].some(b=>b.textContent.trim()==='최종안 승인' && !b.disabled)"), false)
     await click('.wb-dialog button', '닫기')
     await wait(() => evaluate("!document.querySelector('.wb-dialog')"), 'close read-only detail')
     await click('.wb-card', '이전 장치 보류 건')
@@ -531,7 +678,7 @@ function run({ root, workspace, board, temp, home, profile, screenshot, bulk, fo
     assert.equal(fs.readFileSync(path.join(formerBoard,'legacy-approval.report.md'),'utf8'), '이전 장치 결재 건 보고서 원문')
     await click('.wb-card', '이전 장치 결재 건')
     await wait(() => evaluate("document.querySelector('.wb-dialog')?.textContent.includes('결재 건 검토 원문')"), 'new owner reviews prior report')
-    await click('.wb-dialog button', '승인')
+    await click('.wb-dialog button', '최종안 승인')
     await wait(async () => (await shared()).tasks.some(t=>t.id==='legacy-approval' && ['approved','done'].includes(t.status)), 'new owner can approve')
     assert.equal(queries.length, providerRuns, 'takeover does not execute approved or blocked work again')
     // A synced pre-native todo card has a permission marker but no business report.
@@ -614,7 +761,7 @@ function run({ root, workspace, board, temp, home, profile, screenshot, bulk, fo
       assert.equal(await evaluate("[...document.querySelectorAll('.wb-recovery .wb-primary')].map(b=>b.textContent.trim()).join()"),'할일 다시 조회','one primary retry action')
       assert.equal(await evaluate("document.querySelector('.wb-recovery select').value"), '')
       assert.ok(await evaluate("!document.querySelector('.wb-recovery .wb-primary').disabled"))
-      assert.ok(!await evaluate("[...document.querySelectorAll('.wb-dialog button')].some(el=>['현재 보고서로 결재 요청','승인','보고서 다운로드'].includes(el.textContent.trim()))"))
+      assert.ok(!await evaluate("[...document.querySelectorAll('.wb-dialog button')].some(el=>['현재 보고서로 결재 요청','최종안 승인','보고서 확인','보고서 다운로드'].includes(el.textContent.trim()))"))
       if (id === 'legacy-organize') await verifyReadReferences(oldTitle)
       else fs.writeFileSync(path.join(path.dirname(screenshot), 'legacy-todo-blocked.png'), (await win.webContents.capturePage()).toPNG())
       await click(action, '할일 다시 조회')
@@ -632,7 +779,7 @@ function run({ root, workspace, board, temp, home, profile, screenshot, bulk, fo
       assert.equal(taskReads.length, readsBeforeRetry, 'selecting scope does not start lookup')
       await click(action, '할일 다시 조회')
       const oldTask = async () => (await shared()).tasks.find(t=>t.id===id)
-      await wait(async () => (await oldTask())?.status==='awaiting_approval', 'native retry generated report pending approval')
+      await wait(async () => (await oldTask())?.reportReceipt?.state==='unread', 'native retry delivers unread report')
       assert.deepEqual(taskReads.slice(readsBeforeRetry), [{ type:'todo', includeClosed:false, fields:'compact', page:1, limit:100, caseId:'case-a' }])
       assert.equal(queries.length, providerRuns, 'no generic agent for the original Korean request')
       await wait(() => evaluate("document.querySelector('.wb-report-preview table')?.textContent.includes('A 준비서면 제출')"), 'report appears without closing or reopening')
@@ -655,10 +802,16 @@ function run({ root, workspace, board, temp, home, profile, screenshot, bulk, fo
       if (id === 'legacy-todos') {
         await saveFromCard('.wb-report-preview button','보고서 다운로드',path.join(formerBoard,id + '.report.md'))
       }
-      await click('.wb-dialog button', '승인')
-      await wait(async () => ['approved','done'].includes((await oldTask())?.status), 'legacy native report approved after successful lookup')
+      await confirmReceipt(formerBoardWorkspace,id)
+      await dismissReceipt()
     }
-    console.log('PASS 기존 할일 지시 2건 · 차단 사유 · 원본 참고 파일 열람/저장/취소 · 재수행 · 보고서 열람/저장/결재')
+    const savedBoards = []
+    for (const folder of [workspace,formerBoardWorkspace]) savedBoards.push([folder,manifest((await snap(folder)).tasks)])
+    fs.writeFileSync(receiptState,JSON.stringify(savedBoards))
+    assert.equal(JSON.stringify(todoRows),originalTodos)
+    assert.ok(toolsCalled.every(name => name === 'list_tasks'),'entire review is read-only')
+    console.log('PASS 보고서함 · 기본 전달 · 수신 확인 · 최종안 승인 · 승인 후 실행 구분')
+    console.log('PASS 기존 할일 지시 2건 · 차단 사유 · 원본 참고 파일 열람/저장/취소 · 재수행 · 보고서 열람/저장/확인')
     console.log('PASS 이전 장치 보드 · 읽기 전용 조회 · 관리 인수 · 수정 충돌 차단 · 삭제 확인 · 새 기기 결재')
     console.log('PASS 할일 검토 · 사건 범위 · 전체 선택 · 조회 권한 거부 · 실제 0건')
     console.log('PASS 업무 보드 · 실제 IPC · 결재 · 일괄 입력 3건 · 보고 저장 · ' + screenshot)
@@ -675,11 +828,13 @@ try {
   await fs.writeFile(entry, '(' + run.toString() + ')(' + JSON.stringify({ root, temp, home, profile, workspace, board, screenshot, bulk, formerBoardWorkspace, formerBoard, formerOwner }) + ')')
   const env = { ...process.env, HOME: home, USERPROFILE: home }
   for (const key of Object.keys(env)) if (/^(ANTHROPIC_|OPENAI_|CLAUDE_|CODEX_|ELECTRON_RUN_AS_NODE|ELECTRON_RENDERER_URL|LEGAL_TERMINAL_CHECK_UPDATE_IN_DEV)/.test(key)) delete env[key]
-  await new Promise((resolve, reject) => {
-    const child = spawn(createRequire(import.meta.url)('electron'), [entry, '--disable-background-networking', '--user-data-dir=' + profile], { env, stdio:'inherit' })
+  const launch = extraEnv => new Promise((resolve, reject) => {
+    const child = spawn(createRequire(import.meta.url)('electron'), [entry, '--disable-background-networking', '--user-data-dir=' + profile], { env:{...env,...extraEnv}, stdio:'inherit' })
     const timeout = setTimeout(() => child.kill('SIGKILL'), 65_000)
     child.on('error', reject)
     child.on('exit', (code, signal) => { clearTimeout(timeout); if (code === 0) resolve(); else reject(Error('UI test exited ' + (signal || code))) })
   })
+  await launch({ LT_TEST_RECEIPT_RESTART:'0' })
+  await launch({ LT_TEST_RECEIPT_RESTART:'1' })
   assert.ok((await fs.stat(screenshot)).size > 10000)
 } finally { await fs.rm(temp, {recursive:true, force:true}) }

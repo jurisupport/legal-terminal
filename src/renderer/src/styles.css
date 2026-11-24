@@ -7643,6 +7643,7 @@ fieldset.todo-card { margin: 0; min-width: 0; }
 }
 .work-board-links button:hover, .work-board-window > header button:hover { background: #8996a830; }
 .work-board-links span { padding: 1px 5px; border-radius: 9px; background: #963841; color: white; font-size: 11px; }
+.work-board-links .work-board-unread { background: #315c86; }
 .work-board-window {
   position: fixed; inset: 0; margin: 0; padding: 0; border: 0; width: 100vw; height: 100vh;
   max-width: none; max-height: none; box-sizing: border-box; background: #f4f5f7;

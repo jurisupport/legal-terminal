@@ -54,6 +54,7 @@ let afterNativeRead
 globalThis.boardRunFixture = async i => {
   runs.push({ id: i.task.id, title: i.task.title, phase: i.phase, agent: i.task.agent, todoAccess:!!i.readTodos, resume: i.resume, tools: i.approvedTools })
   i.onProgress('파일 읽음 · source.md', 'session-' + i.task.id)
+  if (i.task.body === 'diagnostic-only') return {text:'결재 필요'}
   if (i.readTodos) {
     try {
       const text = await i.readTodos()
@@ -90,7 +91,7 @@ async function open() {
 try {
   await open()
   await board.configure({ dailyTime: '00:00' })
-  await board.add(['A', 'B', 'C'].map(title => ({ title, body: title, agent: 'writer', approval: 'none' })))
+  await board.add(['A', 'B', 'C'].map(title => ({ title, body: title, agent: 'writer' })))
   const batch = [{title:'보존',body:'idempotent',approval:'none'}]
   let tasks = await until(ts => ts.length === 3 && ts.every(t => t.status === 'done'))
   assert.deepEqual(runs.map(r => r.title), ['A', 'B', 'C'])
@@ -98,6 +99,56 @@ try {
   for (const t of tasks) assert.match((await board.detail(t.id)).report, /보고/)
   assert.ok((await readdir(join(folder, '_일일보고'))).some(n => n.endsWith('.html')))
 
+  assert.ok(tasks.every(t => t.approval === 'none' && t.reportReceipt?.state === 'unread'))
+  assert.equal(board.approvalCount(),0)
+  assert.equal(board.unreadReportCount(),3)
+  const [unopened, changedReport] = tasks
+  await board.add([{title:'읽기 전 후속 업무',body:'후행 업무',depends_on:[unopened.id]}])
+  await until(ts=>ts.some(t=>t.title==='읽기 전 후속 업무' && t.status==='done'))
+  const reportFile = join(folder,unopened.id+'.report.md')
+  const reportBodyBefore = await readFile(reportFile,'utf8')
+  const view = new WorkBoard(dir,folder,join(dir,'reader'),()=>{})
+  try {
+    await view.start()
+    assert.equal((await view.snapshot()).readOnly,true)
+    const firstView = boardRevision(unopened,await view.detail(unopened.id))
+    assert.equal(view.unreadReportCount(),4,'opening details never acknowledges')
+    const priorRuns = runs.length
+    await view.decide(unopened.id,'acknowledge','',firstView)
+    await view.decide(unopened.id,'acknowledge','',firstView)
+    const seen = (await view.snapshot()).tasks.find(t=>t.id===unopened.id)
+    assert.equal(seen.status,'done')
+    assert.equal(seen.updatedAt,unopened.updatedAt)
+    assert.equal(seen.log.filter(e=>e.text==='보고서 확인').length,1)
+    assert.deepEqual(seen.reportReceipt,{...unopened.reportReceipt,state:'read'})
+    assert.equal(await readFile(reportFile,'utf8'), reportBodyBefore)
+    const oldView = boardRevision(changedReport,await view.detail(changedReport.id))
+    await writeFile(join(folder,changedReport.id+'.report.md'),'새 보고서')
+    await assert.rejects(view.decide(changedReport.id,'acknowledge','',oldView),/다시 확인/)
+    assert.equal((await view.snapshot()).tasks.find(t=>t.id===changedReport.id).reportReceipt.state,'unread')
+    assert.equal(runs.length,priorRuns)
+    await board.refresh()
+    assert.equal(board.unreadReportCount(),3,'owner refresh reflects shared acknowledgment')
+    await writeFile(reportFile,'다시 쓴 보고서')
+    await board.refresh()
+    assert.equal(board.unreadReportCount(),4)
+    await assert.rejects(board.decide(unopened.id,'acknowledge','',firstView),/다시 확인/)
+  } finally { view.stop() }
+
+  await board.add([{title:'진단만 반환',body:'diagnostic-only'}])
+  const diagnostic = (await until(ts=>ts.some(t=>t.title==='진단만 반환' && t.status==='blocked'))).find(t=>t.title==='진단만 반환')
+  assert.equal(diagnostic.reportReceipt,undefined)
+  await assert.rejects(board.decide(diagnostic.id,'acknowledge','',boardRevision(diagnostic,await board.detail(diagnostic.id))),/확인할 업무 보고서/)
+  const originalReceipt = (await board.snapshot()).tasks.find(t=>t.id===changedReport.id)
+  await board.updateTask(originalReceipt.id,{title:'새 지시',body:'다시 작성'},boardRevision(originalReceipt,await board.detail(originalReceipt.id)))
+  const edited = (await board.snapshot()).tasks.find(t=>t.id===originalReceipt.id)
+  assert.equal(edited.reportReceipt,undefined)
+  assert.equal(edited.approval,'none')
+  assert.equal((await board.detail(edited.id)).report,'')
+  await board.decide(edited.id,'retry')
+  const rerun = (await until(ts=>ts.some(t=>t.id===edited.id && t.status==='done'))).find(t=>t.id===edited.id)
+  assert.equal(rerun.reportReceipt.state,'unread')
+  assert.notEqual(rerun.reportReceipt.digest,originalReceipt.reportReceipt.digest)
   await board.add(batch,'retry-001')
   await board.add(batch,'retry-001')
   await until(ts => ts.some(t => t.title === '보존' && t.status === 'done'))
@@ -108,6 +159,7 @@ try {
   assert.match((await board.detail(parent.id)).review, /review 보고/)
   assert.equal(runs.some(r => r.phase === 'execute'), false)
   await assert.rejects(board.decide(parent.id, 'approve', '', 'old'), /다시 확인/)
+  await assert.rejects(board.decide(parent.id,'retryReport','',boardRevision(parent,await board.detail(parent.id))), /보고 전용/)
   await approve(parent)
   await until(ts => ts.find(t => t.id === parent.id).status === 'done')
   assert.equal(runs.filter(r => r.phase === 'execute').length, 1)
@@ -247,7 +299,7 @@ try {
   await until(ts=>ts.some(t=>t.id===pending.id && t.status==='blocked'))
   assert.equal(reads.length,4)
   // A previously successful result must not survive an account or scope change on retry.
-  await board.add([{title:'저장 직전 변경',body:reportBody,todoScope:scope,review_agent:'reviewer'}])
+  await board.add([{title:'저장 직전 변경',body:reportBody,todoScope:scope,review_agent:'reviewer',approval:'required'}])
   const stale = (await until(ts=>ts.some(t=>t.title==='저장 직전 변경' && t.status==='awaiting_approval'))).find(t=>t.title==='저장 직전 변경')
   assert.match((await board.detail(stale.id)).report,/미완료 2건/)
   await board.decide(stale.id,'reject','재조회 요청')
@@ -274,7 +326,7 @@ try {
     const legacyStore = new WorkBoardStore(localFolder)
     await legacyStore.init()
     await writeFile(join(localFolder,'legacy.md'), ['---','id: legacy','title: 기존 할일 지시','cwd: '+cwd,index ? 'status: awaiting_approval' : 'status: failed',
-      'todoScope: {kind: all}', 'approval: none','---', '쥬리서포트 할일 점검하기'].join('\n'))
+      'todoScope: {kind: all}', 'approval: required', 'review_agent: reviewer','---', '쥬리서포트 할일 점검하기'].join('\n'))
     board = new WorkBoard(cwd,localFolder,privateDir,()=>{},()=>['alias'])
     await board.start()
     if (index) {
@@ -282,8 +334,16 @@ try {
       await assert.rejects(approve(missing), /승인할 보고서가 없습니다/)
     }
     await assert.rejects(board.decide('legacy','retry'), /조회 범위/)
-    await board.decide('legacy','retry','',undefined,scope)
-    await until(ts=>ts.some(t=>t.id==='legacy' && t.status==='done'))
+    const legacy = (await board.snapshot()).tasks.find(t=>t.id==='legacy')
+    const revision = boardRevision(legacy,await board.detail(legacy.id))
+    assert.equal(legacy.approval,'required')
+    await assert.rejects(board.decide('legacy','retryReport','','stale',scope),/다시 확인/)
+    await board.decide('legacy','retryReport','',revision,scope)
+    const retried = (await until(ts=>ts.some(t=>t.id==='legacy' && t.status==='done'))).find(t=>t.id==='legacy')
+    assert.equal(retried.approval,'none')
+    assert.equal(retried.reportReceipt.state,'unread')
+    assert.equal(retried.review_agent,'reviewer')
+    assert.match((await board.detail('legacy')).review,/review 보고/)
     assert.deepEqual(checkedScopes.at(-1),{workspace:cwd,scope,aliases:['alias'],requireMapped:true})
     assert.deepEqual(reads.at(-1),{scope,account})
     board.stop()
@@ -291,7 +351,8 @@ try {
   console.log('업무 보드 배분·보고·결재·차단·복구·검토 상한·위조 방지 확인')
 } finally {
   board?.stop()
+  await board?.snapshot()
   delete globalThis.boardRunFixture
   delete globalThis.boardTodoFixture
-  await rm(dir, { recursive: true, force: true })
+  await rm(dir, { recursive: true, force: true, maxRetries: 3 })
 }

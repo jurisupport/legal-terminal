@@ -4739,7 +4739,7 @@ export default function App(): JSX.Element {
       : (activeTermTab?.cwd ?? currentCase?.drafts)
   const [board, setBoard] = useState<OpenBoard | null>(null)
   const [boardPicker, setBoardPicker] = useState<{ profile: SshProfile; startPath?: string; view: WorkBoardView } | null>(null)
-  const [boardCounts, setBoardCounts] = useState<Record<string, number>>({})
+  const [{ approvals: boardCounts, reports: unreadReportCounts }, setBoardCounts] = useState<{ approvals: Record<string, number>; reports: Record<string, number> }>({ approvals: {}, reports: {} })
   const boardDialog = useRef<HTMLDialogElement>(null)
   useEffect(() => {
     const api = window.lt.workBoard
@@ -4750,8 +4750,8 @@ export default function App(): JSX.Element {
     const refresh = async (): Promise<void> => {
       const seq = ++request
       try {
-        const counts = await api.counts()
-        if (active && seq === request) setBoardCounts(counts)
+        const [approvals, reports] = await Promise.all([api.counts(), api.counts('reports')])
+        if (active && seq === request) setBoardCounts({ approvals, reports })
       } catch { /* Keep the last known count while a board reconnects. */ }
     }
     const unsubscribe = api.onChange(() => {
@@ -4810,9 +4810,8 @@ export default function App(): JSX.Element {
     const known = Object.keys(boardCounts).filter(path => parseRemoteUri(path)?.profileId === profileId)
     const defaultRoot = profileId && profile?.draftsRoot?.startsWith('/') ? remoteUri(profileId, profile.draftsRoot) : undefined
     let target = folder || (profileId ? defaultRoot : draftsRoot)
-    if (view === 'approvals' && !term && !boardCounts[target ?? '']) {
-      target = known.find(path => boardCounts[path] > 0) ?? target
-    }
+    const counts = view === 'reports' ? unreadReportCounts : view === 'approvals' ? boardCounts : undefined
+    if (!board && counts && !term && !counts[target ?? '']) target = known.find(path => counts[path] > 0) ?? target
     target ||= known[0]
     if (target) selectBoard(target, view, source, bulkSeed)
     else await pickBoardFolder(view, profileId)
@@ -9730,10 +9729,13 @@ export default function App(): JSX.Element {
     <SlashCommandPalette commands={slashCommands} onClose={() => setSlashCommandsOpen(false)} />
   ) : null
 
-  const approvalCount = Object.values(boardCounts).reduce((sum, count) => sum + count, 0)
+  const inboxBadge = (counts: Record<string, number>) => board ? counts[board.workspace] ?? 0 : Object.values(counts).reduce((sum, count) => sum + count, 0)
+  const approvalCount = inboxBadge(boardCounts)
+  const unreadReports = inboxBadge(unreadReportCounts)
   const boardNavigation = (
     <nav className="work-board-links" aria-label="업무지시">
       <button type="button" aria-pressed={board?.view === 'board' || board?.view === 'bulk'} disabled={!workspaceSettingsReady} onClick={() => void openBoard('board')}>업무 보드</button>
+      <button type="button" aria-pressed={board?.view === 'reports'} disabled={!workspaceSettingsReady} onClick={() => void openBoard('reports')}>보고서함{unreadReports > 0 && <> <span className="work-board-unread" aria-label={`미확인 보고서 ${unreadReports}건`}>{unreadReports}</span></>}</button>
       <button type="button" aria-pressed={board?.view === 'approvals'} disabled={!workspaceSettingsReady} onClick={() => void openBoard('approvals')}>결재함 <span>{approvalCount}</span></button>
       <button type="button" aria-pressed={board?.view === 'daily'} disabled={!workspaceSettingsReady} onClick={() => void openBoard('daily')}>일일 보고</button>
     </nav>
@@ -9757,7 +9759,7 @@ export default function App(): JSX.Element {
             }
           }}>
             {[...new Set([board.workspace, boardSourceFolder, ...Object.keys(boardCounts)])].filter((path): path is string => !!path).map(path =>
-              <option key={path} value={path}>{fileNameFromPath(path) || path}{boardCounts[path] ? ` (결재 ${boardCounts[path]})` : ''} · {path}</option>
+              <option key={path} value={path}>{fileNameFromPath(path) || path}{unreadReportCounts[path] ? ` (미확인 보고서 ${unreadReportCounts[path]})` : ''}{boardCounts[path] ? ` (결재 ${boardCounts[path]})` : ''} · {path}</option>
             )}
             <option value="">다른 폴더 선택…</option>
           </select>
