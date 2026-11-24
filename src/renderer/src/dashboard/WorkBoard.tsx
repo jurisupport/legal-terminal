@@ -1,4 +1,4 @@
-import { boardRevision, requestsCurrentBoardCase, isBoardTodoReview } from '../../../shared/workBoard'
+import { boardMutationIssue, boardRevision, requestsCurrentBoardCase, isBoardTodoReview } from '../../../shared/workBoard'
 import DOMPurify from 'dompurify'
 import { marked, Renderer } from 'marked'
 import { createPortal } from 'react-dom'
@@ -80,6 +80,7 @@ function Dialog({ title, children, close }: { title: string; children: ReactNode
       ref={ref}
       aria-label={title}
       onCancel={(event) => {
+        if (event.target !== event.currentTarget) return
         event.preventDefault()
         close()
       }}
@@ -93,6 +94,29 @@ function Dialog({ title, children, close }: { title: string; children: ReactNode
       {children}
     </dialog>
   )
+}
+
+function ConfirmAction({ title, confirmLabel, close, confirm, issue, children }: {
+  title: string; confirmLabel: string; close: () => void; confirm: () => Promise<void>; issue?: string; children: ReactNode
+}) {
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+  return <Dialog title={title} close={() => { if (!busy) close() }}>
+    {children}
+    {issue && <p role="status" className="wb-muted">{issue}</p>}
+    {error && <p className="wb-error" role="alert">{error}</p>}
+    <div className="wb-actions">
+      <button className="wb-btn" disabled={busy} onClick={close}>취소</button>
+      <button className="wb-btn wb-primary" disabled={busy || !!issue} onClick={async () => {
+        if (busy || issue) return
+        setBusy(true)
+        setError('')
+        try { await confirm(); close() }
+        catch (err) { setError(errMsg(err)) }
+        finally { setBusy(false) }
+      }}>{confirmLabel}</button>
+    </div>
+  </Dialog>
 }
 
 interface ScopeOptions {
@@ -165,26 +189,34 @@ function ScopeField({ options, value, change }: { options: ScopeList; value?: Bo
   )
 }
 
-function BulkForm({
+function InstructionForm({
   agents,
   seed,
+  existing,
+  issue,
   scopeOptions,
   submit
 }: {
   agents: BoardAgent[]
   seed?: string
+  existing?: BoardTask
+  issue?: string
   scopeOptions: ScopeOptions
   submit: (drafts: BoardDraft[], batchId: string) => Promise<void>
 }) {
   const [batchId] = useState(() => crypto.randomUUID())
   const [raw, setRaw] = useState(seed || '')
   const [blocks, setBlocks] = useState(false)
-  const [drafts, setDrafts] = useState<BoardDraft[]>([])
+  const [drafts, setDrafts] = useState<BoardDraft[]>(() => existing ? [{
+    title: existing.title, body: existing.body, agent: existing.agent, due: existing.due,
+    approval: existing.approval ?? 'required', review_agent: existing.review_agent,
+    depends_on: existing.depends_on, after_approval: existing.after_approval, allowed_tools: existing.allowed_tools
+  }] : [])
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const update = (index: number, patch: Partial<BoardDraft>) =>
     setDrafts((prev) => prev.map((d, i) => (i === index ? { ...d, ...patch } : d)))
-  const reviewRows = drafts.map(d => isBoardTodoReview(d.body))
+  const reviewRows = drafts.map(d => !existing && isBoardTodoReview(d.body))
   const scopes = useTodoScopeOptions(reviewRows.includes(true), scopeOptions, () => {
     setDrafts(rows => rows.map(({ todoScope, ...draft }) => draft))
   })
@@ -217,7 +249,7 @@ function BulkForm({
           )
           return
         }
-        if (busy || missingScope) return
+        if (busy || issue || missingScope) return
         setBusy(true)
         setError('')
         try {
@@ -247,7 +279,7 @@ function BulkForm({
         drafts.map((d, i) => (
           <fieldset key={i} className="wb-draft" disabled={busy}>
             <legend>
-              {i + 1}. {d.title}
+              {existing ? '지시 내용' : `${i + 1}. ${d.title}`}
             </legend>
             <div className="wb-fields">
               <label className="wb-wide">
@@ -264,6 +296,7 @@ function BulkForm({
                 담당 에이전트
                 <select value={d.agent || ''} onChange={(e) => update(i, { agent: e.target.value })}>
                   <option value="">기본 세션</option>
+                  {d.agent && !agents.some(a => a.name === d.agent) && <option value={d.agent}>{d.agent} (현재 미등록)</option>}
                   {options}
                 </select>
               </label>
@@ -282,6 +315,7 @@ function BulkForm({
                     onChange={(e) => update(i, { review_agent: e.target.value })}
                   >
                     <option value="">검토 생략</option>
+                    {d.review_agent && !agents.some(a => a.name === d.review_agent) && <option value={d.review_agent}>{d.review_agent} (현재 미등록)</option>}
                     {options}
                   </select>
                 </label>
@@ -351,10 +385,12 @@ function BulkForm({
           {error}
         </div>
       )}
+      {issue && <p role="status" className="wb-error">{issue}</p>}
+      {existing && <p className="wb-muted">내용을 변경하면 확인 필요 상태로 저장됩니다. 수정한 지시를 수행하려면 다시 대기열에 넣으세요.</p>}
       <div className="wb-actions">
         {ready.some(d => d.todoScope?.kind === 'all') && <small>{allTodosNotice}</small>}
-        <button disabled={busy || !raw.trim() || missingScope} className="wb-btn wb-primary">
-          {drafts.length ? drafts.length + '건 등록' : '지시별 담당 지정'}
+        <button disabled={busy || !!issue || (!existing && !raw.trim()) || missingScope} className="wb-btn wb-primary">
+          {existing ? '변경 저장' : drafts.length ? drafts.length + '건 등록' : '지시별 담당 지정'}
         </button>
       </div>
     </form>
@@ -602,6 +638,10 @@ function Details({
   task,
   workspace,
   readOnly,
+  tasks,
+  agents,
+  refresh,
+  manageHere,
   scopeOptions,
   onOpenFile,
   onDecision,
@@ -611,6 +651,10 @@ function Details({
   task: BoardTask
   workspace: string
   readOnly: boolean
+  tasks: BoardTask[]
+  agents: BoardAgent[]
+  refresh: () => Promise<void>
+  manageHere?: () => void
   scopeOptions: ScopeOptions
   onOpenFile: Props['onOpenFile']
   close: () => void
@@ -618,6 +662,18 @@ function Details({
   reorder?: () => Promise<void>
 }) {
   const [files, setFiles] = useState<{ report: string; review: string } | null>(null)
+  const [mutation, setMutation] = useState<{ kind: 'update' | 'remove'; task: BoardTask; revision: string } | null>(null)
+  const editIssue = boardMutationIssue(task, tasks, 'update')
+  const removeIssue = boardMutationIssue(task, tasks, 'remove')
+  const changeIssue = mutation && (
+    (readOnly && '관리 기기가 변경되었습니다. 지시를 다시 열어 주세요.') ||
+    (mutation.kind === 'update' ? editIssue : removeIssue) ||
+    (!files && '지시 상태를 확인하고 있습니다.') ||
+    (files && mutation.revision !== boardRevision(task, files) && '지시 내용이 바뀌었습니다. 변경된 지시를 확인한 뒤 다시 선택해 주세요.')
+  ) || undefined
+  const openMutation = (kind: 'update' | 'remove') => {
+    if (files) setMutation({ kind, task, revision: boardRevision(task, files) })
+  }
   const [reason, setReason] = useState('')
   const [chosenScope, setChosenScope] = useState<BoardTodoScope>()
   const retryTodo = !readOnly && !task.parentId && ['failed', 'blocked', 'rejected'].includes(task.status) && isBoardTodoReview(task.body)
@@ -680,6 +736,17 @@ function Details({
         {task.id} · {statusLabel[task.status]} · {agentName(task)}
         {task.due && ' · 기한 ' + task.due}
       </div>
+      {readOnly ? <div className="wb-management">
+        <p>지시 수정·삭제와 결재는 관리 기기에서 할 수 있습니다.</p>
+        {manageHere && <button className="wb-btn" onClick={manageHere}>이 PC에서 관리</button>}
+      </div> : <div className="wb-management" aria-label="선택한 지시 관리">
+        <div className="wb-actions">
+          <button className="wb-btn" disabled={busy || !files || !!editIssue} title={editIssue} onClick={() => openMutation('update')}>지시 수정</button>
+          <button className="wb-btn wb-remove" disabled={busy || !files || !!removeIssue} title={removeIssue} onClick={() => openMutation('remove')}>지시 삭제</button>
+        </div>
+        {editIssue && <p>{editIssue}</p>}
+        {removeIssue && removeIssue !== editIssue && <p>{removeIssue}</p>}
+      </div>}
       <div className="wb-timeline">
         <section>
           <h3>지시 본문</h3>
@@ -696,7 +763,8 @@ function Details({
           </ol>
         </section>
         <section>
-          <h3>보고서</h3>
+          <h3>{task.editedNeedsRun && files?.report ? '수정 전 보고서' : '보고서'}</h3>
+          {task.editedNeedsRun && <p className="wb-muted">수정된 지시의 보고서는 다시 수행한 뒤 확인할 수 있습니다.</p>}
           {todoReview && files?.report ? <TodoReport text={files.report} /> : (
             <p className="wb-notes">{files ? files.report || '아직 보고서가 없습니다.' : '불러오는 중…'}</p>
           )}
@@ -718,7 +786,7 @@ function Details({
           )}
         </section>
         <section>
-          <h3>검토 결과{task.review_agent && ' · ' + task.review_agent}</h3>
+          <h3>{task.editedNeedsRun && files?.review ? '수정 전 검토 결과' : '검토 결과'}{task.review_agent && ' · ' + task.review_agent}</h3>
           <p className="wb-notes">{files?.review || (task.review_agent ? '검토 결과 대기 중' : '검토 생략')}</p>
         </section>
         <section>
@@ -817,7 +885,7 @@ function Details({
                 >
                   다시 대기열에 넣기
                 </button>
-                {task.status === 'blocked' && files?.report && (
+                {task.status === 'blocked' && !task.editedNeedsRun && files?.report && (
                   <button className="wb-btn" disabled={busy} onClick={() => act(() => onDecision(task, 'submit', ''))}>
                     현재 보고서로 결재 요청
                   </button>
@@ -839,6 +907,25 @@ function Details({
           {error}
         </p>
       )}
+      {mutation?.kind === 'update' && <Dialog title="지시 수정" close={() => { if (!busy) setMutation(null) }}>
+        <InstructionForm agents={agents} existing={mutation.task} scopeOptions={scopeOptions} issue={changeIssue}
+          submit={async ([draft]) => {
+            setBusy(true)
+            try {
+              await window.lt.workBoard.updateTask(workspace, mutation.task.id, draft, mutation.revision)
+              setMutation(null)
+              await refresh()
+            } finally { setBusy(false) }
+          }} />
+      </Dialog>}
+      {mutation?.kind === 'remove' && <ConfirmAction title="지시 삭제" confirmLabel="삭제 확인" issue={changeIssue}
+        close={() => setMutation(null)} confirm={async () => {
+          await window.lt.workBoard.removeTask(workspace, mutation.task.id, mutation.revision)
+          close()
+          await refresh()
+        }}>
+        <p>「{mutation.task.title}」의 지시서·보고서·검토서를 이 보드의 <code>_보관</code> 폴더로 옮깁니다.</p>
+      </ConfirmAction>}
     </Dialog>
   )
 }
@@ -851,6 +938,7 @@ function BoardWorkspace({ workspace, view, onView, bulkSeed, boundCase, onOpenFi
   const [data, setData] = useState<BoardSnapshot | null>(null)
   const [error, setError] = useState('')
   const [tab, setTab] = useState(view)
+  const [takeover, setTakeover] = useState<string | null>(null)
   const [settings, setSettings] = useState(false)
   const [selected, setSelected] = useState<string | null>(null)
   const [filter, setFilter] = useState<number | null>(null)
@@ -947,6 +1035,8 @@ function BoardWorkspace({ workspace, view, onView, bulkSeed, boundCase, onOpenFi
     />
   )
   const approvalCount = ordered.filter(stats[1].matches).length
+  const ownerRevision = data?.ownerRevision
+  const requestTakeover = ownerRevision ? () => setTakeover(ownerRevision) : undefined
   const actionHost = onView && data ? document.getElementById('work-board-actions') : null
   const actions = (
     <div className="wb-actions">
@@ -1002,9 +1092,12 @@ function BoardWorkspace({ workspace, view, onView, bulkSeed, boundCase, onOpenFi
         )
       )}
       {!!data?.warnings?.length && <details className="wb-error"><summary>읽지 못한 보드 파일 {data.warnings.length}개</summary>{data.warnings.map(warning => <div key={warning}>{warning}</div>)}</details>}
-    {data?.readOnly && (
-        <div className="wb-status">
-          다른 기기에서 수행 중인 보드입니다. 결재와 설정 변경은 해당 기기에서 할 수 있습니다.
+      {data?.readOnly && (
+        <div className="wb-status wb-owner">
+          <span>이 보드의 지시 수정과 결재는 관리 기기에서 할 수 있습니다.</span>
+          {requestTakeover
+            ? <button className="wb-btn" onClick={requestTakeover}>이 PC에서 관리</button>
+            : <button className="wb-btn" onClick={() => void refresh()}>관리 기기 정보 다시 조회</button>}
         </div>
       )}
       {data && (
@@ -1094,7 +1187,7 @@ function BoardWorkspace({ workspace, view, onView, bulkSeed, boundCase, onOpenFi
           )}
           {tab === 'bulk' && (
             <Dialog title="일괄 지시" close={() => navigate('board')}>
-              <BulkForm
+              <InstructionForm
                 agents={data.agents}
                 seed={bulkSeed}
                 scopeOptions={scopeOptions}
@@ -1126,6 +1219,10 @@ function BoardWorkspace({ workspace, view, onView, bulkSeed, boundCase, onOpenFi
               scopeOptions={scopeOptions}
               workspace={data.workspace || workspace}
               readOnly={!!data.readOnly}
+              tasks={data.tasks}
+              agents={data.agents}
+              refresh={refresh}
+              manageHere={requestTakeover}
               close={() => setSelected(null)}
               onOpenFile={onOpenFile}
               onDecision={async (t, action, reason, revision, todoScope) => {
@@ -1141,6 +1238,16 @@ function BoardWorkspace({ workspace, view, onView, bulkSeed, boundCase, onOpenFi
           )}
         </>
       )}
+      {takeover !== null && <ConfirmAction title="관리 기기 변경" confirmLabel="관리 기기 변경"
+        issue={takeover !== ownerRevision || !data?.readOnly ? '관리 기기 정보가 바뀌었습니다. 창을 닫고 다시 확인해 주세요.' : undefined}
+        close={() => setTakeover(null)} confirm={async () => {
+          try { await api.takeOwnership(workspace, takeover) }
+          finally { await refresh() }
+        }}>
+        <p>이전 관리 기기가 v0.1.350 이하이거나 버전을 모르면 그 기기의 앱을 먼저 종료하세요. 동기화 폴더는 양쪽 동기화가 끝난 뒤 변경하세요.</p>
+        <p>대기 중인 지시는 이 PC에서 이어서 배분합니다. 중단된 수행·검토 지시는 재시도하고, 승인 후 실행은 실제 처리 결과를 먼저 확인하세요.</p>
+        <p>할일 조회 동의와 승인 후 실행 권한은 이 PC에서 다시 확인하세요. 일일 보고 시각 등 배분 설정은 이 PC의 값을 사용합니다.</p>
+      </ConfirmAction>}
     </section>
   )
 }

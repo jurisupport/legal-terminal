@@ -1,3 +1,4 @@
+import { verifyBoardStorage } from './fixtures/work-board-storage.mjs'
 // Exercise the production SSH pool and board store against a private loopback OpenSSH SFTP server.
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
@@ -57,6 +58,7 @@ const require = createRequire(import.meta.url)
 const source = buildSync({
   stdin: {contents: `
     export {WorkBoard} from './src/main/workBoard'
+    export {boardRevision} from './src/shared/workBoard'
     export {WorkBoardStore} from './src/main/workBoardStore'
     export {setJsPairing} from './src/main/caseStore'
     export {disposeRemote, rfsBoardAgentSources} from './src/main/remoteFs'
@@ -142,6 +144,7 @@ try {
   await board.writeText('_일일보고/2026-11-24.md', '일일 보고')
   assert.equal(await board.readText(task.id + '.report.md'), '검토 완료')
   assert.equal(await readFile(join(folder, '_일일보고/2026-11-24.md'), 'utf8'), '일일 보고')
+  await verifyBoardStorage(mod.exports.WorkBoardStore,'ssh://test' + join(root,'인계'),join(root,'인계'))
   // Run a native review end-to-end on a separate, newly owned SFTP board.
   const caseDir = join(root, '사건')
   const remoteCase = 'ssh://test' + caseDir
@@ -190,6 +193,36 @@ try {
     for (const value of ['미완료 할일 2건','기한 초과 1건','기한 임박 1건','담당자 미지정 1건','A 제출 준비','B 의뢰인 면담']) assert.ok(report.includes(value),value)
     assert.doesNotMatch(report,/C 종료한 일|X 별건 초안|loopback-test/)
     console.log('원격 사건 할일 검토 · 범위 확인 · 단일 읽기 · SSH 지시서와 실제 보고서 바이트 일치')
+    const second = new mod.exports.WorkBoard(remoteCase, remoteCase + '/_업무지시', join(root, 'second-device'), () => {})
+    try {
+      await second.start()
+      const viewer = await second.snapshot()
+      assert.equal(viewer.readOnly, true)
+      const revision = async task => mod.exports.boardRevision(task, await second.detail(task.id))
+      await second.takeOwnership(viewer.ownerRevision)
+      assert.equal((await second.snapshot()).readOnly, false)
+      await assert.rejects(workflow.configure({ concurrency: 2 }), /기기|관리|배분/)
+      await second.decide(review.id, 'approve', '', await revision(review))
+      let approved
+      const finishBy = Date.now() + 15_000
+      do {
+        approved = (await second.snapshot()).tasks.find(task => task.id === review.id)
+        if (approved.status === 'done') break
+        await new Promise(resolve => setTimeout(resolve, 50))
+      } while (Date.now() < finishBy)
+      assert.equal(approved.status, 'done')
+      await second.updateTask(approved.id, {title:'수정된 지시', body:'새 지시 내용'}, await revision(approved))
+      const changed = (await second.snapshot()).tasks.find(task => task.id === review.id)
+      assert.equal(changed.status, 'blocked')
+      assert.equal(changed.body, '새 지시 내용')
+      await second.removeTask(changed.id, await revision(changed))
+      assert.equal((await second.snapshot()).tasks.some(task => task.id === review.id), false)
+      assert.equal(existsSync(join(caseDir, '_업무지시', review.id + '.md')), false)
+      assert.equal(sdkRuns, 0, 'editing or deleting the instruction must not execute it')
+      console.log('동일 SSH 보드의 두 번째 PC에서 처리권 인수·결재·수정·보관 삭제 확인')
+    } finally {
+      second.stop()
+    }
   } finally {
     workflow.stop()
     globalThis.fetch = nativeFetch

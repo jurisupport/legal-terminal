@@ -74,9 +74,15 @@ try {
   assert.match(lostAccount.text,/계정이 변경/)
   const abort = new AbortController()
   await assert.rejects(runBoardAgent({...todoInput,signal:abort.signal,readTodos:async()=>{ abort.abort(); return report }}),{name:'AbortError'})
-  const run = (phase,approvedTools=[],readTodos) => runBoardAgent({task:{id:'sample',cwd:directory,agent:'fixture'},phase,prompt:'검수용 지시',
-    approvedTools,readTodos,signal:AbortSignal.timeout(30000),policyDir:directory,onProgress:message=>progress.push(message)})
+  const run = (phase,approvedTools=[],readTodos,withOwnership) => runBoardAgent({task:{id:'sample',cwd:directory,agent:'fixture'},phase,prompt:'검수용 지시',
+    approvedTools,readTodos,withOwnership,signal:AbortSignal.timeout(30000),policyDir:directory,onProgress:message=>progress.push(message)})
+  let fenced = 0
+  const lostOwnership = async () => { fenced++; throw Error('다른 기기로 전환됨') }
   scenario='draft'
+  assert.ok((await run('work',[],undefined,lostOwnership)).blocked)
+  assert.equal(fenced,1)
+  await assert.rejects(readFile(join(directory,'_업무산출물','sample-초안.md')),{code:'ENOENT'})
+  toolCalled=false
   assert.match((await run('work')).text,/검수 완료/)
   assert.match(await readFile(join(directory,'_업무산출물','sample-초안.md'),'utf8'),/검수 본문/)
   assert.equal(sawNamedAgent,true)
@@ -85,6 +91,10 @@ try {
   assert.deepEqual([...observedTools].sort(),['mcp__board__case_draft','mcp__board__case_list','mcp__board__case_read','mcp__board__request_action'])
   toolCalled=false; scenario='command'
   assert.match((await run('work',['Bash(echo approved)'])).text,/결재 필요/)
+  assert.equal(progress.some(message=>message.includes('승인된 실행')),false)
+  toolCalled=false
+  assert.ok((await run('execute',['Bash(echo approved)'],undefined,lostOwnership)).blocked)
+  assert.equal(fenced,2)
   assert.equal(progress.some(message=>message.includes('승인된 실행')),false)
   toolCalled=false
   assert.match((await run('execute',['Bash(echo approved)'],async()=>{ reads++; return report })).text,/검수 완료/)

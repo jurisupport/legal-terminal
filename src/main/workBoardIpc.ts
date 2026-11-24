@@ -136,6 +136,9 @@ export function registerWorkBoards(): () => void {
   }
   handle('open', snapshot)
   handle('snapshot', (w: string) => snapshot(w))
+  handle('takeOwnership', async (w: string, expectedOwner: string) => (await open(w)).takeOwnership(expectedOwner))
+  handle('updateTask', async (w: string, id: string, draft: BoardDraft, revision: string) => (await open(w)).updateTask(id, draft, revision))
+  handle('removeTask', async (w: string, id: string, revision: string) => (await open(w)).removeTask(id, revision))
   handle('add', async (w: string, drafts: BoardDraft[], batchId?: string) => (await open(w)).add(drafts, batchId))
   handle('decide', async (w: string, id: string, action: BoardDecision, reason?: string, expectedRevision?: string, todoScope?: BoardTodoScope) => (await open(w)).decide(id, action, reason, expectedRevision, todoScope))
   handle('reorder', async (w: string, ids: string[]) => (await open(w)).reorder(ids))

@@ -69,7 +69,7 @@ jobs:
 
       - name: Verify SSH work board authentication and tool approvals
         if: matrix.arch == 'arm64'
-        run: npm run verify:work-board-remote-runner
+        run: npm run verify:work-board-remote-runner && npm run verify:work-board-management
 
       - name: Verify durable segmented transcription
         run: npm run verify:transcription-safety
@@ -183,6 +183,9 @@ jobs:
       - name: Verify document selection before Windows preflight
         if: ${{ inputs.windows_preflight }}
         run: npm run verify:editor-refresh && npm run build && npm run verify:inline-selection-ui
+
+      - name: Verify board management across devices
+        run: npm run verify:work-board-management
 
       - name: Verify durable segmented transcription
         run: npm run verify:transcription-safety

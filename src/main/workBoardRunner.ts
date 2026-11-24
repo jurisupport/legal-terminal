@@ -56,6 +56,7 @@ export interface BoardRunInput {
   approvedTools: string[]
   /** Bound to the account and scope authorized by the local board dispatcher. */
   readTodos?: () => Promise<string>
+  withOwnership?: <T>(effect: () => Promise<T>) => Promise<T>
   resume?: string
   policyDir: string
   signal: AbortSignal
@@ -112,6 +113,20 @@ export async function runBoardAgent(input: BoardRunInput) {
     if (!boardPermission(toolName, command, [...grants], policy)) blocked(toolName === 'Bash' ? 'Bash(' + command + ')' : toolName)
   }
   const reply = (value: string) => ({ content: [{ type: 'text' as const, text: value }] })
+  const withOwnership = async <T>(effect: () => Promise<T>): Promise<T> => {
+    if (!input.withOwnership) return effect()
+    let entered = false
+    try {
+      return await input.withOwnership(() => {
+        controller.signal.throwIfAborted()
+        entered = true
+        return effect()
+      })
+    } catch (error) {
+      if (!entered) return blocked('배분 권한을 확인하지 못해 실행을 중단했습니다.')
+      throw error
+    }
+  }
   const files = [
     tool('case_list', '작업 폴더 아래의 파일 목록을 조회합니다.', { path: z.string().default('') }, async ({ path }) => {
       guarded('case_list')
@@ -129,7 +144,7 @@ export async function runBoardAgent(input: BoardRunInput) {
     }),
     tool('case_draft', '_업무산출물 폴더에 새 Markdown 또는 텍스트 초안을 저장합니다.', {
       name: z.string().regex(/^[\p{L}\p{N} _-]{1,80}\.(md|txt)$/u), text: z.string().max(500000)
-    }, async ({ name, text }) => {
+    }, ({ name, text }) => withOwnership(async () => {
       guarded('case_draft')
       if (phase === 'review') blocked('검토 세션의 초안 작성')
       const directory = prefix + '_업무산출물'
@@ -145,38 +160,41 @@ export async function runBoardAgent(input: BoardRunInput) {
       outputs.push(path)
       onProgress('파일 작성 · ' + path)
       return reply(path)
-    }),
+    })),
     tool('request_action', 'Bash 또는 외부 MCP 도구를 요청합니다. 종류에 정확한 도구 이름을 입력하세요. 사용자 입력이 필요하면 AskUserQuestion과 question을 지정하세요.', {
       name: z.string().max(200), args: z.record(z.string(), z.unknown())
     }, async ({ name, args }) => {
       if (name === 'AskUserQuestion') blocked(String(args.question || '사용자 답변 필요').slice(0, 1000))
       const command = typeof args.command === 'string' ? args.command : undefined
       guarded(name, command)
-      const grant = name === 'Bash' ? `Bash(${command})` : name
-      if (!grants.delete(grant)) blocked(grant)
-      onProgress('승인된 실행 · ' + name)
-      failedActions.add(grant)
-      if (name === 'Bash' && command) {
-        if (remote) {
-          const output = await rfsBoardApprovedCommand(root, command, controller.signal)
+      return withOwnership(async () => {
+        controller.signal.throwIfAborted()
+        const grant = name === 'Bash' ? `Bash(${command})` : name
+        if (!grants.delete(grant)) blocked(grant)
+        onProgress('승인된 실행 · ' + name)
+        failedActions.add(grant)
+        if (name === 'Bash' && command) {
+          if (remote) {
+            const output = await rfsBoardApprovedCommand(root, command, controller.signal)
+            failedActions.delete(grant)
+            return reply(output)
+          }
+          const result = await promisify(exec)(command, { cwd: root, env: cleanEnv(), timeout: 60000, signal: controller.signal, maxBuffer: 1024 * 1024 })
           failedActions.delete(grant)
-          return reply(output)
+          return reply(result.stdout + result.stderr)
         }
-        const result = await promisify(exec)(command, { cwd: root, env: cleanEnv(), timeout: 60000, signal: controller.signal, maxBuffer: 1024 * 1024 })
-        failedActions.delete(grant)
-        return reply(result.stdout + result.stderr)
-      }
-      const parts = /^mcp__([a-zA-Z0-9_-]+?)__([a-zA-Z0-9_-]+)$/.exec(name)
-      const server = parts && Object.hasOwn(policy.mcpServers, parts[1]) ? policy.mcpServers[parts[1]] : undefined
-      if (!parts || !server) return blocked('도구 서버 미등록 · ' + name)
-      const client = new Client({ name: 'legal-terminal-board', version: '1' })
-      try {
-        await client.connect(new StreamableHTTPClientTransport(new URL(server.url), { requestInit: { headers: server.headers, redirect: 'error', signal: controller.signal } }))
-        const result = await client.callTool({ name: parts[2], arguments: args }, undefined, { signal: controller.signal, timeout: 60000 })
-        if (result.isError) throw new Error('승인된 도구에서 오류를 반환했습니다.')
-        failedActions.delete(grant)
-        return reply(JSON.stringify(result.content).slice(0, 50000))
-      } finally { await client.close() }
+        const parts = /^mcp__([a-zA-Z0-9_-]+?)__([a-zA-Z0-9_-]+)$/.exec(name)
+        const server = parts && Object.hasOwn(policy.mcpServers, parts[1]) ? policy.mcpServers[parts[1]] : undefined
+        if (!parts || !server) return blocked('도구 서버 미등록 · ' + name)
+        const client = new Client({ name: 'legal-terminal-board', version: '1' })
+        try {
+          await client.connect(new StreamableHTTPClientTransport(new URL(server.url), { requestInit: { headers: server.headers, redirect: 'error', signal: controller.signal } }))
+          const result = await client.callTool({ name: parts[2], arguments: args }, undefined, { signal: controller.signal, timeout: 60000 })
+          if (result.isError) throw new Error('승인된 도구에서 오류를 반환했습니다.')
+          failedActions.delete(grant)
+          return reply(JSON.stringify(result.content).slice(0, 50000))
+        } finally { await client.close() }
+      })
     })
   ]
   const sandbox = join(input.policyDir, 'sessions')

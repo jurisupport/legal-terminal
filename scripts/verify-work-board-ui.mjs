@@ -11,13 +11,16 @@ const temp = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'lt-board
 const screenshot = path.join(root, 'output/work-board/board.png')
 const workspace = path.join(temp, '시안 검증 사건')
 const board = path.join(workspace, '_업무지시')
+const formerBoardWorkspace = path.join(temp, '공유 보드 검증 사건')
+const formerBoard = path.join(formerBoardWorkspace, '_업무지시')
+const formerOwner = 'fb202658-7bf0-4d44-9d8f-a5ab203dce1d'
 const home = path.join(temp, 'home')
 const agentDir = path.join(home, '.claude/agents')
 const profile = path.join(temp, 'profile')
 const bulk = ['준비서면 쟁점 정리', '제출 서류 목록 작성', '계약 변경 사항 요약'].join('\n')
 
 async function seed() {
-  for (const dir of [board, profile, agentDir, path.dirname(screenshot)]) await fs.mkdir(dir, { recursive: true })
+  for (const dir of [board, formerBoard, profile, agentDir, path.dirname(screenshot)]) await fs.mkdir(dir, { recursive: true })
   await fs.writeFile(path.join(profile, 'config.json'), JSON.stringify({ jurisupportTokenEnc: 'plain:ui-test-only' }))
   const today = new Date(Date.now() + 9 * 3600000).toISOString().slice(0, 10)
   const fixtures = [
@@ -46,10 +49,16 @@ async function seed() {
   await fs.writeFile(path.join(board, 'approve-a.report.md'), '## 결론\n검토용 보고서입니다.\n## 산출물 경로\n- 초안.md\n')
   await fs.writeFile(path.join(board, 'approve-a.review.md'), '준법감시 검토 완료')
   await fs.writeFile(path.join(workspace, '초안.md'), '발송 전 검토본')
+  await fs.writeFile(path.join(formerBoard, '_배분기'), formerOwner)
+  for (const [id, title, status] of [['legacy-blocked','이전 장치 보류 건','blocked'], ['legacy-approval','이전 장치 결재 건','awaiting_approval']]) {
+    await fs.writeFile(path.join(formerBoard, id + '.md'), `---\nid: ${id}\ntitle: ${title}\ncwd: '.'\nstatus: ${status}\n---\n${title}의 원래 본문`)
+    await fs.writeFile(path.join(formerBoard, id + '.report.md'), title + ' 보고서 원문')
+    await fs.writeFile(path.join(formerBoard, id + '.review.md'), title + ' 검토 원문')
+  }
 }
 
 // Run built main, preload, renderer and storage. The provider returns synthetic reports.
-function run({ root, workspace, board, temp, home, profile, screenshot, bulk }) {
+function run({ root, workspace, board, temp, home, profile, screenshot, bulk, formerBoardWorkspace, formerBoard, formerOwner }) {
   const { app, BrowserWindow, ipcMain, session } = require('electron')
   const fs = require('node:fs'), path = require('node:path'), assert = require('node:assert/strict')
   app.setPath('home', home)
@@ -103,8 +112,11 @@ function run({ root, workspace, board, temp, home, profile, screenshot, bulk }) 
 
   const history = [{ drafts: workspace, name: '시안 검증 사건', ts: Date.now() }]
   const sessions = new Map()
+  let pickedFolder = workspace
+  const boardMutations = []
   const register = ipcMain.handle.bind(ipcMain)
   ipcMain.handle = (key, handler) => register(key, async (event, ...args) => {
+    if (['workBoard:updateTask', 'workBoard:removeTask', 'workBoard:takeOwnership'].includes(key)) boardMutations.push({key, args})
     if (key.startsWith('workBoard:') || key.startsWith('workspace:') || ['app:info', 'tabs:ready', 'app:setWindowTitle'].includes(key)) return handler(event, ...args)
     if (key === 'fs:readText' && args[0] === path.join(workspace, '초안.md')) return handler(event, ...args)
     if (key === 'settings:get') return { draftsRoot: workspace, sshProfiles: [], agentDefaultProvider: 'claude' }
@@ -114,7 +126,7 @@ function run({ root, workspace, board, temp, home, profile, screenshot, bulk }) 
     if (key === 'js:tokenStatus') return { hasToken: false }
     if (key === 'js:listCases') return { ok: true, cases: args[0]?.refresh ? cases : [] }
     if (key === 'todo:list') return { ok: true, todos: [] }
-    if (key === 'dialog:pickFolder') return { path: workspace, name: '시안 검증 사건' }
+    if (key === 'dialog:pickFolder') return { path: pickedFolder, name: path.basename(pickedFolder) }
     if (key === 'agent:create') {
       const options = args[0]
       sessions.set(options.id, options)
@@ -144,12 +156,13 @@ function run({ root, workspace, board, temp, home, profile, screenshot, bulk }) 
     throw Error('Timed out: ' + label)
   }
   const visible = selector => wait(() => evaluate('!!document.querySelector(' + JSON.stringify(selector) + ')'), selector)
-  const click = (selector, label) => evaluate(`(() => {
+  const click = (selector, label) => wait(() => evaluate(`(() => {
     const buttons = [...document.querySelectorAll(${JSON.stringify(selector)})].filter(el => el.offsetWidth && !el.disabled)
     const button = buttons.find(el => el.textContent.includes(${JSON.stringify(label)}))
-    if (!button) throw Error('Missing enabled button: ' + ${JSON.stringify(label)})
+    if (!button) return false
     button.click()
-  })()`)
+    return true
+  })()`), 'enabled ' + label)
   ;(async () => {
     await ready
     await visible('.case-sidebar-case')
@@ -287,6 +300,77 @@ function run({ root, workspace, board, temp, home, profile, screenshot, bulk }) 
     await wait(() => evaluate("document.querySelectorAll('.wb-lane').length === 5"), 'reopen board with linked case')
     const empty = await review('빈 사건 확인', 'pinned', 'awaiting_approval')
     assert.match(empty, /미완료 할일 0건/)
+    // This folder came from a different workstation. Its original owner has stopped.
+    pickedFolder = formerBoardWorkspace
+    await evaluate(`(() => {
+      const select = document.querySelector('[aria-label="업무 보드 작업 폴더"]')
+      select.value = ''
+      select.dispatchEvent(new Event('change', {bubbles:true}))
+    })()`)
+    await wait(() => evaluate("document.querySelector('.work-board')?.textContent.includes('이 PC에서 관리')"), 'read-only shared board')
+    const shared = () => evaluate(`window.lt.workBoard.snapshot(${JSON.stringify(formerBoardWorkspace)})`)
+    assert.equal((await shared()).readOnly, true)
+    await click('.wb-card', '이전 장치 결재 건')
+    await wait(() => evaluate("document.querySelector('.wb-dialog')?.textContent.includes('결재 건 보고서 원문')"), 'read original report')
+    assert.equal(await evaluate("[...document.querySelectorAll('.wb-dialog button')].some(b=>b.textContent.trim()==='승인' && !b.disabled)"), false)
+    await click('.wb-dialog button', '닫기')
+    await wait(() => evaluate("!document.querySelector('.wb-dialog')"), 'close read-only detail')
+    await click('.work-board button', '이 PC에서 관리')
+    const confirmDialog = name => 'dialog[aria-label="' + name + '"] button'
+    await visible('dialog[aria-label="관리 기기 변경"]')
+    fs.writeFileSync(path.join(path.dirname(screenshot), 'handoff.png'), (await win.webContents.capturePage()).toPNG())
+    assert.equal(fs.readFileSync(path.join(formerBoard,'_배분기'),'utf8'), formerOwner)
+    await click(confirmDialog('관리 기기 변경'), '관리 기기 변경')
+    await wait(async () => !(await shared()).readOnly, 'new owner accepted')
+    assert.notEqual(fs.readFileSync(path.join(formerBoard,'_배분기'),'utf8'), formerOwner)
+    await click('.wb-card', '이전 장치 보류 건')
+    await click('.wb-dialog button', '지시 수정')
+    const editForm = 'dialog[aria-label="지시 수정"]'
+    await visible(editForm)
+    await evaluate(`(() => {
+      const form = document.querySelector(${JSON.stringify(editForm)})
+      for (const [label, text] of [['제목','인수 후 변경한 지시'], ['지시 본문','변경 내용을 보존합니다.']]) {
+        const input = [...form.querySelectorAll('label')].find(el=>el.textContent.trim().startsWith(label)).querySelector('input,textarea')
+        Object.getOwnPropertyDescriptor(Object.getPrototypeOf(input),'value').set.call(input,text)
+        input.dispatchEvent(new Event('input',{bubbles:true}))
+      }
+    })()`)
+    await click(confirmDialog('지시 수정'), '변경 저장')
+    await wait(async () => (await shared()).tasks.some(t=>t.id==='legacy-blocked' && t.title==='인수 후 변경한 지시' && t.body==='변경 내용을 보존합니다.' && t.status==='blocked'), 'edited instruction waits for explicit retry')
+    const update = boardMutations.find(m=>m.key==='workBoard:updateTask')
+    assert.ok(update?.args[3], 'editor supplies reviewed revision')
+    const conflict = await evaluate(`window.lt.workBoard.updateTask(...${JSON.stringify(update.args)}).then(() => '', error => error.message)`)
+    assert.match(conflict, /변경되었/, 'an outdated editor cannot overwrite the saved change')
+    const closeDetails = async () => {
+      if (await evaluate("!!document.querySelector('.wb-dialog[open]')")) await click('.wb-dialog[open] button', '닫기')
+      await wait(() => evaluate("!document.querySelector('.wb-dialog[open]')"), 'detail closed')
+    }
+    await closeDetails()
+    await click('.wb-card', '인수 후 변경한 지시')
+    await click('.wb-dialog button', '지시 삭제')
+    await visible('dialog[aria-label="지시 삭제"]')
+    await click(confirmDialog('지시 삭제'), '취소')
+    assert.ok((await shared()).tasks.some(t=>t.id==='legacy-blocked'), 'cancelling deletion preserves the task')
+    await closeDetails()
+    await click('.wb-card', '인수 후 변경한 지시')
+    await click('.wb-dialog button', '지시 삭제')
+    await click(confirmDialog('지시 삭제'), '삭제 확인')
+    await wait(async () => !(await shared()).tasks.some(t=>t.id==='legacy-blocked'), 'confirmed removal persisted')
+    for (const name of ['legacy-blocked.md','legacy-blocked.report.md','legacy-blocked.review.md']) {
+      assert.equal(fs.existsSync(path.join(formerBoard,name)), false, name + ' removed from active board')
+    }
+    const archive = path.join(formerBoard, '_보관')
+    const archived = fs.readdirSync(archive, {recursive:true}).filter(name=>name.endsWith('.md')).map(name=>fs.readFileSync(path.join(archive,name),'utf8'))
+    for (const evidence of ['이전 장치 보류 건 보고서 원문','이전 장치 보류 건 검토 원문','변경 내용을 보존합니다.']) {
+      assert.ok(archived.some(text=>text.includes(evidence)), 'original and edited content remain recoverable')
+    }
+    assert.equal(fs.readFileSync(path.join(formerBoard,'legacy-approval.report.md'),'utf8'), '이전 장치 결재 건 보고서 원문')
+    await click('.wb-card', '이전 장치 결재 건')
+    await wait(() => evaluate("document.querySelector('.wb-dialog')?.textContent.includes('결재 건 검토 원문')"), 'new owner reviews prior report')
+    await click('.wb-dialog button', '승인')
+    await wait(async () => (await shared()).tasks.some(t=>t.id==='legacy-approval' && ['approved','done'].includes(t.status)), 'new owner can approve')
+    assert.equal(queries.length, providerRuns, 'takeover does not execute approved or blocked work again')
+    console.log('PASS 이전 장치 보드 · 읽기 전용 조회 · 관리 인수 · 수정 충돌 차단 · 삭제 확인 · 새 기기 결재')
     console.log('PASS 할일 검토 · 사건 범위 · 전체 선택 · 조회 권한 거부 · 실제 0건')
     console.log('PASS 업무 보드 · 실제 IPC · 결재 · 일괄 입력 3건 · 보고 저장 · ' + screenshot)
     app.exit(0)
@@ -299,7 +383,7 @@ try {
   await seed()
   await fs.mkdir(path.join(home, '일반 대화'))
   const entry = path.join(temp, 'ui.cjs')
-  await fs.writeFile(entry, '(' + run.toString() + ')(' + JSON.stringify({ root, temp, home, profile, workspace, board, screenshot, bulk }) + ')')
+  await fs.writeFile(entry, '(' + run.toString() + ')(' + JSON.stringify({ root, temp, home, profile, workspace, board, screenshot, bulk, formerBoardWorkspace, formerBoard, formerOwner }) + ')')
   const env = { ...process.env, HOME: home, USERPROFILE: home }
   for (const key of Object.keys(env)) if (/^(ANTHROPIC_|OPENAI_|CLAUDE_|CODEX_|ELECTRON_RUN_AS_NODE|ELECTRON_RENDERER_URL|LEGAL_TERMINAL_CHECK_UPDATE_IN_DEV)/.test(key)) delete env[key]
   await new Promise((resolve, reject) => {

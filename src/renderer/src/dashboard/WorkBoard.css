@@ -98,3 +98,8 @@
 .wb-table-scroll th, .wb-table-scroll td { padding: 6px 8px; vertical-align: top; text-align: left; border: 1px solid var(--wb-border); min-width: 6em; }
 .wb-table-scroll th { background: #eef1f5; white-space: nowrap; }
 .wb-table-scroll tbody tr:nth-child(even) { background: #f8f9fa; }
+
+.wb-owner, .wb-management { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.wb-management { margin-top: 8px; }
+.wb-management p { margin: 0; color: var(--wb-muted); font-size: 12px; }
+.wb-remove:not(:disabled) { color: #9c2533; }

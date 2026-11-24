@@ -1553,6 +1553,25 @@ async function loadRemoteBoardAgents(profileId: string, sftp: SFTPWrapper): Prom
   return definitions
 }
 
+/** Board bookkeeping uses exclusive creates and non-recursive removals on the existing SFTP channel. */
+export async function rfsBoardControl(root: string) {
+  const {profileId, path: directory} = parseRemote(root)
+  const sftp = await getSftp(profileId)
+  const path = (name: string) => {
+    if (!name || name.includes('\0') || name.split('/').some(part => !part || part === '.' || part === '..')) throw new Error('보드 제어 파일 경로를 확인해 주세요.')
+    return posix.join(directory, name)
+  }
+  return {
+    mkdir: (name: string) => sftpRequest<void>(sftp, done => sftp.mkdir(path(name), {mode:0o700}, done)),
+    rmdir: (name: string) => sftpRequest<void>(sftp, done => sftp.rmdir(path(name), done)),
+    unlink: (name: string) => sftpRequest<void>(sftp, done => sftp.unlink(path(name), done)),
+    move: (from: string, to: string) => sftpRequest<void>(sftp, done => sftp.rename(path(from), path(to), done)),
+    create: (name: string, data: string) => sftpRequest<void>(sftp, done => sftp.writeFile(path(name),data,{flag:'wx',mode:0o600}, done)),
+    touch: (name: string) => sftpRequest<void>(sftp, done => sftp.writeFile(path(name),'1',{flag:'r+'},done)),
+    names: (name: string) => sftpRequest<FileEntryWithStats[]>(sftp, done => sftp.readdir(path(name),done)).then(entries => entries.map(e => e.filename)),
+  }
+}
+
 /** Uncached metadata for board files; missing is distinct from a disconnected server. */
 export async function rfsBoardStat(uri: string): Promise<{size: number; directory: boolean; mtimeMs: number} | null> {
   const { profileId, path } = parseRemote(uri)
@@ -1580,7 +1599,8 @@ export async function rfsWriteText(
   uri: string,
   content: string,
   expected?: RemoteFileSignature | null,
-  followSymlinks = true
+  followSymlinks = true,
+  beforeCommit?: () => Promise<void>
 ): Promise<RemoteFileSignature> {
   const { profileId, path: requestedPath } = parseRemote(uri)
   const sftp = await getSftp(profileId)
@@ -1629,6 +1649,7 @@ export async function rfsWriteText(
     if (original ? !current || current.size !== original.size || current.mtime !== original.mtime || current.mode !== original.mode || current.uid !== original.uid || current.gid !== original.gid : current) {
       throw new RemoteFileConflict(current)
     }
+    await beforeCommit?.()
     await sftpRequest<void>(sftp, (done) => {
       if (original) sftp.ext_openssh_rename(temporary, path, done)
       else sftp.rename(temporary, path, done) // Standard SFTP rename refuses an existing destination.

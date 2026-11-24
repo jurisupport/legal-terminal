@@ -1,3 +1,4 @@
+import { verifyBoardStorage } from './fixtures/work-board-storage.mjs'
 import assert from 'node:assert/strict'
 import { mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -56,6 +57,7 @@ status: queued
   await symlink(join(directory, 'outside'), join(board.root, 'bad.md'))
   await assert.rejects(board.writeText('bad.md', 'outside'))
   await assert.rejects(readFile(join(directory, 'outside')), {code: 'ENOENT'})
+  await verifyBoardStorage(WorkBoardStore,join(directory,'인계'),join(directory,'인계'))
   console.log('업무지시 저장·재시작·충돌·배분기 소유권·경로 보호 확인')
 } finally {
   await rm(directory, {recursive: true, force: true})

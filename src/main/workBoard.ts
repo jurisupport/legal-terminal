@@ -1,8 +1,8 @@
 import { createHash, randomUUID } from 'node:crypto'
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { BoardAgent, BoardDecision, BoardDraft, BoardSettings, BoardSnapshot, BoardTask, BoardTeam, BoardTodoScope } from '../shared/workBoard'
-import { boardRevision, isBoardTodoReview } from '../shared/workBoard'
+import { boardMutationIssue, boardRevision, isBoardTodoReview } from '../shared/workBoard'
 import { kstDateKey } from '../shared/todoSummary'
 import { WorkBoardStore } from './workBoardStore'
 import { runBoardAgent, listBoardAgents } from './workBoardRunner'
@@ -18,6 +18,13 @@ interface TodoConsent {
   mapped?: boolean
   account: string
   state: 'ready' | 'review' | 'spent'
+}
+
+const activityFile = '_배분기-활동'
+const activeWindowMs = 90_000
+
+function ownerRevision(owner: string) {
+  return createHash('sha256').update(owner).digest('hex')
 }
 
 const selectTodoScope = '지시 상세에서 할일 조회 범위를 확인하고 다시 시도해 주세요.'
@@ -79,6 +86,10 @@ export class WorkBoard {
   private teams: BoardTeam[] = []
   private tasks: BoardTask[] = []
   private owner = ''
+  private observedOwner = ''
+  private epoch = ''
+  private activityRecorded = false
+  private pendingHandoff = false
   private writable = false
   private warnings = ''
   private lastDaily: string | null = null
@@ -101,6 +112,75 @@ export class WorkBoard {
     return result
   }
 
+  private observeOwner(owner: string) {
+    const writable = !!owner && owner === this.owner
+    if (!writable) for (const controller of this.active.values()) controller.abort()
+    const changed = this.writable !== writable || this.observedOwner !== owner
+    this.observedOwner = owner
+    this.writable = writable
+    if (changed) this.changed()
+  }
+
+  private async lockedAs<T>(token: string, operation: () => Promise<T>): Promise<T> {
+    // Retry only admission: an action that already started may have external effects.
+    const deadline = performance.now() + 8_000
+    while (true) {
+      let entered = false
+      try {
+        return await this.store.withOwner(token, () => {
+          entered = true
+          return operation()
+        }, this.owner)
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code
+        if (code === 'BOARD_OWNER_CHANGED') this.observeOwner(await this.store.readText('_배분기') ?? '')
+        if (entered || code !== 'BOARD_BUSY' || this.closed || performance.now() >= deadline) throw error
+        await new Promise(resolve => setTimeout(resolve, 120))
+      }
+    }
+  }
+
+  private withOwner<T>(operation: () => Promise<T>): Promise<T> {
+    return this.lockedAs(this.owner, async () => {
+      if (this.pendingHandoff) {
+        await this.recoverHandoff()
+        await rename(join(this.privatePath, 'handoff-pending'), join(this.privatePath, 'handoff-owner'))
+        this.pendingHandoff = false
+      }
+      return operation()
+    })
+  }
+
+  private serialOwner<T>(operation: () => Promise<T>) {
+    return this.serial(() => this.withOwner(operation))
+  }
+
+  private async runOwned<T>(signal: AbortSignal, operation: () => Promise<T>): Promise<T> {
+    // A long-running peer operation may outlast the interactive wait. Keep the result
+    // and retry admission outside the local queue so closing and refreshing still work.
+    while (true) {
+      signal.throwIfAborted()
+      let entered = false
+      try {
+        return await this.serialOwner(() => {
+          signal.throwIfAborted()
+          entered = true
+          return operation()
+        })
+      } catch (error) {
+        if (entered || (error as NodeJS.ErrnoException).code !== 'BOARD_BUSY') throw error
+        await new Promise(resolve => setTimeout(resolve, 250))
+      }
+    }
+  }
+
+  private async recordActivity(active: boolean) {
+    if (active || this.activityRecorded) {
+      await this.store.writeText(activityFile, active ? this.owner : '')
+      this.activityRecorded = active
+    }
+  }
+
   async start() {
     await mkdir(this.privatePath, { recursive: true, mode: 0o700 })
     const ownerFile = join(this.privatePath, 'owner')
@@ -115,8 +195,19 @@ export class WorkBoard {
     this.prefs = settings(config ? JSON.parse(config) : {})
     this.lastDaily = await privateText(join(this.privatePath, 'daily-date')) ?? null
     await this.store.init()
+    const pending = await privateText(join(this.privatePath, 'handoff-pending'))
+    const installed = await privateText(join(this.privatePath, 'handoff-owner'))
+    const marker = await this.store.readText('_배분기')
+    this.epoch = pending && pending === marker ? pending : installed ?? ''
+    if (this.epoch) this.owner = this.epoch
+    this.pendingHandoff = !!pending && pending === marker
+    if (!marker) await this.store.claimOwner(this.owner)
     await this.refresh()
-    if (this.writable) {
+    if (this.writable) await this.withOwner(async () => {
+      this.tasks = await this.store.list(true)
+      this.activityRecorded = (await this.store.readText(activityFile)) === this.owner
+      await this.recordActivity(false)
+      if (pending && pending === this.owner) return
       for (const task of this.tasks.filter(t => t.status === 'running' || t.status === 'in_review')) {
         if (task.parentId) {
           await this.transition(task, 'blocked', '앱 종료 전 실행 결과를 확인해 주세요. 승인 후 실행은 자동 반복하지 않습니다.')
@@ -126,7 +217,7 @@ export class WorkBoard {
           await this.transition(task, wasReview ? 'reported' : 'queued', task.sessionId ? '저장된 세션에서 재개' : '앱 재시작 후 재배분')
         }
       }
-    }
+    })
     if (this.closed) return
     this.timer = setInterval(() => this.tick(true), 30_000)
     this.timer.unref()
@@ -141,8 +232,7 @@ export class WorkBoard {
 
   private async refresh() {
     const wasWritable = this.writable
-    this.writable = await this.store.claimOwner(this.owner)
-    if (wasWritable && !this.writable) for (const controller of this.active.values()) controller.abort()
+    this.observeOwner(await this.store.readText('_배분기') ?? '')
     const tasks = await this.store.list()
     const teams = await this.store.teams()
     const agents = await listBoardAgents(this.workspace).catch(error => {
@@ -166,7 +256,7 @@ export class WorkBoard {
     await this.tail
     return {
       workspace: this.workspace, tasks: structuredClone(this.tasks), settings: { ...this.prefs }, agents: this.agents,
-      teams: this.teams, folder: this.folder, warnings: [...this.store.warnings], readOnly: !this.writable
+      teams: this.teams, folder: this.folder, warnings: [...this.store.warnings], readOnly: !this.writable, ownerRevision: this.observedOwner ? ownerRevision(this.observedOwner) : undefined
     }
   }
 
@@ -176,6 +266,71 @@ export class WorkBoard {
     const t = this.tasks.find(t => t.id === id)
     if (!t) throw new Error('지시를 찾을 수 없습니다.')
     return t
+  }
+
+  async takeOwnership(expectedOwner: string) {
+    await this.serial(async () => {
+      if (this.closed || !this.observedOwner || ownerRevision(this.observedOwner) !== expectedOwner)
+        throw new Error('배분기가 변경되었습니다. 보드를 다시 확인해 주세요.')
+      if (this.writable) throw new Error('이미 이 기기가 배분기입니다.')
+      if (this.active.size) throw new Error('이 기기의 이전 업무가 종료된 뒤 다시 시도해 주세요.')
+      const next = randomUUID()
+      await replace(join(this.privatePath, 'handoff-pending'), next)
+      await this.store.takeOwnership(this.observedOwner, next, async () => {
+        const text = await this.store.readText(activityFile)
+        if (text === this.observedOwner && (await this.store.activityAgeMs(activityFile) ?? 0) < activeWindowMs)
+          throw new Error('기존 배분기가 업무를 수행 중입니다. 이전 앱을 닫은 뒤 최대 90초 후 다시 시도해 주세요.')
+      })
+      this.pendingHandoff = true
+      this.epoch = this.owner = next
+      this.observeOwner(next)
+      await this.withOwner(async () => {})
+    })
+    this.tick()
+  }
+
+  private async recoverHandoff() {
+    this.tasks = await this.store.list(true)
+    const sessions = join(this.privatePath, 'sessions')
+    try { await rename(sessions, join(this.privatePath, 'sessions-before-' + this.epoch)) }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
+    const pathOnServer = (uri: string) => /^ssh:\/\/[^/]+(\/.*)$/.exec(uri)?.[1]
+    const samePath = pathOnServer(this.workspace) ?? this.workspace
+    for (const previous of this.tasks) {
+      const task = { ...previous }
+      let changed = false
+      if (task.cwd !== this.workspace && (pathOnServer(task.cwd) ?? task.cwd) === samePath) {
+        task.cwd = this.workspace
+        changed = true
+      }
+      if (task.sessionId) {
+        delete task.sessionId
+        changed = true
+      }
+      if (task.status === 'running' || task.status === 'in_review' || (task.parentId && task.status === 'queued')) {
+        await this.transition(task, 'blocked', task.parentId ? '배분기 인계 · 이전 기기에서 외부 실행 여부를 확인해 주세요.' : '배분기 인계 · 이전 기기의 수행 내역을 확인한 뒤 다시 시도해 주세요.')
+      } else if (changed) await this.save(task)
+    }
+    for (const task of this.tasks.filter(t => !t.parentId && (t.status === 'approved' ||
+      (t.status === 'blocked' && t.after_approval && this.tasks.some(child => child.parentId === t.id))))) {
+      if (!task.after_approval) {
+        await this.transition(task, 'done', '결재 완료')
+        continue
+      }
+      const children = this.tasks.filter(t => t.parentId === task.id).sort((a,b) => b.createdAt.localeCompare(a.createdAt))
+      if (children.length) {
+        const unresolved = children.find(child => !['done', 'rejected'].includes(child.status))
+        await this.settleChild(task, unresolved ?? children[0])
+      } else {
+        // A missing execution record cannot establish whether the previous device performed the action.
+        const child = this.newTask({title:'승인 후 실행 · ' + task.title, body:task.after_approval, approval:'none'})
+        child.id = 'handoff-' + createHash('sha256').update(task.id + this.epoch).digest('hex')
+        child.parentId = task.id
+        await this.transition(child, 'blocked', '이전 기기의 실행 결과를 확인한 뒤 완료 또는 미수행을 선택해 주세요.')
+        await this.transition(task, 'blocked', '승인 후 실행 결과 확인 필요')
+      }
+    }
+    this.changed()
   }
 
   private async save(task: BoardTask) {
@@ -201,7 +356,7 @@ export class WorkBoard {
   }
 
   private consentFile(task: BoardTask) {
-    return join(this.privatePath, 'todo-' + createHash('sha256').update(task.id).digest('hex') + '.json')
+    return join(this.privatePath, this.epoch + 'todo-' + createHash('sha256').update(task.id).digest('hex') + '.json')
   }
 
   private todoIntent(task: BoardTask) {
@@ -235,7 +390,8 @@ export class WorkBoard {
   }
 
   async add(inputs: BoardDraft[], batchId?: string) {
-    await this.serial(async () => {
+    await this.serial(() => this.lockedAs(this.observedOwner, async () => {
+      await this.reloadTaskList()
       if (!Array.isArray(inputs) || !inputs.length) throw new Error('한 건 이상 입력해 주세요.')
       if (batchId !== undefined && (typeof batchId !== 'string' || !/^[a-zA-Z0-9_-]{1,128}$/.test(batchId)))
         throw new Error('일괄 지시 번호를 확인해 주세요.')
@@ -250,7 +406,7 @@ export class WorkBoard {
         }
         if (scope) {
           try {
-            await this.ownerOnly()
+            if (!this.writable) throw new Error('이 보드를 배분하는 기기에서 조회 범위를 확인해 주세요.')
             await this.authorizeTodos(task, scope)
           } catch (error) {
             task.status = 'blocked'
@@ -259,18 +415,12 @@ export class WorkBoard {
         }
         await this.save(task)
       }
-    })
+    }))
     this.tick()
   }
 
-  private async ownerOnly() {
-    this.writable = await this.store.claimOwner(this.owner)
-    if (!this.writable) throw new Error('이 보드를 배분하는 기기에서 변경해 주세요.')
-  }
-
   async configure(patch: Partial<BoardSettings>) {
-    await this.serial(async () => {
-      await this.ownerOnly()
+    await this.serialOwner(async () => {
       const next = settings({ ...this.prefs, ...patch })
       await replace(join(this.privatePath, 'settings.json'), JSON.stringify(next, null, 2))
       this.prefs = next
@@ -280,8 +430,7 @@ export class WorkBoard {
   }
 
   async reorder(ids: string[]) {
-    await this.serial(async () => {
-      await this.ownerOnly()
+    await this.serialOwner(async () => {
       const queue = this.tasks.filter(t => t.status === 'queued')
       if (ids.length !== queue.length || new Set(ids).size !== ids.length || ids.some(id => !queue.some(t => t.id === id)))
         throw new Error('대기 목록이 바뀌었습니다. 다시 정렬해 주세요.')
@@ -295,13 +444,102 @@ export class WorkBoard {
     return { report: (await this.store.readText(id + '.report.md')) ?? '', review: (await this.store.readText(id + '.review.md')) ?? '' }
   }
 
+  private async reloadTaskList() {
+    const tasks = await this.store.list(true)
+    if (JSON.stringify(tasks) !== JSON.stringify(this.tasks)) {
+      this.tasks = tasks
+      this.changed()
+    }
+  }
+
+  private async mutationTarget(id: string, action: 'update' | 'remove', expectedRevision: string) {
+    await this.reloadTaskList()
+    const task = this.find(id)
+    const detail = await this.detail(id)
+    if (boardRevision(task, detail) !== expectedRevision) throw new Error('지시나 보고서가 변경되었습니다. 현재 상세 내용을 다시 확인해 주세요.')
+    if (this.active.has(id)) throw new Error('수행 중인 지시는 변경할 수 없습니다.')
+    const issue = boardMutationIssue(task, this.tasks, action)
+    if (issue) throw new Error(issue)
+    const grant = this.grantFile(id)
+    if (await privateText(grant) !== undefined ||
+        (!['done', 'rejected'].includes(task.status) && await privateText(grant + '.used') !== undefined)) {
+      throw new Error('승인 후 실행 기록이 남아 있습니다. 외부 실행 결과를 먼저 확인해 주세요.')
+    }
+    return { task, detail }
+  }
+
+  private async retireTaskPermissions(task: BoardTask) {
+    await rm(this.consentFile(task), { force: true })
+    // Keep completed or interrupted approval evidence off the dispatcher's active paths.
+    for (const suffix of ['.pending', '.used']) {
+      const path = this.grantFile(task.id) + suffix
+      await rename(path, path + '.retired-' + randomUUID()).catch(error => {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+      })
+    }
+  }
+
+  async updateTask(id: string, input: BoardDraft, expectedRevision: string): Promise<void> {
+    await this.serialOwner(async () => {
+      const { task, detail } = await this.mutationTarget(id, 'update', expectedRevision)
+      const fields = draft(input)
+      if (input.depends_on === undefined) fields.depends_on = task.depends_on
+      else {
+        if (fields.depends_on?.length !== input.depends_on.length) throw new Error('선행 업무가 중복되었습니다.')
+        const byId = new Map(this.tasks.map(t => [t.id, t]))
+        const visiting = new Set([id]), checked = new Set<string>()
+        const visit = (dependency: string) => {
+          if (checked.has(dependency)) return
+          if (visiting.has(dependency)) throw new Error('선행 업무가 자기 자신을 참조하거나 순환합니다.')
+          const prerequisite = byId.get(dependency)
+          if (!prerequisite) throw new Error('현재 보드에 없는 선행 업무입니다.')
+          visiting.add(dependency)
+          for (const prior of prerequisite.depends_on ?? []) visit(prior)
+          visiting.delete(dependency)
+          checked.add(dependency)
+        }
+        for (const dependency of fields.depends_on ?? []) visit(dependency)
+      }
+      const cwd = this.epoch ? this.workspace : task.cwd
+      if (cwd === task.cwd && JSON.stringify(fields) === JSON.stringify(draft(task))) return
+      const edited: BoardTask = { ...structuredClone(task), ...fields, cwd, status: 'blocked', editedNeedsRun: true, attempts: 0 }
+      delete edited.sessionId
+      delete edited.todoScope
+      append(edited, '지시 수정 · 다시 대기열에 넣으면 수정한 내용으로 수행합니다.')
+      await this.retireTaskPermissions(task)
+      try {
+        await this.store.saveEdit(edited, detail)
+      } catch (error) {
+        // The task edit may already be durable if archiving old reports was interrupted.
+        await this.reloadTaskList()
+        throw error
+      }
+      this.tasks = this.tasks.map(current => current.id === id ? edited : current)
+      this.changed()
+    })
+  }
+
+  async removeTask(id: string, expectedRevision: string): Promise<void> {
+    await this.serialOwner(async () => {
+      const { task, detail } = await this.mutationTarget(id, 'remove', expectedRevision)
+      await this.retireTaskPermissions(task)
+      try {
+        await this.store.archive(id, detail)
+      } catch (error) {
+        await this.reloadTaskList()
+        throw error
+      }
+      this.tasks = this.tasks.filter(current => current.id !== id)
+      this.changed()
+    })
+  }
+
   private grantFile(parent: string) {
-    return join(this.privatePath, 'approval-' + createHash('sha256').update(parent).digest('hex') + '.json')
+    return join(this.privatePath, this.epoch + 'approval-' + createHash('sha256').update(parent).digest('hex') + '.json')
   }
 
   async decide(id: string, action: BoardDecision, reason = '', expectedRevision?: string, todoScope?: BoardTodoScope) {
-    await this.serial(async () => {
-      await this.ownerOnly()
+    await this.serialOwner(async () => {
       const task = structuredClone(this.find(id))
       if (task.parentId && ['blocked', 'failed'].includes(task.status) && (action === 'complete' || action === 'reject')) {
         if (!reason.trim()) throw new Error('외부 실행 결과를 확인하고 근거를 입력해 주세요.')
@@ -310,6 +548,9 @@ export class WorkBoard {
         await this.transition(task, action === 'complete' ? 'done' : 'rejected', '사용자 확인 · ' + reason.trim())
         await this.settleChild(parent, this.find(id))
         return
+      }
+      if ((action === 'submit' || action === 'approve') && task.editedNeedsRun) {
+        throw new Error('수정된 지시를 먼저 다시 수행해 주세요.')
       }
       if (action === 'submit') {
         if (task.parentId || task.status !== 'blocked' || !(await this.detail(id)).report.trim())
@@ -329,6 +570,12 @@ export class WorkBoard {
         if (this.tasks.some(t => t.parentId === id && ['failed', 'blocked'].includes(t.status)))
           throw new Error('승인 후 실행 지시에서 외부 실행 여부를 먼저 확인해 주세요.')
         if (!['failed', 'blocked', 'rejected'].includes(task.status) || task.parentId) throw new Error('이 지시는 재실행할 수 없습니다.')
+        if (task.editedNeedsRun) {
+          // Finish any interrupted archival before a fresh result can replace the edit marker.
+          const prior = await this.detail(id)
+          if (prior.report || prior.review) await this.store.saveEdit(task, prior)
+        }
+        if (this.epoch) task.cwd = this.workspace
         if (isBoardTodoReview(task.body)) await this.authorizeTodos(task, todoScope)
         else if (reason.trim()) task.body += '\n\n추가 지시\n' + reason.trim()
         delete task.sessionId
@@ -379,7 +626,7 @@ export class WorkBoard {
   daily() {
     return this.serial(async () => {
       if (!this.writable) return buildBoardDaily(this.tasks).markdown
-      return this.writeDaily(false)
+      return this.withOwner(() => this.writeDaily(false))
     })
   }
 
@@ -389,16 +636,21 @@ export class WorkBoard {
     void this.serial(async () => {
       if (refresh) await this.refresh()
       if (!this.writable || this.closed) return
-      for (const task of this.tasks.filter(t => t.status === 'approved' || (t.status === 'blocked' && t.after_approval))) await this.followApproval(task)
-      for (const task of this.tasks.filter(t => t.status === 'reported' && !t.review_agent)) await this.finishReport(task)
-      for (const task of this.tasks) {
-        if (this.closed || this.active.size >= this.prefs.concurrency) break
-        if (this.active.has(task.id)) continue
-        if (task.status === 'reported' && task.review_agent) await this.launch(task, 'review')
-        if (task.status === 'queued' && (task.depends_on ?? []).every(id => this.tasks.some(t => t.id === id && t.status === 'done')))
-          await this.launch(task, task.parentId ? 'execute' : 'work')
-      }
-      if (boardReportDue(this.prefs.dailyTime, this.lastDaily)) await this.writeDaily(true)
+      if (!this.pendingHandoff && !this.active.size && !this.activityRecorded && !boardReportDue(this.prefs.dailyTime, this.lastDaily)
+        && !this.tasks.some(t => ['queued','approved','reported'].includes(t.status) || (t.status === 'blocked' && t.after_approval))) return
+      await this.withOwner(async () => {
+        if (refresh || !this.active.size) await this.recordActivity(this.active.size > 0)
+        for (const task of this.tasks.filter(t => t.status === 'approved' || (t.status === 'blocked' && t.after_approval))) await this.followApproval(task)
+        for (const task of this.tasks.filter(t => t.status === 'reported' && !t.review_agent)) await this.finishReport(task)
+        for (const task of this.tasks) {
+          if (this.closed || this.active.size >= this.prefs.concurrency) break
+          if (this.active.has(task.id)) continue
+          if (task.status === 'reported' && task.review_agent) await this.launch(task, 'review')
+          if (task.status === 'queued' && (task.depends_on ?? []).every(id => this.tasks.some(t => t.id === id && t.status === 'done')))
+            await this.launch(task, task.parentId ? 'execute' : 'work')
+        }
+        if (boardReportDue(this.prefs.dailyTime, this.lastDaily)) await this.writeDaily(true)
+      })
     }).catch(err => this.changed('업무 보드 · ' + String(err))).finally(() => { this.ticking = false })
   }
 
@@ -417,6 +669,10 @@ export class WorkBoard {
   }
 
   private async settleChild(task: BoardTask, child: BoardTask) {
+    if (this.tasks.some(t => t.parentId === task.id && t.id !== child.id && !['done', 'rejected'].includes(t.status))) {
+      if (task.status === 'approved') await this.transition(task, 'blocked', '연결된 승인 후 실행 결과를 모두 확인해 주세요.')
+      return
+    }
     if (child.status === 'done') await this.transition(task, 'done', '승인 후 실행 완료')
     else if (child.status === 'rejected') await this.transition(task, 'awaiting_approval', '승인 후 실행 미수행 확인 · 새 결재 요청')
     else if (task.status === 'approved' && (child.status === 'failed' || child.status === 'blocked'))
@@ -469,13 +725,14 @@ export class WorkBoard {
       if (task.attempts) prompt += '\n\n앞선 검토의 반려 사유\n' + (await this.detail(task.id)).review
     }
     const controller = new AbortController()
+    await this.recordActivity(true)
     await this.transition(task, phase === 'review' ? 'in_review' : 'running',
       (nativeTodo ? 'JuriSupport 할일 점검 시작' : phase === 'review' ? '검토 시작 · ' + task.review_agent : '수행 시작 · ' + (task.agent || '기본 에이전트')))
     if (this.closed) return
     this.active.set(task.id, controller)
     const onProgress = (message: string, sessionId?: string) => {
       if (controller.signal.aborted) return
-      void this.serial(async () => {
+      void this.serialOwner(async () => {
         if (this.active.get(task.id) !== controller || controller.signal.aborted) return
         const current = structuredClone(this.find(task.id))
         if (sessionId) current.sessionId = sessionId
@@ -488,17 +745,17 @@ export class WorkBoard {
         let result = await runBoardAgent({
           task, phase, prompt, approvedTools, resume: phase === 'execute' ? undefined : task.sessionId,
           signal: controller.signal, onProgress, policyDir: this.privatePath,
-          readTodos: consent ? async () => {
+          withOwnership: operation => this.runOwned(controller.signal, operation),
+          readTodos: consent ? () => this.runOwned(controller.signal, async () => {
             controller.signal.throwIfAborted()
             await this.verifyTodoScope(consent.scope, consent.mapped)
             const report = await readBoardTodos(consent.scope, consent.account)
             await this.verifyTodoScope(consent.scope, consent.mapped)
             controller.signal.throwIfAborted()
             return report
-          } : undefined
+          }) : undefined
         })
-        await this.serial(async () => {
-          if (controller.signal.aborted) return
+        await this.runOwned(controller.signal, async () => {
           const current = structuredClone(this.find(task.id))
           if (current.status !== (phase === 'review' ? 'in_review' : 'running')) return
           if (JSON.stringify(draft(current)) !== JSON.stringify(draft(task)) || current.cwd !== task.cwd || current.parentId !== task.parentId) {
@@ -516,6 +773,7 @@ export class WorkBoard {
             if (controller.signal.aborted) return
           }
           await this.store.writeText(task.id + (phase === 'review' ? '.review.md' : '.report.md'), result.text)
+          if (phase === 'work') delete current.editedNeedsRun
           if (consent) {
             consent.state = !result.blocked && current.review_agent ? 'review' : 'spent'
             await replace(this.consentFile(current), JSON.stringify(consent))
@@ -537,13 +795,13 @@ export class WorkBoard {
           else await this.transition(current, phase === 'execute' ? 'done' : 'reported', '보고서 저장')
         })
       } catch (err) {
-        if (!controller.signal.aborted) await this.serial(async () => {
+        if (!controller.signal.aborted) await this.runOwned(controller.signal, async () => {
           const text = err instanceof Error ? err.message : String(err)
           await this.transition(this.find(task.id), phase === 'execute' || nativeTodo ? 'blocked' : 'failed', text)
           this.changed('업무 확인 필요 · ' + task.title)
         })
       } finally {
-        this.active.delete(task.id)
+        if (this.active.get(task.id) === controller) this.active.delete(task.id)
         this.tick()
       }
     })().catch(err => this.changed('업무 보드 저장 오류 · ' + String(err)))
