@@ -16,7 +16,7 @@ const result = await build({
       build.onLoad({ filter: /.*/, namespace: 'fixture' }, () => ({
         contents: `
       export const runBoardAgent=i=>globalThis.handoffRun(i), listBoardAgents=async()=>[];
-      export const getBoardTodoAccount=async()=>'fixture', readBoardTodos=async()=>'todo', verifyBoardTodoScope=async()=>false;
+      export const getBoardTodoAccount=async()=>'fixture', readBoardTodos=async()=>'todo', readBoardMcpTodos=async()=>'[]', verifyBoardTodoScope=async()=>false;
     `}))
     }
   }]

@@ -28,7 +28,7 @@ const result = await build({
     b.onLoad({filter:/.*/,namespace:'fixture'},({path})=>({contents:{
       './workBoardRunner':'export const listBoardAgents=async()=>[]; export const runBoardAgent=globalThis.editTestRunner',
       './workBoardScope':'export const verifyBoardTodoScope=async()=>true',
-      './workBoardTodos':'export const getBoardTodoAccount=async()=>"test-account"; export const readBoardTodos=async()=>"미완료 0건"',
+      './workBoardTodos':'export const getBoardTodoAccount=async()=>"test-account"; export const readBoardMcpTodos=async()=>"[]"; export const readBoardTodos=async()=>"미완료 0건"',
       './remoteFs':'export {}'
     }[path]}))
   }}]

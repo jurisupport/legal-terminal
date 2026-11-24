@@ -43,7 +43,7 @@ new Function('require','module','exports','fetch','Date',outputFiles[0].text)(na
   if (name === 'fs/promises') return {rm:async()=>{},readFile:async()=>{throw Error('fixture file missing')}}
   return require(name)
 },mod,mod.exports,transport,testDate)
-const {readBoardTodos,getBoardTodoAccount} = mod.exports
+const {readBoardTodos,readBoardMcpTodos,getBoardTodoAccount} = mod.exports
 const key = await getBoardTodoAccount()
 assert.match(key,/^[a-f\d]{64}$/)
 assert.equal(await getBoardTodoAccount(),key)
@@ -62,6 +62,12 @@ try {
   assert.match(example,/제목 A.*미지정.*기한 초과 · 담당자 미지정/)
   assert.match(example,/제목 B.*기한 임박/)
   assert.doesNotMatch(example,/SECRET|fixture|MEMO|OTHER|제목 C/)
+  const agentResult = await readBoardMcpTodos(scope,key)
+  const scoped = JSON.parse(agentResult)
+  assert.deepEqual(scoped.scope,scope)
+  assert.equal(scoped.total,2)
+  assert.deepEqual(scoped.tasks.map(row=>row.id),['A','B'])
+  assert.doesNotMatch(agentResult,/SECRET|fixture|MEMO|OTHER/)
   assert.ok(requests.every(q=>q.caseId === 'only-this'))
   const all = await readBoardTodos({kind:'all'},key)
   assert.match(all,/제목 OTHER.*other/)

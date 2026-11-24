@@ -49,6 +49,30 @@ export async function listBoardAgents(workspace = ''): Promise<BoardAgent[]> {
   return [...(await definitions(workspace)).values()].map(({ name, description }) => ({ name, description }))
 }
 
+// Stay below the CLI's tool-result offload threshold, including multibyte Korean text.
+function todoMcpPages(text: string): string[] {
+  const { scope, total, tasks } = JSON.parse(text)
+  if (!Array.isArray(tasks) || total !== tasks.length) throw new Error('조회한 할일 목록과 전체 건수가 일치하지 않습니다.')
+  const maxBytes = 12 * 1024
+  if (Buffer.byteLength(text) <= maxBytes) return [text]
+  const envelopeSize = Buffer.byteLength(JSON.stringify({ scope, total, page: total, totalPages: total, nextPage: total, tasks: [] })) + 4
+  if (envelopeSize > maxBytes) throw new Error('조회 범위 정보가 너무 커서 할일을 전달할 수 없습니다.')
+  const chunks: unknown[][] = [[]]
+  let size = envelopeSize
+  for (const task of tasks) {
+    const rowSize = Buffer.byteLength(JSON.stringify(task)) + 1
+    if (envelopeSize + rowSize > maxBytes) throw new Error('할일 한 건이 너무 커서 담당자에게 전체 내용을 전달할 수 없습니다.')
+    if (size + rowSize > maxBytes) {
+      chunks.push([])
+      size = envelopeSize
+    }
+    chunks[chunks.length - 1].push(task)
+    size += rowSize
+  }
+  return chunks.map((rows, i) => JSON.stringify({ scope, total, page: i + 1, totalPages: chunks.length,
+    nextPage: i + 1 < chunks.length ? i + 2 : null, tasks: rows }))
+}
+
 export interface BoardRunInput {
   task: BoardTask
   phase: 'work' | 'review' | 'execute'
@@ -56,6 +80,8 @@ export interface BoardRunInput {
   approvedTools: string[]
   /** Bound to the account and scope authorized by the local board dispatcher. */
   readTodos?: () => Promise<string>
+  /** A one-run, scope-bound lookup for a general agent task. */
+  readMcpTodos?: () => Promise<string>
   withOwnership?: <T>(effect: () => Promise<T>) => Promise<T>
   resume?: string
   policyDir: string
@@ -113,6 +139,38 @@ export async function runBoardAgent(input: BoardRunInput) {
     if (!boardPermission(toolName, command, [...grants], policy)) blocked(toolName === 'Bash' ? 'Bash(' + command + ')' : toolName)
   }
   const reply = (value: string) => ({ content: [{ type: 'text' as const, text: value }] })
+  const todoTool = 'mcp__jurisupport__list_tasks'
+  let todoPages: string[] = []
+  let todoSnapshot: string | undefined
+  const pagesRead = new Set<number>()
+  let lookupError = ''
+  const listTasks = async (page: unknown = 1) => {
+    signal.throwIfAborted()
+    controller.signal.throwIfAborted()
+    if (!input.readMcpTodos) return blocked(todoTool)
+    if (typeof page !== 'number' || !Number.isSafeInteger(page) || page < 1)
+      return { ...reply('page에 1부터 시작하는 페이지 번호를 입력하세요.'), isError: true }
+    try {
+      const text = await input.readMcpTodos()
+      signal.throwIfAborted()
+      controller.signal.throwIfAborted()
+      if (!text?.trim()) throw new Error('할일 조회 결과를 받지 못했습니다.')
+      if (todoSnapshot !== undefined && text !== todoSnapshot) throw new Error('조회 중 할일 목록이 변경되었습니다. 다시 조회해 주세요.')
+      if (todoSnapshot === undefined) {
+        todoPages = todoMcpPages(text)
+        todoSnapshot = text
+      }
+      if (page > todoPages.length) return { ...reply('마지막 페이지는 ' + todoPages.length + '입니다.'), isError: true }
+      pagesRead.add(page)
+      onProgress(`쥬리서포트 MCP · 승인한 범위의 미완료 할일 조회 · ${page}/${todoPages.length}페이지`)
+      return reply(todoPages[page - 1])
+    } catch (error) {
+      signal.throwIfAborted()
+      controller.signal.throwIfAborted()
+      lookupError = error instanceof Error ? error.message : '쥬리서포트 연결 상태를 확인해 주세요.'
+      return blocked(todoTool)
+    }
+  }
   const withOwnership = async <T>(effect: () => Promise<T>): Promise<T> => {
     if (!input.withOwnership) return effect()
     let entered = false
@@ -165,6 +223,7 @@ export async function runBoardAgent(input: BoardRunInput) {
       name: z.string().max(200), args: z.record(z.string(), z.unknown())
     }, async ({ name, args }) => {
       if (name === 'AskUserQuestion') blocked(String(args.question || '사용자 답변 필요').slice(0, 1000))
+      if (phase === 'work' && (name === todoTool || name === 'mcp__jurisupport__list_todos')) return listTasks(args.page)
       const command = typeof args.command === 'string' ? args.command : undefined
       guarded(name, command)
       return withOwnership(async () => {
@@ -200,6 +259,7 @@ export async function runBoardAgent(input: BoardRunInput) {
   const sandbox = join(input.policyDir, 'sessions')
   await mkdir(sandbox, { recursive: true, mode: 0o700 })
   const tools = [...boardFileTools, 'request_action'].map(n => 'mcp__board__' + n)
+  if (phase === 'work') tools.push(todoTool)
   const binding = join(sandbox, task.id + '-' + phase + '.session')
   const sessionBinding = (id: string) => remote ? 'ssh:' + id : id
   if (input.resume && (await readFile(binding, 'utf8').catch(() => '')) !== sessionBinding(input.resume)) {
@@ -217,7 +277,10 @@ export async function runBoardAgent(input: BoardRunInput) {
     signal.throwIfAborted()
     const session = query({
       prompt: '다음 업무지시를 수행하고 최종 답변을 Markdown으로 작성하세요. 파일 경로는 case_list/read의 상대 경로를 사용하세요. 결재할 파일이 있으면 보고서의 “## 결재 대상 문서” 아래에 실제 작업 폴더 기준 경로를 한 줄에 하나씩 적으세요. 외부 작업 또는 사용자 답변이 필요하면 request_action을 호출하세요.\n' +
-        input.prompt + reviewFormat + (phase === 'execute' ? '\n이 지시에 승인된 도구 목록: ' + JSON.stringify([...grants]) : ''),
+        input.prompt + reviewFormat + (phase === 'work' ? (input.readMcpTodos
+          ? '\n승인한 범위의 현재 할일을 mcp__jurisupport__list_tasks로 조회한 뒤 그 결과를 사용해 원래 업무를 완료하세요.'
+          : '\n쥬리서포트의 현재 할일이 필요하면 mcp__jurisupport__list_tasks를 사용하세요.') : '') +
+        (phase === 'execute' ? '\n이 지시에 승인된 도구 목록: ' + JSON.stringify([...grants]) : ''),
       options: {
         ...transport, cwd: sandbox, env: cleanEnv(), pathToClaudeCodeExecutable: packagedClaudeAgentSdkExecutable(),
         abortController: controller, resume: input.resume,
@@ -225,7 +288,13 @@ export async function runBoardAgent(input: BoardRunInput) {
         tools: [], skills: [], plugins: [], settingSources: [], strictMcpConfig: true,
         managedSettings: { disableAllHooks: true }, agentProgressSummaries: true,
         settings: { disableAllHooks: true, disableSkillShellExecution: true, disableBundledSkills: true, autoMemoryEnabled: false }, maxTurns: 40,
-        mcpServers: { board: createSdkMcpServer({ name: 'board', tools: files }) },
+        mcpServers: {
+          board: createSdkMcpServer({ name: 'board', tools: files }),
+          ...(phase === 'work' ? { jurisupport: createSdkMcpServer({ name: 'jurisupport', tools: [
+            tool('list_tasks', '승인 범위의 미완료 할일을 조회합니다. 응답에 nextPage 번호가 있으면 그 번호로 다시 호출해 모든 페이지를 확인하세요.',
+              { page: z.number().int().positive().optional() }, ({ page }) => listTasks(page))
+          ] }) } : {})
+        },
         permissionMode: 'default',
         canUseTool: async name => tools.includes(name) ? { behavior: 'allow' } : blocked(name),
         onUserDialog: async req => blocked('사용자 응답 필요 · ' + req.dialogKind)
@@ -264,6 +333,13 @@ export async function runBoardAgent(input: BoardRunInput) {
     }
   } finally { signal.removeEventListener('abort', cancel) }
   await rm(binding, { force: true })
+  if (lookupError) return { blocked: true, text: '## 할 일 조회 확인 필요\n\n' + lookupError }
+  if (!notes.size && phase === 'work' && input.readMcpTodos && (!todoPages.length || pagesRead.size !== todoPages.length)) {
+    onProgress('결재 필요 · ' + todoTool)
+    return { blocked: true, text: '## 할 일 조회 확인 필요\n\n' + (pagesRead.size
+      ? `담당자가 전체 ${todoPages.length}페이지 중 ${pagesRead.size}페이지만 확인했습니다. 다시 조회해 주세요.`
+      : '담당자가 승인 범위의 할일 조회를 수행하지 않았습니다. 다시 조회해 주세요.') }
+  }
   for (const action of failedActions) notes.add('실행 결과 확인 필요 · ' + action)
   if (notes.size) return { text: [result, ...outputs.map(p => '산출물 · ' + p), '## 결재 필요', ...notes].filter(Boolean).join('\n\n'), blocked: true }
   if (!result.trim()) throw new Error('에이전트가 보고서를 반환하지 않았습니다.')

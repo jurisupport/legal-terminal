@@ -88,7 +88,7 @@ try {
   assert.equal(sawNamedAgent,true)
   await assert.rejects(readFile(hookMarker),{code:'ENOENT'})
   assert.ok(observedTools?.includes('mcp__board__case_draft'))
-  assert.deepEqual([...observedTools].sort(),['mcp__board__case_draft','mcp__board__case_list','mcp__board__case_read','mcp__board__request_action'])
+  assert.deepEqual([...observedTools].sort(),['mcp__board__case_draft','mcp__board__case_list','mcp__board__case_read','mcp__board__request_action','mcp__jurisupport__list_tasks'])
   toolCalled=false; scenario='command'
   assert.match((await run('work',['Bash(echo approved)'])).text,/결재 필요/)
   assert.equal(progress.some(message=>message.includes('승인된 실행')),false)

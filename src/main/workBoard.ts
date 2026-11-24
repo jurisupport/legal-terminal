@@ -2,12 +2,12 @@ import { createHash, randomUUID } from 'node:crypto'
 import { lstat, mkdir, readFile, realpath, rename, rm, writeFile } from 'node:fs/promises'
 import { join, resolve, sep } from 'node:path'
 import type { BoardAgent, BoardDecision, BoardDraft, BoardSettings, BoardSnapshot, BoardTask, BoardTeam, BoardTodoScope } from '../shared/workBoard'
-import { boardDocumentPaths, boardFollowUpContext, boardFollowUpRevision, boardReferencePaths, boardMutationIssue, boardReportAvailable, boardResultKind, boardRevision, canRetryAsReport, isBoardReport, isBoardDecisionPending, isBoardDocumentPath, isBoardTodoReview } from '../shared/workBoard'
+import { boardDocumentPaths, boardFollowUpContext, boardFollowUpRevision, boardReferencePaths, boardMutationIssue, boardReportAvailable, boardRequestsTodoRead, boardResultKind, boardRevision, canRetryAsReport, isBoardReport, isBoardDecisionPending, isBoardDocumentPath, isBoardTodoReview } from '../shared/workBoard'
 import { workspaceDocumentPath } from '../shared/workBoardDocuments'
 import { kstDateKey } from '../shared/todoSummary'
 import { WorkBoardStore, followUpSnapshot, unreadReportReceipt } from './workBoardStore'
 import { runBoardAgent, listBoardAgents } from './workBoardRunner'
-import { getBoardTodoAccount, readBoardTodos } from './workBoardTodos'
+import { getBoardTodoAccount, readBoardMcpTodos, readBoardTodos } from './workBoardTodos'
 import { verifyBoardTodoScope } from './workBoardScope'
 import { buildBoardDaily, boardReportDue } from './workBoardDaily'
 
@@ -18,7 +18,7 @@ interface TodoConsent {
   scope: BoardTodoScope
   mapped?: boolean
   account: string
-  state: 'ready' | 'review' | 'spent'
+  state: 'ready' | 'review' | 'spent' | 'mcp-ready'
 }
 
 const activityFile = '_배분기-활동'
@@ -28,6 +28,7 @@ function ownerRevision(owner: string) {
   return createHash('sha256').update(owner).digest('hex')
 }
 
+const mcpTodoGrant = 'JuriSupport 할일 조회 허용 · 이번 실행'
 const selectTodoScope = '지시 상세에서 할일 조회 범위를 확인하고 다시 시도해 주세요.'
 
 function settings(patch: Partial<BoardSettings>): BoardSettings {
@@ -380,7 +381,7 @@ export class WorkBoard {
     if (record?.intent === this.todoIntent(task) && typeof record.account === 'string' && record.account) return record
   }
 
-  private async authorizeTodos(task: BoardTask, scope?: BoardTodoScope) {
+  private async authorizeTodos(task: BoardTask, scope?: BoardTodoScope, state: 'ready' | 'mcp-ready' = 'ready') {
     const previous = scope ? undefined : await this.consent(task)
     const requested = scope ?? previous?.scope
     if (!requested) throw new Error(selectTodoScope)
@@ -389,7 +390,7 @@ export class WorkBoard {
     if (!account || (previous && previous.account !== account))
       throw new Error('JuriSupport 로그인 계정이 바뀌었습니다. ' + selectTodoScope)
     const authorizedScope: BoardTodoScope = requested.kind === 'case' ? { kind: 'case', caseId: requested.caseId } : { kind: 'all' }
-    const record: TodoConsent = { intent: this.todoIntent(task), scope: authorizedScope, mapped, account, state: 'ready' }
+    const record: TodoConsent = { intent: this.todoIntent(task), scope: authorizedScope, mapped, account, state }
     await replace(this.consentFile(task), JSON.stringify(record))
   }
 
@@ -636,7 +637,7 @@ export class WorkBoard {
   async decide(id: string, action: BoardDecision, reason = '', expectedRevision?: string, todoScope?: BoardTodoScope) {
     if (action === 'acknowledge') return this.serial(() => this.lockedAs(this.observedOwner, () => this.acknowledge(id, expectedRevision)))
     await this.serialOwner(async () => {
-      if (action === 'retryReport') await this.reloadTaskList()
+      if (action === 'retryReport' || action === 'allowTodoRead') await this.reloadTaskList()
       const task = structuredClone(this.find(id))
       if (task.parentId && ['blocked', 'failed'].includes(task.status) && (action === 'complete' || action === 'reject')) {
         if (!reason.trim()) throw new Error('외부 실행 결과를 확인하고 근거를 입력해 주세요.')
@@ -663,6 +664,18 @@ export class WorkBoard {
         } else task.approval = 'required'
         delete task.sessionId
         await this.transition(task, 'reported', '저장된 보고서로 검토·결재 요청')
+        return
+      }
+      if (action === 'allowTodoRead') {
+        if (!boardRequestsTodoRead(task) || this.tasks.some(child => child.parentId === id))
+          throw new Error('이 업무에서 요청한 할일 조회 권한을 확인해 주세요.')
+        if (!todoScope) throw new Error(selectTodoScope)
+        if (expectedRevision !== boardRevision(task, await this.detail(id)))
+          throw new Error('업무 내용이나 요청한 권한이 변경되었습니다. 다시 확인해 주세요.')
+        if (this.epoch) task.cwd = this.workspace
+        await this.authorizeTodos(task, todoScope, 'mcp-ready')
+        delete task.sessionId
+        await this.transition(task, 'queued', mcpTodoGrant)
         return
       }
       if (action === 'retry' || action === 'retryReport') {
@@ -809,12 +822,17 @@ export class WorkBoard {
       await this.transition(task, 'blocked', '지시의 작업 폴더가 이 보드의 작업 폴더와 다릅니다.')
       return
     }
-    const nativeTodo = phase === 'work' && isBoardTodoReview(task.body)
-    const consent = nativeTodo ? await this.consent(task).catch(() => undefined) : undefined
-    if (nativeTodo && consent?.state !== 'ready') {
+    const mcpTodo = phase === 'work' && !task.parentId && task.log.at(-1)?.text === mcpTodoGrant
+    const nativeTodo = !mcpTodo && phase === 'work' && isBoardTodoReview(task.body)
+    const consent = nativeTodo || mcpTodo ? await this.consent(task).catch(() => undefined) : undefined
+    if ((nativeTodo || mcpTodo) && consent?.state !== (mcpTodo ? 'mcp-ready' : 'ready')) {
       await this.transition(task, 'blocked', selectTodoScope)
       this.changed('조회 범위 확인 필요 · ' + task.title)
       return
+    }
+    if (mcpTodo && consent) {
+      // Claim before starting the provider so an interrupted session cannot replay a read grant.
+      await replace(this.consentFile(task), JSON.stringify({ ...consent, state: 'spent' }))
     }
     let approvedTools: string[] = []
     let prompt = task.body
@@ -855,36 +873,47 @@ export class WorkBoard {
       void this.serialOwner(async () => {
         if (this.active.get(task.id) !== controller || controller.signal.aborted) return
         const current = structuredClone(this.find(task.id))
-        if (sessionId) current.sessionId = sessionId
+        if (sessionId && !mcpTodo) current.sessionId = sessionId
         if (message) append(current, message.slice(0, 1200))
         await this.save(current)
       }).catch(err => this.changed('진행 기록 저장 오류 · ' + String(err)))
     }
     void (async () => {
       try {
+        let mcpSnapshot: string | undefined
+        const readScopedTodos = consent ? () => this.runOwned(controller.signal, async () => {
+          if (mcpTodo) {
+            const saved = await this.store.readTask(task.id)
+            if (saved?.status !== 'running' || saved.cwd !== this.workspace || this.todoIntent(saved) !== consent.intent)
+              throw new Error('조회 권한을 부여한 지시가 변경되었습니다.')
+          }
+          await this.verifyTodoScope(consent.scope, consent.mapped)
+          const read = mcpTodo ? readBoardMcpTodos : readBoardTodos
+          const report = mcpSnapshot ?? await read(consent.scope, consent.account)
+          if (mcpSnapshot === undefined) await this.verifyTodoScope(consent.scope, consent.mapped)
+          if (mcpTodo && await getBoardTodoAccount() !== consent.account)
+            throw new Error('JuriSupport 로그인 계정이 변경되었습니다.')
+          controller.signal.throwIfAborted()
+          if (mcpTodo) mcpSnapshot = report
+          return report
+        }) : undefined
         let result = await runBoardAgent({
-          task, phase, prompt, approvedTools, resume: phase === 'execute' ? undefined : task.sessionId,
+          task, phase, prompt, approvedTools, resume: phase === 'execute' || mcpTodo ? undefined : task.sessionId,
           signal: controller.signal, onProgress, policyDir: this.privatePath,
           withOwnership: operation => this.runOwned(controller.signal, operation),
-          readTodos: consent ? () => this.runOwned(controller.signal, async () => {
-            controller.signal.throwIfAborted()
-            await this.verifyTodoScope(consent.scope, consent.mapped)
-            const report = await readBoardTodos(consent.scope, consent.account)
-            await this.verifyTodoScope(consent.scope, consent.mapped)
-            controller.signal.throwIfAborted()
-            return report
-          }) : undefined
+          readTodos: nativeTodo ? readScopedTodos : undefined,
+          readMcpTodos: mcpTodo ? readScopedTodos : undefined
         })
         await this.runOwned(controller.signal, async () => {
-          const current = structuredClone(this.find(task.id))
-          if (current.status !== (phase === 'review' ? 'in_review' : 'running')) return
+          const current = mcpTodo ? await this.store.readTask(task.id) : structuredClone(this.find(task.id))
+          if (current?.status !== (phase === 'review' ? 'in_review' : 'running')) return
           if (JSON.stringify(draft(current)) !== JSON.stringify(draft(task)) || current.cwd !== task.cwd || current.parentId !== task.parentId ||
               JSON.stringify(current.followUp) !== JSON.stringify(task.followUp)) {
             await this.transition(current, 'blocked', '수행 중 지시서가 변경되었습니다. 결과를 확인해 주세요.')
             return
           }
           delete current.sessionId
-          if (consent && !result.blocked) {
+          if (consent && (mcpTodo || !result.blocked)) {
             // The completed lookup may have waited behind another board mutation.
             const blocked = { blocked: true, text: 'JuriSupport 계정 또는 연결 사건을 확인할 수 없어 보고서 저장을 보류했습니다. ' + selectTodoScope }
             try {
@@ -895,7 +924,7 @@ export class WorkBoard {
           }
           await this.store.writeText(task.id + (phase === 'review' ? '.review.md' : '.report.md'), result.text)
           if (phase === 'work') delete current.editedNeedsRun
-          if (consent) {
+          if (nativeTodo && consent) {
             consent.state = !result.blocked && current.review_agent ? 'review' : 'spent'
             await replace(this.consentFile(current), JSON.stringify(consent))
           } else if (phase === 'review' && !result.blocked && isBoardTodoReview(current.body)) {

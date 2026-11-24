@@ -72,7 +72,7 @@ export interface BoardSnapshot {
   agents: BoardAgent[]
   folder: string
 }
-export type BoardDecision = 'acknowledge' | 'retryReport' | 'approve' | 'reject' | 'revise' | 'retry' | 'complete' | 'submit'
+export type BoardDecision = 'acknowledge' | 'allowTodoRead' | 'retryReport' | 'approve' | 'reject' | 'revise' | 'retry' | 'complete' | 'submit'
 export interface BoardApi {
   open(workspace: string, folder?: string): Promise<BoardSnapshot>
   snapshot(workspace: string): Promise<BoardSnapshot>
@@ -95,6 +95,20 @@ export interface BoardApi {
 }
 
 type BoardResultFields = Pick<BoardDraft, 'approval' | 'after_approval'>
+
+export function boardRequestsTodoRead(task: BoardTask): boolean {
+  if (task.status !== 'blocked' || task.parentId || task.editedNeedsRun || isBoardTodoReview(task.body) ||
+      task.log.at(-1)?.text !== '권한 확인 또는 추가 답변 필요') return false
+  // Older sessions requested list_todos through the board's external-tool bridge.
+  let request: string | undefined
+  for (let i = task.log.length - 2; i >= 0; i--) {
+    const { text } = task.log[i]
+    if (text.startsWith('검토 시작 · ') || text === 'JuriSupport 할일 점검 시작') return false
+    if (text.startsWith('수행 시작 · ')) return /^결재 필요 · mcp__jurisupport__list_(?:tasks|todos)$/.test(request ?? '')
+    if (!request && text.startsWith('결재 필요 · ')) request = text
+  }
+  return false
+}
 
 export function boardResultKind(task: BoardResultFields): 'report' | 'final' | 'action' {
   if (task.after_approval?.trim()) return 'action'

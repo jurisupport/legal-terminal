@@ -72,6 +72,12 @@ async function seed() {
   await fs.writeFile(path.join(formerBoard, 'legacy-todos.md'),
     `---\nid: legacy-todos\ntitle: ${oldTitle}\ncwd: '.'\napproval: required\nstatus: blocked\n---\n${oldTitle}`)
   await fs.writeFile(path.join(formerBoard, 'legacy-todos.report.md'), '## 결재 필요\n\nmcp__jurisupport__list_todos')
+  const mcpTitle = '쥬리서포트 할일을 정리한다'
+  const mcpLog = ['수행 시작 · 기본 에이전트', '결재 필요 · mcp__jurisupport__list_todos', '권한 확인 또는 추가 답변 필요']
+    .map(text => ({ at: new Date().toISOString(), text }))
+  await fs.writeFile(path.join(formerBoard, 'legacy-mcp.md'),
+    `---\nid: legacy-mcp\ntitle: ${mcpTitle}\ncwd: '.'\napproval: none\nstatus: blocked\nlog: ${JSON.stringify(mcpLog)}\n---\n${mcpTitle}\n\n추가 지시\n권한 부여할테니 진행해`)
+  await fs.writeFile(path.join(formerBoard, 'legacy-mcp.report.md'), '## 결재 필요\n\nmcp__jurisupport__list_todos')
   const legacyTitle = '할일 정리부터 하자.'
   const sourceHtml = '진행중사건목록_20261117.html'
   const sourceNote = '남은과제_체크리스트.md'
@@ -167,14 +173,25 @@ function run({ root, workspace, board, temp, home, profile, screenshot, bulk, fo
   const sourceFinding = '원 보고서의 검토 사항은 송달일 대조입니다.'
   const childFinding = '송달일부터 제출기한까지의 일정 확인을 별도 업무로 정리했습니다.'
   const queries = []
-  require.cache[sdkId].exports = { ...sdk, query({ options, prompt }) {
+  const serverTools = new WeakMap()
+  require.cache[sdkId].exports = { ...sdk, createSdkMcpServer(config) {
+    const server = sdk.createSdkMcpServer(config)
+    serverTools.set(server, config.tools)
+    return server
+  }, query({ options, prompt }) {
     assert.ok(options.cwd.startsWith(temp + path.sep))
     queries.push({ prompt, agent: options.agent })
     return { close() {}, async *[Symbol.asyncIterator]() {
       await gate
       if (holdFollowup) await followupGate
       let result = '## 결론\n합성 수행 보고서'
-      if (prompt.includes(childTitle)) result = '## 추가 업무 결과\n' + childFinding
+      if (prompt.includes('쥬리서포트 할일을 정리한다')) {
+        const list = serverTools.get(options.mcpServers.jurisupport).find(tool => tool.name === 'list_tasks')
+        const rows = JSON.stringify((await list.handler({})).content)
+        assert.match(rows, /A 준비서면 제출/)
+        assert.doesNotMatch(rows, /E 별건 메모 검토/)
+        result = '담당자가 조회한 할일 · A 준비서면 제출'
+      } else if (prompt.includes(childTitle)) result = '## 추가 업무 결과\n' + childFinding
       else if (prompt.includes('준비서면 쟁점 정리')) result += '\n' + sourceFinding + '\n\n## 산출물 경로\n- 검토의견.hwpx\n- 초안.md'
       yield { type:'result', subtype:'success', is_error:false, result }
     } }
@@ -186,7 +203,7 @@ function run({ root, workspace, board, temp, home, profile, screenshot, bulk, fo
   const boardMutations = []
   const register = ipcMain.handle.bind(ipcMain)
   ipcMain.handle = (key, handler) => register(key, async (event, ...args) => {
-    if (['workBoard:updateTask', 'workBoard:removeTask', 'workBoard:takeOwnership', 'workBoard:addFollowUp'].includes(key)) boardMutations.push({key, args})
+    if (['workBoard:updateTask', 'workBoard:removeTask', 'workBoard:takeOwnership', 'workBoard:addFollowUp', 'workBoard:decide'].includes(key)) boardMutations.push({key, args})
     if (key === 'window:new') {
       assert.equal(args[0]?.tabs?.length, 1)
       const viewerFiles = ['검토서.pdf','검토의견.hwpx','참고자료.docx'].map(name=>path.join(workspace,name))
@@ -876,6 +893,31 @@ function run({ root, workspace, board, temp, home, profile, screenshot, bulk, fo
       await confirmReceipt(formerBoardWorkspace,id)
       await dismissReceipt()
     }
+    await click('.wb-card', '쥬리서포트 할일을 정리한다')
+    await visible('.wb-recovery option[value="case:case-a"]')
+    assert.equal(await evaluate("document.querySelector('.wb-recovery select').value"), '')
+    assert.equal(await evaluate("!!document.querySelector('.wb-recovery textarea')"), false)
+    const readsBeforeGrant = taskReads.length
+    assert.ok(await evaluate("document.querySelector('.wb-recovery button[type=submit]').disabled"))
+    assert.equal(taskReads.length, readsBeforeGrant)
+    await evaluate(`(() => {
+      const scope = document.querySelector('.wb-recovery select')
+      scope.value = 'case:case-a'; scope.dispatchEvent(new Event('change', { bubbles: true }))
+    })()`)
+    await wait(() => evaluate("!document.querySelector('.wb-recovery button[type=submit]').disabled"), 'grant becomes available for selected scope')
+    await evaluate('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))')
+    fs.writeFileSync(path.join(path.dirname(screenshot), 'mcp-read-permission.png'), (await win.webContents.capturePage()).toPNG())
+    await click('.wb-recovery button', '조회 허용하고 다시 실행')
+    await wait(() => evaluate("document.querySelector('.wb-report-preview')?.innerText.includes('담당자가 조회한 할일 · A 준비서면 제출')"), 'agent receives scoped MCP results and delivers report in same card')
+    assert.ok(await evaluate("[...document.querySelectorAll('.wb-detail-history details')].some(d=>d.querySelector('summary')?.textContent.startsWith('도구 권한 기록') && d.textContent.includes('JuriSupport 할일 조회 허용'))"))
+    const grants = boardMutations.filter(m=>m.key==='workBoard:decide' && m.args[2]==='allowTodoRead')
+    assert.equal(grants.length, 1)
+    assert.deepEqual(grants[0].args.slice(0,4), [formerBoardWorkspace, 'legacy-mcp', 'allowTodoRead', ''])
+    assert.ok(grants[0].args[4])
+    assert.deepEqual(grants[0].args[5], {kind:'case',caseId:'case-a'})
+    assert.deepEqual(taskReads.slice(readsBeforeGrant).map(args=>args.caseId), ['case-a'])
+    await dismissReceipt()
+    console.log('PASS 기존 MCP 권한 요청 · 조회 범위 선택 · 담당자 수행 · 같은 카드에 보고서 도착')
     const savedBoards = []
     for (const folder of [workspace,formerBoardWorkspace]) savedBoards.push([folder,manifest((await snap(folder)).tasks)])
     fs.writeFileSync(receiptState,JSON.stringify(savedBoards))

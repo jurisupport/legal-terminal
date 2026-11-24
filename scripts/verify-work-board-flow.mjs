@@ -18,7 +18,7 @@ const { outputFiles } = await build({
       build.onResolve({ filter: /^\.\/remoteFs$/ }, () => ({ path: 'remote', namespace: 'mock' }))
       build.onResolve({ filter: /^\.\/workBoard(?:Todos|Scope)$/ }, ({path}) => ({path,namespace:'todo'}))
       build.onLoad({filter:/.*/,namespace:'todo'}, () => ({
-        contents:'export const {readBoardTodos,getBoardTodoAccount,verifyBoardTodoScope}=globalThis.boardTodoFixture'
+        contents:'export const {readBoardTodos,readBoardMcpTodos,getBoardTodoAccount,verifyBoardTodoScope}=globalThis.boardTodoFixture'
       }))
       build.onLoad({ filter: /.*/, namespace: 'mock' }, ({ path }) => ({
         contents: path === 'remote' ? 'export {}' : 'export const listBoardAgents=async()=>[];export const runBoardAgent=(input)=>globalThis.boardRunFixture(input)'
@@ -29,13 +29,18 @@ const { outputFiles } = await build({
 let account = 'account-one'
 let paired = true
 const reads = []
-const checkedScopes = []
+const checkedScopes = [], mcpReads = []
 globalThis.boardTodoFixture = {
   async getBoardTodoAccount() { if (!account) throw Error('JuriSupport 로그인 필요'); return account },
   async verifyBoardTodoScope(workspace,scope,aliases,requireMapped) {
     checkedScopes.push({workspace,scope,aliases,requireMapped})
     if ((requireMapped && !paired) || (paired && (scope.kind !== 'case' || scope.caseId !== 'case-one'))) throw Error('연결 사건을 다시 확인하세요.')
     return paired
+  },
+  async readBoardMcpTodos(scope,expectedAccount) {
+    if (account !== expectedAccount) throw Error('JuriSupport 로그인 계정이 변경되었습니다.')
+    mcpReads.push({scope,account})
+    return 'MCP 조회 결과'
   },
   async readBoardTodos(scope,expectedAccount) {
     if (account !== expectedAccount) throw Error('JuriSupport 로그인 계정이 변경되었습니다.')
@@ -47,12 +52,12 @@ const mod = { exports: {} }
 new Function('module', 'exports', 'require', outputFiles[0].text)(mod, mod.exports, require)
 const { WorkBoard } = mod.exports
 const folder = join(dir, 'tasks'), privateDir = join(dir, 'profile')
-const notes = [], runs = []
+const notes = [], runs = [], mcpPageErrors = []
 let board
 let gate = null
-let afterNativeRead
+let afterNativeRead, afterMcpRead
 globalThis.boardRunFixture = async i => {
-  runs.push({ id: i.task.id, title: i.task.title, phase: i.phase, agent: i.task.agent, todoAccess:!!i.readTodos, resume: i.resume, tools: i.approvedTools, prompt:i.prompt })
+  runs.push({ id: i.task.id, title: i.task.title, phase: i.phase, agent: i.task.agent, todoAccess:!!i.readTodos, mcpAccess:!!i.readMcpTodos, resume: i.resume, tools: i.approvedTools, prompt:i.prompt })
   i.onProgress('파일 읽음 · source.md', 'session-' + i.task.id)
   if (i.task.body === 'diagnostic-only') return {text:'결재 필요'}
   if (i.readTodos) {
@@ -62,6 +67,19 @@ globalThis.boardRunFixture = async i => {
       return {text}
     }
     catch (e) { return {blocked:true, text:e.message} }
+  }
+  if (i.phase === 'work' && i.task.body.startsWith('쥬리서포트 할일을 정리한다')) {
+    if (!i.readMcpTodos) {
+      i.onProgress('결재 필요 · mcp__jurisupport__list_todos')
+      return {blocked:true,text:'## 결재 필요\n\nmcp__jurisupport__list_todos'}
+    }
+    try {
+      const text = await i.readMcpTodos()
+      const blocked = afterMcpRead?.()
+      const nextPageSnapshot = await i.readMcpTodos()
+      assert.equal(nextPageSnapshot,text)
+      return {text:'담당자별 요약 · ' + text, blocked}
+    } catch (error) { mcpPageErrors.push(error.message); return {text:error.message,blocked:true} }
   }
   if (i.phase === 'review' && i.task.title === '할일 재검토' && i.task.attempts === 0)
     return {rejected:true,text:'자료를 다시 확인해 주세요.'}
@@ -309,6 +327,36 @@ try {
   await until(ts => ts.some(t => t.id === 'forged-child' && t.status === 'blocked'))
   assert.equal(runs.filter(r => r.phase === 'execute').length, prior)
   const scope = {kind:'case',caseId:'case-one'}
+  const mcpBody = '쥬리서포트 할일을 정리한다\n\n추가 지시\n권한 부여할테니 진행해'
+  await board.add([{title:'MCP 업무',body:mcpBody,review_agent:'reviewer'}])
+  const deniedMcp = (await until(ts=>ts.some(t=>t.title==='MCP 업무' && t.status==='blocked'))).find(t=>t.title==='MCP 업무')
+  const decision = async (task,scope) => board.decide(task.id,'allowTodoRead','',boardRevision(task,await board.detail(task.id)),scope)
+  await assert.rejects(decision(notice,scope), /요청한 할일 조회/)
+  await assert.rejects(decision(deniedMcp),/조회 범위/)
+  await assert.rejects(board.decide(deniedMcp.id,'allowTodoRead','','stale',scope),/다시 확인/)
+  await assert.rejects(decision(deniedMcp,{kind:'all'}), /연결 사건/)
+  await decision(deniedMcp,scope)
+  const mcpDone = (await until(ts=>ts.some(t=>t.id===deniedMcp.id && t.status==='done'))).find(t=>t.id===deniedMcp.id)
+  assert.equal(mcpDone.body,mcpBody)
+  assert.match((await board.detail(mcpDone.id)).report,/담당자별 요약 · MCP 조회 결과/)
+  assert.deepEqual(mcpReads,[{scope,account}])
+  assert.deepEqual(runs.filter(r=>r.id===mcpDone.id).map(r=>[r.phase,r.mcpAccess,r.todoAccess]),
+    [['work',false,false],['work',true,false],['review',false,false]])
+  assert.equal(runs.find(r=>r.id===mcpDone.id && r.mcpAccess).resume,undefined)
+  assert.ok(!/account-one|case-one|todoScope/.test(await readFile(join(folder,mcpDone.id+'.md'),'utf8')))
+  // A changed account must also suppress a partial report from an interrupted provider.
+  afterMcpRead = () => { account='different'; return true }
+  await board.add([{title:'MCP 저장 직전 계정 변경',body:mcpBody}])
+  const mcpStale = (await until(ts=>ts.some(t=>t.title==='MCP 저장 직전 계정 변경' && t.status==='blocked'))).find(t=>t.title==='MCP 저장 직전 계정 변경')
+  await decision(mcpStale,scope)
+  await until(ts=>ts.some(t=>t.id===mcpStale.id && t.status==='blocked' && t.log.some(l=>l.text.includes('이번 실행'))))
+  assert.doesNotMatch((await board.detail(mcpStale.id)).report,/MCP 조회 결과/)
+  assert.deepEqual(mcpPageErrors,['JuriSupport 로그인 계정이 변경되었습니다.'],'cached pages require the same live account')
+  afterMcpRead = undefined
+  await board.decide(mcpStale.id,'retry','')
+  await until(ts=>ts.some(t=>t.id===mcpStale.id && t.status==='blocked' && t.log.at(-2)?.text.includes('list_todos')))
+  assert.equal(mcpReads.length,2,'an ordinary retry cannot reuse the consumed permission')
+  account = 'account-one'
   const reportBody = '할일 검토해줘'
   await board.add([{title:'조회', body:reportBody, todoScope:scope, review_agent:'reviewer', after_approval:'확인한 결과 전달'}])
   const reviewTask = (await until(ts=>ts.some(t=>t.title==='조회' && t.status==='awaiting_approval'))).find(t=>t.title==='조회')
@@ -386,6 +434,16 @@ try {
   await until(ts=>ts.some(t=>t.id===stale.id && t.status==='awaiting_approval'))
   assert.equal(checkedScopes.at(-1).requireMapped,false)
   paired = true
+  board.stop()
+  // Replaying the very same queued request from the shared folder cannot restore its private grant.
+  const grantIndex = mcpDone.log.findIndex(l=>l.text==='JuriSupport 할일 조회 허용 · 이번 실행')
+  assert.ok(grantIndex > 0)
+  await changed.save({...mcpDone,status:'queued',reportReceipt:undefined,log:mcpDone.log.slice(0,grantIndex+1)})
+  const runsBeforeReplay = runs.length
+  await open()
+  await until(ts=>ts.some(t=>t.id===mcpDone.id && t.status==='blocked'))
+  assert.equal(runs.length,runsBeforeReplay)
+  assert.equal(mcpReads.length,2)
   board.stop()
   for (const [index, cwd] of [dir,'ssh://office/cases/one'].entries()) {
     const localFolder = join(dir,'legacy-'+index)

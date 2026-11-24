@@ -1,4 +1,4 @@
-import { boardFollowUpRevision, boardResultKind, isBoardReport, isBoardDecisionPending, canRetryAsReport, boardReferencePaths, boardDocumentPaths, boardMutationIssue, boardReportAvailable, boardRevision, requestsCurrentBoardCase, isBoardTodoReview } from '../../../shared/workBoard'
+import { boardFollowUpRevision, boardRequestsTodoRead, boardResultKind, isBoardReport, isBoardDecisionPending, canRetryAsReport, boardReferencePaths, boardDocumentPaths, boardMutationIssue, boardReportAvailable, boardRevision, requestsCurrentBoardCase, isBoardTodoReview } from '../../../shared/workBoard'
 import DOMPurify from 'dompurify'
 import { marked, Renderer } from 'marked'
 import { createPortal } from 'react-dom'
@@ -823,8 +823,9 @@ function Details({
   const [reason, setReason] = useState('')
   const [chosenScope, setChosenScope] = useState<BoardTodoScope>()
   const retryTodo = !readOnly && canRetry && isBoardTodoReview(task.body)
-  const scopes = useTodoScopeOptions(retryTodo, scopeOptions, () => setChosenScope(undefined))
-  const retryScope = retryTodo ? selectedScope(scopes, chosenScope) : undefined
+  const grantTodoRead = !readOnly && boardRequestsTodoRead(task) && !tasks.some(child => child.parentId === task.id)
+  const scopes = useTodoScopeOptions(retryTodo || grantTodoRead, scopeOptions, () => setChosenScope(undefined))
+  const retryScope = retryTodo || grantTodoRead ? selectedScope(scopes, chosenScope) : undefined
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   useEffect(() => {
@@ -854,7 +855,7 @@ function Details({
     }
   }
   const history = task.log.filter(l => /^(?:(?:승인|최종안 승인|승인 후 실행 요청)$|반려 · |수정 지시 등록 · )/.test(l.text))
-  const permissions = task.log.filter(l => /^(?:결재 필요 · |권한 확인 또는 추가 답변 필요$|승인된 실행 · )/.test(l.text))
+  const permissions = task.log.filter(l => /^(?:결재 필요 · |권한 확인 또는 추가 답변 필요$|승인된 실행 · |JuriSupport 할일 조회 허용 · )/.test(l.text))
   const todoReview = isBoardTodoReview(task.body)
   const storedReason = files && !reportAvailable ? files.report.trim().replace(/^#{1,6}\s*(?:결재 필요|할\s*일 조회 확인 필요)\s*(?:\n+|$)/u, '').trim() : ''
   const lastEntry = task.log.at(-1)?.text || ''
@@ -933,7 +934,18 @@ function Details({
             <button className="wb-btn" disabled={busy || !reason.trim()} onClick={() => act(() => onDecision(task, 'reject', reason.trim()))}>미실행 확인 · 결재함으로</button>
             <button className="wb-btn wb-primary" disabled={busy || !reason.trim()} onClick={() => act(() => onDecision(task, 'complete', reason.trim()))}>실행 확인 · 완료 처리</button>
           </div>
-        </> : <form onSubmit={e => {
+        </> : grantTodoRead ? <form onSubmit={e => {
+          e.preventDefault()
+          if (busy || !retryScope || !files) return
+          void act(() => onDecision(task, 'allowTodoRead', '', boardRevision(task, files), retryScope), true)
+        }}>
+          <h3>담당자가 쥬리서포트 할일 조회를 요청했습니다</h3>
+          <p>이번 실행에서 {workspace.startsWith('ssh://') ? 'SSH 서버의 ' : ''}담당 에이전트가 현재 계정의 미완료 할일을 읽고 원래 지시를 수행합니다. 작성한 보고서는 이 보드 폴더에 저장됩니다.</p>
+          <div className="wb-recovery-action">
+            <ScopeField options={scopes} value={retryScope} change={setChosenScope} />
+            <button type="submit" className="wb-btn wb-primary" disabled={busy || !retryScope || !files}>조회 허용하고 다시 실행</button>
+          </div>
+        </form> : <form onSubmit={e => {
           e.preventDefault()
           if (busy || (retryTodo && !retryScope)) return
           void act(() => onDecision(task, retryAsReport ? 'retryReport' : 'retry', reason.trim(), retryAsReport ? boardRevision(task, files) : undefined, retryScope), true)

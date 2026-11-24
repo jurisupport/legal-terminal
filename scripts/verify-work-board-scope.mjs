@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { transformSync } from 'esbuild'
 import { createRequire } from 'node:module'
-import { boardDocumentPaths, boardReferencePaths, boardReportAvailable, isBoardTodoReview, requestsCurrentBoardCase } from '../src/shared/workBoard.ts'
+import { boardDocumentPaths, boardReferencePaths, boardReportAvailable, boardRequestsTodoRead, isBoardTodoReview, requestsCurrentBoardCase } from '../src/shared/workBoard.ts'
 import { normalizeProjectWorkspacePath } from '../src/main/projectStore.ts'
 import { parseCasePairingFileText } from '../src/main/caseSyncData.ts'
 
@@ -15,6 +15,24 @@ for (const request of ['할일 정리부터 하자. 끝나면 발송해', '할�
 }
 assert.equal(requestsCurrentBoardCase('이 사건 미완료 할 일 조회해줘'), true)
 assert.equal(requestsCurrentBoardCase('미완료 할일 점검'), false)
+
+const run = '수행 시작 · 기본 에이전트'
+const oldReadRequest = '결재 필요 · mcp__jurisupport__list_todos'
+const readRequest = '결재 필요 · mcp__jurisupport__list_tasks'
+const stopped = '권한 확인 또는 추가 답변 필요'
+const permissionCard = (...lines) => ({
+  body: '쥬리서포트 할일을 정리한다\n\n추가 지시\n권한 부여할테니 진행해',
+  status:'blocked', log:lines.map(text=>({text}))
+})
+for (const request of [oldReadRequest,readRequest]) assert.ok(boardRequestsTodoRead(permissionCard(run,request,stopped)))
+for (const card of [
+  permissionCard(run,readRequest,stopped,run,'결재 필요 · Bash(ls)',stopped),
+  permissionCard(run,readRequest,stopped,'검토 시작 · 검토자',readRequest,stopped),
+  permissionCard(run,readRequest,stopped,run,stopped),
+  permissionCard(run,readRequest,'재시도 요청'),
+  {...permissionCard(run,readRequest,stopped),parentId:'approved-action'},
+  {...permissionCard(run,readRequest,stopped),body:'할일 검토'}
+]) assert.equal(boardRequestsTodoRead(card),false)
 
 for (const report of ['', '  ', '## 결재 필요\n\nmcp__jurisupport__list_todos', '## 할 일 조회 확인 필요\r\n권한 부족', '## 결재 필요\n\nBash(python3 -c "\n## 표처럼 보이는 줄\n내용\n")']) {
   assert.equal(boardReportAvailable(report), false)

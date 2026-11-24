@@ -4,6 +4,11 @@ import type { BoardTodoScope } from '../shared/workBoard'
 
 export { getBoardTodoAccount }
 
+export async function readBoardMcpTodos(scope: BoardTodoScope, expectedAccount: string): Promise<string> {
+  const tasks = await listBoardReviewTodos(scope, expectedAccount)
+  return JSON.stringify({ scope, total: tasks.length, tasks })
+}
+
 // Treat user-entered values as literal table cells in stored Markdown and HTML previews.
 function literal(value: string): string {
   return value.replace(/[\u0000-\u001f\u007f]/g, ' ').replace(/[&<>]/g, char => ({'&':'&amp;', '<':'&lt;', '>':'&gt;'})[char]!)

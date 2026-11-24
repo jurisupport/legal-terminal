@@ -29,8 +29,8 @@ const progress = []
 let requestedTool
 const inference = boardInference((input, headers) => {
   requests.push({ key: headers['x-api-key'], tools: input.tools.map(t => t.name).sort(), system: JSON.stringify(input.system), history: JSON.stringify(input.messages) })
-  const reply = requestedTool
-  requestedTool = undefined
+  const reply = Array.isArray(requestedTool) ? requestedTool.shift() : requestedTool
+  if (!Array.isArray(requestedTool) || !requestedTool.length) requestedTool = undefined
   return reply || { text: '## 결론\n원격 보고 완료' }
 })
 const client = new ssh2.Client()
@@ -120,9 +120,9 @@ try {
   })
   const { runBoardAgent, listBoardAgents, boardClaudeCommand } = await import(pathToFileURL(file))
   assert.deepEqual(await listBoardAgents(workspace), [{ name: 'remote-writer', description: '원격 담당자' }])
-  const run = (id, phase, approvedTools = [], resume) => runBoardAgent({
+  const run = (id, phase, approvedTools = [], resume, readMcpTodos) => runBoardAgent({
     task: { id, cwd: workspace, agent: 'remote-writer' }, phase, prompt: '가상 원격 사건 검토', policyDir: localHome,
-    signal: AbortSignal.timeout(30_000), approvedTools, resume, onProgress: message => progress.push(message)
+    signal: AbortSignal.timeout(30_000), approvedTools, resume, readMcpTodos, onProgress: message => progress.push(message)
   })
   // The owner can review application data even if the remote agent folder and CLI are offline.
   const todoReport = '## 앱 할 일 검토\n\n미완료 1건 · 내부 사건 항목'
@@ -142,7 +142,8 @@ try {
   assert.equal(await readFile(join(caseDir, '_업무산출물', 'remote-결과.md'), 'utf8'), '원격 전용 초안')
   assert.ok(requests.some(r => r.system.includes('REMOTE_PROFILE_MARKER')))
   assert.ok(requests.every(r => r.key === remoteKey))
-  assert.deepEqual(requests[0].tools, ['mcp__board__case_draft', 'mcp__board__case_list', 'mcp__board__case_read', 'mcp__board__request_action'])
+  const todoTool = 'mcp__jurisupport__list_tasks'
+  assert.deepEqual(requests[0].tools, ['mcp__board__case_draft', 'mcp__board__case_list', 'mcp__board__case_read', 'mcp__board__request_action', todoTool])
   assert.ok(!commands.some(c => c.includes(nativeCli) || c.includes(remoteKey) || c.includes('nonexistent-fixture')))
   assert.equal((await readFile(join(remoteHome, 'launch-cwd'), 'utf8')).trimEnd(), sandbox)
   const args = (await readFile(join(remoteHome, 'launch-argv'), 'utf8')).split('\0').slice(0, -1)
@@ -170,6 +171,54 @@ try {
   assert.match(blocked.text, /결재 필요/)
   assert.deepEqual(actions, [])
 
+  requestedTool = { name: todoTool, args: {} }
+  const needsScope = await run('read-todos', 'work')
+  assert.ok(needsScope.blocked)
+  assert.match(needsScope.text, /mcp__jurisupport__list_tasks/)
+  const todoList = tasks => JSON.stringify({ scope:{kind:'case', caseId:'A'}, total:tasks.length, tasks })
+  const readMcpTodos = async () => { scopedReads++; return todoList([{ title: 'SCOPED_MCP_FIXTURE_TODO' }]) }
+  for (const call of [
+    { name: todoTool, args: {} },
+    { name: 'mcp__board__request_action', args: { name: 'mcp__jurisupport__list_todos', args: {} } }
+  ]) {
+    requestedTool = call
+    const before = requests.length
+    assert.match((await run('read-todos', 'work', [], undefined, readMcpTodos)).text, /원격 보고 완료/)
+    assert.ok(requests.slice(before).some(r => r.history.includes('SCOPED_MCP_FIXTURE_TODO')))
+  }
+  assert.equal(scopedReads, 3)
+  const noLookup = await run('read-todos', 'work', [], undefined, readMcpTodos)
+  assert.ok(noLookup.blocked)
+  assert.match(noLookup.text, /할일 조회를 수행하지 않았습니다/)
+  requestedTool = { name: todoTool, args: {} }
+  const unreadable = await run('read-todos', 'work', [], undefined, async () => { throw Error('계정이 변경되었습니다.') })
+  assert.ok(unreadable.blocked)
+  assert.match(unreadable.text, /계정이 변경되었습니다/)
+  requestedTool = { name: todoTool, args: {} }
+  assert.match((await run('empty-todos', 'work', [], undefined, async () => todoList([]))).text, /원격 보고 완료/)
+  const largeList = todoList(['FIRST_PAGE', 'LAST_PAGE'].map(id => ({id, title:'한'.repeat(2200)})))
+  const bothPages = () => [1,2].map(page => ({name:todoTool, args:{page}}))
+  let pageReads = 0
+  const beforePages = requests.length
+  requestedTool = bothPages()
+  assert.match((await run('paged', 'work', [], undefined, async () => { pageReads++; return largeList })).text, /원격 보고 완료/)
+  assert.equal(pageReads, 2)
+  const pageHistory = requests.slice(beforePages).map(request => request.history)
+  assert.ok(pageHistory.some(text => text.includes('FIRST_PAGE') && text.includes('nextPage') && !text.includes('LAST_PAGE')))
+  assert.ok(pageHistory.some(text => text.includes('LAST_PAGE')))
+  requestedTool = bothPages()[0]
+  assert.match((await run('incomplete', 'work', [], undefined, async () => largeList)).text, /2페이지 중 1페이지만/)
+  requestedTool = bothPages()
+  let changingRead = 0
+  const changed = await run('changed', 'work', [], undefined, async () => ++changingRead === 1 ? largeList : todoList([{title:'CHANGED_ROWS'}]))
+  assert.ok(changed.blocked)
+  assert.match(changed.text, /조회 중 할일 목록이 변경/)
+  assert.ok(!requests.at(-1).history.includes('CHANGED_ROWS'))
+  requestedTool = bothPages()[0]
+  const oversize = await run('oversize', 'work', [], undefined, async () => todoList([{title:'한'.repeat(5000)}]))
+  assert.ok(oversize.blocked)
+  assert.match(oversize.text, /할일 한 건이 너무 커서/)
+
   requestedTool = { name: 'mcp__board__case_read', args: { path: 'alias.txt' } }
   assert.match((await run('alias', 'work')).text, /원격 보고 완료/)
   assert.ok(requests.some(r => r.history.includes('작업 폴더 밖')))
@@ -177,6 +226,7 @@ try {
 
   requestedTool = { name: 'mcp__board__request_action', args: { name: 'Bash', args: { command: 'echo fixture' } } }
   assert.match((await run('granted', 'execute', ['Bash(echo fixture)'])).text, /원격 보고 완료/)
+  assert.ok(!requests.at(-1).tools.includes(todoTool))
   assert.deepEqual(actions, ['echo fixture'])
   assert.ok(commands.length >= 4)
   assert.ok(requests.every(r => r.key === remoteKey))
