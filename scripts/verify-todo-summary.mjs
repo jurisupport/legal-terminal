@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import vm from 'node:vm'
+import { createHash } from 'node:crypto'
 import ts from 'typescript'
 import * as summary from '../src/shared/todoSummary.ts'
 import { parseRpc } from '../src/main/mcpResponse.ts'
@@ -40,6 +41,7 @@ function adapter(handler, toolSchemas=modernTools, hooks={}) {
   const code=ts.transpileModule(readFileSync(new URL('../src/main/jurisupport.ts',import.meta.url),'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText
   const context={exports, module:{exports}, process:{env:{}}, console:{warn(){}}, Buffer, Date:Clock, Promise, Map, Set, JSON, String, Number, Object, Array, Error, AbortController, setTimeout:fakeTimeout, clearTimeout:timer=>timers.delete(timer),
     require(name) {
+      if(name==='node:crypto')return {createHash}
       if(name==='electron')return {app:{getPath:()=>'/tmp'},safeStorage:{isEncryptionAvailable:()=>false}}
       if(name==='./settings')return {getSettings:async()=>settings,setSettings:async(p)=>{await hooks.beforeSettings?.();settings={...settings,...p}}}
       if(name==='fs/promises')return {rm:async()=>{}}

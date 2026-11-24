@@ -3,8 +3,9 @@ import { mkdir, readFile, realpath, rename, writeFile } from 'node:fs/promises'
 import { isAbsolute, join, posix } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { WorkBoard } from './workBoard'
+import { boardTodoCaseIds } from './workBoardScope'
 import { isRemote, makeRemote, parseRemote, rfsRealpath } from './remoteFs'
-import type { BoardDecision, BoardDraft, BoardSettings } from '../shared/workBoard'
+import type { BoardDecision, BoardDraft, BoardSettings, BoardTodoScope } from '../shared/workBoard'
 
 export function registerWorkBoards(): () => void {
   const privateDir = join(app.getPath('userData'), 'work-boards')
@@ -37,6 +38,7 @@ export function registerWorkBoards(): () => void {
     return next
   }
   const aliases = new Map<string, string>()
+  const workspaceAliases = (key: string) => [...aliases].filter(([, value]) => value === key).map(([path]) => path)
   async function pathKey(value: string, existing: boolean) {
     if (typeof value !== 'string' || !value || value.includes('\0')) throw Error('작업 폴더를 선택하세요.')
     const cached = existing && aliases.get(value)
@@ -90,7 +92,7 @@ export function registerWorkBoards(): () => void {
           if (!win.isDestroyed()) win.webContents.send('workBoard:changed', key, message)
         }
         if (message && Notification.isSupported()) new Notification({ title: '업무 보드', body: message }).show()
-      })
+      }, () => workspaceAliases(key))
       try {
         if (closing) throw Error('앱을 종료하고 있습니다.')
         folders.set(key, folder)
@@ -122,10 +124,20 @@ export function registerWorkBoards(): () => void {
   function handle<A extends unknown[]>(name: string, fn: (...args: A) => unknown) {
     ipcMain.handle('workBoard:' + name, (event, ...args) => { trusted(event); return fn(...args as A) })
   }
-  handle('open', async (w: string, folder?: string) => (await open(w, folder)).snapshot())
-  handle('snapshot', async (w: string) => (await open(w)).snapshot())
+  async function snapshot(w: string, folder?: string) {
+    const data = await (await open(w, folder)).snapshot()
+    const workspace = data.workspace || w
+    try {
+      const todoCaseIds = await boardTodoCaseIds(workspace, workspaceAliases(workspace))
+      return { ...data, todoCaseIds }
+    } catch {
+      return { ...data, warnings: [...(data.warnings ?? []), '사건 폴더 연결 정보를 확인할 수 없어 할일 조회가 제한됩니다.'] }
+    }
+  }
+  handle('open', snapshot)
+  handle('snapshot', (w: string) => snapshot(w))
   handle('add', async (w: string, drafts: BoardDraft[], batchId?: string) => (await open(w)).add(drafts, batchId))
-  handle('decide', async (w: string, id: string, action: BoardDecision, reason?: string, expectedRevision?: string) => (await open(w)).decide(id, action, reason, expectedRevision))
+  handle('decide', async (w: string, id: string, action: BoardDecision, reason?: string, expectedRevision?: string, todoScope?: BoardTodoScope) => (await open(w)).decide(id, action, reason, expectedRevision, todoScope))
   handle('reorder', async (w: string, ids: string[]) => (await open(w)).reorder(ids))
   handle('configure', async (w: string, patch: Partial<BoardSettings>) => (await open(w)).configure(patch))
   handle('detail', async (w: string, id: string) => (await open(w)).detail(id))

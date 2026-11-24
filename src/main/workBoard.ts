@@ -1,14 +1,26 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
-import type { BoardAgent, BoardDecision, BoardDraft, BoardSettings, BoardSnapshot, BoardTask, BoardTeam } from '../shared/workBoard'
-import { boardRevision } from '../shared/workBoard'
+import type { BoardAgent, BoardDecision, BoardDraft, BoardSettings, BoardSnapshot, BoardTask, BoardTeam, BoardTodoScope } from '../shared/workBoard'
+import { boardRevision, isBoardTodoReview } from '../shared/workBoard'
 import { kstDateKey } from '../shared/todoSummary'
 import { WorkBoardStore } from './workBoardStore'
 import { runBoardAgent, listBoardAgents } from './workBoardRunner'
+import { getBoardTodoAccount, readBoardTodos } from './workBoardTodos'
+import { verifyBoardTodoScope } from './workBoardScope'
 import { buildBoardDaily, boardReportDue } from './workBoardDaily'
 
 const defaults: BoardSettings = { concurrency: 1, restart: 'requeue', maxReviews: 2, dailyTime: '18:00' }
+
+interface TodoConsent {
+  intent: string
+  scope: BoardTodoScope
+  mapped?: boolean
+  account: string
+  state: 'ready' | 'review' | 'spent'
+}
+
+const selectTodoScope = '지시 상세에서 할일 조회 범위를 확인하고 다시 시도해 주세요.'
 
 function settings(patch: Partial<BoardSettings>): BoardSettings {
   const s = { ...defaults, ...patch }
@@ -77,7 +89,7 @@ export class WorkBoard {
   private ticking = false
 
   constructor(private readonly workspace: string, readonly folder: string, privateDir: string,
-    private readonly changed: (message?: string) => void) {
+    private readonly changed: (message?: string) => void, private readonly workspaceAliases: () => string[] = () => []) {
     this.store = new WorkBoardStore(folder)
     this.privatePath = join(privateDir, createHash('sha256').update(JSON.stringify([workspace, folder])).digest('hex'))
   }
@@ -188,6 +200,40 @@ export class WorkBoard {
     }
   }
 
+  private consentFile(task: BoardTask) {
+    return join(this.privatePath, 'todo-' + createHash('sha256').update(task.id).digest('hex') + '.json')
+  }
+
+  private todoIntent(task: BoardTask) {
+    // The private directory binds the workspace and board. Queue position, logs and state can change independently.
+    return createHash('sha256').update(JSON.stringify([task.id, task.createdAt, task.parentId, draft(task)])).digest('hex')
+  }
+
+  private async consent(task: BoardTask): Promise<TodoConsent | undefined> {
+    const raw = await privateText(this.consentFile(task))
+    if (!raw) return
+    let record: TodoConsent
+    try { record = JSON.parse(raw) } catch { return }
+    if (record?.intent === this.todoIntent(task) && typeof record.account === 'string' && record.account) return record
+  }
+
+  private async authorizeTodos(task: BoardTask, scope?: BoardTodoScope) {
+    const previous = scope ? undefined : await this.consent(task)
+    const requested = scope ?? previous?.scope
+    if (!requested) throw new Error(selectTodoScope)
+    const mapped = await this.verifyTodoScope(requested, previous?.mapped)
+    const account = await getBoardTodoAccount()
+    if (!account || (previous && previous.account !== account))
+      throw new Error('JuriSupport 로그인 계정이 바뀌었습니다. ' + selectTodoScope)
+    const authorizedScope: BoardTodoScope = requested.kind === 'case' ? { kind: 'case', caseId: requested.caseId } : { kind: 'all' }
+    const record: TodoConsent = { intent: this.todoIntent(task), scope: authorizedScope, mapped, account, state: 'ready' }
+    await replace(this.consentFile(task), JSON.stringify(record))
+  }
+
+  private verifyTodoScope(scope: BoardTodoScope, requireMapped = false) {
+    return verifyBoardTodoScope(this.workspace, scope, this.workspaceAliases(), requireMapped)
+  }
+
   async add(inputs: BoardDraft[], batchId?: string) {
     await this.serial(async () => {
       if (!Array.isArray(inputs) || !inputs.length) throw new Error('한 건 이상 입력해 주세요.')
@@ -197,9 +243,19 @@ export class WorkBoard {
       for (const input of validated) for (const dependency of input.depends_on ?? []) this.find(dependency)
       for (const [index, input] of validated.entries()) {
         const task = this.newTask(input)
+        const scope = isBoardTodoReview(task.body) ? inputs[index].todoScope : undefined
         if (batchId) {
-          task.id = 'batch-' + createHash('sha256').update(JSON.stringify([batchId, index, input])).digest('hex')
+          task.id = 'batch-' + createHash('sha256').update(JSON.stringify(scope ? [batchId, index, input, scope] : [batchId, index, input])).digest('hex')
           if (this.tasks.some(t => t.id === task.id)) continue
+        }
+        if (scope) {
+          try {
+            await this.ownerOnly()
+            await this.authorizeTodos(task, scope)
+          } catch (error) {
+            task.status = 'blocked'
+            append(task, error instanceof Error ? error.message : String(error))
+          }
         }
         await this.save(task)
       }
@@ -243,7 +299,7 @@ export class WorkBoard {
     return join(this.privatePath, 'approval-' + createHash('sha256').update(parent).digest('hex') + '.json')
   }
 
-  async decide(id: string, action: BoardDecision, reason = '', expectedRevision?: string) {
+  async decide(id: string, action: BoardDecision, reason = '', expectedRevision?: string, todoScope?: BoardTodoScope) {
     await this.serial(async () => {
       await this.ownerOnly()
       const task = structuredClone(this.find(id))
@@ -258,7 +314,13 @@ export class WorkBoard {
       if (action === 'submit') {
         if (task.parentId || task.status !== 'blocked' || !(await this.detail(id)).report.trim())
           throw new Error('보고서가 있는 일반 확인 대기 지시만 결재 요청할 수 있습니다.')
-        task.approval = 'required'
+        if (isBoardTodoReview(task.body)) {
+          const previous = await this.consent(task)
+          if (previous?.state !== 'review') throw new Error('할일 조회가 완료되어야 결재 요청할 수 있습니다.')
+          task.approval = 'required'
+          previous.intent = this.todoIntent(task)
+          await replace(this.consentFile(task), JSON.stringify(previous))
+        } else task.approval = 'required'
         delete task.sessionId
         await this.transition(task, 'reported', '저장된 보고서로 검토·결재 요청')
         return
@@ -267,7 +329,8 @@ export class WorkBoard {
         if (this.tasks.some(t => t.parentId === id && ['failed', 'blocked'].includes(t.status)))
           throw new Error('승인 후 실행 지시에서 외부 실행 여부를 먼저 확인해 주세요.')
         if (!['failed', 'blocked', 'rejected'].includes(task.status) || task.parentId) throw new Error('이 지시는 재실행할 수 없습니다.')
-        if (reason.trim()) task.body += '\n\n추가 지시\n' + reason.trim()
+        if (isBoardTodoReview(task.body)) await this.authorizeTodos(task, todoScope)
+        else if (reason.trim()) task.body += '\n\n추가 지시\n' + reason.trim()
         delete task.sessionId
         await this.transition(task, 'queued', '재시도 요청' + (reason.trim() ? ' · ' + reason.trim() : ''))
         return
@@ -374,6 +437,13 @@ export class WorkBoard {
       await this.transition(task, 'blocked', '지시의 작업 폴더가 이 보드의 작업 폴더와 다릅니다.')
       return
     }
+    const nativeTodo = phase === 'work' && isBoardTodoReview(task.body)
+    const consent = nativeTodo ? await this.consent(task).catch(() => undefined) : undefined
+    if (nativeTodo && consent?.state !== 'ready') {
+      await this.transition(task, 'blocked', selectTodoScope)
+      this.changed('조회 범위 확인 필요 · ' + task.title)
+      return
+    }
     let approvedTools: string[] = []
     let prompt = task.body
     if (phase === 'execute') {
@@ -393,14 +463,14 @@ export class WorkBoard {
       prompt = sealed.body
     } else if (phase === 'review') {
       prompt += '\n\n보고서와 산출물을 점검해 주세요.\n' + (await this.detail(task.id)).report
-    } else {
+    } else if (!nativeTodo) {
       prompt += '\n\n아래 양식으로 최종 보고서를 작성해 주세요.\n' + (await this.store.readText('_보고서양식.md') ?? '')
       if (task.after_approval) prompt += '\n\n다음 단계는 별도 결재 후 수행합니다. 현재는 준비 상황만 보고하세요.\n' + task.after_approval
       if (task.attempts) prompt += '\n\n앞선 검토의 반려 사유\n' + (await this.detail(task.id)).review
     }
     const controller = new AbortController()
     await this.transition(task, phase === 'review' ? 'in_review' : 'running',
-      (phase === 'review' ? '검토 시작 · ' + task.review_agent : '수행 시작 · ' + (task.agent || '기본 에이전트')))
+      (nativeTodo ? 'JuriSupport 할일 점검 시작' : phase === 'review' ? '검토 시작 · ' + task.review_agent : '수행 시작 · ' + (task.agent || '기본 에이전트')))
     if (this.closed) return
     this.active.set(task.id, controller)
     const onProgress = (message: string, sessionId?: string) => {
@@ -415,9 +485,17 @@ export class WorkBoard {
     }
     void (async () => {
       try {
-        const result = await runBoardAgent({
+        let result = await runBoardAgent({
           task, phase, prompt, approvedTools, resume: phase === 'execute' ? undefined : task.sessionId,
-          signal: controller.signal, onProgress, policyDir: this.privatePath
+          signal: controller.signal, onProgress, policyDir: this.privatePath,
+          readTodos: consent ? async () => {
+            controller.signal.throwIfAborted()
+            await this.verifyTodoScope(consent.scope, consent.mapped)
+            const report = await readBoardTodos(consent.scope, consent.account)
+            await this.verifyTodoScope(consent.scope, consent.mapped)
+            controller.signal.throwIfAborted()
+            return report
+          } : undefined
         })
         await this.serial(async () => {
           if (controller.signal.aborted) return
@@ -428,9 +506,28 @@ export class WorkBoard {
             return
           }
           delete current.sessionId
+          if (consent && !result.blocked) {
+            // The completed lookup may have waited behind another board mutation.
+            const blocked = { blocked: true, text: 'JuriSupport 계정 또는 연결 사건을 확인할 수 없어 보고서 저장을 보류했습니다. ' + selectTodoScope }
+            try {
+              await this.verifyTodoScope(consent.scope, consent.mapped)
+              if (await getBoardTodoAccount() !== consent.account) result = blocked
+            } catch { result = blocked }
+            if (controller.signal.aborted) return
+          }
           await this.store.writeText(task.id + (phase === 'review' ? '.review.md' : '.report.md'), result.text)
+          if (consent) {
+            consent.state = !result.blocked && current.review_agent ? 'review' : 'spent'
+            await replace(this.consentFile(current), JSON.stringify(consent))
+          } else if (phase === 'review' && !result.blocked && isBoardTodoReview(current.body)) {
+            const previous = await this.consent(current)
+            if (previous?.state === 'review') {
+              previous.state = result.rejected && current.attempts < this.prefs.maxReviews ? 'ready' : 'spent'
+              await replace(this.consentFile(current), JSON.stringify(previous))
+            }
+          }
           if (result.blocked) {
-            await this.transition(current, 'blocked', '권한 확인 또는 추가 답변 필요')
+            await this.transition(current, 'blocked', nativeTodo ? '할일 조회를 마치지 못했습니다. 보고서에서 원인을 확인하고 다시 시도해 주세요.' : '권한 확인 또는 추가 답변 필요')
             this.changed('확인 필요 · ' + current.title)
           } else if (phase === 'review' && result.rejected) {
             current.attempts++
@@ -442,7 +539,7 @@ export class WorkBoard {
       } catch (err) {
         if (!controller.signal.aborted) await this.serial(async () => {
           const text = err instanceof Error ? err.message : String(err)
-          await this.transition(this.find(task.id), phase === 'execute' ? 'blocked' : 'failed', text)
+          await this.transition(this.find(task.id), phase === 'execute' || nativeTodo ? 'blocked' : 'failed', text)
           this.changed('업무 확인 필요 · ' + task.title)
         })
       } finally {

@@ -1,5 +1,27 @@
 export type BoardStatus = 'queued' | 'running' | 'blocked' | 'reported' | 'in_review' | 'awaiting_approval' | 'approved' | 'rejected' | 'done' | 'failed'
+export type BoardTodoScope = { kind: 'case'; caseId: string } | { kind: 'all' }
+
+function todoReviewText(input: string): string {
+  return input.normalize('NFC').replace(/\s+/gu, '').replace(/[.!?。]+$/u, '')
+}
+
+// Match standalone requests so an instruction to change a task is never reduced to a report.
+export function isBoardTodoReview(input: string): boolean {
+  const text = todoReviewText(input)
+  const request = text.replace(/^(?:전체|모든|이사건|현재사건|이번사건|미완료|남은|등록된|앱의|앱에등록된)*/u, '')
+  if (!request.startsWith('할일')) return false
+  const action = request.replace(/^할일(?:목록)?(?:을|를)?/u, '')
+  if (!action) return /^(?:전체|모든)/u.test(text)
+  return /^(?:검토|점검|확인|조회|정리|요약)(?:하기|요청|부탁(?:해|합니다|드립니다)?|해(?:줘요?|주세요|주십시오|주실래요)?)?$/u.test(action) ||
+    /^(?:보여줘|보여주세요)$/u.test(action)
+}
+
+export function explicitlyAllBoardTodos(input: string): boolean {
+  return isBoardTodoReview(input) && /^(?:전체|모든|미완료(?:전체|모든))/u.test(todoReviewText(input))
+}
+
 export interface BoardDraft {
+  todoScope?: BoardTodoScope
   title: string
   body: string
   agent?: string
@@ -31,6 +53,7 @@ export interface BoardSettings {
 export interface BoardTeam { name: string; color: string; agents: string[] }
 export interface BoardAgent { name: string; description: string }
 export interface BoardSnapshot {
+  todoCaseIds?: string[]
   workspace?: string
   warnings?: string[]
   readOnly?: boolean
@@ -45,7 +68,7 @@ export interface BoardApi {
   open(workspace: string, folder?: string): Promise<BoardSnapshot>
   snapshot(workspace: string): Promise<BoardSnapshot>
   add(workspace: string, drafts: BoardDraft[], batchId?: string): Promise<void>
-  decide(workspace: string, id: string, action: BoardDecision, reason?: string, expectedRevision?: string): Promise<void>
+  decide(workspace: string, id: string, action: BoardDecision, reason?: string, expectedRevision?: string, todoScope?: BoardTodoScope): Promise<void>
   reorder(workspace: string, ids: string[]): Promise<void>
   configure(workspace: string, patch: Partial<BoardSettings>): Promise<void>
   detail(workspace: string, id: string): Promise<{report: string; review: string}>

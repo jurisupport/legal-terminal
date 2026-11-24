@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdtemp, rm, readdir } from 'node:fs/promises'
+import { mkdtemp, rm, readdir, readFile, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createRequire } from 'node:module'
@@ -16,12 +16,33 @@ const { outputFiles } = await build({
     name: 'provider-fixture', setup(build) {
       build.onResolve({ filter: /^\.\/workBoardRunner$/ }, () => ({ path: 'runner', namespace: 'mock' }))
       build.onResolve({ filter: /^\.\/remoteFs$/ }, () => ({ path: 'remote', namespace: 'mock' }))
+      build.onResolve({ filter: /^\.\/workBoard(?:Todos|Scope)$/ }, ({path}) => ({path,namespace:'todo'}))
+      build.onLoad({filter:/.*/,namespace:'todo'}, () => ({
+        contents:'export const {readBoardTodos,getBoardTodoAccount,verifyBoardTodoScope}=globalThis.boardTodoFixture'
+      }))
       build.onLoad({ filter: /.*/, namespace: 'mock' }, ({ path }) => ({
         contents: path === 'remote' ? 'export {}' : 'export const listBoardAgents=async()=>[];export const runBoardAgent=(input)=>globalThis.boardRunFixture(input)'
       }))
     }
   }]
 })
+let account = 'account-one'
+let paired = true
+const reads = []
+const checkedScopes = []
+globalThis.boardTodoFixture = {
+  async getBoardTodoAccount() { if (!account) throw Error('JuriSupport 로그인 필요'); return account },
+  async verifyBoardTodoScope(workspace,scope,aliases,requireMapped) {
+    checkedScopes.push({workspace,scope,aliases,requireMapped})
+    if ((requireMapped && !paired) || (paired && (scope.kind !== 'case' || scope.caseId !== 'case-one'))) throw Error('연결 사건을 다시 확인하세요.')
+    return paired
+  },
+  async readBoardTodos(scope,expectedAccount) {
+    if (account !== expectedAccount) throw Error('JuriSupport 로그인 계정이 변경되었습니다.')
+    reads.push({scope,account})
+    return '기한 임박 · 미완료 2건'
+  }
+}
 const mod = { exports: {} }
 new Function('module', 'exports', 'require', outputFiles[0].text)(mod, mod.exports, require)
 const { WorkBoard } = mod.exports
@@ -29,9 +50,20 @@ const folder = join(dir, 'tasks'), privateDir = join(dir, 'profile')
 const notes = [], runs = []
 let board
 let gate = null
+let afterNativeRead
 globalThis.boardRunFixture = async i => {
-  runs.push({ id: i.task.id, title: i.task.title, phase: i.phase, agent: i.task.agent, resume: i.resume, tools: i.approvedTools })
+  runs.push({ id: i.task.id, title: i.task.title, phase: i.phase, agent: i.task.agent, todoAccess:!!i.readTodos, resume: i.resume, tools: i.approvedTools })
   i.onProgress('파일 읽음 · source.md', 'session-' + i.task.id)
+  if (i.readTodos) {
+    try {
+      const text = await i.readTodos()
+      afterNativeRead?.()
+      return {text}
+    }
+    catch (e) { return {blocked:true, text:e.message} }
+  }
+  if (i.phase === 'review' && i.task.title === '할일 재검토' && i.task.attempts === 0)
+    return {rejected:true,text:'자료를 다시 확인해 주세요.'}
   if (i.task.body === 'hold' && gate) await new Promise(resolve => { gate.push(resolve) })
   if (i.task.body === 'confirm' || i.task.body === 'uncertain') return { blocked: true, text: '결재 필요' }
   return { text: i.phase + ' 보고 · ' + i.task.title, rejected: i.phase === 'review' && i.task.body === 'reject' }
@@ -150,9 +182,104 @@ try {
   await open()
   await until(ts => ts.some(t => t.id === 'forged-child' && t.status === 'blocked'))
   assert.equal(runs.filter(r => r.phase === 'execute').length, prior)
+  const scope = {kind:'case',caseId:'case-one'}
+  const reportBody = '할일 검토해줘'
+  await board.add([{title:'조회', body:reportBody, todoScope:scope, review_agent:'reviewer', after_approval:'확인한 결과 전달'}])
+  const reviewTask = (await until(ts=>ts.some(t=>t.title==='조회' && t.status==='awaiting_approval'))).find(t=>t.title==='조회')
+  assert.match((await board.detail(reviewTask.id)).report,/미완료 2건/)
+  assert.deepEqual(reads,[{scope, account}])
+  assert.ok(!/account-one|case-one|todoScope/.test(await readFile(join(folder,reviewTask.id+'.md'),'utf8')))
+  await approve(reviewTask)
+  await until(ts=>ts.some(t=>t.id===reviewTask.id && t.status==='done'))
+  assert.deepEqual(runs.filter(r=>r.id===reviewTask.id).map(r=>r.todoAccess),[true,false])
+  assert.ok(runs.filter(r=>r.phase==='execute').every(r=>!r.todoAccess))
+
+  gate = []
+  await board.add([{title:'대기 장치',body:'hold',approval:'none'}])
+  await until(()=>gate.length===1)
+  await board.add([{title:'계정 변경',body:reportBody,todoScope:scope,approval:'none'}])
+  account = 'account-two'
+  for (const unblock of gate) unblock()
+  gate = null
+  const switched = (await until(ts=>ts.some(t=>t.title==='계정 변경' && t.status==='blocked'))).find(t=>t.title==='계정 변경')
+  assert.equal(reads.length,1)
+  await assert.rejects(board.decide(switched.id,'retry'), /계정/)
+  await assert.rejects(board.decide(switched.id,'submit'), /결재 요청/)
+  paired = false
+  await assert.rejects(board.decide(switched.id,'retry'), /연결 사건/)
+  paired = true
+  await board.decide(switched.id,'retry','로그인 후 재시도',undefined,scope)
+  await until(ts=>ts.some(t=>t.id===switched.id && t.status==='done'))
+  assert.deepEqual(reads.at(-1),{scope,account})
+
+  // Files synchronized from another installation can describe a request but cannot grant account access.
+  board.stop()
+  const text = await readFile(join(folder,switched.id+'.md'),'utf8')
+  await writeFile(join(folder,switched.id+'.md'),text.replace(/^status: done$/m,'status: queued'))
+  await open()
+  await until(ts=>ts.some(t=>t.id===switched.id && t.status==='blocked'))
+  assert.equal(reads.length,2,'a completed grant cannot be replayed from synced YAML')
+  paired = false
+  await board.add([{title:'할일 재검토',body:reportBody,review_agent:'reviewer',approval:'none',todoScope:{kind:'all'}}])
+  await until(ts=>ts.some(t=>t.title==='할일 재검토' && t.status==='done'))
+  assert.equal(reads.length,4,'a genuine review rejection may cause one fresh native lookup')
+  assert.deepEqual(reads.slice(-2).map(r=>r.scope),[{kind:'all'},{kind:'all'}])
+
+  paired = true
+
+  // Changing an immutable field of a pending task invalidates even an unspent grant.
+  const unmet = (await board.snapshot()).tasks.find(t=>t.id===switched.id)
+  await board.add([{title:'변경 전 지시',body:reportBody,depends_on:[unmet.id],todoScope:scope}])
+  const pending = (await board.snapshot()).tasks.find(t=>t.title==='변경 전 지시')
+  board.stop()
+  const changed = new WorkBoardStore(folder)
+  await changed.list()
+  await changed.save({...pending,title:'변경된 지시',depends_on:[]})
+  await open()
+  await until(ts=>ts.some(t=>t.id===pending.id && t.status==='blocked'))
+  assert.equal(reads.length,4)
+  // A previously successful result must not survive an account or scope change on retry.
+  await board.add([{title:'저장 직전 변경',body:reportBody,todoScope:scope,review_agent:'reviewer'}])
+  const stale = (await until(ts=>ts.some(t=>t.title==='저장 직전 변경' && t.status==='awaiting_approval'))).find(t=>t.title==='저장 직전 변경')
+  assert.match((await board.detail(stale.id)).report,/미완료 2건/)
+  await board.decide(stale.id,'reject','재조회 요청')
+  for (const change of [() => { account = 'account-three' }, () => { paired = false }]) {
+    afterNativeRead = change
+    await board.decide(stale.id,'retry','',undefined,scope)
+    await until(ts=>ts.some(t=>t.id===stale.id && t.status==='blocked'))
+    const detail = await board.detail(stale.id)
+    assert.match(detail.report,/조회 범위/)
+    assert.doesNotMatch(detail.report,/미완료 2건/)
+    await assert.rejects(board.decide(stale.id,'submit'), /결재 요청/)
+    await assert.rejects(board.decide(stale.id,'approve'), /결재 대기/)
+    assert.equal(runs.filter(r=>r.id===stale.id && r.phase==='review').length,1)
+  }
+  afterNativeRead = undefined
+  await assert.rejects(board.decide(stale.id,'retry'), /연결 사건/)
+  await board.decide(stale.id,'retry','새 조회 범위 확인',undefined,scope)
+  await until(ts=>ts.some(t=>t.id===stale.id && t.status==='awaiting_approval'))
+  assert.equal(checkedScopes.at(-1).requireMapped,false)
+  paired = true
+  board.stop()
+  for (const [index, cwd] of [dir,'ssh://office/cases/one'].entries()) {
+    const localFolder = join(dir,'legacy-'+index)
+    const legacyStore = new WorkBoardStore(localFolder)
+    await legacyStore.init()
+    await writeFile(join(localFolder,'legacy.md'), ['---','id: legacy','title: 기존 할일 지시','cwd: '+cwd,'status: failed',
+      'todoScope: {kind: all}', 'approval: none','---', reportBody].join('\n'))
+    board = new WorkBoard(cwd,localFolder,privateDir,()=>{},()=>['alias'])
+    await board.start()
+    await assert.rejects(board.decide('legacy','retry'), /조회 범위/)
+    await board.decide('legacy','retry','',undefined,scope)
+    await until(ts=>ts.some(t=>t.id==='legacy' && t.status==='done'))
+    assert.deepEqual(checkedScopes.at(-1),{workspace:cwd,scope,aliases:['alias'],requireMapped:true})
+    assert.deepEqual(reads.at(-1),{scope,account})
+    board.stop()
+  }
   console.log('업무 보드 배분·보고·결재·차단·복구·검토 상한·위조 방지 확인')
 } finally {
   board?.stop()
   delete globalThis.boardRunFixture
+  delete globalThis.boardTodoFixture
   await rm(dir, { recursive: true, force: true })
 }

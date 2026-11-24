@@ -18,6 +18,7 @@ const bulk = ['준비서면 쟁점 정리', '제출 서류 목록 작성', '계�
 
 async function seed() {
   for (const dir of [board, profile, agentDir, path.dirname(screenshot)]) await fs.mkdir(dir, { recursive: true })
+  await fs.writeFile(path.join(profile, 'config.json'), JSON.stringify({ jurisupportTokenEnc: 'plain:ui-test-only' }))
   const today = new Date(Date.now() + 9 * 3600000).toISOString().slice(0, 10)
   const fixtures = [
     ['waiting-a', '12월 블로그·쇼츠 편집 캘린더', 'content-planner', 'queued'],
@@ -54,7 +55,36 @@ function run({ root, workspace, board, temp, home, profile, screenshot, bulk }) 
   app.setPath('home', home)
   app.setPath('userData', profile)
   BrowserWindow.prototype.show = BrowserWindow.prototype.maximize = function () {}
-  global.fetch = async () => { throw Error('Network disabled by UI test') }
+  let listMode = 'rows'
+  const taskReads = []
+  const cases = [{ id: 'case-a', caseName: '검토 대상 사건' }, { id: 'case-b', caseName: '다른 사건' }]
+  const today = new Date(Date.now() + 9 * 3600000).toISOString().slice(0, 10)
+  const yesterday = new Date(Date.parse(today) - 86_400_000).toISOString().slice(0, 10)
+  const todoRows = [
+    { id: 'A', title: 'A 준비서면 제출', caseId: 'case-a', type: 'todo', status: 'pending', dueDate: yesterday, assigneeId: null },
+    { id: 'B', title: 'B 의뢰인 면담', caseId: 'case-a', type: 'todo', status: 'in_progress', dueDate: today, assigneeName: '박담당' },
+    { id: 'C', title: 'C 종료한 지시', caseId: 'case-a', type: 'todo', status: 'completed' },
+    { id: 'D', title: 'D 자정 후 기한', caseId: 'case-a', type: 'todo', status: 'pending', dueDate: yesterday + 'T15:30:00Z', assigneeName: '김담당' },
+    { id: 'E', title: 'E 별건 메모 검토', caseId: 'case-b', type: 'todo', status: 'pending', dueDate: today, assigneeName: '박담당' },
+    { id: 'F', title: 'F 기한 없는 점검', caseId: 'case-b', type: 'todo', status: 'pending', dueDate: null, reviewAt: today, assigneeName: '[김담당](https://example.invalid)' }
+  ]
+  global.fetch = async (url, options) => {
+    assert.equal(url, 'https://api.jurisupport.com/mcp')
+    assert.equal(options.headers.Authorization, 'Bearer ui-test-only')
+    const rpc = JSON.parse(options.body)
+    const respond = (result, status = 200) => new Response(JSON.stringify({ jsonrpc: '2.0', id: rpc.id, result }), {
+      status, headers: { 'mcp-session-id': 'test-session' }
+    })
+    if (rpc.method === 'initialize' || rpc.method === 'notifications/initialized') return respond({})
+    assert.equal(rpc.method, 'tools/call')
+    assert.equal(rpc.params.name, 'list_tasks')
+    const args = rpc.params.arguments
+    taskReads.push(args)
+    if (listMode === 'denied') return respond({}, 403)
+    // Return a second case and a closed row even for a scoped request, as a legacy endpoint might.
+    const rows = listMode === 'empty' ? [] : todoRows
+    return respond({ content: [{ type: 'text', text: JSON.stringify({ tasks: rows, hasNext: false, total: rows.length }) }] })
+  }
 
   const projectRequire = require('node:module').createRequire(path.join(root, 'package.json'))
   const sdkId = projectRequire.resolve('@anthropic-ai/claude-agent-sdk')
@@ -82,7 +112,7 @@ function run({ root, workspace, board, temp, home, profile, screenshot, bulk }) 
     if (key === 'app:generalChatDirectory') return path.join(home, '일반 대화')
     if (key === 'js:hasToken') return false
     if (key === 'js:tokenStatus') return { hasToken: false }
-    if (key === 'js:listCases') return { ok: true, cases: [] }
+    if (key === 'js:listCases') return { ok: true, cases: args[0]?.refresh ? cases : [] }
     if (key === 'todo:list') return { ok: true, todos: [] }
     if (key === 'dialog:pickFolder') return { path: workspace, name: '시안 검증 사건' }
     if (key === 'agent:create') {
@@ -163,6 +193,84 @@ function run({ root, workspace, board, temp, home, profile, screenshot, bulk }) 
     await click('.work-board-window .work-board-links button', '일일 보고')
     await click('.wb-page button', '오늘 보고서 저장')
     await wait(() => fs.existsSync(path.join(board,'_일일보고')) && fs.readdirSync(path.join(board,'_일일보고')).some(name=>name.endsWith('.html')), 'daily HTML')
+    const providerRuns = queries.length
+    async function review(title, choice, expectedStatus) {
+      const before = taskReads.length
+      await click('.work-board-window button', '일괄 지시')
+      await visible('.wb-dialog textarea')
+      const inputText = (selector, value) => evaluate(`(() => {
+        const el = document.querySelector(${JSON.stringify(selector)})
+        Object.getOwnPropertyDescriptor(Object.getPrototypeOf(el), 'value').set.call(el, ${JSON.stringify(value)})
+        el.dispatchEvent(new Event('input', {bubbles:true}))
+      })()`)
+      await inputText('.wb-dialog textarea', '할일 검토')
+      await click('.wb-dialog button', '지시별 담당 지정')
+      await visible('.wb-draft option[value="case:case-a"]')
+      const scope = `document.querySelector('.wb-draft option[value="all"]').parentElement`
+      assert.equal(await evaluate(scope + '.value'), '')
+      assert.equal(await evaluate("document.querySelector('.wb-dialog .wb-primary').disabled"), true)
+      assert.equal(taskReads.length, before, 'no read before choosing scope')
+      await inputText('.wb-draft input', title)
+      await evaluate(`(() => { const select = ${scope}; select.value = ${JSON.stringify(choice)}
+        select.dispatchEvent(new Event('change', {bubbles:true})) })()`)
+      await click('.wb-dialog button', '1건 등록')
+      await wait(() => evaluate("!document.querySelector('.wb-dialog')"), 'save ' + title)
+      let task
+      await wait(async () => {
+        const snap = await evaluate(`window.lt.workBoard.snapshot(${JSON.stringify(workspace)})`)
+        task = snap.tasks.find(t => t.title === title)
+        return task?.status === expectedStatus
+      }, title + ' ' + expectedStatus)
+      assert.equal(task.body, '할일 검토')
+      assert.ok(!task.agent && !task.review_agent, 'default worker, no review agent')
+      assert.equal(queries.length, providerRuns, 'native report requires no model invocation')
+      const reads = taskReads.slice(before)
+      assert.deepEqual(reads, [{ page: 1, limit: 100, type: 'todo', includeClosed: false, fields: 'compact',
+        ...(choice === 'all' ? {} : { caseId: 'case-a' }) }])
+      await click('.work-board-window .work-board-links button', '업무 보드')
+      await click('.wb-card', title)
+      const report = fs.readFileSync(path.join(board, task.id + '.report.md'), 'utf8')
+      if (expectedStatus === 'blocked') {
+        await wait(() => evaluate("document.querySelector('.wb-dialog')?.textContent.includes('권한')"), 'read failure displayed')
+      } else {
+        await wait(() => evaluate("!!document.querySelector('.wb-dialog .wb-todo-report')?.textContent.trim()"), 'report rendered')
+        const text = await evaluate("document.querySelector('.wb-todo-report').innerText")
+        if (listMode === 'empty') assert.match(text, /미완료 할일 0건/)
+        else {
+          assert.ok(text.includes('D 자정 후 기한'))
+          assert.ok(await evaluate("!!document.querySelector('.wb-todo-report table')"), 'report uses accessible tables')
+          assert.equal(await evaluate("document.querySelectorAll('.wb-todo-report a, .wb-todo-report img').length"), 0, 'todo fields cannot introduce links or images')
+          if (choice !== 'all') {
+            await evaluate(`(async () => {
+              document.querySelector('.wb-todo-report').closest('section').scrollIntoView({block:'start'})
+              await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))
+            })()`)
+            assert.ok(await evaluate(`[...document.querySelectorAll('.wb-todo-report table')].every(table =>
+              table.clientWidth <= table.parentElement.clientWidth + 1 ||
+              ['auto','scroll'].includes(getComputedStyle(table.parentElement).overflowX))`), 'wide report tables can scroll')
+            fs.writeFileSync(path.join(path.dirname(screenshot), 'todo-review.png'), (await win.webContents.capturePage()).toPNG())
+          }
+        }
+      }
+      await click('.wb-dialog button', '닫기')
+      return report
+    }
+    const scoped = await review('사건 미완료 목록', 'case:case-a', 'awaiting_approval')
+    for (const value of ['미완료 할일 3건', '기한 초과 1건', '기한 임박 2건', '담당자 미지정 1건', 'A 준비서면 제출', 'B 의뢰인 면담', 'D 자정 후 기한']) assert.ok(scoped.includes(value), value)
+    const midnightRow = scoped.split('\n').find(line => line.includes('D 자정 후 기한'))
+    assert.ok(midnightRow.includes(today) && !midnightRow.includes('기한 초과'), 'UTC 15:30 belongs to today in Seoul')
+    assert.doesNotMatch(scoped, /별건 메모|종료한 지시|F 기한 없는 점검/)
+    const all = await review('전체 미완료 목록', 'all', 'awaiting_approval')
+    assert.ok(all.includes('미완료 할일 5건') && all.includes(todoRows[4].title))
+    for (const label of ['기한 없음 1건', '재확인일 도래 1건', 'F 기한 없는 점검']) assert.ok(all.includes(label), label)
+    listMode = 'denied'
+    const denied = await review('연결 확인', 'case:case-a', 'blocked')
+    assert.match(denied, /권한/)
+    assert.doesNotMatch(denied, /미완료 할일 0건|ui-test-only/)
+    listMode = 'empty'
+    const empty = await review('빈 사건 확인', 'case:case-a', 'awaiting_approval')
+    assert.match(empty, /미완료 할일 0건/)
+    console.log('PASS 할일 검토 · 사건 범위 · 전체 선택 · 조회 권한 거부 · 실제 0건')
     console.log('PASS 업무 보드 · 실제 IPC · 결재 · 일괄 입력 3건 · 보고 저장 · ' + screenshot)
     app.exit(0)
   })().catch(async error => {

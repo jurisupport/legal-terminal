@@ -85,10 +85,11 @@ function withPairingLock<T>(fn: () => Promise<T>): Promise<T> {
   return run
 }
 
-async function readPairingFile(): Promise<CasePairingRecord[]> {
+async function readPairingFile(strict = false): Promise<CasePairingRecord[]> {
   try {
-    return parseCasePairingFileText(await readFile(casePairingPath(), 'utf8'))
-  } catch {
+    return parseCasePairingFileText(await readFile(casePairingPath(), 'utf8'), strict)
+  } catch (error) {
+    if (strict && (error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
     return []
   }
 }
@@ -126,9 +127,9 @@ function mergeLegacyPairingsOnce(): Promise<void> {
   return legacyPairingMergePromise
 }
 
-async function readPairingRecords(): Promise<CasePairingRecord[]> {
+async function readPairingRecords(strict = false): Promise<CasePairingRecord[]> {
   await mergeLegacyPairingsOnce().catch(() => {})
-  return readPairingFile()
+  return readPairingFile(strict)
 }
 
 export async function getJsPairing(
@@ -137,11 +138,11 @@ export async function getJsPairing(
   const entry = (await readPairingRecords()).find((e) => e.key === id)
   return entry ? { drafts: entry.drafts, records: entry.records } : undefined
 }
-export async function allJsPairings(): Promise<
+export async function allJsPairings(strict = false): Promise<
   Record<string, { drafts: string; records?: string }>
 > {
   const out: Record<string, { drafts: string; records?: string }> = {}
-  for (const e of await readPairingRecords()) out[e.key] = { drafts: e.drafts, records: e.records }
+  for (const e of await readPairingRecords(strict)) out[e.key] = { drafts: e.drafts, records: e.records }
   return out
 }
 export async function setJsPairing(

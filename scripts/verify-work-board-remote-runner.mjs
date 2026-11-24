@@ -124,6 +124,19 @@ try {
     task: { id, cwd: workspace, agent: 'remote-writer' }, phase, prompt: '가상 원격 사건 검토', policyDir: localHome,
     signal: AbortSignal.timeout(30_000), approvedTools, resume, onProgress: message => progress.push(message)
   })
+  // The owner can review application data even if the remote agent folder and CLI are offline.
+  const todoReport = '## 앱 할 일 검토\n\n미완료 1건 · 내부 사건 항목'
+  let scopedReads = 0
+  const nativeReview = await runBoardAgent({
+    task:{id:'todo',cwd:'ssh://offline/case',agent:'remote-writer'}, phase:'work', prompt:'할 일 검토',
+    policyDir:localHome, approvedTools:[], signal:AbortSignal.timeout(30000), onProgress:message=>progress.push(message),
+    readTodos:async()=>{ scopedReads++; return todoReport }
+  })
+  assert.deepEqual(nativeReview,{text:todoReport})
+  assert.equal(scopedReads,1)
+  assert.equal(commands.length,0)
+  assert.equal(requests.length,0)
+  assert.ok(progress.includes('앱의 할 일 목록 조회 · 지정 담당 remote-writer'))
   requestedTool = { name: 'mcp__board__case_draft', args: { name: '결과.md', text: '원격 전용 초안' } }
   assert.match((await run('remote', 'work')).text, /원격 보고 완료/)
   assert.equal(await readFile(join(caseDir, '_업무산출물', 'remote-결과.md'), 'utf8'), '원격 전용 초안')

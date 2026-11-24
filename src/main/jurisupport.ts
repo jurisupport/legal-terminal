@@ -1,4 +1,6 @@
 import { app, safeStorage } from 'electron'
+import { createHash } from 'node:crypto'
+import type { BoardTodoScope } from '../shared/workBoard'
 import { readFile, writeFile, rm } from 'fs/promises'
 import { homedir } from 'os'
 import { join } from 'path'
@@ -210,7 +212,25 @@ async function rawPost(
 }
 
 // 401/403 authentication failures may recover from an agent-registered token.
-class TokenRejectedError extends Error {}
+class TokenRejectedError extends Error {
+  readonly status: number
+  constructor(message: string, status: number) { super(message); this.status = status }
+}
+
+class BoardTodoError extends Error {}
+const boardAccountChanged = () => new BoardTodoError('JuriSupport 계정이 변경되었습니다. 조회 범위를 다시 지정해 주세요.')
+function boardAccountKey(token: string): string {
+  return createHash('sha256').update('legal-terminal:board-todos:v1\0').update(token).digest('hex')
+}
+export async function getBoardTodoAccount(): Promise<string> {
+  const token = await getToken().catch(() => { throw boardAccountChanged() })
+  if (!token) throw new BoardTodoError('JuriSupport 로그인 정보를 확인해 주세요.')
+  return boardAccountKey(token)
+}
+
+function boardAuthError(status: number) {
+  return new BoardTodoError(status === 403 ? '현재 JuriSupport 계정에 할일 조회 권한이 없습니다.' : 'JuriSupport 인증이 만료되었거나 유효하지 않습니다. 계정 연결을 확인해 주세요.')
+}
 
 async function ensureSession(token: string, epoch: number): Promise<void> {
   const init = await rawPost(token, {
@@ -226,7 +246,7 @@ async function ensureSession(token: string, epoch: number): Promise<void> {
   if (!init.sid || init.status === 401 || init.status === 403) {
     const err = parseRpc(init.text)
     const message = 'MCP 초기화 실패: ' + (err?.error?.message ?? `HTTP ${init.status}`)
-    throw init.status === 401 || init.status === 403 ? new TokenRejectedError(message) : new Error(message)
+    throw init.status === 401 || init.status === 403 ? new TokenRejectedError(message, init.status) : new Error(message)
   }
   await rawPost(token, { jsonrpc: '2.0', method: 'notifications/initialized' }, init.sid, epoch)
   if (changingCredentials || epoch !== accountEpoch) throw new Error('계정이 변경되었습니다. 다시 조회해 주세요.')
@@ -256,10 +276,17 @@ async function openSession(token: string, epoch: number): Promise<string> {
 }
 
 // 도구 호출 본체. 세션 만료 시 1회 재수립 후 재시도.
-async function callToolNow(name: string, args: Record<string, unknown>, epoch: number): Promise<unknown> {
+async function callToolNow(name: string, args: Record<string, unknown>, epoch: number, boardAccount?: string): Promise<unknown> {
   const saved = await getToken()
+  if (boardAccount && (!saved || boardAccountKey(saved) !== boardAccount || epoch !== accountEpoch)) throw boardAccountChanged()
   if (!saved) throw new Error('JuriSupport 토큰이 설정되지 않았습니다.')
-  const token = sessionId ? saved : await openSession(saved, epoch)
+  // A board grant is pinned to one credential. Ordinary interactive calls can recover a rotated token.
+  const start = async () => {
+    if (!boardAccount) return openSession(saved, epoch)
+    await ensureSession(saved, epoch)
+    return saved
+  }
+  const token = sessionId ? saved : await start()
 
   const call = (): Promise<{ status: number; sid: string | null; text: string }> =>
     rawPost(
@@ -271,11 +298,14 @@ async function callToolNow(name: string, args: Record<string, unknown>, epoch: n
 
   let resp = await call()
   let rpc = parseRpc(resp.text)
+  if (boardAccount && [401,403].includes(resp.status)) throw boardAuthError(resp.status)
   if (resp.status === 401 || resp.status === 403 || (rpc?.error && /session/i.test(rpc.error.message || ''))) {
-    await openSession(token, epoch)
+    await start()
     resp = await call()
+    if (boardAccount && [401,403].includes(resp.status)) throw boardAuthError(resp.status)
     rpc = parseRpc(resp.text)
   }
+  if (boardAccount && (resp.status < 200 || resp.status >= 300)) throw new BoardTodoError('JuriSupport 할일 조회 요청이 실패했습니다. 연결 상태를 확인해 주세요.')
   if (!rpc) throw new Error(`JuriSupport 응답을 해석하지 못했습니다. (HTTP ${resp.status})`)
   if (rpc?.error) throw new Error(rpc.error.message)
   // MCP 도구 결과: result.content[0].text = JSON 문자열
@@ -338,10 +368,10 @@ async function enqueueMcp<T>(run: () => Promise<T>): Promise<T> {
   }
 }
 
-async function callTool(name: string, args: Record<string, unknown>, epoch = accountEpoch): Promise<unknown> {
+async function callTool(name: string, args: Record<string, unknown>, epoch = accountEpoch, boardAccount?: string): Promise<unknown> {
   return enqueueMcp(async () => {
     if (changingCredentials || epoch !== accountEpoch) throw new Error('계정이 변경되었습니다. 다시 조회해 주세요.')
-    const result = await callToolNow(name, args, epoch)
+    const result = await callToolNow(name, args, epoch, boardAccount)
     if (changingCredentials || epoch !== accountEpoch) throw new Error('계정이 변경되었습니다. 다시 조회해 주세요.')
     return result
   })
@@ -777,16 +807,21 @@ function normalizeTodoFields(value: Record<string, unknown>): JsTodo | null {
   }
 }
 
-function normalizeTodo(r: unknown): JsTodo | null {
+function todoRecord(r: unknown): Record<string, unknown> | null {
   const obj = asObject(r)
   if (!obj) return null
   for (const key of ['todo', 'item', 'data', 'result']) {
     const nested = asObject(obj[key])
     if (nested && (typeof nested.id === 'string' || typeof nested.title === 'string')) {
-      return normalizeTodoFields(nested)
+      return nested
     }
   }
-  return normalizeTodoFields(obj)
+  return obj
+}
+
+function normalizeTodo(r: unknown): JsTodo | null {
+  const row = todoRecord(r)
+  return row && normalizeTodoFields(row)
 }
 
 function normalizeTodoList(r: unknown): JsTodo[] {
@@ -1125,8 +1160,72 @@ export async function getCase(id: string): Promise<JsCase | null> {
   return normalizeCase(r)
 }
 
-interface TodoPage { todos: JsTodo[]; total?: number; totalPages?: number; hasNext?: boolean }
-function normalizeTodoPage(raw: unknown): TodoPage {
+interface BoardTodoQuery { account: string; epoch: number; caseId?: string }
+
+function boardTodoRow(raw: unknown, query: BoardTodoQuery): JsTodo {
+  const row = todoRecord(raw)
+  const id = stringFrom(row?.id) ?? stringFrom(row?.taskId) ?? stringFrom(row?.todoId)
+  if (!row || !id) throw new BoardTodoError('식별자가 없는 할일이 있어 전체 목록을 확인할 수 없습니다.')
+  if (row.type === 'memo') return {id, title:'', type:'memo', status:'closed'}
+  const status = toJuriTaskStatus(stringFrom(row.status))
+  if (!status || (row.type != null && row.type !== 'todo')) throw new BoardTodoError('할일의 상태 또는 유형을 확인할 수 없습니다.')
+  if (status === 'closed' || status === 'completed') return {id, status, title:''}
+  const related = asObject(row.case) ?? asObject(row.jsCase)
+  const caseIds = [row.caseId, row.case_id, row.jsId, related?.id].map(stringFrom).filter(Boolean)
+  if (new Set(caseIds).size > 1) throw new BoardTodoError('할일의 사건 연결 정보가 서로 다릅니다.')
+  const caseId = caseIds[0] ?? (row.caseId === null || row.case === null ? null : undefined)
+  if (query.caseId && caseId === undefined) throw new BoardTodoError('일부 미완료 할일의 사건 연결을 확인할 수 없습니다. 사건 범위를 다시 확인해 주세요.')
+  const assigned = asObject(row.assignee)
+  const assigneeId = stringFrom(row.assigneeId) ?? stringFrom(assigned?.id)
+  const assigneeName = stringFrom(row.assigneeName) ?? stringFrom(assigned?.name)
+  const unassigned = !assigneeId && !assigneeName && (row.assigneeId === null || row.assignee === null)
+  const dueFields = ['dueDate','due_date','deadline','dueAt','due_at']
+  const dueDate = dueFields.map(key => stringFrom(row[key])).find(Boolean) ?? (dueFields.some(key => row[key] === null) ? null : undefined)
+  return {id, type:'todo', status, title:stringFrom(row.title) ?? stringFrom(row.name) ?? '(제목 미확인)', caseId,
+    caseName:stringFrom(row.caseName) ?? stringFrom(related?.caseName) ?? stringFrom(related?.name),
+    caseNumber:stringFrom(row.caseNumber) ?? stringFrom(related?.caseNumber),
+    reviewAt:stringFrom(row.reviewAt), waitingFor:stringFrom(row.waitingFor),
+    assigneeId:assigneeId ?? (unassigned ? null : undefined), assigneeName, dueDate}
+}
+
+// A child reference can precede its authoritative top-level row by several pages.
+function nestedBoardTodos(rows: unknown[]): unknown[] {
+  const children: unknown[] = []
+  const visit = (raw: unknown) => {
+    const row = todoRecord(raw)
+    for (const key of ['children', 'openDescendants']) {
+      if (row?.[key] == null) continue
+      if (!Array.isArray(row[key])) throw new BoardTodoError('하위 할일 목록 형식을 확인할 수 없습니다.')
+      for (const item of row[key]) children.push(item)
+    }
+  }
+  rows.forEach(visit)
+  for (let i = 0; i < children.length; i++) visit(children[i])
+  return children
+}
+
+function mergeBoardChildren(todos: Map<string,JsTodo>, children: unknown[], query: BoardTodoQuery): void {
+  const incomplete = new Set<string>()
+  for (const child of children) {
+    const row = todoRecord(child)
+    const id = stringFrom(child) ?? stringFrom(row?.id) ?? stringFrom(row?.taskId) ?? stringFrom(row?.todoId)
+    if (!id) throw new BoardTodoError('하위 할일의 식별자가 누락되어 전체 목록을 확인할 수 없습니다.')
+    if (todos.has(id)) continue
+    if (!row) { incomplete.add(id); continue }
+    const status = toJuriTaskStatus(stringFrom(row.status))
+    if (row.type !== 'memo' && status !== 'completed' && status !== 'closed' &&
+        (!status || !stringFrom(row.title) || !['dueDate','dueAt','due_date','deadline','due_at','assigneeId','assignee','assigneeName','reviewAt'].some(key => Object.hasOwn(row,key)))) {
+      incomplete.add(id)
+      continue
+    }
+    todos.set(id,boardTodoRow(row,query))
+    incomplete.delete(id)
+  }
+  if (incomplete.size) throw new BoardTodoError('일부 하위 할일의 상세 정보가 없어 전체 목록을 집계하지 않았습니다.')
+}
+
+interface TodoPage { todos: JsTodo[]; nested?: unknown[]; total?: number; totalPages?: number; hasNext?: boolean }
+function normalizeTodoPage(raw: unknown, board?: BoardTodoQuery, requestedPage?: number): TodoPage {
   const obj = asObject(raw)
   const data = asObject(obj?.data)
   const recognized = Array.isArray(raw) || [obj, data].some((container) => container && ['todos', 'tasks', 'items', 'data', 'results'].some((key) => Array.isArray(container[key])))
@@ -1136,47 +1235,89 @@ function normalizeTodoPage(raw: unknown): TodoPage {
     for (const container of containers) for (const key of keys) if (typeof container[key] === 'number' && Number.isFinite(container[key]) && Number(container[key]) >= 0) return Number(container[key])
     return undefined
   }
-  const hasNext = containers.map((c) => c.hasNext ?? c.hasNextPage).find((value) => typeof value === 'boolean') as boolean | undefined
-  const todos = normalizeTodoList(raw)
+  const hasNext = containers.map((c) => c.hasNext ?? c.hasNextPage ?? c.hasMore).find((value) => typeof value === 'boolean') as boolean | undefined
   const arrays = [raw, ...[obj, data].flatMap((c) => c ? ['todos', 'tasks', 'items', 'data', 'results'].map((key) => c[key]) : [])].filter(Array.isArray)
+  if (board && containers.some(c => c.complete === false || c.partial === true || c.truncated === true || c.success === false || c.error)) {
+    throw new BoardTodoError('JuriSupport가 일부 할일만 반환했습니다. 전체 목록을 다시 조회해 주세요.')
+  }
+  if (board && containers.some(c =>
+    ['total','totalCount','totalPages','pageCount'].some(key => c[key] != null && (!Number.isSafeInteger(c[key]) || Number(c[key]) < 0)) ||
+    ['hasNext','hasNextPage','hasMore'].some(key => c[key] != null && typeof c[key] !== 'boolean'))) {
+    throw new BoardTodoError('할일 목록의 페이지 정보를 확인할 수 없습니다.')
+  }
+  if (board && containers.some(c => c.page != null && c.page !== requestedPage)) throw new BoardTodoError('요청한 페이지와 응답의 페이지가 다릅니다.')
+  const todos = board ? arrays[0].map(row => boardTodoRow(row, board)) : normalizeTodoList(raw)
   if (arrays[0] && arrays[0].length !== todos.length) throw new Error('식별자가 없는 할일 응답입니다. 다시 조회해 주세요.')
-  return { todos, total: number('total', 'totalCount'), totalPages: number('totalPages', 'pageCount'), hasNext }
+  return { todos, nested:board ? nestedBoardTodos(arrays[0]) : undefined, total: number('total', 'totalCount'), totalPages: number('totalPages', 'pageCount'), hasNext }
 }
-async function listTodoPage(params: ListTodosParams): Promise<TodoPage> {
-  return normalizeTodoPage(await callTool('list_tasks', await taskListArgs(params)))
+async function listTodoPage(params: ListTodosParams, board?: BoardTodoQuery): Promise<TodoPage> {
+  const args = board ? compactRecord({type:'todo', includeClosed:false, fields:'compact', page:params.page, limit:params.limit, caseId:board.caseId})
+    : await taskListArgs(params)
+  try {
+    return normalizeTodoPage(await callTool('list_tasks', args, board?.epoch, board?.account), board, params.page)
+  } catch (error) {
+    if (!board) throw error
+    if (board.epoch !== accountEpoch) throw boardAccountChanged()
+    let reason = 'JuriSupport 목록을 조회하지 못했습니다. 연결 상태와 조회 범위를 확인해 주세요.'
+    if (error instanceof BoardTodoError) reason = error.message
+    else if (error instanceof TokenRejectedError) reason = boardAuthError(error.status).message
+    else if (error instanceof Error) {
+      // The gateway sometimes wraps 401/403 in HTTP 200. Never retain the remote error text.
+      if (/\b(?:401|unauthenticated|unauthorized|invalid_token|token_expired)\b/i.test(error.message)) reason = boardAuthError(401).message
+      if (/\b(?:403|forbidden|permission_denied|access_denied)\b/i.test(error.message)) reason = boardAuthError(403).message
+    }
+    throw new BoardTodoError(`할일 ${params.page}페이지 · ${reason}`)
+  }
 }
-async function listTodoStatus(params: ListTodosParams): Promise<JsTodo[]> {
+async function listTodoStatus(params: ListTodosParams, board?: BoardTodoQuery): Promise<JsTodo[]> {
   if (params.page !== undefined || params.limit !== undefined) return (await listTodoPage({ ...params, page: params.page ?? 1, limit: params.limit ?? TODOS_PAGE_LIMIT })).todos
   const todos = new Map<string, JsTodo>()
   let expectedTotal: number | undefined
-  for (let page = 1; page <= TODOS_MAX_PAGES; page++) {
-    const result = await listTodoPage({ ...params, page, limit: TODOS_PAGE_LIMIT })
-    const before = todos.size
-    for (const todo of result.todos) todos.set(todo.id, todo)
-    if (result.total !== undefined) expectedTotal = result.total
-    if (result.todos.length && todos.size === before) throw new Error('할일 조회 페이지가 반복되었습니다. 전체 조회를 다시 시도해 주세요.')
-    const complete = result.hasNext === false || (result.totalPages !== undefined && page >= result.totalPages) || (expectedTotal !== undefined && todos.size >= expectedTotal)
-    const more = result.hasNext === true || (result.totalPages !== undefined && page < result.totalPages) || (expectedTotal !== undefined && todos.size < expectedTotal)
-    if (complete) {
-      if (expectedTotal !== undefined && todos.size < expectedTotal) throw new Error('할일 일부가 누락되었습니다. 전체 조회를 다시 시도해 주세요.')
-      return [...todos.values()]
-    }
-    if (!result.todos.length && more) throw new Error('할일 일부가 누락되었습니다. 전체 조회를 다시 시도해 주세요.')
-    if (!more && result.todos.length < TODOS_PAGE_LIMIT) return [...todos.values()]
+  const pagesSeen = new Set<string>()
+  let receivedRows = 0
+  const nested: unknown[] = []
+  const finish = () => {
+    if (board) mergeBoardChildren(todos,nested,board)
+    return [...todos.values()]
   }
-  throw new Error('할일 전체 조회 상한에 도달했습니다. 전체 건수를 확인할 수 없습니다.')
+  for (let page = 1; page <= TODOS_MAX_PAGES; page++) {
+    const result = await listTodoPage({ ...params, page, limit: TODOS_PAGE_LIMIT }, board)
+    const before = todos.size
+    receivedRows += result.todos.length
+    for (const child of result.nested ?? []) nested.push(child)
+    for (const todo of result.todos) todos.set(todo.id, todo)
+    if (board && expectedTotal !== undefined && result.total !== undefined && expectedTotal !== result.total) throw new BoardTodoError(`할일 ${page}페이지 · 조회 중 전체 건수가 변경되었습니다.`)
+    if (result.total !== undefined) expectedTotal = result.total
+    const count = board ? receivedRows : todos.size
+    if (result.todos.length) {
+      const signature = board ? JSON.stringify(result.todos.map(todo => todo.id)) : ''
+      if (board ? pagesSeen.has(signature) : todos.size === before) throw new BoardTodoError(`할일 조회 ${page}페이지가 반복되었습니다. 전체 조회를 다시 시도해 주세요.`)
+      if (board) pagesSeen.add(signature)
+    }
+    const complete = result.hasNext === false || (result.totalPages !== undefined && page >= result.totalPages) || (expectedTotal !== undefined && count >= expectedTotal)
+    const more = result.hasNext === true || (result.totalPages !== undefined && page < result.totalPages) || (expectedTotal !== undefined && count < expectedTotal)
+    if (board && ((more && complete) || (expectedTotal !== undefined && count > expectedTotal))) throw new BoardTodoError(`할일 ${page}페이지 · 목록의 건수나 다음 페이지 표시가 일치하지 않습니다.`)
+    if (complete) {
+      if (expectedTotal !== undefined && count < expectedTotal) throw new BoardTodoError(`할일 조회 ${page}페이지에 일부가 누락되었습니다. 다시 조회해 주세요.`)
+      return finish()
+    }
+    if (!result.todos.length && more) throw new BoardTodoError(`할일 조회 ${page}페이지에 일부가 누락되었습니다. 다시 조회해 주세요.`)
+    if (!more && (board ? result.todos.length === 0 : result.todos.length < TODOS_PAGE_LIMIT)) return finish()
+  }
+  throw new BoardTodoError(`할일 전체 조회 상한(${TODOS_MAX_PAGES}페이지)에 도달했습니다. 전체 건수를 확인할 수 없습니다.`)
 }
 const todoListInflight = new Map<string, Promise<JsTodo[]>>()
-export function listTodos(params: ListTodosParams = {}): Promise<JsTodo[]> {
-  const key = JSON.stringify(params)
+export function listTodos(params: ListTodosParams = {}, board?: BoardTodoQuery): Promise<JsTodo[]> {
+  const key = JSON.stringify([params, board])
   const existing = todoListInflight.get(key)
   if (existing) return existing
   const epoch = accountEpoch
   const request = (async () => {
-    const statuses = params.openOnly ? ['pending', 'in_progress'] : (params.includeClosed ?? params.includeArchived) && (!params.status || params.status === 'all') && params.page === undefined && params.limit === undefined ? ['pending', 'in_progress', 'completed', 'closed'] : [params.status]
+    const statuses = board ? [undefined] : params.openOnly ? ['pending', 'in_progress'] : (params.includeClosed ?? params.includeArchived) && (!params.status || params.status === 'all') && params.page === undefined && params.limit === undefined ? ['pending', 'in_progress', 'completed', 'closed'] : [params.status]
     const unique = new Map<string, JsTodo>()
     for (const status of statuses) {
-      for (const todo of await listTodoStatus({ ...params, status })) {
+      for (const todo of await listTodoStatus({ ...params, status }, board)) {
+        if (board?.caseId && todo.caseId !== board.caseId) continue
         if (todo.type !== (params.type ?? 'todo')) continue
         if (params.openOnly && !['pending', 'in_progress'].includes(todo.status)) continue
         if ((params.includeClosed ?? params.includeArchived) === false && todo.status === 'closed' && toJuriTaskStatus(params.status) !== 'closed') continue
@@ -1191,6 +1332,27 @@ export function listTodos(params: ListTodosParams = {}): Promise<JsTodo[]> {
   })().finally(() => { if (todoListInflight.get(key) === request) todoListInflight.delete(key) })
   todoListInflight.set(key, request)
   return request
+}
+
+export async function listBoardReviewTodos(scope: BoardTodoScope, expectedAccount: string): Promise<JsTodo[]> {
+  if (!scope || (scope.kind === 'all' ? 'caseId' in scope : scope.kind !== 'case' || typeof scope.caseId !== 'string' || !scope.caseId || scope.caseId !== scope.caseId.trim())) {
+    throw new BoardTodoError('할일 조회 범위를 다시 지정해 주세요.')
+  }
+  if (await getBoardTodoAccount() !== expectedAccount) throw boardAccountChanged()
+  const epoch = accountEpoch
+  const caseId = scope.kind === 'case' ? scope.caseId : undefined
+  const query = {account:expectedAccount, epoch, caseId}
+  let result: JsTodo[]
+  try {
+    result = await listTodos({caseId,openOnly:true,enrichCaseDetails:false}, query)
+  } catch (error) {
+    if (epoch !== accountEpoch) throw boardAccountChanged()
+    if (error instanceof BoardTodoError) throw error
+    // Remote errors may contain confidential server output; board errors can be saved in Markdown.
+    throw new BoardTodoError('JuriSupport 미완료 할일 전체 목록을 조회하지 못했습니다. 연결 상태와 조회 범위를 확인해 주세요.')
+  }
+  if (await getBoardTodoAccount() !== expectedAccount || epoch !== accountEpoch) throw boardAccountChanged()
+  return result
 }
 
 export async function getTodo(id: string): Promise<JsTodo | null> {

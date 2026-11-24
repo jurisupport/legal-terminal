@@ -119,23 +119,26 @@ export function legacyJsPairingsToRecords(
   )
 }
 
-function parseEntries(text: string): CasePairingRecord[] | null {
+function parseEntries(text: string, strict: boolean): CasePairingRecord[] | null {
   try {
     const parsed = JSON.parse(text) as { entries?: unknown }
-    return Array.isArray(parsed.entries) ? parsed.entries.filter(isCasePairingRecord) : []
+    if (!Array.isArray(parsed.entries)) return strict ? null : []
+    const entries = parsed.entries.filter(isCasePairingRecord)
+    return strict && entries.length !== parsed.entries.length ? null : entries
   } catch {
     return null
   }
 }
 
-export function parseCasePairingFileText(text: string): CasePairingRecord[] {
-  const direct = parseEntries(text)
+export function parseCasePairingFileText(text: string, strict = false): CasePairingRecord[] {
+  const direct = parseEntries(text, strict)
   if (direct) return direct
   // 비원자 쓰기가 겹치면 유효한 JSON 뒤에 이전 내용 조각이 남을 수 있다 — 세션 인덱스와 동일 복구.
   const end = text.indexOf('\n}')
   if (end > 0) {
-    const salvaged = parseEntries(text.slice(0, end + 2))
+    const salvaged = parseEntries(text.slice(0, end + 2), strict)
     if (salvaged) return salvaged
   }
+  if (strict) throw new Error('사건과 폴더의 연결 정보를 확인할 수 없습니다.')
   return []
 }

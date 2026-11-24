@@ -1,4 +1,6 @@
-import { boardRevision } from '../../../shared/workBoard'
+import { boardRevision, explicitlyAllBoardTodos, isBoardTodoReview } from '../../../shared/workBoard'
+import DOMPurify from 'dompurify'
+import { marked, Renderer } from 'marked'
 import { createPortal } from 'react-dom'
 import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react'
 import type {
@@ -9,9 +11,11 @@ import type {
   BoardSnapshot,
   BoardStatus,
   BoardTask,
-  BoardTeam
+  BoardTeam,
+  BoardTodoScope
 } from '../../../shared/workBoard'
 import { isBoardDueSoon, isBoardRunning } from '../../../shared/workBoardSummary'
+import { JS_TOKEN_UPDATED_EVENT } from './CasesDashboard'
 import './WorkBoard.css'
 
 export type WorkBoardView = 'board' | 'approvals' | 'daily' | 'bulk'
@@ -21,6 +25,7 @@ interface Props {
   onView?: (view: WorkBoardView) => void
   onOpenFile: (path: string) => void
   bulkSeed?: string
+  boundCase?: { id: string; label: string }
 }
 const statusLabel: Record<BoardStatus, string> = {
   queued: '대기',
@@ -90,13 +95,84 @@ function Dialog({ title, children, close }: { title: string; children: ReactNode
   )
 }
 
+interface ScopeOptions {
+  caseIds: string[]
+  boundCase?: Props['boundCase']
+}
+
+function useTodoScopeOptions(needed: boolean, { caseIds, boundCase }: ScopeOptions, clearSelection: () => void) {
+  const clearSelectionRef = useRef(clearSelection)
+  clearSelectionRef.current = clearSelection
+  const pinned = boundCase
+    ? (caseIds.includes(boundCase.id) ? boundCase.id : undefined)
+    : (caseIds.length === 1 ? caseIds[0] : undefined)
+  const [cases, setCases] = useState<{ id: string; label: string }[]>([])
+  const [error, setError] = useState('')
+  const [request, setRequest] = useState(0)
+  const [accountChanged, setAccountChanged] = useState(false)
+  useEffect(() => {
+    if (!needed || pinned) return
+    let live = true
+    const refresh = () => {
+      setCases([])
+      setAccountChanged(true)
+      clearSelectionRef.current()
+      setRequest(n => n + 1)
+    }
+    setCases([])
+    setError('')
+    window.lt.js.listCases({ refresh: true }).then(result => {
+      if (!live) return
+      if (!result.ok) throw new Error(result.error || '사건 목록을 불러오지 못했습니다.')
+      setCases((result.cases ?? []).map(c => ({ id: c.id, label: [c.caseNumber, c.caseName].filter(Boolean).join(' · ') || c.id })))
+    }).catch(err => { if (live) setError(errMsg(err)) })
+    window.addEventListener(JS_TOKEN_UPDATED_EVENT, refresh)
+    return () => { live = false; window.removeEventListener(JS_TOKEN_UPDATED_EVENT, refresh) }
+  }, [needed, pinned, request])
+  return {
+    pinned,
+    pinnedLabel: boundCase?.id === pinned ? boundCase?.label : pinned,
+    cases: caseIds.length ? cases.filter(c => caseIds.includes(c.id)) : cases,
+    allowAll: caseIds.length === 0,
+    accountChanged,
+    error, retry: () => setRequest(n => n + 1)
+  }
+}
+
+type ScopeList = ReturnType<typeof useTodoScopeOptions>
+function selectedScope(options: ScopeList, choice?: BoardTodoScope, explicitAll = false): BoardTodoScope | undefined {
+  if (options.pinned) return { kind: 'case', caseId: options.pinned }
+  if (choice?.kind === 'case') return options.cases.some(c => c.id === choice.caseId) ? choice : undefined
+  if (options.allowAll && (choice?.kind === 'all' || (explicitAll && !options.accountChanged))) return { kind: 'all' }
+}
+
+function ScopeField({ options, value, change }: { options: ScopeList; value?: BoardTodoScope; change: (scope: BoardTodoScope) => void }) {
+  if (options.pinned) return <p className="wb-wide">할일 검토 범위 · {options.pinnedLabel}</p>
+  return (
+    <div className="wb-wide">
+      <label>할일 검토 범위
+        <select required value={value?.kind === 'case' ? 'case:' + value.caseId : value?.kind || ''}
+          onChange={e => change(e.target.value === 'all' ? { kind: 'all' } : { kind: 'case', caseId: e.target.value.slice(5) })}>
+          <option value="" disabled>검토할 범위 선택</option>
+          {options.cases.map(c => <option key={c.id} value={'case:' + c.id}>{c.label}</option>)}
+          {options.allowAll && <option value="all">전체 미완료 할일</option>}
+        </select>
+      </label>
+      {value?.kind === 'all' && <small>현재 계정에서 볼 수 있는 미완료 할일을 이 보드의 보고서에 저장합니다.</small>}
+      {options.error && <p role="alert">{options.error} <button type="button" className="wb-btn" onClick={options.retry}>다시 조회</button></p>}
+    </div>
+  )
+}
+
 function BulkForm({
   agents,
   seed,
+  scopeOptions,
   submit
 }: {
   agents: BoardAgent[]
   seed?: string
+  scopeOptions: ScopeOptions
   submit: (drafts: BoardDraft[], batchId: string) => Promise<void>
 }) {
   const [batchId] = useState(() => crypto.randomUUID())
@@ -107,6 +183,18 @@ function BulkForm({
   const [error, setError] = useState('')
   const update = (index: number, patch: Partial<BoardDraft>) =>
     setDrafts((prev) => prev.map((d, i) => (i === index ? { ...d, ...patch } : d)))
+  const reviewRows = drafts.map(d => isBoardTodoReview(d.body))
+  const scopes = useTodoScopeOptions(reviewRows.includes(true), scopeOptions, () => {
+    setDrafts(rows => rows.map(({ todoScope, ...draft }) => draft))
+  })
+  const ready: BoardDraft[] = drafts.map((d, i) => {
+    if (!reviewRows[i]) {
+      const { todoScope, ...draft } = d
+      return draft
+    }
+    return { ...d, todoScope: selectedScope(scopes, d.todoScope, explicitlyAllBoardTodos(d.body)) }
+  })
+  const missingScope = ready.some((d, i) => reviewRows[i] && !d.todoScope)
   const options = agents.map((a) => (
     <option key={a.name} value={a.name} title={a.description}>
       {a.name}
@@ -128,11 +216,11 @@ function BulkForm({
           )
           return
         }
-        if (busy) return
+        if (busy || missingScope) return
         setBusy(true)
         setError('')
         try {
-          await submit(drafts, batchId)
+          await submit(ready, batchId)
         } catch (err) {
           setError(errMsg(err))
         } finally {
@@ -169,6 +257,8 @@ function BulkForm({
                 지시 본문
                 <textarea required rows={2} value={d.body} onChange={(e) => update(i, { body: e.target.value })} />
               </label>
+              {reviewRows[i] && <ScopeField options={scopes} value={ready[i].todoScope}
+                change={todoScope => update(i, { todoScope })} />}
               <label>
                 담당 에이전트
                 <select value={d.agent || ''} onChange={(e) => update(i, { agent: e.target.value })}>
@@ -261,7 +351,7 @@ function BulkForm({
         </div>
       )}
       <div className="wb-actions">
-        <button disabled={busy || !raw.trim()} className="wb-btn wb-primary">
+        <button disabled={busy || !raw.trim() || missingScope} className="wb-btn wb-primary">
           {drafts.length ? drafts.length + '건 등록' : '지시별 담당 지정'}
         </button>
       </div>
@@ -479,10 +569,38 @@ function reportPaths(report: string, cwd: string): string[] {
   return [...paths]
 }
 
+function TodoReport({ text }: { text: string }) {
+  const container = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    const renderer = new Renderer()
+    const literal = (value: string) => value.replaceAll('&', '&amp;').replaceAll('<', '&lt;')
+    renderer.html = token => literal(token.text)
+    renderer.image = token => literal(token.text)
+    renderer.link = function (token) { return this.parser.parseInline(token.tokens) }
+    const html = marked.parse(text, { renderer, gfm: true, breaks: true, async: false })
+    const report = DOMPurify.sanitize(html, {
+      ALLOWED_TAGS: ['p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'ul', 'ol', 'li', 'strong', 'em', 'code', 'pre', 'br', 'table', 'thead', 'tbody', 'tr', 'th', 'td'],
+      ALLOWED_ATTR: [], ALLOW_ARIA_ATTR: false, ALLOW_DATA_ATTR: false, RETURN_DOM_FRAGMENT: true
+    })
+    for (const table of report.querySelectorAll('table')) {
+      const scroll = document.createElement('div')
+      scroll.className = 'wb-table-scroll'
+      scroll.tabIndex = 0
+      scroll.setAttribute('role', 'region')
+      scroll.setAttribute('aria-label', table.previousElementSibling?.matches('h1,h2,h3,h4,h5,h6') ? table.previousElementSibling.textContent || '할일 표' : '할일 표')
+      table.replaceWith(scroll)
+      scroll.append(table)
+    }
+    container.current?.replaceChildren(report)
+  }, [text])
+  return <div className="wb-todo-report" ref={container} />
+}
+
 function Details({
   task,
   workspace,
   readOnly,
+  scopeOptions,
   onOpenFile,
   onDecision,
   close,
@@ -491,13 +609,18 @@ function Details({
   task: BoardTask
   workspace: string
   readOnly: boolean
+  scopeOptions: ScopeOptions
   onOpenFile: Props['onOpenFile']
   close: () => void
-  onDecision: (task: BoardTask, action: BoardDecision, reason: string, revision?: string) => Promise<void>
+  onDecision: (task: BoardTask, action: BoardDecision, reason: string, revision?: string, todoScope?: BoardTodoScope) => Promise<void>
   reorder?: () => Promise<void>
 }) {
   const [files, setFiles] = useState<{ report: string; review: string } | null>(null)
   const [reason, setReason] = useState('')
+  const [chosenScope, setChosenScope] = useState<BoardTodoScope>()
+  const retryTodo = !readOnly && !task.parentId && ['failed', 'blocked', 'rejected'].includes(task.status) && isBoardTodoReview(task.body)
+  const scopes = useTodoScopeOptions(retryTodo, scopeOptions, () => setChosenScope(undefined))
+  const retryScope = retryTodo ? selectedScope(scopes, chosenScope) : undefined
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   useEffect(() => {
@@ -530,7 +653,8 @@ function Details({
     }
   }
   const history = task.log.filter((l) => /결재|승인|반려|수정 지시/.test(l.text))
-  const paths = reportPaths(files?.report || '', workspace)
+  const todoReview = isBoardTodoReview(task.body)
+  const paths = todoReview ? [] : reportPaths(files?.report || '', workspace)
   const [preview, setPreview] = useState<{ path: string; text: string } | null>(null)
   const previewVersion = useRef(0)
   async function openArtifact(path: string) {
@@ -571,7 +695,9 @@ function Details({
         </section>
         <section>
           <h3>보고서</h3>
-          <p className="wb-notes">{files ? files.report || '아직 보고서가 없습니다.' : '불러오는 중…'}</p>
+          {todoReview && files?.report ? <TodoReport text={files.report} /> : (
+            <p className="wb-notes">{files ? files.report || '아직 보고서가 없습니다.' : '불러오는 중…'}</p>
+          )}
           {paths.map((path) => (
             <button className="wb-btn" key={path} onClick={() => void openArtifact(path)}>
               {path.split('/').pop()} 열기
@@ -679,11 +805,12 @@ function Details({
                 추가 답변 또는 재수행 지시
                 <textarea value={reason} rows={2} onChange={(e) => setReason(e.target.value)} />
               </label>
+              {retryTodo && <ScopeField options={scopes} value={retryScope} change={setChosenScope} />}
               <div className="wb-actions">
                 <button
                   className="wb-btn"
-                  disabled={busy}
-                  onClick={() => act(() => onDecision(task, 'retry', reason.trim()))}
+                  disabled={busy || (retryTodo && !retryScope)}
+                  onClick={() => act(() => onDecision(task, 'retry', reason.trim(), undefined, retryScope))}
                 >
                   다시 대기열에 넣기
                 </button>
@@ -716,7 +843,7 @@ function Details({
 export function WorkBoard(props: Props) {
   return <BoardWorkspace key={props.workspace} {...props} />
 }
-function BoardWorkspace({ workspace, view, onView, bulkSeed, onOpenFile }: Props) {
+function BoardWorkspace({ workspace, view, onView, bulkSeed, boundCase, onOpenFile }: Props) {
   const api = window.lt.workBoard
   const [data, setData] = useState<BoardSnapshot | null>(null)
   const [error, setError] = useState('')
@@ -726,6 +853,10 @@ function BoardWorkspace({ workspace, view, onView, bulkSeed, onOpenFile }: Props
   const [filter, setFilter] = useState<number | null>(null)
   const [report, setReport] = useState('')
   const [exporting, setExporting] = useState(false)
+  const scopeOptions: ScopeOptions = {
+    caseIds: data?.todoCaseIds?.length ? data.todoCaseIds : boundCase ? [boundCase.id] : [],
+    boundCase
+  }
   const drag = useRef<string | null>(null)
   const version = useRef(0)
   const mounted = useRef(true)
@@ -963,6 +1094,7 @@ function BoardWorkspace({ workspace, view, onView, bulkSeed, onOpenFile }: Props
               <BulkForm
                 agents={data.agents}
                 seed={bulkSeed}
+                scopeOptions={scopeOptions}
                 submit={async (drafts, batchId) => {
                   await api.add(workspace, drafts, batchId)
                   navigate('board')
@@ -986,13 +1118,15 @@ function BoardWorkspace({ workspace, view, onView, bulkSeed, onOpenFile }: Props
           )}
           {task && (
             <Details
+              key={task.id}
               task={task}
+              scopeOptions={scopeOptions}
               workspace={data.workspace || workspace}
               readOnly={!!data.readOnly}
               close={() => setSelected(null)}
               onOpenFile={onOpenFile}
-              onDecision={async (t, action, reason, revision) => {
-                await api.decide(workspace, t.id, action, reason, revision)
+              onDecision={async (t, action, reason, revision, todoScope) => {
+                await api.decide(workspace, t.id, action, reason, revision, todoScope)
                 await refresh()
               }}
               reorder={

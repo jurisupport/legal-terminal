@@ -286,7 +286,7 @@ const NOTIFICATION_TONES: Record<Exclude<NotificationSound, 'none'>, Notificatio
   ]
 }
 
-interface OpenBoard { workspace: string; view: WorkBoardView; bulkSeed?: string }
+interface OpenBoard { workspace: string; view: WorkBoardView; bulkSeed?: string; boundCase?: { id: string; label: string } }
 
 const normalizePasteForPty = (text: string): string =>
   text.replace(/\r\n/g, '\n').replace(/\r/g, '\n').replace(/\n/g, '\r')
@@ -4780,6 +4780,13 @@ export default function App(): JSX.Element {
   const sessionCaseSource = currentCaseSessionSource(currentCase, sshProfiles)
   const boardSource = activeTermTab ?? sessionCaseSource
   const boardSourceFolder = boardTermFolder(boardSource)
+  const selectBoard = (workspace: string, view: WorkBoardView, source = boardSource, bulkSeed?: string): void => {
+    const boundCase = workspace === board?.workspace ? board.boundCase
+      : source?.jsId && resolveAgentContextKind(source) === 'case' && workspace === boardTermFolder(source)
+        ? { id: source.jsId, label: [source.caseNumber, source.caseName].filter(Boolean).join(' · ') || source.jsId }
+        : undefined
+    setBoard({ workspace, view, bulkSeed, boundCase })
+  }
   const pickBoardFolder = async (view: WorkBoardView, profileId?: string, startPath?: string): Promise<void> => {
     if (profileId) {
       const profile = sshProfiles.find(p => p.id === profileId)
@@ -4788,7 +4795,7 @@ export default function App(): JSX.Element {
       return
     }
     const picked = await window.lt.dialog.pickFolder({ title: '업무 보드 작업 폴더 선택', defaultPath: startPath || draftsRoot })
-    if (picked) setBoard({ workspace: picked.path, view })
+    if (picked) selectBoard(picked.path, view)
   }
   const openBoard = async (view: WorkBoardView, term?: TermTab, bulkSeed?: string): Promise<void> => {
     const source = term ?? boardSource
@@ -4806,7 +4813,7 @@ export default function App(): JSX.Element {
       target = known.find(path => boardCounts[path] > 0) ?? target
     }
     target ||= known[0]
-    if (target) setBoard({ workspace: target, view, bulkSeed })
+    if (target) selectBoard(target, view, source, bulkSeed)
     else await pickBoardFolder(view, profileId)
   }
   const activeRecordsFolder = activeTermTab?.recordsFolder ?? currentCase?.records
@@ -9742,7 +9749,7 @@ export default function App(): JSX.Element {
           작업 폴더
           <select aria-label="업무 보드 작업 폴더" title={board.workspace} value={board.workspace} onChange={async event => {
             const value = event.currentTarget.value
-            if (value) setBoard({ workspace: value, view: board.view })
+            if (value) selectBoard(value, board.view)
             else {
               const remote = parseRemoteUri(board.workspace)
               await pickBoardFolder(board.view, remote?.profileId, remote?.path ?? board.workspace)
@@ -9756,7 +9763,7 @@ export default function App(): JSX.Element {
         </label>
       </header>
       <WorkBoard key={board.workspace} {...board}
-        onView={view => setBoard({ workspace: board.workspace, view })}
+        onView={view => setBoard({ ...board, view, bulkSeed: undefined })}
         onOpenFile={path => {
           if (termOnly || board.workspace !== boardSourceFolder) {
             void window.lt.app.newWindow({ tabs: [{ kind: 'doc', path, title: fileNameFromPath(path) }] })
@@ -9777,7 +9784,7 @@ export default function App(): JSX.Element {
             void window.lt.dialog.alert('원격 폴더의 전체 경로를 선택하세요.')
             return
           }
-          setBoard({ workspace: remoteUri(boardPicker.profile.id, path), view: boardPicker.view })
+          selectBoard(remoteUri(boardPicker.profile.id, path), boardPicker.view)
           setBoardPicker(null)
         }} />
     </dialog>}

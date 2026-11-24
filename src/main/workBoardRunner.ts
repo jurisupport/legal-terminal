@@ -54,6 +54,8 @@ export interface BoardRunInput {
   phase: 'work' | 'review' | 'execute'
   prompt: string
   approvedTools: string[]
+  /** Bound to the account and scope authorized by the local board dispatcher. */
+  readTodos?: () => Promise<string>
   resume?: string
   policyDir: string
   signal: AbortSignal
@@ -63,6 +65,21 @@ export interface BoardRunInput {
 export async function runBoardAgent(input: BoardRunInput) {
   const { task, phase, signal, onProgress } = input
   signal.throwIfAborted()
+  if (phase === 'work' && input.readTodos) {
+    onProgress('앱의 할 일 목록 조회 · ' + (task.agent ? '지정 담당 ' + task.agent : '기본 담당'))
+    try {
+      const text = await input.readTodos()
+      signal.throwIfAborted()
+      if (typeof text !== 'string' || !text.trim()) throw new Error('조회 결과를 받지 못했습니다. 앱의 할 일 연결을 확인한 뒤 다시 시도하세요.')
+      onProgress('앱의 할 일 조회 결과로 보고서 작성')
+      return { text }
+    } catch (error) {
+      signal.throwIfAborted()
+      const reason = error instanceof Error && error.message.trim() ? error.message : '앱의 할 일 연결을 확인한 뒤 다시 시도하세요.'
+      onProgress('앱의 할 일 조회 중단')
+      return { blocked: true, text: '## 할 일 조회 확인 필요\n\n' + reason }
+    }
+  }
   const policy = await readBoardPolicy(input.policyDir)
   const name = phase === 'review' ? task.review_agent : task.agent
   const agent = name ? (await definitions(task.cwd)).get(name) : undefined

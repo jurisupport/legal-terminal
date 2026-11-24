@@ -55,11 +55,22 @@ const server = new ssh2.Server({hostKeys: [hostKey.private]}, client => {
 })
 const require = createRequire(import.meta.url)
 const source = buildSync({
-  stdin: {contents: "export * from './src/main/workBoardStore'; export {disposeRemote, rfsBoardAgentSources} from './src/main/remoteFs'", resolveDir: process.cwd()},
+  stdin: {contents: `
+    export {WorkBoard} from './src/main/workBoard'
+    export {WorkBoardStore} from './src/main/workBoardStore'
+    export {setJsPairing} from './src/main/caseStore'
+    export {disposeRemote, rfsBoardAgentSources} from './src/main/remoteFs'
+  `, resolveDir: process.cwd()},
   bundle: true, write: false, format: 'cjs', platform: 'node', packages: 'external'
 }).outputFiles[0].text
 const mod = new Module(import.meta.filename)
-mod.require = id => id === 'electron' ? {app: {getPath: () => root}} : require(id)
+let sdkRuns = 0
+mod.require = id => {
+  if (id === 'electron') return {app: {getPath: () => root}}
+  if (id === 'os' || id === 'node:os') return { ...require(id), homedir: () => root }
+  if (id === '@anthropic-ai/claude-agent-sdk') return { ...require(id), query() { sdkRuns++; throw Error('Unexpected model session') } }
+  return require(id)
+}
 mod._compile(source, import.meta.filename)
 try {
   server.listen(0, '127.0.0.1')
@@ -70,7 +81,7 @@ try {
     '#!/bin/sh', 'test "$1" = "-ilc" || exit 2', 'echo login-banner',
     'export CLAUDE_CONFIG_DIR="$TEST_CLAUDE_CONFIG"', 'exec /bin/sh -c "$2"'
   ].join('\n'), {mode:0o700})
-  await writeFile(join(root, 'config.json'), JSON.stringify({sshProfiles: [{id: 'test', host: '127.0.0.1', port, user, identityFile: privateKey}]}))
+  await writeFile(join(root, 'config.json'), JSON.stringify({jurisupportTokenEnc:'plain:loopback-test',sshProfiles: [{id: 'test', host: '127.0.0.1', port, user, identityFile: privateKey}]}))
   const key = ssh2.utils.parseKey(hostKey.private)
   const fingerprint = createHash('sha256').update(JSON.stringify(['127.0.0.1', port, key.type])).digest('hex')
   await mkdir(join(root,'ssh-host-keys'))
@@ -131,6 +142,58 @@ try {
   await board.writeText('_일일보고/2026-11-24.md', '일일 보고')
   assert.equal(await board.readText(task.id + '.report.md'), '검토 완료')
   assert.equal(await readFile(join(folder, '_일일보고/2026-11-24.md'), 'utf8'), '일일 보고')
+  // Run a native review end-to-end on a separate, newly owned SFTP board.
+  const caseDir = join(root, '사건')
+  const remoteCase = 'ssh://test' + caseDir
+  await mkdir(caseDir)
+  await mod.exports.setJsPairing('remote:test:case-a', {drafts:caseDir})
+  const workflow = new mod.exports.WorkBoard(remoteCase, remoteCase + '/_업무지시', join(root,'owner-private'), () => {})
+  const nativeFetch = globalThis.fetch
+  const queries = []
+  const today = new Date(Date.now() + 9 * 3600000).toISOString().slice(0,10)
+  const rows = [
+    {id:'A', title:'A 제출 준비', caseId:'case-a', status:'pending', dueDate:'2000-01-01', assigneeId:null},
+    {id:'B', title:'B 의뢰인 면담', caseId:'case-a', status:'in_progress', dueDate:today, assigneeName:'김담당'},
+    {id:'C', title:'C 종료한 일', caseId:'case-a', status:'completed'},
+    {id:'X', title:'X 별건 초안', caseId:'case-x', status:'pending', dueDate:today, assigneeId:null}
+  ]
+  globalThis.fetch = async (url, options) => {
+    assert.equal(url,'https://api.jurisupport.com/mcp')
+    assert.equal(options.headers.Authorization,'Bearer loopback-test')
+    const rpc = JSON.parse(options.body)
+    let result = {}
+    if (rpc.method === 'tools/call') {
+      queries.push(rpc.params)
+      result = {content:[{type:'text',text:JSON.stringify({tasks:rows, total:rows.length, hasNext:false})}]}
+    } else assert.ok(['initialize','notifications/initialized'].includes(rpc.method))
+    return new Response(JSON.stringify({jsonrpc:'2.0',id:rpc.id,result}), {headers:{'mcp-session-id':'loopback'}})
+  }
+  try {
+    await workflow.start()
+    const execsBeforeAdd = configLookups
+    await workflow.add([{title:'할일 검토',body:'할일 검토',todoScope:{kind:'case',caseId:'case-a'}}])
+    let review
+    const deadline = Date.now() + 15_000
+    do {
+      review = (await workflow.snapshot()).tasks[0]
+      if (['awaiting_approval','failed','blocked'].includes(review?.status)) break
+      await new Promise(resolve => setTimeout(resolve, 50))
+    } while (Date.now() < deadline)
+    assert.equal(review?.status,'awaiting_approval',JSON.stringify(review?.log))
+    assert.ok(!review.agent && !review.review_agent)
+    assert.deepEqual(queries,[{name:'list_tasks',arguments:{type:'todo',includeClosed:false,fields:'compact',page:1,limit:100,caseId:'case-a'}}])
+    assert.equal(configLookups,execsBeforeAdd,'no SSH exec channel opened by the instruction')
+    assert.equal(sdkRuns,0,'no Claude SDK session')
+    const report = (await workflow.detail(review.id)).report
+    const stored = await readFile(join(caseDir,'_업무지시',review.id + '.report.md'))
+    assert.deepEqual(stored,Buffer.from(report))
+    for (const value of ['미완료 할일 2건','기한 초과 1건','기한 임박 1건','담당자 미지정 1건','A 제출 준비','B 의뢰인 면담']) assert.ok(report.includes(value),value)
+    assert.doesNotMatch(report,/C 종료한 일|X 별건 초안|loopback-test/)
+    console.log('원격 사건 할일 검토 · 범위 확인 · 단일 읽기 · SSH 지시서와 실제 보고서 바이트 일치')
+  } finally {
+    workflow.stop()
+    globalThis.fetch = nativeFetch
+  }
   assert.equal(connections, 1)
   console.log('실제 루프백 SSH/SFTP 연결 1개에서 지시서 생성·변경·조회, 보고서 및 일일 보고 저장 확인')
 } finally {
