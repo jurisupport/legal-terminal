@@ -1,3 +1,5 @@
+import { verifyBoardText } from './fixtures/work-board-text.mjs'
+import { readBoardDocumentText } from '../src/main/workBoardDocumentText.ts'
 import { verifyBoardStorage } from './fixtures/work-board-storage.mjs'
 import assert from 'node:assert/strict'
 import { mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises'
@@ -7,6 +9,7 @@ import { WorkBoardStore } from '../src/main/workBoardStore.ts'
 
 const directory = await mkdtemp(join(tmpdir(), 'legal-board-'))
 try {
+  await verifyBoardText(readBoardDocumentText,directory)
   const board = new WorkBoardStore(join(directory, '_업무지시'))
   await board.init()
   assert.match(await board.readText('_보고서양식.md'), /결재 요청 사항/)

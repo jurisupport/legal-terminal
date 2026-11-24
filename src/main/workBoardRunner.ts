@@ -157,7 +157,7 @@ export async function runBoardAgent(input: BoardRunInput) {
       controller.signal.throwIfAborted()
       if (remote) await rfsWriteText(path, text, null)
       else await writeFile(path, text, { flag: 'wx', mode: 0o600 })
-      outputs.push(path)
+      outputs.push('_업무산출물/' + task.id + '-' + name)
       onProgress('파일 작성 · ' + path)
       return reply(path)
     })),
@@ -216,7 +216,7 @@ export async function runBoardAgent(input: BoardRunInput) {
   try {
     signal.throwIfAborted()
     const session = query({
-      prompt: '다음 업무지시를 수행하고 최종 답변을 Markdown으로 작성하세요. 파일 경로는 case_list/read의 상대 경로를 사용하세요. 외부 작업 또는 사용자 답변이 필요하면 request_action을 호출하세요.\n' +
+      prompt: '다음 업무지시를 수행하고 최종 답변을 Markdown으로 작성하세요. 파일 경로는 case_list/read의 상대 경로를 사용하세요. 결재할 파일이 있으면 보고서의 “## 결재 대상 문서” 아래에 실제 작업 폴더 기준 경로를 한 줄에 하나씩 적으세요. 외부 작업 또는 사용자 답변이 필요하면 request_action을 호출하세요.\n' +
         input.prompt + reviewFormat + (phase === 'execute' ? '\n이 지시에 승인된 도구 목록: ' + JSON.stringify([...grants]) : ''),
       options: {
         ...transport, cwd: sandbox, env: cleanEnv(), pathToClaudeCodeExecutable: packagedClaudeAgentSdkExecutable(),

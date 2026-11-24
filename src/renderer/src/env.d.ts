@@ -169,6 +169,7 @@ export type TabPayload =
   | { kind: 'terminal'; tab: TerminalTabPayload }
 
 export interface NewWindowOptions {
+  docOnly?: boolean
   tabs?: TabPayload[]
   termOnly?: boolean
 }

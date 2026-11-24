@@ -1,3 +1,4 @@
+export { boardDocumentPaths, isBoardDocumentPath } from './workBoardDocuments.ts'
 export type BoardStatus = 'queued' | 'running' | 'blocked' | 'reported' | 'in_review' | 'awaiting_approval' | 'approved' | 'rejected' | 'done' | 'failed'
 export type BoardTodoScope = { kind: 'case'; caseId: string } | { kind: 'all' }
 
@@ -8,10 +9,10 @@ function todoReviewText(input: string): string {
 // Match standalone requests so an instruction to change a task is never reduced to a report.
 export function isBoardTodoReview(input: string): boolean {
   const text = todoReviewText(input)
-  const request = text.replace(/^(?:전체|모든|이사건|현재사건|이번사건|미완료|남은|등록된|앱의|앱에등록된)*/u, '')
+  const request = text.replace(/^(?:(?:쥬리서포트|주리서포트|jurisupport)(?:에등록된|에있는|에서|의)?|전체|모든|이사건|현재사건|이번사건|미완료|남은|등록된|앱의|앱에등록된)*/iu, '')
   if (!request.startsWith('할일')) return false
   const action = request.replace(/^할일(?:목록)?(?:을|를)?/u, '')
-  if (!action) return /^(?:전체|모든)/u.test(text)
+  if (!action) return /전체|모든/u.test(text.slice(0, text.indexOf('할일')))
   return /^(?:검토|점검|확인|조회|정리|요약)(?:하기|요청|부탁(?:해|합니다|드립니다)?|해(?:줘요?|주세요|주십시오|주실래요)?)?$/u.test(action) ||
     /^(?:보여줘|보여주세요)$/u.test(action)
 }
@@ -78,6 +79,8 @@ export interface BoardApi {
   reorder(workspace: string, ids: string[]): Promise<void>
   configure(workspace: string, patch: Partial<BoardSettings>): Promise<void>
   detail(workspace: string, id: string): Promise<{report: string; review: string}>
+  documentPath(workspace: string, id: string, path: string): Promise<string>
+  documentText(workspace: string, id: string, path: string, offset?: number): Promise<{text: string; nextOffset: number | null; size: number}>
   daily(workspace: string): Promise<string>
   onChange(listener: (workspace: string, message?: string) => void): () => void
   counts(): Promise<Record<string, number>>
@@ -101,6 +104,17 @@ export function boardMutationIssue(task: BoardTask, tasks: readonly BoardTask[],
   if (task.status === 'done' && dependents.some(candidate => candidate.status !== 'queued')) {
     return '이 결과를 사용한 후속 지시가 있어 다시 수행하도록 변경할 수 없습니다.'
   }
+}
+
+// A blocked run can save its diagnostic in the report file without producing a work result.
+export function boardReportAvailable(report: string): boolean {
+  const text = report.trim()
+  if (!text || /^## 할 일 조회 확인 필요(?:\s|$)/u.test(text) ||
+      text.startsWith('JuriSupport 계정 또는 연결 사건을 확인할 수 없어 보고서 저장을 보류했습니다.')) return false
+  if (text === '결재 필요') return false
+  const notice = /^## 결재 필요[ \t]*(?:\r?\n|$)/u.exec(text)
+  if (!notice) return true
+  return /^#{1,6} [^\n]+\r?\n+\s*[^#\s]/mu.test(text.slice(notice[0].length))
 }
 
 export function boardRevision(task: BoardTask, detail?: { report: string; review: string }): string {

@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
+import { verifyBoardDocuments } from './fixtures/work-board-documents.mjs'
 import { createHash } from 'node:crypto'
-import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -8,7 +9,7 @@ import { build } from 'esbuild'
 import { WorkBoardStore } from '../src/main/workBoardStore.ts'
 import { boardRevision } from '../src/shared/workBoard.ts'
 
-const tmp = await mkdtemp(join(tmpdir(), 'board-edit-'))
+const tmp = await realpath(await mkdtemp(join(tmpdir(), 'board-edit-')))
 const folder = join(tmp, 'board'), app = join(tmp, 'app')
 const source = new WorkBoardStore(folder)
 const events = [], runs = []
@@ -72,6 +73,7 @@ try {
   await writeFile(join(folder,'산출물.txt'),'기존 산출물')
   await board.start()
   await wait(()=>held.length>0)
+  await verifyBoardDocuments(board,'done',tmp,tmp,source)
   await assert.rejects(board.updateTask('busy',fields,await revision('busy')),/수행/)
   await assert.rejects(board.removeTask('busy',await revision('busy')),/수행/)
   for (const id of ['queue','reported','failed','rejected','done','awaiting_approval']) {

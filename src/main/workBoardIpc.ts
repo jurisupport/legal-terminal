@@ -3,6 +3,7 @@ import { mkdir, readFile, realpath, rename, writeFile } from 'node:fs/promises'
 import { isAbsolute, join, posix } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { WorkBoard } from './workBoard'
+import { readBoardDocumentText } from './workBoardDocumentText'
 import { boardTodoCaseIds } from './workBoardScope'
 import { isRemote, makeRemote, parseRemote, rfsRealpath } from './remoteFs'
 import type { BoardDecision, BoardDraft, BoardSettings, BoardTodoScope } from '../shared/workBoard'
@@ -144,6 +145,9 @@ export function registerWorkBoards(): () => void {
   handle('reorder', async (w: string, ids: string[]) => (await open(w)).reorder(ids))
   handle('configure', async (w: string, patch: Partial<BoardSettings>) => (await open(w)).configure(patch))
   handle('detail', async (w: string, id: string) => (await open(w)).detail(id))
+  handle('documentPath', async (w: string, id: string, path: string) => (await open(w)).documentPath(id, path))
+  handle('documentText', async (w: string, id: string, path: string, offset: number = 0) =>
+    readBoardDocumentText(await (await open(w)).documentPath(id, path), offset))
   handle('daily', async (w: string) => (await open(w)).daily())
   handle('counts', () => Object.fromEntries([...boards].map(([w, b]) => [w, b.approvalCount()])))
   // Restore independently of the selected window so queued work survives an app restart.

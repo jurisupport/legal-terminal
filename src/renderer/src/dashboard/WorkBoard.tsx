@@ -1,8 +1,8 @@
-import { boardMutationIssue, boardRevision, requestsCurrentBoardCase, isBoardTodoReview } from '../../../shared/workBoard'
+import { boardDocumentPaths, boardMutationIssue, boardReportAvailable, boardRevision, requestsCurrentBoardCase, isBoardTodoReview } from '../../../shared/workBoard'
 import DOMPurify from 'dompurify'
 import { marked, Renderer } from 'marked'
 import { createPortal } from 'react-dom'
-import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react'
+import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react'
 import type {
   BoardAgent,
   BoardDecision,
@@ -23,7 +23,7 @@ interface Props {
   workspace: string
   view: WorkBoardView
   onView?: (view: WorkBoardView) => void
-  onOpenFile: (path: string) => void
+  onOpenFile: (path: string) => Promise<void>
   bulkSeed?: string
   boundCase?: { id: string; label: string }
 }
@@ -587,27 +587,7 @@ function TaskCard({
   )
 }
 
-function reportPaths(report: string, cwd: string): string[] {
-  const paths = new Set<string>()
-  const section = report.match(/(?:^|\n)#{1,6}\s+산출물(?:\s*경로)?[^\n]*\n([\s\S]*?)(?=\n#{1,6}\s|$)/)
-  const recorded = [...report.matchAll(/^산출물 · (.+)$/gm)].map((match) => match[1])
-  for (const line of [...(section?.[1] || '').split('\n'), ...recorded]) {
-    const path = (
-      line.match(/\[[^\]]*\]\(([^)]+)\)/)?.[1] ||
-      line.match(/`([^`]+)`/)?.[1] ||
-      line.replace(/^\s*[-*]\s+/, '')
-    ).trim()
-    if (!/\.(?:pdf|md|txt|hwp|hwpx|json|csv|png|jpe?g|webp)$/i.test(path) || /[\x00-\x1f]/.test(path)) continue
-    const base = cwd.replace(/\\/g, '/').replace(/\/$/, '')
-    let normalized = path.replace(/\\/g, '/')
-    if (normalized.startsWith(base + '/')) normalized = normalized.slice(base.length + 1)
-    if (/^(?:[a-zA-Z][\w+.-]*:|\/)/.test(normalized) || normalized.split('/').includes('..')) continue
-    paths.add(base + '/' + normalized.replace(/^\.\//, ''))
-  }
-  return [...paths]
-}
-
-function TodoReport({ text }: { text: string }) {
+function ReportMarkdown({ text, todo = false }: { text: string; todo?: boolean }) {
   const container = useRef<HTMLDivElement>(null)
   useEffect(() => {
     const renderer = new Renderer()
@@ -625,13 +605,111 @@ function TodoReport({ text }: { text: string }) {
       scroll.className = 'wb-table-scroll'
       scroll.tabIndex = 0
       scroll.setAttribute('role', 'region')
-      scroll.setAttribute('aria-label', table.previousElementSibling?.matches('h1,h2,h3,h4,h5,h6') ? table.previousElementSibling.textContent || '할일 표' : '할일 표')
+      scroll.setAttribute('aria-label', table.previousElementSibling?.matches('h1,h2,h3,h4,h5,h6') ? table.previousElementSibling.textContent || '표' : '표')
       table.replaceWith(scroll)
       scroll.append(table)
     }
     container.current?.replaceChildren(report)
   }, [text])
-  return <div className="wb-todo-report" ref={container} />
+  return <div className={todo ? 'wb-markdown wb-todo-report' : 'wb-markdown'} ref={container} />
+}
+
+const inlineDocument = /\.(?:md|markdown|mdx|txt|csv|json)$/i
+
+function DocumentTargets({ workspace, id, paths, previous, onOpenFile }: {
+  workspace: string; id: string; paths: string[]; previous: boolean; onOpenFile: Props['onOpenFile']
+}) {
+  const [selected, setSelected] = useState(paths[0])
+  const [offsets, setOffsets] = useState([0])
+  const [attempt, setAttempt] = useState(0)
+  const [page, setPage] = useState<{ path: string; offset: number; text: string; nextOffset: number | null } | null>(null)
+  const [readError, setReadError] = useState('')
+  const [viewerError, setViewerError] = useState('')
+  const [opening, setOpening] = useState(false)
+  const request = useRef(0)
+  const offset = offsets[offsets.length - 1]
+  const markdown = /\.(?:md|markdown|mdx)$/i.test(selected)
+  const inline = inlineDocument.test(selected)
+  const content = page?.path === selected && page.offset === offset ? page : null
+  const prefix = workspace.replace(/\\/g, '/').replace(/\/$/, '') + '/'
+  const label = (path: string) => path.replace(/\\/g, '/').startsWith(prefix)
+    ? path.replace(/\\/g, '/').slice(prefix.length) : path
+
+  const fileError = (path: string, err: unknown) => {
+    const message = errMsg(err).replace(/^Error invoking remote method '[^']+': (?:Error: )?/, '')
+    if (/ENOENT|no such file/i.test(message)) return `「${label(path)}」 파일을 찾을 수 없습니다.`
+    return `「${label(path)}」 문서를 열지 못했습니다. ${message}`
+  }
+
+  useEffect(() => () => { request.current++ }, [])
+  useEffect(() => {
+    let live = true
+    setPage(null)
+    setReadError('')
+    if (inline) {
+      window.lt.workBoard.documentText(workspace, id, selected, offset).then(
+        result => { if (live) setPage({ path: selected, offset, text: result.text, nextOffset: result.nextOffset }) },
+        err => { if (live) setReadError(fileError(selected, err)) }
+      )
+    }
+    return () => { live = false }
+  }, [workspace, id, selected, offset, inline, attempt])
+
+  async function openWindow(path: string) {
+    const current = ++request.current
+    setOpening(true)
+    setViewerError('')
+    try {
+      const verified = await window.lt.workBoard.documentPath(workspace, id, path)
+      if (current === request.current) await onOpenFile(verified)
+    } catch (err) {
+      if (current === request.current) setViewerError(fileError(path, err))
+    } finally {
+      if (current === request.current) setOpening(false)
+    }
+  }
+
+  return <section className="wb-target-documents" aria-label="결재 대상 문서">
+    <h3>{previous ? '수정 전 결재 대상 문서' : '결재 대상 문서'}</h3>
+    <div className="wb-target-list">
+      {paths.map(path => <button type="button" key={path} className="wb-btn"
+        aria-pressed={path === selected} disabled={opening && path === selected} onClick={() => {
+          request.current++
+          setOpening(false)
+          setSelected(path)
+          setViewerError('')
+          setOffsets([0])
+          if (inlineDocument.test(path)) {
+            if (selected === path) setAttempt(n => n + 1)
+          } else void openWindow(path)
+        }}>
+        <span className="wb-target-type">{path.split('.').pop()?.toUpperCase()}</span>{label(path)} 열기
+      </button>)}
+    </div>
+    {opening && <p role="status">문서 창을 여는 중…</p>}
+    {viewerError && <p className="wb-error" role="alert">{viewerError} <button type="button" className="wb-btn" onClick={() => void openWindow(selected)}>다시 열기</button></p>}
+    {inline && <div className="wb-artifact">
+      <div className="wb-split-label">
+        <strong>{label(selected)}</strong>
+        {content && offsets.length === 1 && content.nextOffset === null && (
+          <button type="button" className="wb-btn" disabled={opening} onClick={() => void openWindow(selected)}>문서 창에서 열기</button>
+        )}
+      </div>
+      {readError ? <p className="wb-error" role="alert">{readError} <button type="button" className="wb-btn" onClick={() => setAttempt(n => n + 1)}>문서 다시 불러오기</button></p>
+        : !content ? <p role="status">문서를 불러오는 중…</p>
+        : !content.text ? <p className="wb-muted">본문이 비어 있습니다.</p>
+        : <div className="wb-document-body" tabIndex={0} role="region" aria-label={label(selected) + ' 본문'}>
+            {markdown ? <ReportMarkdown text={content.text} /> : <pre className="wb-notes">{content.text}</pre>}
+          </div>}
+      {(offsets.length > 1 || content?.nextOffset != null) && <div className="wb-actions">
+        <span className="wb-muted">본문 {offsets.length}번째 부분</span>
+        <button type="button" className="wb-btn" disabled={offsets.length < 2} onClick={() => setOffsets(parts => parts.slice(0, -1))}>이전 부분</button>
+        <button type="button" className="wb-btn" disabled={content?.nextOffset == null} onClick={() => {
+          if (content?.nextOffset != null && content.nextOffset > offset) setOffsets([...offsets, content.nextOffset])
+        }}>다음 부분</button>
+      </div>}
+    </div>}
+  </section>
 }
 
 function Details({
@@ -661,13 +739,21 @@ function Details({
   onDecision: (task: BoardTask, action: BoardDecision, reason: string, revision?: string, todoScope?: BoardTodoScope) => Promise<void>
   reorder?: () => Promise<void>
 }) {
-  const [files, setFiles] = useState<{ report: string; review: string } | null>(null)
+  const detailKey = JSON.stringify([workspace, task.id, task.updatedAt])
+  const [loaded, setLoaded] = useState<{ key: string; report: string; review: string } | null>(null)
+  const [readError, setReadError] = useState('')
+  const [readAttempt, setReadAttempt] = useState(0)
+  const files = loaded?.key === detailKey ? loaded : null
+  const reportAvailable = !!files && boardReportAvailable(files.report)
+  const missingApprovalReport = task.status === 'awaiting_approval' && !!files && !reportAvailable
+  const canRetry = !task.parentId && (['failed', 'blocked', 'rejected'].includes(task.status) || missingApprovalReport)
   const [mutation, setMutation] = useState<{ kind: 'update' | 'remove'; task: BoardTask; revision: string } | null>(null)
   const editIssue = boardMutationIssue(task, tasks, 'update')
   const removeIssue = boardMutationIssue(task, tasks, 'remove')
   const changeIssue = mutation && (
     (readOnly && '관리 기기가 변경되었습니다. 지시를 다시 열어 주세요.') ||
     (mutation.kind === 'update' ? editIssue : removeIssue) ||
+    (readError && '상세 창에서 보고서 다시 불러오기를 눌러 주세요.') ||
     (!files && '지시 상태를 확인하고 있습니다.') ||
     (files && mutation.revision !== boardRevision(task, files) && '지시 내용이 바뀌었습니다. 변경된 지시를 확인한 뒤 다시 선택해 주세요.')
   ) || undefined
@@ -676,27 +762,21 @@ function Details({
   }
   const [reason, setReason] = useState('')
   const [chosenScope, setChosenScope] = useState<BoardTodoScope>()
-  const retryTodo = !readOnly && !task.parentId && ['failed', 'blocked', 'rejected'].includes(task.status) && isBoardTodoReview(task.body)
+  const retryTodo = !readOnly && canRetry && isBoardTodoReview(task.body)
   const scopes = useTodoScopeOptions(retryTodo, scopeOptions, () => setChosenScope(undefined))
   const retryScope = retryTodo ? selectedScope(scopes, chosenScope) : undefined
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   useEffect(() => {
     let current = true
-    setFiles(null)
-    setError('')
+    setLoaded(null)
+    setReadError('')
     window.lt.workBoard.detail(workspace, task.id).then(
-      (f) => {
-        if (current) setFiles(f)
-      },
-      (err) => {
-        if (current) setError(errMsg(err))
-      }
+      f => { if (current) setLoaded({ ...f, key: detailKey }) },
+      err => { if (current) setReadError(errMsg(err) || '보고서와 검토 결과를 불러오지 못했습니다.') }
     )
-    return () => {
-      current = false
-    }
-  }, [workspace, task.id, task.updatedAt])
+    return () => { current = false }
+  }, [workspace, task.id, detailKey, readAttempt])
   const act = async (fn: () => Promise<void>) => {
     if (busy) return
     setBusy(true)
@@ -706,104 +786,49 @@ function Details({
       close()
     } catch (err) {
       setError(errMsg(err))
+      setReadAttempt(n => n + 1)
+      await refresh()
     } finally {
       setBusy(false)
     }
   }
   const history = task.log.filter((l) => /결재|승인|반려|수정 지시/.test(l.text))
   const todoReview = isBoardTodoReview(task.body)
-  const paths = todoReview ? [] : reportPaths(files?.report || '', workspace)
-  const [preview, setPreview] = useState<{ path: string; text: string } | null>(null)
-  const previewVersion = useRef(0)
-  async function openArtifact(path: string) {
-    if (!/\.(md|txt|csv|json)$/i.test(path)) {
-      onOpenFile(path)
-      return
-    }
-    const n = ++previewVersion.current
-    setPreview({ path, text: '불러오는 중…' })
-    try {
-      const file = await window.lt.fs.readText(path)
-      if (previewVersion.current === n)
-        setPreview({ path, text: file.text + (file.truncated ? '\n[일부 생략]' : '') })
-    } catch (err) {
-      if (previewVersion.current === n) setPreview({ path, text: errMsg(err) })
-    }
-  }
+  const storedReason = files && !reportAvailable ? files.report.trim().replace(/^#{1,6}\s*(?:결재 필요|할\s*일 조회 확인 필요)\s*(?:\n+|$)/u, '').trim() : ''
+  const blockReason = /^mcp__[\w.-]+__[\w.-]+$/u.test(storedReason)
+    ? (todoReview ? '이전 실행은 할일 목록 조회 단계에서 멈췄습니다.' : '요청한 도구의 실행이 중단됐습니다.') + '\n요청한 도구 · ' + storedReason
+    : storedReason || (['blocked', 'failed'].includes(task.status) ? task.log.at(-1)?.text : '')
+  const targetReport = !todoReview && reportAvailable ? files?.report : undefined
+  const paths = useMemo(() => targetReport ? boardDocumentPaths(targetReport, workspace) : [], [targetReport, workspace])
+  const reportIsTarget = reportAvailable && paths.length === 0 && !task.editedNeedsRun
   return (
     <Dialog title={task.title} close={close}>
       <div className="wb-muted">
         {task.id} · {statusLabel[task.status]} · {agentName(task)}
         {task.due && ' · 기한 ' + task.due}
       </div>
-      {readOnly ? <div className="wb-management">
-        <p>지시 수정·삭제와 결재는 관리 기기에서 할 수 있습니다.</p>
-        {manageHere && <button className="wb-btn" onClick={manageHere}>이 PC에서 관리</button>}
-      </div> : <div className="wb-management" aria-label="선택한 지시 관리">
-        <div className="wb-actions">
-          <button className="wb-btn" disabled={busy || !files || !!editIssue} title={editIssue} onClick={() => openMutation('update')}>지시 수정</button>
-          <button className="wb-btn wb-remove" disabled={busy || !files || !!removeIssue} title={removeIssue} onClick={() => openMutation('remove')}>지시 삭제</button>
-        </div>
-        {editIssue && <p>{editIssue}</p>}
-        {removeIssue && removeIssue !== editIssue && <p>{removeIssue}</p>}
-      </div>}
-      <div className="wb-timeline">
-        <section>
-          <h3>지시 본문</h3>
-          <p className="wb-notes">{task.body}</p>
-        </section>
-        <section>
-          <h3>진행 로그</h3>
-          <ol>
-            {task.log.map((l, i) => (
-              <li key={i}>
-                <time>{new Date(l.at).toLocaleString('ko-KR')}</time> · {l.text}
-              </li>
-            ))}
-          </ol>
-        </section>
-        <section>
-          <h3>{task.editedNeedsRun && files?.report ? '수정 전 보고서' : '보고서'}</h3>
-          {task.editedNeedsRun && <p className="wb-muted">수정된 지시의 보고서는 다시 수행한 뒤 확인할 수 있습니다.</p>}
-          {todoReview && files?.report ? <TodoReport text={files.report} /> : (
-            <p className="wb-notes">{files ? files.report || '아직 보고서가 없습니다.' : '불러오는 중…'}</p>
-          )}
-          {paths.map((path) => (
-            <button className="wb-btn" key={path} onClick={() => void openArtifact(path)}>
-              {path.split('/').pop()} 열기
-            </button>
-          ))}
-          {preview && (
-            <div className="wb-artifact">
-              <div className="wb-split-label">
-                <strong>{preview.path.split('/').pop()}</strong>
-                <button className="wb-btn" onClick={() => onOpenFile(preview.path)}>
-                  문서 창에서 열기
-                </button>
-              </div>
-              <pre className="wb-notes">{preview.text}</pre>
-            </div>
-          )}
-        </section>
-        <section>
-          <h3>{task.editedNeedsRun && files?.review ? '수정 전 검토 결과' : '검토 결과'}{task.review_agent && ' · ' + task.review_agent}</h3>
-          <p className="wb-notes">{files?.review || (task.review_agent ? '검토 결과 대기 중' : '검토 생략')}</p>
-        </section>
-        <section>
-          <h3>결재 이력</h3>
-          {history.length ? (
-            <ol>
-              {history.map((l, i) => (
-                <li key={i}>
-                  {new Date(l.at).toLocaleString('ko-KR')} · {l.text}
-                </li>
-              ))}
-            </ol>
-          ) : (
-            <p className="wb-muted">결재 이력이 없습니다.</p>
-          )}
-        </section>
-      </div>
+      {paths.length > 0 && <DocumentTargets key={JSON.stringify([detailKey, paths])}
+        workspace={workspace} id={task.id} paths={paths} previous={!!task.editedNeedsRun} onOpenFile={onOpenFile} />}
+      <section className={reportIsTarget ? 'wb-report-preview wb-target-documents' : 'wb-report-preview'}
+        aria-label={reportIsTarget ? '결재 대상 문서' : '업무 보고서'}>
+        <h3>{reportIsTarget ? '결재 대상 문서' : task.editedNeedsRun && reportAvailable ? '수정 전 보고서' : '업무 보고서'}</h3>
+        {reportIsTarget && <p className="wb-target-title">업무 보고서 · {task.title}</p>}
+        {readError ? <div className="wb-error" role="alert">
+          보고서와 검토 결과를 불러오지 못했습니다. {readError}
+          <button type="button" className="wb-btn" onClick={() => setReadAttempt(n => n + 1)}>보고서 다시 불러오기</button>
+        </div> : !files ? <p role="status">보고서를 불러오는 중…</p>
+          : reportAvailable ? <ReportMarkdown text={files.report} todo={todoReview} />
+          : <p className="wb-muted">아직 결재할 업무 보고서가 없습니다.</p>}
+        {task.editedNeedsRun && <p className="wb-muted">수정된 지시의 보고서는 다시 수행한 뒤 확인할 수 있습니다.</p>}
+      </section>
+      {files && (files.review || task.review_agent) && <section className="wb-review-preview">
+        <h3>{task.editedNeedsRun && files.review ? '수정 전 검토 결과' : '검토 결과'}{task.review_agent && ' · ' + task.review_agent}</h3>
+        <p className="wb-notes">{files.review || '검토 결과 대기 중'}</p>
+      </section>}
+      {blockReason && <section className="wb-block-reason">
+        <h3>{task.status === 'failed' ? '실패 사유' : '확인 사유'}</h3>
+        <p className="wb-notes">{blockReason}</p>
+      </section>}
       {task.after_approval && (
         <section>
           <h3>승인 후 실행</h3>
@@ -817,7 +842,7 @@ function Details({
           {task.status === 'awaiting_approval' && (
             <>
               <label>
-                반려 사유 또는 수정 지시
+                {missingApprovalReport ? '반려 사유·수정 지시 또는 재수행 메모' : '반려 사유 또는 수정 지시'}
                 <textarea value={reason} rows={2} onChange={(e) => setReason(e.target.value)} />
               </label>
               <div className="wb-actions">
@@ -835,13 +860,13 @@ function Details({
                 >
                   반려
                 </button>
-                <button
+                {reportAvailable && !task.editedNeedsRun && files && <button
                   className="wb-btn wb-primary"
-                  disabled={busy || !files}
-                  onClick={() => act(() => onDecision(task, 'approve', '', boardRevision(task, files!)))}
+                  disabled={busy}
+                  onClick={() => act(() => onDecision(task, 'approve', '', boardRevision(task, files)))}
                 >
                   승인
-                </button>
+                </button>}
               </div>
             </>
           )}
@@ -869,13 +894,16 @@ function Details({
               </div>
             </>
           )}
-          {!task.parentId && ['failed', 'blocked', 'rejected'].includes(task.status) && (
+          {canRetry && (
             <>
-              <label>
-                추가 답변 또는 재수행 지시
+              {!missingApprovalReport && <label>
+                {retryTodo ? '재조회 메모 (선택)' : '추가 답변 또는 재수행 지시'}
                 <textarea value={reason} rows={2} onChange={(e) => setReason(e.target.value)} />
-              </label>
-              {retryTodo && <ScopeField options={scopes} value={retryScope} change={setChosenScope} />}
+              </label>}
+              {retryTodo && <>
+                <p className="wb-muted">{scopes.pinned ? '연결된 사건을 확인한 뒤' : '아래에서 할일 검토 범위를 선택한 뒤'} ‘다시 대기열에 넣기’를 누르면 할일을 다시 조회합니다.</p>
+                <ScopeField options={scopes} value={retryScope} change={setChosenScope} />
+              </>}
               <div className="wb-actions">
                 {retryScope?.kind === 'all' && <small>{allTodosNotice}</small>}
                 <button
@@ -885,8 +913,8 @@ function Details({
                 >
                   다시 대기열에 넣기
                 </button>
-                {task.status === 'blocked' && !task.editedNeedsRun && files?.report && (
-                  <button className="wb-btn" disabled={busy} onClick={() => act(() => onDecision(task, 'submit', ''))}>
+                {task.status === 'blocked' && !task.editedNeedsRun && reportAvailable && files && (!todoReview || !!task.review_agent) && (
+                  <button className="wb-btn" disabled={busy} onClick={() => act(() => onDecision(task, 'submit', '', boardRevision(task, files)))}>
                     현재 보고서로 결재 요청
                   </button>
                 )}
@@ -907,6 +935,32 @@ function Details({
           {error}
         </p>
       )}
+      <div className="wb-detail-history">
+        <details>
+          <summary>지시 본문</summary>
+          <p className="wb-notes">{task.body}</p>
+        </details>
+        <details>
+          <summary>진행 로그 ({task.log.length})</summary>
+          <ol>{task.log.map((l, i) => <li key={i}><time>{new Date(l.at).toLocaleString('ko-KR')}</time> · {l.text}</li>)}</ol>
+        </details>
+        <details>
+          <summary>결재 이력 ({history.length})</summary>
+          {history.length ? <ol>{history.map((l, i) => <li key={i}><time>{new Date(l.at).toLocaleString('ko-KR')}</time> · {l.text}</li>)}</ol>
+          : <p className="wb-muted">결재 이력이 없습니다.</p>}
+        </details>
+      </div>
+      {readOnly ? <div className="wb-management">
+        <p>지시 수정·삭제와 결재는 관리 기기에서 할 수 있습니다.</p>
+        {manageHere && <button className="wb-btn" onClick={manageHere}>이 PC에서 관리</button>}
+      </div> : <div className="wb-management" aria-label="선택한 지시 관리">
+        <div className="wb-actions">
+          <button className="wb-btn" disabled={busy || !files || !!editIssue} title={editIssue} onClick={() => openMutation('update')}>지시 수정</button>
+          <button className="wb-btn wb-remove" disabled={busy || !files || !!removeIssue} title={removeIssue} onClick={() => openMutation('remove')}>지시 삭제</button>
+        </div>
+        {editIssue && <p>{editIssue}</p>}
+        {removeIssue && removeIssue !== editIssue && <p>{removeIssue}</p>}
+      </div>}
       {mutation?.kind === 'update' && <Dialog title="지시 수정" close={() => { if (!busy) setMutation(null) }}>
         <InstructionForm agents={agents} existing={mutation.task} scopeOptions={scopeOptions} issue={changeIssue}
           submit={async ([draft]) => {

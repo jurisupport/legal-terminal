@@ -1,8 +1,8 @@
 import { createHash, randomUUID } from 'node:crypto'
-import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
-import { join } from 'node:path'
+import { lstat, mkdir, readFile, realpath, rename, rm, writeFile } from 'node:fs/promises'
+import { join, resolve, sep } from 'node:path'
 import type { BoardAgent, BoardDecision, BoardDraft, BoardSettings, BoardSnapshot, BoardTask, BoardTeam, BoardTodoScope } from '../shared/workBoard'
-import { boardMutationIssue, boardRevision, isBoardTodoReview } from '../shared/workBoard'
+import { boardDocumentPaths, boardMutationIssue, boardReportAvailable, boardRevision, isBoardDocumentPath, isBoardTodoReview } from '../shared/workBoard'
 import { kstDateKey } from '../shared/todoSummary'
 import { WorkBoardStore } from './workBoardStore'
 import { runBoardAgent, listBoardAgents } from './workBoardRunner'
@@ -444,6 +444,31 @@ export class WorkBoard {
     return { report: (await this.store.readText(id + '.report.md')) ?? '', review: (await this.store.readText(id + '.review.md')) ?? '' }
   }
 
+  async documentPath(id: string, path: string): Promise<string> {
+    const remote = this.workspace.startsWith('ssh://') ? await import('./remoteFs') : undefined
+    const canonical = remote ? remote.rfsRealpath : realpath
+    const root = remote ? this.workspace : resolve(this.workspace)
+    // The IPC layer records a canonical workspace when the board opens. Reject a replaced root.
+    if (await canonical(root) !== root) throw Error('작업 폴더의 실제 위치가 변경되었습니다. 보드를 다시 열어 주세요.')
+    const { report } = await this.detail(id)
+    if (typeof path !== 'string' || !boardDocumentPaths(report, this.workspace).includes(path)) {
+      throw Error('현재 보고서에 기록된 문서를 선택해 주세요.')
+    }
+    const separator = remote ? '/' : sep
+    const prefix = root.endsWith(separator) ? root : root + separator
+    const candidate = remote ? path : resolve(path)
+    if (!candidate.startsWith(prefix) || candidate.slice(prefix.length).split(separator).includes('..') ||
+        (!remote && process.platform === 'win32' && candidate.slice(prefix.length).includes(':'))) {
+      throw Error('작업 폴더 안의 문서만 열 수 있습니다.')
+    }
+    const actual = await canonical(candidate)
+    if (!actual.startsWith(prefix)) throw Error('작업 폴더 밖으로 연결된 문서는 열 수 없습니다.')
+    if (!isBoardDocumentPath(actual)) throw Error('지원하지 않는 문서 형식입니다.')
+    const regular = remote ? (await remote.rfsBoardStat(actual))?.directory === false : (await lstat(actual)).isFile()
+    if (!regular) throw Error('일반 문서 파일을 선택해 주세요.')
+    return actual
+  }
+
   private async reloadTaskList() {
     const tasks = await this.store.list(true)
     if (JSON.stringify(tasks) !== JSON.stringify(this.tasks)) {
@@ -553,8 +578,10 @@ export class WorkBoard {
         throw new Error('수정된 지시를 먼저 다시 수행해 주세요.')
       }
       if (action === 'submit') {
-        if (task.parentId || task.status !== 'blocked' || !(await this.detail(id)).report.trim())
-          throw new Error('보고서가 있는 일반 확인 대기 지시만 결재 요청할 수 있습니다.')
+        const detail = await this.detail(id)
+        if (task.parentId || task.status !== 'blocked' || !boardReportAvailable(detail.report))
+          throw new Error('업무 결과가 담긴 보고서가 있어야 결재 요청할 수 있습니다.')
+        if (expectedRevision !== boardRevision(task, detail)) throw new Error('결재 요청 전에 현재 보고서를 다시 확인해 주세요.')
         if (isBoardTodoReview(task.body)) {
           const previous = await this.consent(task)
           if (previous?.state !== 'review') throw new Error('할일 조회가 완료되어야 결재 요청할 수 있습니다.')
@@ -569,7 +596,8 @@ export class WorkBoard {
       if (action === 'retry') {
         if (this.tasks.some(t => t.parentId === id && ['failed', 'blocked'].includes(t.status)))
           throw new Error('승인 후 실행 지시에서 외부 실행 여부를 먼저 확인해 주세요.')
-        if (!['failed', 'blocked', 'rejected'].includes(task.status) || task.parentId) throw new Error('이 지시는 재실행할 수 없습니다.')
+        const missingReport = task.status === 'awaiting_approval' && !boardReportAvailable((await this.detail(id)).report)
+        if ((!missingReport && !['failed', 'blocked', 'rejected'].includes(task.status)) || task.parentId) throw new Error('이 지시는 재실행할 수 없습니다.')
         if (task.editedNeedsRun) {
           // Finish any interrupted archival before a fresh result can replace the edit marker.
           const prior = await this.detail(id)
@@ -592,7 +620,9 @@ export class WorkBoard {
         }
         await this.transition(task, 'rejected', (action === 'revise' ? '수정 지시 등록 · ' : '반려 · ') + reason.trim())
       } else if (action === 'approve') {
-        if (expectedRevision !== boardRevision(task, await this.detail(task.id))) throw new Error('현재 지시 내용과 승인 후 실행 단계를 다시 확인해 주세요.')
+        const detail = await this.detail(task.id)
+        if (!boardReportAvailable(detail.report)) throw new Error('승인할 보고서가 없습니다. 지시를 다시 수행해 주세요.')
+        if (expectedRevision !== boardRevision(task, detail)) throw new Error('현재 지시 내용과 승인 후 실행 단계를 다시 확인해 주세요.')
         if (task.after_approval?.trim()) {
           const child = this.newTask({
             title: '승인 후 실행 · ' + task.title, body: task.after_approval,
@@ -681,6 +711,10 @@ export class WorkBoard {
 
   private async finishReport(task: BoardTask) {
     const needsApproval = task.approval !== 'none' || !!task.after_approval
+    if (needsApproval && !boardReportAvailable((await this.detail(task.id)).report)) {
+      await this.transition(task, 'blocked', '결재할 업무 보고서가 없습니다. 지시를 다시 수행해 주세요.')
+      return
+    }
     await this.transition(task, needsApproval ? 'awaiting_approval' : 'done', needsApproval ? '결재 요청' : '업무 완료')
   }
 

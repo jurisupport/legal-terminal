@@ -1572,6 +1572,28 @@ export async function rfsBoardControl(root: string) {
   }
 }
 
+/** Keep header and page reads on the same read-only SFTP handle, bypassing whole-file caches. */
+export async function rfsWithBoardDocument<T>(
+  uri: string,
+  readPage: (size: number, read: (buffer: Buffer, position: number) => Promise<number>) => Promise<T>
+): Promise<T> {
+  const {profileId, path} = parseRemote(uri)
+  const sftp = await getSftp(profileId)
+  const link = await sftpRequest<Stats>(sftp, done => sftp.lstat(path,done))
+  if (!link.isFile()) throw new Error('일반 파일만 읽을 수 있습니다.')
+  const handle = await sftpRequest<Buffer>(sftp, done => sftp.open(path,'r',done))
+  try {
+    const before = await sftpRequest<Stats>(sftp, done => sftp.fstat(handle,done))
+    const canonical = await sftpRequest<string>(sftp, done => sftp.realpath(path,done))
+    if (!before.isFile() || before.size !== link.size || before.mtime !== link.mtime || canonical !== path) throw new Error('문서 위치가 변경되었습니다. 다시 열어 주세요.')
+    const result = await readPage(before.size,(buffer,position) => sftpRequest<number>(sftp, done =>
+      sftp.read(handle,buffer,0,buffer.length,position,done)))
+    const after = await sftpRequest<Stats>(sftp, done => sftp.fstat(handle,done))
+    if (before.size !== after.size || before.mtime !== after.mtime) throw new Error('읽는 동안 문서가 변경되었습니다. 다시 열어 주세요.')
+    return result
+  } finally { await sftpRequest<void>(sftp, done => sftp.close(handle,done),2000) }
+}
+
 /** Uncached metadata for board files; missing is distinct from a disconnected server. */
 export async function rfsBoardStat(uri: string): Promise<{size: number; directory: boolean; mtimeMs: number} | null> {
   const { profileId, path } = parseRemote(uri)

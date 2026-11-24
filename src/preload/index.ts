@@ -148,6 +148,7 @@ type TabPayload =
   | { kind: 'terminal'; tab: TerminalTabPayload }
 
 interface NewWindowOptions {
+  docOnly?: boolean
   tabs?: TabPayload[]
   termOnly?: boolean
 }
@@ -813,6 +814,8 @@ const workBoard: BoardApi = {
   reorder: (workspace, ids) => ipcRenderer.invoke('workBoard:reorder', workspace, ids),
   configure: (workspace, patch) => ipcRenderer.invoke('workBoard:configure', workspace, patch),
   detail: (workspace, id) => ipcRenderer.invoke('workBoard:detail', workspace, id),
+  documentPath: (workspace, id, path) => ipcRenderer.invoke('workBoard:documentPath', workspace, id, path),
+  documentText: (workspace, id, path, offset) => ipcRenderer.invoke('workBoard:documentText', workspace, id, path, offset),
   daily: workspace => ipcRenderer.invoke('workBoard:daily', workspace),
   counts: () => ipcRenderer.invoke('workBoard:counts'),
   onChange: listener => {

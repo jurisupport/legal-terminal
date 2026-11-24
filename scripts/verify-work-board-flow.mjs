@@ -65,7 +65,9 @@ globalThis.boardRunFixture = async i => {
   if (i.phase === 'review' && i.task.title === '할일 재검토' && i.task.attempts === 0)
     return {rejected:true,text:'자료를 다시 확인해 주세요.'}
   if (i.task.body === 'hold' && gate) await new Promise(resolve => { gate.push(resolve) })
-  if (i.task.body === 'confirm' || i.task.body === 'uncertain') return { blocked: true, text: '결재 필요' }
+  if (i.task.body === 'confirm') return { blocked:true, text:'## 점검 결과\n초안을 검토했습니다.\n\n## 결재 필요\nmcp__mail__send' }
+  if (i.task.body === 'notice only') return { blocked:true, text:'## 결재 필요\n\nmcp__jurisupport__list_todos' }
+  if (i.task.body === 'uncertain') return { blocked: true, text: '결재 필요' }
   return { text: i.phase + ' 보고 · ' + i.task.title, rejected: i.phase === 'review' && i.task.body === 'reject' }
 }
 async function until(check) {
@@ -117,12 +119,18 @@ try {
 
   const denied = (await board.snapshot()).tasks.find(t => t.title === '확인')
   const beforeSubmit = runs.filter(r => r.id === denied.id).length
-  await board.decide(denied.id, 'submit')
+  await assert.rejects(board.decide(denied.id, 'submit', '', 'old'), /다시 확인/)
+  await board.decide(denied.id, 'submit', '', boardRevision(denied, await board.detail(denied.id)))
   const submitted = (await until(ts => ts.some(t => t.id === denied.id && t.status === 'awaiting_approval'))).find(t => t.id === denied.id)
   await approve(submitted)
   const reported = await until(ts => ts.some(t => t.id === denied.id && t.status === 'done'))
   assert.ok(!reported.some(t => t.parentId === denied.id))
   assert.equal(runs.filter(r => r.id === denied.id).length, beforeSubmit)
+
+  await board.add([{title:'도구 요청 기록만 있음',body:'notice only'}])
+  const notice = (await until(ts => ts.some(t => t.title === '도구 요청 기록만 있음' && t.status === 'blocked'))).find(t => t.title === '도구 요청 기록만 있음')
+  await assert.rejects(board.decide(notice.id, 'submit', '', boardRevision(notice, await board.detail(notice.id))), /보고서/)
+  assert.equal((await board.snapshot()).tasks.find(t => t.id === notice.id).status, 'blocked')
 
   await board.add([{ title: '결과 미상', body: 'prepare', after_approval: 'uncertain' }])
   const ambiguous = (await until(ts => ts.some(t => t.title === '결과 미상' && t.status === 'awaiting_approval'))).find(t => t.title === '결과 미상')
@@ -265,10 +273,14 @@ try {
     const localFolder = join(dir,'legacy-'+index)
     const legacyStore = new WorkBoardStore(localFolder)
     await legacyStore.init()
-    await writeFile(join(localFolder,'legacy.md'), ['---','id: legacy','title: 기존 할일 지시','cwd: '+cwd,'status: failed',
-      'todoScope: {kind: all}', 'approval: none','---', reportBody].join('\n'))
+    await writeFile(join(localFolder,'legacy.md'), ['---','id: legacy','title: 기존 할일 지시','cwd: '+cwd,index ? 'status: awaiting_approval' : 'status: failed',
+      'todoScope: {kind: all}', 'approval: none','---', '쥬리서포트 할일 점검하기'].join('\n'))
     board = new WorkBoard(cwd,localFolder,privateDir,()=>{},()=>['alias'])
     await board.start()
+    if (index) {
+      const missing = (await board.snapshot()).tasks.find(t => t.id === 'legacy')
+      await assert.rejects(approve(missing), /승인할 보고서가 없습니다/)
+    }
     await assert.rejects(board.decide('legacy','retry'), /조회 범위/)
     await board.decide('legacy','retry','',undefined,scope)
     await until(ts=>ts.some(t=>t.id==='legacy' && t.status==='done'))

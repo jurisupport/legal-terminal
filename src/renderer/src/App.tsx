@@ -9764,14 +9764,7 @@ export default function App(): JSX.Element {
       </header>
       <WorkBoard key={board.workspace} {...board}
         onView={view => setBoard({ ...board, view, bulkSeed: undefined })}
-        onOpenFile={path => {
-          if (termOnly || board.workspace !== boardSourceFolder) {
-            void window.lt.app.newWindow({ tabs: [{ kind: 'doc', path, title: fileNameFromPath(path) }] })
-          } else {
-            setBoard(null)
-            openFile(path, fileNameFromPath(path))
-          }
-        }}
+        onOpenFile={path => window.lt.app.newWindow({ docOnly: true, tabs: [{ kind: 'doc', path, title: fileNameFromPath(path) }] })}
       />
     </dialog>)}
     {boardPicker && <dialog aria-label="원격 업무 보드 폴더 선택"

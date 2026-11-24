@@ -3,18 +3,38 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { transformSync } from 'esbuild'
 import { createRequire } from 'node:module'
-import { isBoardTodoReview, requestsCurrentBoardCase } from '../src/shared/workBoard.ts'
+import { boardDocumentPaths, boardReportAvailable, isBoardTodoReview, requestsCurrentBoardCase } from '../src/shared/workBoard.ts'
 import { normalizeProjectWorkspacePath } from '../src/main/projectStore.ts'
 import { parseCasePairingFileText } from '../src/main/caseSyncData.ts'
 
-for (const request of ['할일 검토', '미완료 할 일 점검', '할일 점검', '전체 미완료 할일', '이 사건 할 일을 확인해 주세요.', '남은 할일 목록 보여줘']) {
+for (const request of ['할일 검토', '미완료 할 일 점검', '할일 점검', '전체 미완료 할일', '이 사건 할 일을 확인해 주세요.', '남은 할일 목록 보여줘', '쥬리서포트 할일 점검하기', '주리서포트의 미완료 할 일 검토해 줘', 'JuriSupport에서 전체 미완료 할일 조회', 'JuriSupport 전체 미완료 할일']) {
   assert.equal(isBoardTodoReview(request), true, request)
 }
-for (const request of ['할일 검토하고 메일 발송', '할일 검토를 위한 안내문 작성', '할일 완료 처리', '검토', '할일 검토\n기한을 내일로 변경']) {
+for (const request of ['할일 검토하고 메일 발송', '할일 검토를 위한 안내문 작성', '할일 완료 처리', '쥬리서포트 할일 점검하고 완료 처리', '쥬리서포트 할일 점검 후 메일 발송', '검토', '할일 검토\n기한을 내일로 변경']) {
   assert.equal(isBoardTodoReview(request), false, request)
 }
 assert.equal(requestsCurrentBoardCase('이 사건 미완료 할 일 조회해줘'), true)
 assert.equal(requestsCurrentBoardCase('미완료 할일 점검'), false)
+
+for (const report of ['', '  ', '## 결재 필요\n\nmcp__jurisupport__list_todos', '## 할 일 조회 확인 필요\r\n권한 부족']) {
+  assert.equal(boardReportAvailable(report), false)
+}
+for (const report of ['미완료 할일 0건', '## 결론\n업무 점검 완료\n\n## 결재 필요\n발송 권한',
+  '## 결재 필요\n승인 요청\n\n## 산출물\n초안.md']) assert.equal(boardReportAvailable(report), true)
+
+const documents = [
+  '## 결론', '[관련 자료](참고.pdf)', '## 결재 대상 문서',
+  '- [원본](<서면/의견서 (최종).pdf>)', '- `서면/답변서.docx`',
+  '| [한글 문서](서면/답변%20초안.hwpx) |', '## 검토 결과', '첨부 파일: 초안.html',
+  '산출물 · _업무산출물/원문.md', '산출물 · /case/서면/의견서 (최종).pdf',
+  '산출물 · /other/외부.pdf', '산출물 · ssh://other/case/private.pdf',
+  '### 첨부 문서', '[외부](https://example.invalid/외부.pdf)', '[상위](%2e%2e/외부.txt)',
+  '```', '산출물 · 가짜.txt', '```'
+].join('\n')
+assert.deepEqual(boardDocumentPaths(documents, 'ssh://office/case'), [
+  '서면/의견서 (최종).pdf', '서면/답변서.docx', '서면/답변 초안.hwpx', '초안.html', '_업무산출물/원문.md'
+].map(name => 'ssh://office/case/' + name))
+assert.deepEqual(boardDocumentPaths('산출물 · c:\\Cases\\A\\의견서.pdf', 'C:\\Cases\\A'), ['C:/Cases/A/의견서.pdf'])
 
 const entries = {
   localA: {drafts:'/cases/a'}, otherLocal: {drafts:'/cases/ab'},

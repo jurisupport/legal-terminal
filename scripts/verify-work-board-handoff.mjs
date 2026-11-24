@@ -153,6 +153,8 @@ try {
   await winner.decide(child.id, 'reject', '실행되지 않음을 확인함')
   const parent = (await winner.snapshot()).tasks.find(t => t.id === 'missing')
   assert.equal(parent.status, 'awaiting_approval')
+  await assert.rejects(winner.decide(parent.id, 'approve', '', boardRevision(parent, await winner.detail(parent.id))), /승인할 보고서가 없습니다/)
+  await store.writeText('missing.report.md', '검토를 마쳤습니다. 별도 실행 승인을 요청합니다.')
   await winner.decide(parent.id, 'approve', '', boardRevision(parent, await winner.detail(parent.id)))
   await until(winner, s => s.tasks.find(t => t.id === parent.id)?.status === 'done')
   assert.deepEqual(effects, ['외부 실행 없음 확인'])

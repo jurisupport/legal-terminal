@@ -1,3 +1,5 @@
+import { verifyBoardText } from './fixtures/work-board-text.mjs'
+import { verifyBoardDocuments } from './fixtures/work-board-documents.mjs'
 import { verifyBoardStorage } from './fixtures/work-board-storage.mjs'
 // Exercise the production SSH pool and board store against a private loopback OpenSSH SFTP server.
 import assert from 'node:assert/strict'
@@ -21,6 +23,7 @@ const privateKey = join(root, 'identity')
 const publicKey = ssh2.utils.parseKey(identity.private).getPublicSSH()
 const user = randomUUID()
 let connections = 0
+let bytesFromSftp = 0
 let configOverride = null
 let configLookups = 0
 const server = new ssh2.Server({hostKeys: [hostKey.private]}, client => {
@@ -49,6 +52,7 @@ const server = new ssh2.Server({hostKeys: [hostKey.private]}, client => {
     const channel = start()
     const child = spawn(binary, [], {cwd: root, stdio: ['pipe', 'pipe', 'ignore']})
     channel.pipe(child.stdin)
+    child.stdout.on('data', chunk => { bytesFromSftp += chunk.length })
     child.stdout.pipe(channel)
     child.stdin.on('error', () => {})
     channel.on('close', () => child.kill())
@@ -60,6 +64,7 @@ const source = buildSync({
     export {WorkBoard} from './src/main/workBoard'
     export {boardRevision} from './src/shared/workBoard'
     export {WorkBoardStore} from './src/main/workBoardStore'
+    export {readBoardDocumentText} from './src/main/workBoardDocumentText'
     export {setJsPairing} from './src/main/caseStore'
     export {disposeRemote, rfsBoardAgentSources} from './src/main/remoteFs'
   `, resolveDir: process.cwd()},
@@ -89,6 +94,7 @@ try {
   await mkdir(join(root,'ssh-host-keys'))
   await writeFile(join(root, 'ssh-host-keys', fingerprint), key.getPublicSSH().toString('base64'))
   const sshWorkspace = 'ssh://test' + root
+  await verifyBoardText(mod.exports.readBoardDocumentText,root,sshWorkspace,() => bytesFromSftp)
   const lookup = () => mod.exports.rfsBoardAgentSources(sshWorkspace)
   assert.deepEqual(await lookup(), [], 'a missing remote agents directory is a normal empty roster')
   const agentFile = '---\nname: remote-review\ndescription: 검토\n---\nREMOTE_AGENT_MARKER'
@@ -188,6 +194,7 @@ try {
     assert.equal(configLookups,execsBeforeAdd,'no SSH exec channel opened by the instruction')
     assert.equal(sdkRuns,0,'no Claude SDK session')
     const report = (await workflow.detail(review.id)).report
+    await verifyBoardDocuments(workflow, review.id, remoteCase, caseDir, new mod.exports.WorkBoardStore(remoteCase + '/_업무지시'))
     const stored = await readFile(join(caseDir,'_업무지시',review.id + '.report.md'))
     assert.deepEqual(stored,Buffer.from(report))
     for (const value of ['미완료 할일 2건','기한 초과 1건','기한 임박 1건','담당자 미지정 1건','A 제출 준비','B 의뢰인 면담']) assert.ok(report.includes(value),value)

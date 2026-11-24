@@ -438,6 +438,7 @@ interface TabPayload {
   tab?: unknown
 }
 interface NewWindowOptions {
+  docOnly?: boolean
   tabs?: TabPayload[]
   termOnly?: boolean
 }
@@ -465,8 +466,9 @@ const recordTabTransfer = (payload: TabPayload, target: BrowserWindow): void => 
 
 // 새 창 (새 작업환경)
 ipcMain.handle('window:new', (_e, opts?: NewWindowOptions) => {
-  const win = createWindow(false, { termOnly: opts?.termOnly === true })
   const tabs = Array.isArray(opts?.tabs) ? opts.tabs.filter(Boolean) : []
+  const docOnly = opts?.docOnly === true && tabs.length === 1 && tabs[0].kind === 'doc' && !!tabs[0].path
+  const win = createWindow(false, { docOnly, termOnly: !docOnly && opts?.termOnly === true })
   tabs.forEach((tab) => recordTabTransfer(tab, win))
   if (tabs.length) pendingReceive.set(win.webContents.id, tabs)
 })
@@ -1176,7 +1178,7 @@ ipcMain.handle('projects:remove', async (_event, id: string, expectedUpdatedAt?:
 
 // ── 파일시스템 IPC (탐색기) ──
 const TEXT_EXT = new Set([
-  '.md', '.mdx', '.txt', '.srt', '.json', '.csv', '.log', '.yml', '.yaml', '.html', '.htm', '.xml',
+  '.md', '.mdx', '.markdown', '.txt', '.srt', '.json', '.csv', '.log', '.yml', '.yaml', '.html', '.htm', '.xml',
   '.js', '.ts', '.tsx', '.css', '.py', '.sh', '.ini', '.toml'
 ])
 const MAX_TEXT_BYTES = 2 * 1024 * 1024 // 2MB 초과 텍스트는 잘라서 안내
