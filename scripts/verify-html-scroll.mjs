@@ -11,14 +11,15 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const temp = await fs.mkdtemp(path.join(os.tmpdir(), 'html-scroll-'))
 const app = await fs.readFile(path.join(root, 'src/renderer/src/App.tsx'), 'utf8')
 const parsed = ts.createSourceFile('App.tsx', app, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX)
-const names = new Set(['HtmlView', 'htmlWithLocalBase', 'localFileBaseHref', 'useRemoteFileVersion', 'HTML_VIEWER_DEFAULT_STYLE', 'REMOTE_FILE_CHANGED_EVENT'])
+const names = new Set(['HtmlView', 'offlineBoardHtml', 'htmlWithLocalBase', 'localFileBaseHref', 'useRemoteFileVersion', 'HTML_VIEWER_DEFAULT_STYLE', 'REMOTE_FILE_CHANGED_EVENT'])
 const declarations = parsed.statements.filter(node =>
   (ts.isFunctionDeclaration(node) && names.has(node.name?.text)) ||
   (ts.isVariableStatement(node) && node.declarationList.declarations.some(decl => names.has(decl.name.getText(parsed))))
 ).map(node => node.getText(parsed)).join('\n')
 assert.equal(declarations.includes('function HtmlView'), true)
 const source = String.raw`
-import React, { useState, useEffect, useRef } from 'react'
+import React, { useState, useEffect, useMemo, useRef } from 'react'
+import DOMPurify from 'dompurify'
 import { createRoot } from 'react-dom/client'
 import './src/renderer/src/styles.css'
 const isRemotePath = path => path?.startsWith('ssh://')
