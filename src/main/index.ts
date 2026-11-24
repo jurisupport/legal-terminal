@@ -223,7 +223,7 @@ function requestWindowAttention(win: BrowserWindow, reason?: 'done' | 'question'
   win.flashFrame(true)
 }
 
-function createWindow(setMain = true, opts?: { docOnly?: boolean; termOnly?: boolean }): BrowserWindow {
+function createWindow(setMain = true, opts?: { docOnly?: boolean; termOnly?: boolean; boardHtml?: boolean }): BrowserWindow {
   const docOnly = !!opts?.docOnly
   const termOnly = !!opts?.termOnly
   const detached = docOnly || termOnly
@@ -421,7 +421,7 @@ function createWindow(setMain = true, opts?: { docOnly?: boolean; termOnly?: boo
 
   // electron-vite: dev 서버 URL 또는 빌드된 index.html 로드
   // 전용 창은 해시로 렌더러에 알림 (문서만 / 터미널만)
-  const hash = docOnly ? 'docOnly' : termOnly ? 'termOnly' : ''
+  const hash = docOnly ? (opts?.boardHtml ? 'docOnly/board-html' : 'docOnly') : termOnly ? 'termOnly' : ''
   if (process.env['ELECTRON_RENDERER_URL']) {
     win.loadURL(process.env['ELECTRON_RENDERER_URL'] + (hash ? `#${hash}` : ''))
   } else {
@@ -468,7 +468,7 @@ const recordTabTransfer = (payload: TabPayload, target: BrowserWindow): void => 
 ipcMain.handle('window:new', (_e, opts?: NewWindowOptions) => {
   const tabs = Array.isArray(opts?.tabs) ? opts.tabs.filter(Boolean) : []
   const docOnly = opts?.docOnly === true && tabs.length === 1 && tabs[0].kind === 'doc' && !!tabs[0].path
-  const win = createWindow(false, { docOnly, termOnly: !docOnly && opts?.termOnly === true })
+  const win = createWindow(false, { docOnly, boardHtml: docOnly && /\.html?$/i.test(tabs[0].path!), termOnly: !docOnly && opts?.termOnly === true })
   tabs.forEach((tab) => recordTabTransfer(tab, win))
   if (tabs.length) pendingReceive.set(win.webContents.id, tabs)
 })

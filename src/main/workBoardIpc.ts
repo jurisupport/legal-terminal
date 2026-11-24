@@ -3,6 +3,7 @@ import { mkdir, readFile, realpath, rename, writeFile } from 'node:fs/promises'
 import { isAbsolute, join, posix } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { WorkBoard } from './workBoard'
+import { downloadBoardDocument, downloadBoardReport } from './workBoardDownload'
 import { readBoardDocumentText } from './workBoardDocumentText'
 import { boardTodoCaseIds } from './workBoardScope'
 import { isRemote, makeRemote, parseRemote, rfsRealpath } from './remoteFs'
@@ -117,10 +118,12 @@ export function registerWorkBoards(): () => void {
     try { return await operation } finally { pending.delete(key) }
   }
   function trusted(event: IpcMainInvokeEvent) {
+    const win = BrowserWindow.fromWebContents(event.sender)
     const frame = event.senderFrame
     const expected = process.env.ELECTRON_RENDERER_URL || pathToFileURL(join(__dirname, '../renderer/index.html')).href
-    if (!frame || frame !== event.sender.mainFrame || !BrowserWindow.fromWebContents(event.sender) ||
+    if (!frame || frame !== event.sender.mainFrame || !win ||
         frame.url.split(/[?#]/)[0].replace(/\/$/, '') !== expected.split(/[?#]/)[0].replace(/\/$/, '')) throw Error('업무 보드는 앱 창에서만 사용할 수 있습니다.')
+    return win
   }
   function handle<A extends unknown[]>(name: string, fn: (...args: A) => unknown) {
     ipcMain.handle('workBoard:' + name, (event, ...args) => { trusted(event); return fn(...args as A) })
@@ -148,6 +151,14 @@ export function registerWorkBoards(): () => void {
   handle('documentPath', async (w: string, id: string, path: string) => (await open(w)).documentPath(id, path))
   handle('documentText', async (w: string, id: string, path: string, offset: number = 0) =>
     readBoardDocumentText(await (await open(w)).documentPath(id, path), offset))
+  ipcMain.handle('workBoard:downloadDocument', async (event, w: string, id: string, path: string) => {
+    const win = trusted(event)
+    return downloadBoardDocument(await open(w), id, path, win)
+  })
+  ipcMain.handle('workBoard:downloadReport', async (event, w: string, id: string) => {
+    const win = trusted(event)
+    return downloadBoardReport(await open(w), id, win)
+  })
   handle('daily', async (w: string) => (await open(w)).daily())
   handle('counts', () => Object.fromEntries([...boards].map(([w, b]) => [w, b.approvalCount()])))
   // Restore independently of the selected window so queued work survives an app restart.

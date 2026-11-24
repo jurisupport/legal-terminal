@@ -2,7 +2,8 @@ import { createHash, randomUUID } from 'node:crypto'
 import { lstat, mkdir, readFile, realpath, rename, rm, writeFile } from 'node:fs/promises'
 import { join, resolve, sep } from 'node:path'
 import type { BoardAgent, BoardDecision, BoardDraft, BoardSettings, BoardSnapshot, BoardTask, BoardTeam, BoardTodoScope } from '../shared/workBoard'
-import { boardDocumentPaths, boardMutationIssue, boardReportAvailable, boardRevision, isBoardDocumentPath, isBoardTodoReview } from '../shared/workBoard'
+import { boardDocumentPaths, boardReferencePaths, boardMutationIssue, boardReportAvailable, boardRevision, isBoardDocumentPath, isBoardTodoReview } from '../shared/workBoard'
+import { workspaceDocumentPath } from '../shared/workBoardDocuments'
 import { kstDateKey } from '../shared/todoSummary'
 import { WorkBoardStore } from './workBoardStore'
 import { runBoardAgent, listBoardAgents } from './workBoardRunner'
@@ -450,9 +451,12 @@ export class WorkBoard {
     const root = remote ? this.workspace : resolve(this.workspace)
     // The IPC layer records a canonical workspace when the board opens. Reject a replaced root.
     if (await canonical(root) !== root) throw Error('작업 폴더의 실제 위치가 변경되었습니다. 보드를 다시 열어 주세요.')
-    const { report } = await this.detail(id)
-    if (typeof path !== 'string' || !boardDocumentPaths(report, this.workspace).includes(path)) {
-      throw Error('현재 보고서에 기록된 문서를 선택해 주세요.')
+    const task = await this.store.readTask(id)
+    if (!task) throw Error('현재 지시를 찾을 수 없습니다.')
+    const report = await this.store.readText(id + '.report.md') ?? ''
+    if (typeof path !== 'string' || (!boardDocumentPaths(report, this.workspace, this.folder, id).includes(path) &&
+        !boardReferencePaths(task.log, this.workspace, id, this.folder).includes(path))) {
+      throw Error('현재 보고서 또는 파일 읽기 기록에 있는 문서를 선택해 주세요.')
     }
     const separator = remote ? '/' : sep
     const prefix = root.endsWith(separator) ? root : root + separator
@@ -464,6 +468,11 @@ export class WorkBoard {
     const actual = await canonical(candidate)
     if (!actual.startsWith(prefix)) throw Error('작업 폴더 밖으로 연결된 문서는 열 수 없습니다.')
     if (!isBoardDocumentPath(actual)) throw Error('지원하지 않는 문서 형식입니다.')
+    const boardOnSameHost = remote
+      ? remote.isRemote(this.folder) && remote.parseRemote(root).profileId === remote.parseRemote(this.folder).profileId
+      : !this.folder.startsWith('ssh://')
+    const boardFolder = boardOnSameHost ? await canonical(this.folder) : this.folder
+    if (!workspaceDocumentPath(actual, this.workspace, boardFolder, id)) throw Error('숨김 파일이나 보드 설정 파일은 열 수 없습니다.')
     const regular = remote ? (await remote.rfsBoardStat(actual))?.directory === false : (await lstat(actual)).isFile()
     if (!regular) throw Error('일반 문서 파일을 선택해 주세요.')
     return actual

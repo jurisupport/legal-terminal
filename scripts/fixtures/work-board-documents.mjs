@@ -8,6 +8,7 @@ export async function verifyBoardDocuments(board, id, workspace, disk, store) {
   const docs = await mkdtemp(join(disk, 'board-documents-'))
   const outside = await mkdtemp(join(dirname(disk), basename(disk) + '-outside-'))
   const original = (await board.detail(id)).report
+  const savedTask = (await store.list(true)).find(task => task.id === id)
   const reportFile = id + '.report.md'
   const subdir = basename(docs)
   const listed = name => workspace.replaceAll('\\', '/').replace(/\/$/, '') + '/' + subdir + '/' + name
@@ -43,9 +44,22 @@ export async function verifyBoardDocuments(board, id, workspace, disk, store) {
       execFileSync('mkfifo', [join(docs, 'pipe.md')])
       await assert.rejects(board.documentPath(id, listed('pipe.md')), /파일/)
     }
-    await store.writeText(reportFile, '산출물 목록 변경')
+    await store.writeText(reportFile, '## 결재 필요\n\nBash(cat ' + subdir + '/result.md)')
     await assert.rejects(board.documentPath(id, listed('result.md')), /현재 보고서/)
+    await writeFile(join(docs, '읽은 페이지.html'), '<p>참고한 페이지</p>')
+    await mkdir(join(docs, '_업무지시'))
+    await writeFile(join(docs, '_업무지시', 'control.md'), '내부 지시')
+    await symlink(join(docs, '_업무지시'), join(docs, 'alias-control'), 'junction')
+    const read = name => ({at:new Date().toISOString(),text:'파일 읽음 · ' + subdir + '/' + name})
+    // Direct disk updates emulate a synced log arriving after the UI's last snapshot.
+    await store.save({...savedTask, log:[...savedTask.log,read('읽은 페이지.html'),read('alias-control/control.md'),read('outside/private.md')]})
+    assert.equal(await board.documentPath(id, listed('읽은 페이지.html')), await expected('읽은 페이지.html'))
+    await assert.rejects(board.documentPath(id, listed('alias-control/control.md')), /숨김 파일이나 보드/)
+    await assert.rejects(board.documentPath(id, listed('outside/private.md')), /폴더 밖/)
+    await store.save(savedTask)
+    await assert.rejects(board.documentPath(id, listed('읽은 페이지.html')), /현재 보고서/)
   } finally {
+    await store.save(savedTask)
     await store.writeText(reportFile, original)
     await rm(docs, { recursive: true, force: true })
     await rm(outside, { recursive: true, force: true })

@@ -66,6 +66,22 @@ async function seed() {
   await fs.writeFile(path.join(formerBoard, 'legacy-todos.md'),
     `---\nid: legacy-todos\ntitle: ${oldTitle}\ncwd: '.'\napproval: required\nstatus: blocked\n---\n${oldTitle}`)
   await fs.writeFile(path.join(formerBoard, 'legacy-todos.report.md'), '## 결재 필요\n\nmcp__jurisupport__list_todos')
+  const legacyTitle = '할일 정리부터 하자.'
+  const sourceHtml = '진행중사건목록_20261117.html'
+  const sourceNote = '남은과제_체크리스트.md'
+  const sourceChecklist = '남은과제_체크리스트_20261112.html'
+  const referenceEntries = [sourceHtml, sourceChecklist, sourceNote, '_업무지시/_보고서양식.md', sourceHtml]
+    .map(name => ({ at:new Date().toISOString(), text:'파일 읽음 · ' + name }))
+  referenceEntries.push({at:new Date().toISOString(), text:'결재 필요 · Bash(cd /test/board-sessions && python3 -I -c "print(0)" 진행중사건목록_20261117.html)'})
+  await fs.writeFile(path.join(formerBoard, 'legacy-organize.md'),
+    `---\nid: legacy-organize\ntitle: ${legacyTitle}\ncwd: '.'\napproval: required\nstatus: blocked\nlog: ${JSON.stringify(referenceEntries)}\n---\n${legacyTitle}`)
+  await fs.writeFile(path.join(formerBoard, 'legacy-organize.report.md'), '## 결재 필요\n\nBash(cd /test/board-sessions && python3 -I -c "print(0)" 진행중사건목록_20261117.html)')
+  await fs.writeFile(path.join(formerBoardWorkspace,sourceHtml),
+    '\uFEFF<!doctype html>\r\n<html lang="ko"><meta charset="utf-8"><h1>진행 중인 검토 사건</h1><p>참고 목록 7건</p>' +
+    '<script>document.documentElement.dataset.fixtureExecuted = "yes"</script>' +
+    '<img src="https://board-fixture.invalid/image.png"><a href="https://board-fixture.invalid/next">외부 안내 페이지</a></html>\r\n')
+  await fs.writeFile(path.join(formerBoardWorkspace,sourceChecklist), '<!doctype html><meta charset="utf-8"><h1>남은 과제 목록</h1>')
+  await fs.writeFile(path.join(formerBoardWorkspace,sourceNote), '\uFEFF## 다음 확인 사항\r\n\r\n첨부 자료와 일정 검토\r\n')
   for (const [id, title, status] of [['legacy-blocked','이전 장치 보류 건','blocked'], ['legacy-approval','이전 장치 결재 건','awaiting_approval']]) {
     await fs.writeFile(path.join(formerBoard, id + '.md'), `---\nid: ${id}\ntitle: ${title}\ncwd: '.'\nstatus: ${status}\n---\n${title}의 원래 본문`)
     await fs.writeFile(path.join(formerBoard, id + '.report.md'), title + ' 보고서 원문')
@@ -75,8 +91,22 @@ async function seed() {
 
 // Run built main, preload, renderer and storage. The provider returns synthetic reports.
 function run({ root, workspace, board, temp, home, profile, screenshot, bulk, formerBoardWorkspace, formerBoard, formerOwner }) {
-  const { app, BrowserWindow, ipcMain, session } = require('electron')
+  const { app, BrowserWindow, dialog, ipcMain, session, shell } = require('electron')
   const fs = require('node:fs'), path = require('node:path'), assert = require('node:assert/strict')
+  const downloads = path.join(temp, 'downloads')
+  fs.mkdirSync(downloads)
+  app.setPath('downloads', downloads)
+  let saveRequest = null
+  dialog.showSaveDialog = async (parent, options) => {
+    assert.ok(saveRequest, 'only explicitly requested downloads can open a save dialog')
+    assert.equal(parent, win)
+    assert.equal(path.basename(options.defaultPath), saveRequest.name)
+    const { destination, cancel } = saveRequest
+    saveRequest = null
+    return { canceled:cancel, filePath:cancel ? '' : destination }
+  }
+  const external = []
+  shell.openExternal = async url => { external.push(url) }
   app.setPath('home', home)
   app.setPath('userData', profile)
   BrowserWindow.prototype.show = BrowserWindow.prototype.maximize = function () {}
@@ -135,12 +165,13 @@ function run({ root, workspace, board, temp, home, profile, screenshot, bulk, fo
     if (['workBoard:updateTask', 'workBoard:removeTask', 'workBoard:takeOwnership'].includes(key)) boardMutations.push({key, args})
     if (key === 'window:new') {
       assert.equal(args[0]?.tabs?.length, 1)
-      assert.ok(['검토서.pdf','검토의견.hwpx','참고자료.docx'].some(name =>
-        fs.realpathSync(args[0].tabs[0].path) === fs.realpathSync(path.join(workspace,name))))
+      const viewerFiles = ['검토서.pdf','검토의견.hwpx','참고자료.docx'].map(name=>path.join(workspace,name))
+      viewerFiles.push(path.join(formerBoardWorkspace,'진행중사건목록_20261117.html'))
+      assert.ok(viewerFiles.some(p => fs.realpathSync(args[0].tabs[0].path) === fs.realpathSync(p)))
       return handler(event, ...args)
     }
     if (key.startsWith('workBoard:') || key.startsWith('workspace:') || ['app:info', 'tabs:ready', 'app:setWindowTitle', 'window:forceClose'].includes(key)) return handler(event, ...args)
-    if (key === 'fs:readText' && args[0] === path.join(workspace, '초안.md')) return handler(event, ...args)
+    if (key === 'fs:readText' && [path.join(workspace, '초안.md'),path.join(formerBoardWorkspace,'진행중사건목록_20261117.html')].includes(args[0])) return handler(event, ...args)
     if (key === 'fs:readBytes' && args[0] === path.join(workspace, '검토서.pdf')) return handler(event, ...args)
     if (key === 'fs:readHwpMarkdown' && args[0] === path.join(workspace, '검토의견.hwpx')) return handler(event, ...args)
     if (key === 'fs:readDocxText' && args[0] === path.join(workspace, '참고자료.docx')) return handler(event, ...args)
@@ -165,7 +196,10 @@ function run({ root, workspace, board, temp, home, profile, screenshot, bulk, fo
     if (['fs:list', 'fs:listPdfs', 'sessions:list', 'projects:list'].includes(key)) return []
     return null
   })
-  app.whenReady().then(() => session.defaultSession.webRequest.onBeforeRequest({ urls: ['https://*/*', 'http://*/*'] }, (_, reply) => reply({ cancel: true })))
+  app.whenReady().then(() => session.defaultSession.webRequest.onBeforeRequest({ urls: ['https://*/*', 'http://*/*'] }, (request, reply) => {
+    if (request.url.startsWith('https://board-fixture.invalid/')) external.push(request.url)
+    reply({ cancel:true })
+  }))
   let win
   const ready = new Promise(resolve => app.once('browser-window-created', (_, window) => {
     win = window
@@ -468,48 +502,112 @@ function run({ root, workspace, board, temp, home, profile, screenshot, bulk, fo
     assert.equal(queries.length, providerRuns, 'takeover does not execute approved or blocked work again')
     // A synced pre-native todo card has a permission marker but no business report.
     listMode = 'rows'
-    const oldTitle = '쥬리서포트 할일 점검하기'
-    const readsBeforeRetry = taskReads.length
-    await wait(() => evaluate("!document.querySelector('.wb-dialog[open]')"), 'previous approval dialog closed')
-    await click('.wb-card', oldTitle)
-    await visible('dialog[aria-label="' + oldTitle + '"][open]')
-    await wait(() => evaluate("document.querySelector('.wb-dialog .wb-report-preview')?.textContent.includes('아직 결재할 업무 보고서가 없습니다.')"), 'legacy card has no reviewable report')
-    const reason = await evaluate("document.querySelector('.wb-dialog .wb-block-reason')?.innerText || ''")
-    assert.match(reason, /할일 목록 조회 단계에서 멈췄습니다/)
-    assert.equal(await evaluate("document.querySelector('.wb-dialog .wb-report-preview').textContent.includes('list_todos')"), false)
-    assert.equal(await evaluate("[...document.querySelectorAll('.wb-dialog button')].some(el=>el.textContent.trim()==='현재 보고서로 결재 요청' || el.textContent.trim()==='승인')"), false)
-    await visible('.wb-dialog option[value="case:case-a"]')
-    assert.equal(await evaluate("document.querySelector('.wb-dialog option[value=all]').parentElement.value"), '')
-    assert.equal(await evaluate("[...document.querySelectorAll('.wb-dialog button')].find(el=>el.textContent.includes('다시 대기열에 넣기')).disabled"), true)
-    await evaluate(`(() => { const scope = document.querySelector('.wb-dialog option[value="case:case-a"]').parentElement
-      scope.value = 'case:case-a'; scope.dispatchEvent(new Event('change', {bubbles:true})) })()`)
-    await wait(() => evaluate("[...document.querySelectorAll('.wb-dialog button')].some(el=>el.textContent.includes('다시 대기열에 넣기') && !el.disabled)"), 'retry enabled for the selected case')
-    await evaluate('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))')
-    fs.writeFileSync(path.join(path.dirname(screenshot), 'legacy-todo-blocked.png'), (await win.webContents.capturePage()).toPNG())
-    assert.equal(taskReads.length, readsBeforeRetry, 'reading the marker or selecting a scope does not fetch tasks')
-    await click('.wb-dialog button', '다시 대기열에 넣기')
-    const oldTask = async () => (await shared()).tasks.find(t=>t.id==='legacy-todos')
-    await wait(async () => (await oldTask())?.status==='awaiting_approval', 'native retry generated report pending approval')
-    assert.deepEqual(taskReads.slice(readsBeforeRetry), [{ type:'todo', includeClosed:false, fields:'compact', page:1, limit:100, caseId:'case-a' }])
-    assert.equal(queries.length, providerRuns, 'no generic agent for the original Korean request')
-    await wait(() => evaluate("!document.querySelector('.wb-dialog[open]')"), 'retry dialog closed')
-    await click('.wb-card', oldTitle)
-    await wait(() => evaluate("document.querySelector('.wb-report-preview table')?.textContent.includes('A 준비서면 제출')"), 'completed real report displayed on reopening')
-    const result = await evaluate("document.querySelector('.wb-report-preview').innerText")
-    assert.match(result,/미완료 할일 3건/)
-    assert.doesNotMatch(result,/mcp__jurisupport__list_todos|E 별건/)
-    const refreshedReport = fs.readFileSync(path.join(formerBoard,'legacy-todos.report.md'),'utf8')
-    assert.match(refreshedReport,/미완료 할일 3건/)
-    assert.doesNotMatch(refreshedReport,/mcp__jurisupport__list_todos/)
-    assert.equal(await evaluate(`(() => {
-      const preview = document.querySelector('.wb-dialog .wb-report-preview')
-      const folds = [...document.querySelectorAll('.wb-dialog details')].filter(el => /^(진행 로그|지시 본문|결재 이력)/.test(el.querySelector('summary')?.textContent.trim()))
-      return folds.length === 3 && folds.every(el => !el.open && !!(preview.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_FOLLOWING))
-    })()`),true,'report precedes collapsed logs, instructions and decisions')
-    fs.writeFileSync(path.join(path.dirname(screenshot), 'legacy-todo-report.png'), (await win.webContents.capturePage()).toPNG())
-    await click('.wb-dialog button', '승인')
-    await wait(async () => ['approved','done'].includes((await oldTask())?.status), 'legacy native report approved after successful lookup')
-    console.log('PASS 기존 쥬리서포트 할일 점검 카드 · 차단 사유 · 범위 지정 · 실제 보고서 우선 표시 · 결재')
+    async function saveFromCard(selector, buttonText, source, cancel = false) {
+      const name = path.basename(source)
+      const destination = path.join(downloads, name)
+      const original = fs.readFileSync(source)
+      saveRequest = {name,destination,cancel}
+      await click(selector, buttonText)
+      await wait(() => !saveRequest, 'native save dialog: ' + name)
+      if (cancel) {
+        await wait(() => evaluate("document.querySelector('.wb-dialog')?.innerText.includes('다운로드를 취소했습니다.')"), 'cancel acknowledged')
+        assert.equal(fs.existsSync(destination),false,'cancel creates no file')
+      } else {
+        await wait(() => fs.existsSync(destination) && fs.readFileSync(destination).equals(original), 'download preserves bytes: ' + name)
+      }
+    }
+    async function verifyReadReferences(oldTitle) {
+      const htmlName = '진행중사건목록_20261117.html'
+      const mdName = '남은과제_체크리스트.md'
+      const section = '.wb-reference-documents'
+      await visible(section)
+      const referenceText = await evaluate("document.querySelector('.wb-reference-documents').innerText")
+      for (const name of [htmlName, mdName, '남은과제_체크리스트_20261112.html']) assert.ok(referenceText.includes(name), name)
+      assert.ok(!referenceText.includes('_보고서양식') && !referenceText.includes('_업무지시'))
+      assert.equal(await evaluate("document.querySelectorAll('.wb-reference-documents button[aria-pressed]').length"),3,'only three distinct business source files')
+      assert.match(await evaluate("document.querySelector('.wb-block-reason > p').textContent"), /터미널 명령이 차단.+조회 범위/)
+      fs.writeFileSync(path.join(path.dirname(screenshot),'legacy-reference-documents.png'), (await win.webContents.capturePage()).toPNG())
+      assert.equal(await evaluate("!!document.querySelector('.wb-target-documents, .wb-reference-documents .wb-artifact')"),false,'sources appear as unopened references')
+      const headings = await evaluate("[...document.querySelectorAll('.wb-dialog summary')].map(el=>el.textContent.trim())")
+      assert.ok(headings.includes('도구 권한 기록 (1)') && headings.includes('결재 이력 (0)'), 'a denied tool is not an approval')
+      assert.equal(await evaluate("!!document.querySelector('.wb-dialog .wb-block-reason details:not([open])')"),true)
+      const source = path.join(formerBoardWorkspace,htmlName)
+      const downloadButton = name => section + ' button[aria-label="' + name + ' 다운로드"]'
+      await saveFromCard(downloadButton(htmlName),'',source,true)
+      await saveFromCard(downloadButton(htmlName),'',source)
+      await click(section + ' button',htmlName + ' 열기')
+      let viewer
+      await wait(() => {
+        viewer = BrowserWindow.getAllWindows().find(w=>w!==win)
+        return viewer?.webContents.getURL().endsWith('#docOnly/board-html')
+      }, 'offline HTML reference viewer')
+      await wait(() => viewer.webContents.executeJavaScript("document.querySelector('iframe')?.contentDocument?.body?.innerText.includes('참고 목록 7건')"), 'original HTML content')
+      const viewed = await viewer.webContents.executeJavaScript(`(() => {
+        const frame = document.querySelector('iframe')
+        const doc = frame.contentDocument
+        const link = [...doc.querySelectorAll('a')].find(a => a.textContent.includes('외부 안내 페이지'))
+        link?.click()
+        return { script:doc.documentElement.dataset.fixtureExecuted || '', scriptsAllowed:frame.sandbox.contains('allow-scripts'),
+          browserButton:[...document.querySelectorAll('button')].some(b=>b.textContent.includes('브라우저로 열기')) }
+      })()`)
+      assert.deepEqual(viewed,{script:'',scriptsAllowed:false,browserButton:false})
+      assert.ok(await viewer.webContents.executeJavaScript("new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve(document.querySelector('iframe')?.contentDocument?.body?.innerText.includes('참고 목록 7건')))))"))
+      assert.deepEqual(external,[],'no external load, link opening, or navigation from an HTML reference')
+      fs.writeFileSync(path.join(path.dirname(screenshot),'reference-html-viewer.png'), (await viewer.webContents.capturePage()).toPNG())
+      viewer.close()
+      await wait(() => viewer.isDestroyed(),'HTML viewer closed')
+      assert.equal(await evaluate("document.querySelector('.wb-dialog[open]').getAttribute('aria-label')"),oldTitle)
+      await click(section + ' button',mdName + ' 열기')
+      await wait(() => evaluate("document.querySelector('.wb-reference-documents .wb-artifact')?.textContent.includes('첨부 자료와 일정 검토')"),'open Markdown source')
+      await saveFromCard(downloadButton(mdName),'',path.join(formerBoardWorkspace,mdName))
+    }
+    for (const [id,oldTitle] of [['legacy-todos','쥬리서포트 할일 점검하기'], ['legacy-organize','할일 정리부터 하자.']]) {
+      const readsBeforeRetry = taskReads.length
+      await wait(() => evaluate("!document.querySelector('.wb-dialog[open]')"), 'previous approval dialog closed')
+      await click('.wb-card', oldTitle)
+      await visible('dialog[aria-label="' + oldTitle + '"][open]')
+      await wait(() => evaluate("document.querySelector('.wb-dialog .wb-report-preview')?.textContent.includes('아직 결재할 업무 보고서가 없습니다.')"), 'legacy card has no reviewable report')
+      const reason = await evaluate("document.querySelector('.wb-dialog .wb-block-reason')?.innerText || ''")
+      if (id === 'legacy-todos') assert.match(reason, /할일 목록 조회 단계에서 멈췄습니다/)
+      else await verifyReadReferences(oldTitle)
+      assert.equal(await evaluate("document.querySelector('.wb-dialog .wb-report-preview').textContent.includes('list_todos')"), false)
+      assert.equal(await evaluate("[...document.querySelectorAll('.wb-dialog button')].some(el=>['현재 보고서로 결재 요청','승인','보고서 다운로드'].includes(el.textContent.trim()))"), false)
+      await visible('.wb-dialog option[value="case:case-a"]')
+      assert.equal(await evaluate("document.querySelector('.wb-dialog option[value=all]').parentElement.value"), '')
+      assert.equal(await evaluate("[...document.querySelectorAll('.wb-dialog button')].find(el=>el.textContent.includes('다시 대기열에 넣기')).disabled"), true)
+      await evaluate(`(() => { const scope = document.querySelector('.wb-dialog option[value="case:case-a"]').parentElement
+        scope.value = 'case:case-a'; scope.dispatchEvent(new Event('change', {bubbles:true})) })()`)
+      await wait(() => evaluate("[...document.querySelectorAll('.wb-dialog button')].some(el=>el.textContent.includes('다시 대기열에 넣기') && !el.disabled)"), 'retry enabled for the selected case')
+      await evaluate('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))')
+      if (id === 'legacy-todos') fs.writeFileSync(path.join(path.dirname(screenshot), 'legacy-todo-blocked.png'), (await win.webContents.capturePage()).toPNG())
+      assert.equal(taskReads.length, readsBeforeRetry, 'reading the marker or selecting a scope does not fetch tasks')
+      await click('.wb-dialog button', '다시 대기열에 넣기')
+      const oldTask = async () => (await shared()).tasks.find(t=>t.id===id)
+      await wait(async () => (await oldTask())?.status==='awaiting_approval', 'native retry generated report pending approval')
+      assert.deepEqual(taskReads.slice(readsBeforeRetry), [{ type:'todo', includeClosed:false, fields:'compact', page:1, limit:100, caseId:'case-a' }])
+      assert.equal(queries.length, providerRuns, 'no generic agent for the original Korean request')
+      await wait(() => evaluate("!document.querySelector('.wb-dialog[open]')"), 'retry dialog closed')
+      await click('.wb-card', oldTitle)
+      await wait(() => evaluate("document.querySelector('.wb-report-preview table')?.textContent.includes('A 준비서면 제출')"), 'completed real report displayed on reopening')
+      const result = await evaluate("document.querySelector('.wb-report-preview').innerText")
+      assert.match(result,/미완료 할일 3건/)
+      assert.doesNotMatch(result,/mcp__jurisupport__list_todos|E 별건/)
+      const refreshedReport = fs.readFileSync(path.join(formerBoard,id + '.report.md'),'utf8')
+      assert.match(refreshedReport,/미완료 할일 3건/)
+      assert.doesNotMatch(refreshedReport,/mcp__jurisupport__list_todos/)
+      assert.equal(await evaluate(`(() => {
+        const preview = document.querySelector('.wb-dialog .wb-report-preview')
+        const folds = [...document.querySelectorAll('.wb-dialog details')].filter(el => /^(진행 로그|지시 본문|결재 이력)/.test(el.querySelector('summary')?.textContent.trim()))
+        return folds.length === 3 && folds.every(el => !el.open && !!(preview.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_FOLLOWING))
+      })()`),true,'report precedes collapsed logs, instructions and decisions')
+      if (id === 'legacy-todos') fs.writeFileSync(path.join(path.dirname(screenshot), 'legacy-todo-report.png'), (await win.webContents.capturePage()).toPNG())
+      if (id === 'legacy-todos') {
+        await saveFromCard('.wb-report-preview button','보고서 다운로드',path.join(formerBoard,id + '.report.md'))
+      }
+      await click('.wb-dialog button', '승인')
+      await wait(async () => ['approved','done'].includes((await oldTask())?.status), 'legacy native report approved after successful lookup')
+    }
+    console.log('PASS 기존 할일 지시 2건 · 차단 사유 · 원본 참고 파일 열람/저장/취소 · 재수행 · 보고서 열람/저장/결재')
     console.log('PASS 이전 장치 보드 · 읽기 전용 조회 · 관리 인수 · 수정 충돌 차단 · 삭제 확인 · 새 기기 결재')
     console.log('PASS 할일 검토 · 사건 범위 · 전체 선택 · 조회 권한 거부 · 실제 0건')
     console.log('PASS 업무 보드 · 실제 IPC · 결재 · 일괄 입력 3건 · 보고 저장 · ' + screenshot)

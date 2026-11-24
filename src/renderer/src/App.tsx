@@ -1,3 +1,4 @@
+import DOMPurify from 'dompurify'
 import { mediaMimeType, mediaSelectionKey, formatMediaTime, normalizeMediaSelection, type MediaAskRequest, type MediaSelection, type MediaViewState } from '../../shared/media'
 import MediaViewer from './viewer/MediaViewer'
 import {
@@ -12669,12 +12670,29 @@ function htmlWithLocalBase(html: string, path: string): string {
     : tags + html
 }
 
+// Review a board document offline. The original bytes are preserved for download.
+function offlineBoardHtml(source: string): string {
+  const template = document.createElement('template')
+  template.innerHTML = source
+  for (const element of template.content.querySelectorAll('[src]')) {
+    const embeddedImage = element.tagName === 'IMG' && /^data:image\/(?:png|gif|jpeg|webp|avif);base64,/i.test(element.getAttribute('src') || '')
+    if (!embeddedImage) element.removeAttribute('src')
+  }
+  const content = DOMPurify.sanitize(template.innerHTML, {
+    ADD_TAGS: ['style'],
+    FORBID_TAGS: ['script', 'meta', 'base', 'iframe', 'frame', 'link', 'object', 'embed', 'foreignObject', 'template'],
+    FORBID_ATTR: ['href', 'xlink:href', 'srcset', 'srcdoc', 'action', 'formaction', 'poster', 'background', 'ping', 'target']
+  })
+  return `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'">${HTML_VIEWER_DEFAULT_STYLE}</head><body>${content}</body></html>`
+}
+
 function HtmlView({ path, onAsk, onInline, inlineOpen, scrollKey = path, initialScroll, onScrollPosition }: SelectionActionProps & {
   path: string
   scrollKey?: string
   initialScroll?: DocScrollPosition
   onScrollPosition?: (position: DocScrollPosition) => void
 }): JSX.Element {
+  const boardPreview = window.location.hash === '#docOnly/board-html'
   const remoteVersion = useRemoteFileVersion(path)
   const frameRef = useRef<HTMLIFrameElement>(null)
   const scrollPositionRef = useRef(initialScroll)
@@ -12723,6 +12741,8 @@ function HtmlView({ path, onAsk, onInline, inlineOpen, scrollKey = path, initial
     return () => selectionDocument.removeEventListener('scroll', saveScroll)
   }, [selectionDocument, scrollKey])
 
+  const preview = useMemo(() => boardPreview ? offlineBoardHtml(state.text) : htmlWithLocalBase(state.text, path), [boardPreview, state.text, path])
+
   if (state.loading) return <div className="welcome"><p className="muted">불러오는 중…</p></div>
   if (state.err) return <div className="welcome"><p className="muted">열기 실패: {state.err}</p></div>
   if (mode === 'code') {
@@ -12750,7 +12770,7 @@ function HtmlView({ path, onAsk, onInline, inlineOpen, scrollKey = path, initial
           코드
         </button>
         <span className="tb-divider" />
-        {!path.startsWith('ssh://') && (
+        {!boardPreview && !path.startsWith('ssh://') && (
           <button
             className="tb-btn"
             title="스크립트와 복사 기능을 사용하려면 기본 브라우저로 열기"
@@ -12759,7 +12779,8 @@ function HtmlView({ path, onAsk, onInline, inlineOpen, scrollKey = path, initial
             브라우저로 열기
           </button>
         )}
-        <span className="muted small">스크립트는 미리보기에서 실행되지 않습니다.</span>
+        <span className="muted small">{boardPreview ? '오프라인 미리보기' : '스크립트는 미리보기에서 실행되지 않습니다.'}</span>
+        {boardPreview && state.truncated && <span className="muted small">앞부분 2MB를 표시합니다. 전체 원본은 카드에서 다운로드할 수 있습니다.</span>}
       </div>
       <iframe
         ref={frameRef}
@@ -12767,7 +12788,7 @@ function HtmlView({ path, onAsk, onInline, inlineOpen, scrollKey = path, initial
         title={fileNameFromPath(path)}
         sandbox="allow-same-origin"
         referrerPolicy="no-referrer"
-        srcDoc={htmlWithLocalBase(state.text, path)}
+        srcDoc={preview}
         onLoad={(event) => {
           const frame = event.currentTarget
           const doc = frame.contentDocument

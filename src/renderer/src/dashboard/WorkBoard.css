@@ -108,8 +108,8 @@
 .wb-management p { margin: 0; color: var(--wb-muted); font-size: 12px; }
 .wb-remove:not(:disabled) { color: #9c2533; }
 
-.wb-target-documents { padding: 12px; margin: 12px 0; border: 1px solid var(--wb-border); border-radius: 6px; }
-.wb-target-documents > h3 { margin: 0 0 8px; }
+.wb-target-documents, .wb-reference-documents { padding: 12px; margin: 12px 0; border: 1px solid var(--wb-border); border-radius: 6px; }
+.wb-target-documents > h3, .wb-reference-documents > h3 { margin: 0 0 8px; }
 .wb-target-title { margin: 0 0 8px; color: var(--wb-muted); font-size: 12px; }
 .wb-target-list { display: grid; gap: 6px; }
 .wb-target-list button { text-align: left; overflow-wrap: anywhere; }
@@ -120,3 +120,11 @@
 
 .wb-document-body { margin-top: 8px; max-height: 50vh; overflow: auto; }
 .wb-document-body > pre.wb-notes { margin: 0; max-height: none; }
+
+.wb-document-row { display: grid; grid-template-columns: minmax(0,1fr) auto; gap: 6px; align-items: start; }
+.wb-download { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; }
+.wb-document-row .wb-download { display: grid; justify-items: end; max-width: 190px; }
+.wb-download small { overflow-wrap: anywhere; }
+.wb-block-reason details { margin-top: 6px; }
+.wb-block-reason summary { cursor: pointer; }
+.wb-block-reason pre { max-height: 14em; overflow: auto; }

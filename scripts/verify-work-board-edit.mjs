@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { verifyBoardDownloads } from './fixtures/work-board-downloads.mjs'
 import { verifyBoardDocuments } from './fixtures/work-board-documents.mjs'
 import { createHash } from 'node:crypto'
 import { mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises'
@@ -20,7 +21,8 @@ globalThis.editTestRunner = async ({ task, phase }) => {
   return {text:'새 보고 · ' + task.title}
 }
 const result = await build({
-  entryPoints:['src/main/workBoard.ts'],bundle:true,write:false,format:'cjs',platform:'node',
+  stdin:{contents:"export {WorkBoard} from './src/main/workBoard'; export * from './src/main/workBoardDownload'",resolveDir:process.cwd()},
+  bundle:true,write:false,format:'cjs',platform:'node',external:['electron'],
   plugins:[{name:'isolated-board',setup(b) {
     b.onResolve({filter:/^\.\/(?:workBoardRunner|workBoardScope|workBoardTodos|remoteFs)$/}, a=>({path:a.path,namespace:'fixture'}))
     b.onLoad({filter:/.*/,namespace:'fixture'},({path})=>({contents:{
@@ -32,7 +34,21 @@ const result = await build({
   }}]
 })
 const module = {exports:{}}
-new Function('module','exports','require',result.outputFiles[0].text)(module,module.exports,createRequire(import.meta.url))
+let saveDialog
+const require = createRequire(import.meta.url)
+const localFs = require('node:fs/promises')
+new Function('module','exports','require',result.outputFiles[0].text)(module,module.exports, name => {
+  if (name === 'electron') return {app:{getPath:()=>tmp},dialog:{showSaveDialog:(...args)=>saveDialog(...args)}}
+  if (name === 'node:fs/promises') return {...localFs, async link(from,to) {
+    if (!from.includes('.legal-download-')) return localFs.link(from,to)
+    if (to.endsWith('동시 저장.md')) await localFs.writeFile(to,'다른 사용자의 저장',{flag:'wx'})
+    throw Object.assign(Error('removable volume without hard links'),{code:'ENOTSUP'})
+  }, async rename(from,to) {
+    if (from.includes('.legal-download-') && to.endsWith('저장 실패.md')) throw Error('fixture blocked publication')
+    return localFs.rename(from,to)
+  }}
+  return require(name)
+})
 const {WorkBoard} = module.exports
 const board = new WorkBoard(tmp,folder,app,message=>events.push(message))
 let viewer
@@ -74,6 +90,7 @@ try {
   await board.start()
   await wait(()=>held.length>0)
   await verifyBoardDocuments(board,'done',tmp,tmp,source)
+  await verifyBoardDownloads(board,'done',tmp,tmp,source,module.exports,fn=>{saveDialog=fn})
   await assert.rejects(board.updateTask('busy',fields,await revision('busy')),/수행/)
   await assert.rejects(board.removeTask('busy',await revision('busy')),/수행/)
   for (const id of ['queue','reported','failed','rejected','done','awaiting_approval']) {

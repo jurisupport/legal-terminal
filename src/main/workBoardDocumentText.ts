@@ -50,13 +50,11 @@ async function readPage(size: number, offset: number, readBytes: ReadBytes) {
   return {text, size, nextOffset: offset + end < size ? offset + end : null}
 }
 
-/** The caller re-resolves the selected board artifact on each page request. Offsets are file bytes. */
-export async function readBoardDocumentText(path: string, offset: number): Promise<{text: string; nextOffset: number | null; size: number}> {
-  if (!Number.isSafeInteger(offset) || offset < 0) throw invalidOffset()
-  if (!extensions.has(extname(path).toLowerCase())) throw new Error('텍스트 문서 형식을 확인해 주세요.')
+/** Operate on one verified, read-only handle without buffering the whole document. */
+export async function withBoardDocumentFile<T>(path: string, consume: (size: number, read: ReadBytes) => Promise<T>): Promise<T> {
   if (path.startsWith('ssh://')) {
     const {rfsWithBoardDocument} = await import('./remoteFs')
-    return rfsWithBoardDocument(path, (size, read) => readPage(size, offset, read))
+    return rfsWithBoardDocument(path, consume)
   }
   if (!isAbsolute(path)) throw new Error('문서의 절대 경로를 확인해 주세요.')
   const initial = await lstat(path)
@@ -67,10 +65,17 @@ export async function readBoardDocumentText(path: string, offset: number): Promi
     if (!before.isFile() || before.ino !== initial.ino || before.dev !== initial.dev || await realpath(path) !== path) {
       throw new Error('문서 위치가 변경되었습니다. 다시 열어 주세요.')
     }
-    const result = await readPage(before.size, offset, async (buffer, position) =>
+    const result = await consume(before.size, async (buffer, position) =>
       (await file.read(buffer, 0, buffer.length, position)).bytesRead)
     const after = await file.stat()
     if (before.size !== after.size || before.mtimeMs !== after.mtimeMs) throw new Error('읽는 동안 문서가 변경되었습니다. 다시 열어 주세요.')
     return result
   } finally { await file.close() }
+}
+
+/** The caller re-resolves the selected board artifact on each page request. Offsets are file bytes. */
+export async function readBoardDocumentText(path: string, offset: number): Promise<{text: string; nextOffset: number | null; size: number}> {
+  if (!Number.isSafeInteger(offset) || offset < 0) throw invalidOffset()
+  if (!extensions.has(extname(path).toLowerCase())) throw new Error('텍스트 문서 형식을 확인해 주세요.')
+  return withBoardDocumentFile(path, (size, read) => readPage(size, offset, read))
 }

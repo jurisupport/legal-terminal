@@ -1,4 +1,5 @@
 import { verifyBoardText } from './fixtures/work-board-text.mjs'
+import { verifyBoardDownloads } from './fixtures/work-board-downloads.mjs'
 import { verifyBoardDocuments } from './fixtures/work-board-documents.mjs'
 import { verifyBoardStorage } from './fixtures/work-board-storage.mjs'
 // Exercise the production SSH pool and board store against a private loopback OpenSSH SFTP server.
@@ -62,6 +63,7 @@ const require = createRequire(import.meta.url)
 const source = buildSync({
   stdin: {contents: `
     export {WorkBoard} from './src/main/workBoard'
+    export * from './src/main/workBoardDownload'
     export {boardRevision} from './src/shared/workBoard'
     export {WorkBoardStore} from './src/main/workBoardStore'
     export {readBoardDocumentText} from './src/main/workBoardDocumentText'
@@ -72,8 +74,9 @@ const source = buildSync({
 }).outputFiles[0].text
 const mod = new Module(import.meta.filename)
 let sdkRuns = 0
+let saveDialog
 mod.require = id => {
-  if (id === 'electron') return {app: {getPath: () => root}}
+  if (id === 'electron') return {app: {getPath: () => root}, dialog:{showSaveDialog:(...args)=>saveDialog(...args)}}
   if (id === 'os' || id === 'node:os') return { ...require(id), homedir: () => root }
   if (id === '@anthropic-ai/claude-agent-sdk') return { ...require(id), query() { sdkRuns++; throw Error('Unexpected model session') } }
   return require(id)
@@ -194,7 +197,9 @@ try {
     assert.equal(configLookups,execsBeforeAdd,'no SSH exec channel opened by the instruction')
     assert.equal(sdkRuns,0,'no Claude SDK session')
     const report = (await workflow.detail(review.id)).report
-    await verifyBoardDocuments(workflow, review.id, remoteCase, caseDir, new mod.exports.WorkBoardStore(remoteCase + '/_업무지시'))
+    const docStore = new mod.exports.WorkBoardStore(remoteCase + '/_업무지시')
+    await verifyBoardDocuments(workflow, review.id, remoteCase, caseDir, docStore)
+    await verifyBoardDownloads(workflow,review.id,remoteCase,caseDir,docStore,mod.exports,fn=>{saveDialog=fn})
     const stored = await readFile(join(caseDir,'_업무지시',review.id + '.report.md'))
     assert.deepEqual(stored,Buffer.from(report))
     for (const value of ['미완료 할일 2건','기한 초과 1건','기한 임박 1건','담당자 미지정 1건','A 제출 준비','B 의뢰인 면담']) assert.ok(report.includes(value),value)

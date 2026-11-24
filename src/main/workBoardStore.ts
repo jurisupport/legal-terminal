@@ -320,6 +320,13 @@ export class WorkBoardStore {
     try { return {text: await handle.readFile('utf8'), mtimeMs: stat.mtimeMs} } finally { await handle.close() }
   }
 
+  async readTask(id: string): Promise<BoardTask | null> {
+    if (!validId(id)) throw new Error('올바르지 않은 지시 ID입니다.')
+    const file = await this.read(id + '.md')
+    if (!file || await this.isArchived(id)) return null
+    return parseTask(id, file.text, new Date(file.mtimeMs).toISOString())
+  }
+
   async readText(name: string): Promise<string | null> {
     const sidecar = /^([a-zA-Z0-9_-]+)\.(?:report|review)\.md$/.exec(name)
     if (sidecar && await this.isArchived(sidecar[1])) return null

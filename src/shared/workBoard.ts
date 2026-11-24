@@ -1,4 +1,4 @@
-export { boardDocumentPaths, isBoardDocumentPath } from './workBoardDocuments.ts'
+export { boardDocumentPaths, boardReferencePaths, isBoardDocumentPath } from './workBoardDocuments.ts'
 export type BoardStatus = 'queued' | 'running' | 'blocked' | 'reported' | 'in_review' | 'awaiting_approval' | 'approved' | 'rejected' | 'done' | 'failed'
 export type BoardTodoScope = { kind: 'case'; caseId: string } | { kind: 'all' }
 
@@ -9,12 +9,15 @@ function todoReviewText(input: string): string {
 // Match standalone requests so an instruction to change a task is never reduced to a report.
 export function isBoardTodoReview(input: string): boolean {
   const text = todoReviewText(input)
-  const request = text.replace(/^(?:(?:쥬리서포트|주리서포트|jurisupport)(?:에등록된|에있는|에서|의)?|전체|모든|이사건|현재사건|이번사건|미완료|남은|등록된|앱의|앱에등록된)*/iu, '')
+  const request = text.replace(/^(?:(?:쥬리서포트|주리서포트|jurisupport)(?:에등록된|에있는|에서|의)?|먼저|우선|일단|전체|모든|이사건|현재사건|이번사건|미완료|남은|등록된|앱의|앱에등록된)*/iu, '')
   if (!request.startsWith('할일')) return false
-  const action = request.replace(/^할일(?:목록)?(?:을|를)?/u, '')
+  const action = request.replace(/^할일(?:목록)?(?:을|를|부터)?(?:먼저|좀)?/u, '')
   if (!action) return /전체|모든/u.test(text.slice(0, text.indexOf('할일')))
-  return /^(?:검토|점검|확인|조회|정리|요약)(?:하기|요청|부탁(?:해|합니다|드립니다)?|해(?:줘요?|주세요|주십시오|주실래요)?)?$/u.test(action) ||
-    /^(?:보여줘|보여주세요)$/u.test(action)
+  if (/^(?:보여줘|보여주세요)$/u.test(action)) return true
+  const intent = /^(?:검토|점검|확인|조회|정리|요약)(.*)$/u.exec(action)
+  if (!intent) return false
+  const ending = intent[1].replace(/^(?:부터)?(?:먼저|우선)?/u, '')
+  return /^(?:하기|하자|하죠|합시다|할까요|요청|부탁(?:해|합니다|드립니다)?|해(?:보자|봅시다|줘요?|주세요|주십시오|주실래요)?)?$/u.test(ending)
 }
 
 // An unbound board cannot infer which case an explicitly case-scoped instruction refers to.
@@ -80,6 +83,8 @@ export interface BoardApi {
   configure(workspace: string, patch: Partial<BoardSettings>): Promise<void>
   detail(workspace: string, id: string): Promise<{report: string; review: string}>
   documentPath(workspace: string, id: string, path: string): Promise<string>
+  downloadDocument(workspace: string, id: string, path: string): Promise<boolean>
+  downloadReport(workspace: string, id: string): Promise<boolean>
   documentText(workspace: string, id: string, path: string, offset?: number): Promise<{text: string; nextOffset: number | null; size: number}>
   daily(workspace: string): Promise<string>
   onChange(listener: (workspace: string, message?: string) => void): () => void
@@ -114,7 +119,9 @@ export function boardReportAvailable(report: string): boolean {
   if (text === '결재 필요') return false
   const notice = /^## 결재 필요[ \t]*(?:\r?\n|$)/u.exec(text)
   if (!notice) return true
-  return /^#{1,6} [^\n]+\r?\n+\s*[^#\s]/mu.test(text.slice(notice[0].length))
+  const details = text.slice(notice[0].length).trim()
+  if (/^(?:Bash\s*\(|mcp__[\w.-]+__[\w.-]+(?:\s|$)|실행 결과 확인 필요 · )/u.test(details)) return false
+  return /^#{1,6} [^\n]+\r?\n+\s*[^#\s]/mu.test(details)
 }
 
 export function boardRevision(task: BoardTask, detail?: { report: string; review: string }): string {

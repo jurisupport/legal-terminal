@@ -1,4 +1,4 @@
-import { boardDocumentPaths, boardMutationIssue, boardReportAvailable, boardRevision, requestsCurrentBoardCase, isBoardTodoReview } from '../../../shared/workBoard'
+import { boardReferencePaths, boardDocumentPaths, boardMutationIssue, boardReportAvailable, boardRevision, requestsCurrentBoardCase, isBoardTodoReview } from '../../../shared/workBoard'
 import DOMPurify from 'dompurify'
 import { marked, Renderer } from 'marked'
 import { createPortal } from 'react-dom'
@@ -616,10 +616,31 @@ function ReportMarkdown({ text, todo = false }: { text: string; todo?: boolean }
 
 const inlineDocument = /\.(?:md|markdown|mdx|txt|csv|json)$/i
 
-function DocumentTargets({ workspace, id, paths, previous, onOpenFile }: {
-  workspace: string; id: string; paths: string[]; previous: boolean; onOpenFile: Props['onOpenFile']
+function DownloadButton({ name, report = false, save }: { name: string; report?: boolean; save: () => Promise<boolean> }) {
+  const [saving, setSaving] = useState(false)
+  const [message, setMessage] = useState('')
+  const [error, setError] = useState('')
+  return <div className="wb-download">
+    <button type="button" className="wb-btn" aria-label={name + ' 다운로드'} disabled={saving} onClick={async () => {
+      if (saving) return
+      setSaving(true)
+      setMessage('')
+      setError('')
+      try {
+        setMessage(await save() ? '다운로드했습니다.' : '다운로드를 취소했습니다.')
+      } catch (err) {
+        setError('다운로드하지 못했습니다. ' + errMsg(err).replace(/^Error invoking remote method '[^']+': (?:Error: )?/, ''))
+      } finally { setSaving(false) }
+    }}>{saving ? '저장 중…' : report ? '보고서 다운로드' : '다운로드'}</button>
+    {message && <small role="status">{message}</small>}
+    {error && <small role="alert" className="wb-error">{error}</small>}
+  </div>
+}
+
+function DocumentList({ workspace, id, paths, references = false, previous = false, onOpenFile }: {
+  workspace: string; id: string; paths: string[]; references?: boolean; previous?: boolean; onOpenFile: Props['onOpenFile']
 }) {
-  const [selected, setSelected] = useState(paths[0])
+  const [selected, setSelected] = useState(references ? '' : paths[0])
   const [offsets, setOffsets] = useState([0])
   const [attempt, setAttempt] = useState(0)
   const [page, setPage] = useState<{ path: string; offset: number; text: string; nextOffset: number | null } | null>(null)
@@ -669,22 +690,26 @@ function DocumentTargets({ workspace, id, paths, previous, onOpenFile }: {
     }
   }
 
-  return <section className="wb-target-documents" aria-label="결재 대상 문서">
-    <h3>{previous ? '수정 전 결재 대상 문서' : '결재 대상 문서'}</h3>
+  const heading = references ? '작업 중 읽은 참고 문서' : previous ? '수정 전 결재 대상 문서' : '결재 대상 문서'
+  return <section className={references ? 'wb-reference-documents' : 'wb-target-documents'} aria-label={heading}>
+    <h3>{heading}</h3>
     <div className="wb-target-list">
-      {paths.map(path => <button type="button" key={path} className="wb-btn"
-        aria-pressed={path === selected} disabled={opening && path === selected} onClick={() => {
-          request.current++
-          setOpening(false)
-          setSelected(path)
-          setViewerError('')
-          setOffsets([0])
-          if (inlineDocument.test(path)) {
-            if (selected === path) setAttempt(n => n + 1)
-          } else void openWindow(path)
-        }}>
-        <span className="wb-target-type">{path.split('.').pop()?.toUpperCase()}</span>{label(path)} 열기
-      </button>)}
+      {paths.map(path => <div className="wb-document-row" key={path}>
+        <button type="button" className="wb-btn"
+          aria-pressed={path === selected} disabled={opening && path === selected} onClick={() => {
+            request.current++
+            setOpening(false)
+            setSelected(path)
+            setViewerError('')
+            setOffsets([0])
+            if (inlineDocument.test(path)) {
+              if (selected === path) setAttempt(n => n + 1)
+            } else void openWindow(path)
+          }}>
+          <span className="wb-target-type">{path.split('.').pop()?.toUpperCase()}</span>{label(path)} 열기
+        </button>
+        <DownloadButton name={label(path)} save={() => window.lt.workBoard.downloadDocument(workspace, id, path)} />
+      </div>)}
     </div>
     {opening && <p role="status">문서 창을 여는 중…</p>}
     {viewerError && <p className="wb-error" role="alert">{viewerError} <button type="button" className="wb-btn" onClick={() => void openWindow(selected)}>다시 열기</button></p>}
@@ -715,6 +740,7 @@ function DocumentTargets({ workspace, id, paths, previous, onOpenFile }: {
 function Details({
   task,
   workspace,
+  folder,
   readOnly,
   tasks,
   agents,
@@ -728,6 +754,7 @@ function Details({
 }: {
   task: BoardTask
   workspace: string
+  folder: string
   readOnly: boolean
   tasks: BoardTask[]
   agents: BoardAgent[]
@@ -792,14 +819,33 @@ function Details({
       setBusy(false)
     }
   }
-  const history = task.log.filter((l) => /결재|승인|반려|수정 지시/.test(l.text))
+  const history = task.log.filter(l => /^(?:승인$|반려 · |수정 지시 등록 · )/.test(l.text))
+  const permissions = task.log.filter(l => /^(?:결재 필요 · |권한 확인 또는 추가 답변 필요$|승인된 실행 · )/.test(l.text))
   const todoReview = isBoardTodoReview(task.body)
   const storedReason = files && !reportAvailable ? files.report.trim().replace(/^#{1,6}\s*(?:결재 필요|할\s*일 조회 확인 필요)\s*(?:\n+|$)/u, '').trim() : ''
-  const blockReason = /^mcp__[\w.-]+__[\w.-]+$/u.test(storedReason)
-    ? (todoReview ? '이전 실행은 할일 목록 조회 단계에서 멈췄습니다.' : '요청한 도구의 실행이 중단됐습니다.') + '\n요청한 도구 · ' + storedReason
-    : storedReason || (['blocked', 'failed'].includes(task.status) ? task.log.at(-1)?.text : '')
+  const lastEntry = task.log.at(-1)?.text || ''
+  const lastPermission = lastEntry === '권한 확인 또는 추가 답변 필요'
+    ? [...task.log].reverse().find(l => /^(?:결재 필요 · |수행 시작 · |검토 시작 · )/.test(l.text))?.text
+    : undefined
+  const diagnostic = storedReason || (['blocked', 'failed'].includes(task.status)
+    ? (lastPermission?.startsWith('결재 필요 · ') ? lastPermission : lastEntry).replace(/^결재 필요 · /, '') : '')
+  const bashBlocked = /(?:^|\n)\s*Bash\s*\(/i.test(diagnostic)
+  const toolBlocked = /^mcp__[\w.-]+__[\w.-]+$/u.test(diagnostic)
+  const blockReason = bashBlocked
+    ? (todoReview
+      ? '이전 실행에서 터미널 명령이 차단됐습니다. 조회 범위를 선택해 할일 정리를 다시 실행할 수 있습니다.'
+      : '요청한 터미널 명령이 이 지시에 허용되지 않아 실행이 중단됐습니다.')
+    : toolBlocked
+      ? (todoReview ? '이전 실행은 할일 목록 조회 단계에서 멈췄습니다.' : '요청한 도구를 사용할 권한이 없어 실행이 중단됐습니다.')
+      : diagnostic
   const targetReport = !todoReview && reportAvailable ? files?.report : undefined
-  const paths = useMemo(() => targetReport ? boardDocumentPaths(targetReport, workspace) : [], [targetReport, workspace])
+  const paths = useMemo(() => targetReport ? boardDocumentPaths(targetReport, workspace, folder, task.id) : [], [targetReport, workspace, folder, task.id])
+  const referencePaths = useMemo(() => {
+    const windows = /^(?:[a-z]:[\\/]|[\\/]{2})/i.test(workspace)
+    const key = (path: string) => windows ? path.toLowerCase() : path
+    const outputs = new Set(paths.map(key))
+    return boardReferencePaths(task.log, workspace, task.id, folder).filter(path => !outputs.has(key(path)))
+  }, [task.log, workspace, task.id, folder, paths])
   const reportIsTarget = reportAvailable && paths.length === 0 && !task.editedNeedsRun
   return (
     <Dialog title={task.title} close={close}>
@@ -807,7 +853,7 @@ function Details({
         {task.id} · {statusLabel[task.status]} · {agentName(task)}
         {task.due && ' · 기한 ' + task.due}
       </div>
-      {paths.length > 0 && <DocumentTargets key={JSON.stringify([detailKey, paths])}
+      {paths.length > 0 && <DocumentList key={JSON.stringify([detailKey, paths])}
         workspace={workspace} id={task.id} paths={paths} previous={!!task.editedNeedsRun} onOpenFile={onOpenFile} />}
       <section className={reportIsTarget ? 'wb-report-preview wb-target-documents' : 'wb-report-preview'}
         aria-label={reportIsTarget ? '결재 대상 문서' : '업무 보고서'}>
@@ -819,6 +865,7 @@ function Details({
         </div> : !files ? <p role="status">보고서를 불러오는 중…</p>
           : reportAvailable ? <ReportMarkdown text={files.report} todo={todoReview} />
           : <p className="wb-muted">아직 결재할 업무 보고서가 없습니다.</p>}
+        {reportAvailable && !task.editedNeedsRun && <DownloadButton key={detailKey} name="보고서" report save={() => window.lt.workBoard.downloadReport(workspace, task.id)} />}
         {task.editedNeedsRun && <p className="wb-muted">수정된 지시의 보고서는 다시 수행한 뒤 확인할 수 있습니다.</p>}
       </section>
       {files && (files.review || task.review_agent) && <section className="wb-review-preview">
@@ -828,7 +875,10 @@ function Details({
       {blockReason && <section className="wb-block-reason">
         <h3>{task.status === 'failed' ? '실패 사유' : '확인 사유'}</h3>
         <p className="wb-notes">{blockReason}</p>
+        {(bashBlocked || toolBlocked) && <details><summary>기술 정보</summary><pre className="wb-notes">{diagnostic}</pre></details>}
       </section>}
+      {referencePaths.length > 0 && <DocumentList key={JSON.stringify([detailKey, referencePaths])}
+        workspace={workspace} id={task.id} paths={referencePaths} references onOpenFile={onOpenFile} />}
       {task.after_approval && (
         <section>
           <h3>승인 후 실행</h3>
@@ -944,6 +994,10 @@ function Details({
           <summary>진행 로그 ({task.log.length})</summary>
           <ol>{task.log.map((l, i) => <li key={i}><time>{new Date(l.at).toLocaleString('ko-KR')}</time> · {l.text}</li>)}</ol>
         </details>
+        {permissions.length > 0 && <details>
+          <summary>도구 권한 기록 ({permissions.length})</summary>
+          <ol>{permissions.map((l, i) => <li key={i}><time>{new Date(l.at).toLocaleString('ko-KR')}</time> · {l.text}</li>)}</ol>
+        </details>}
         <details>
           <summary>결재 이력 ({history.length})</summary>
           {history.length ? <ol>{history.map((l, i) => <li key={i}><time>{new Date(l.at).toLocaleString('ko-KR')}</time> · {l.text}</li>)}</ol>
@@ -1272,6 +1326,7 @@ function BoardWorkspace({ workspace, view, onView, bulkSeed, boundCase, onOpenFi
               task={task}
               scopeOptions={scopeOptions}
               workspace={data.workspace || workspace}
+              folder={data.folder}
               readOnly={!!data.readOnly}
               tasks={data.tasks}
               agents={data.agents}
