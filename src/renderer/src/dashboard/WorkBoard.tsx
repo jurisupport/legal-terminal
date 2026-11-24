@@ -748,6 +748,7 @@ function Details({
   manageHere,
   scopeOptions,
   onOpenFile,
+  selectTask,
   onDecision,
   close,
   reorder
@@ -762,6 +763,7 @@ function Details({
   manageHere?: () => void
   scopeOptions: ScopeOptions
   onOpenFile: Props['onOpenFile']
+  selectTask: (id: string) => void
   close: () => void
   onDecision: (task: BoardTask, action: BoardDecision, reason: string, revision?: string, todoScope?: BoardTodoScope) => Promise<void>
   reorder?: () => Promise<void>
@@ -804,13 +806,14 @@ function Details({
     )
     return () => { current = false }
   }, [workspace, task.id, detailKey, readAttempt])
-  const act = async (fn: () => Promise<void>) => {
+  const act = async (fn: () => Promise<void>, keepOpen = false) => {
     if (busy) return
     setBusy(true)
     setError('')
     try {
       await fn()
-      close()
+      if (keepOpen) setReason('')
+      else close()
     } catch (err) {
       setError(errMsg(err))
       setReadAttempt(n => n + 1)
@@ -846,16 +849,64 @@ function Details({
     const outputs = new Set(paths.map(key))
     return boardReferencePaths(task.log, workspace, task.id, folder).filter(path => !outputs.has(key(path)))
   }, [task.log, workspace, task.id, folder, paths])
+  const reconcile = !!task.parentId && ['failed', 'blocked'].includes(task.status)
+  const recovery = canRetry || reconcile
+  const pendingChildren = !task.parentId && recovery
+    ? tasks.filter(t => t.parentId === task.id && ['failed', 'blocked'].includes(t.status)) : []
+  const canSubmit = !task.parentId && task.status === 'blocked' && !task.editedNeedsRun && reportAvailable && !!files && (!todoReview || !!task.review_agent)
+  const ApprovalControls = missingApprovalReport ? 'details' : 'div'
   const reportIsTarget = reportAvailable && paths.length === 0 && !task.editedNeedsRun
   return (
     <Dialog title={task.title} close={close}>
-      <div className="wb-muted">
-        {task.id} · {statusLabel[task.status]} · {agentName(task)}
-        {task.due && ' · 기한 ' + task.due}
+      <div className="wb-detail-meta">
+        <span className={recovery ? 'wb-needs-action' : ''}>{statusLabel[task.status]}</span>
+        {task.agent && <span>{agentName(task)}</span>}
+        {task.due && <span>기한 {task.due}</span>}
       </div>
+      {recovery && files && <section className="wb-recovery" aria-label="다음 행동">
+        {readOnly ? <>
+          <h3>이 PC에서 업무를 처리하려면</h3>
+          <p>현재 관리 기기를 이 PC로 변경하면 이 지시를 처리할 수 있습니다.</p>
+          {manageHere && <button className="wb-btn wb-primary" onClick={manageHere}>이 PC에서 관리</button>}
+        </> : pendingChildren.length ? <>
+          <h3>승인 후 실행 결과를 확인하세요</h3>
+          <p>외부에서 처리됐는지 먼저 확인할 지시가 있습니다.</p>
+          {pendingChildren.map(child => <button key={child.id} className="wb-btn wb-primary" onClick={() => selectTask(child.id)}>{child.title} · 결과 확인</button>)}
+        </> : reconcile ? <>
+          <h3>외부 실행 결과를 확인하세요</h3>
+          <p>실제 발송 또는 처리 여부를 확인한 뒤 결과를 기록하세요.</p>
+          <label>확인한 내용<textarea value={reason} rows={2} onChange={e => setReason(e.target.value)} /></label>
+          <div className="wb-actions">
+            <button className="wb-btn" disabled={busy || !reason.trim()} onClick={() => act(() => onDecision(task, 'reject', reason.trim()))}>미실행 확인 · 결재함으로</button>
+            <button className="wb-btn wb-primary" disabled={busy || !reason.trim()} onClick={() => act(() => onDecision(task, 'complete', reason.trim()))}>실행 확인 · 완료 처리</button>
+          </div>
+        </> : <form onSubmit={e => {
+          e.preventDefault()
+          if (busy || (retryTodo && !retryScope)) return
+          void act(() => onDecision(task, 'retry', reason.trim(), undefined, retryScope), true)
+        }}>
+          <h3>{retryTodo ? (retryScope ? '할일을 다시 조회하세요' : '조회할 할일을 선택하세요') : canSubmit ? '지금까지의 결과를 확인하세요' : '업무를 다시 실행하세요'}</h3>
+          <p>{retryTodo && (toolBlocked || bashBlocked)
+            ? '할일 목록을 가져오기 전에 멈췄습니다. 다시 조회하면 이 카드에 보고서가 표시됩니다.'
+            : blockReason || (task.editedNeedsRun ? '저장한 수정 내용으로 실행합니다.' :
+              missingApprovalReport ? '보고서가 없어 결재를 진행할 수 없습니다.' :
+              task.status === 'rejected' ? '반려 사유를 확인한 뒤 필요한 내용을 보완하세요.' :
+              canSubmit ? '보고서를 읽고 결재를 요청하거나 남은 작업을 다시 실행할 수 있습니다.' : '필요한 답변이나 수정 사항을 반영해 다시 시작할 수 있습니다.')}</p>
+          <div className="wb-recovery-action">
+            {retryTodo && <ScopeField options={scopes} value={retryScope} change={setChosenScope} />}
+            <button type="submit" className="wb-btn wb-primary" disabled={busy}>{retryTodo ? '할일 다시 조회' : '다시 실행'}</button>
+          </div>
+          {retryScope?.kind === 'all' && <small>{allTodosNotice}</small>}
+          <details><summary>{retryTodo ? '메모 추가' : '추가 답변 또는 지시 입력'}</summary>
+            <textarea aria-label={retryTodo ? '재조회 메모' : '추가 답변 또는 재수행 지시'} value={reason} rows={2} onChange={e => setReason(e.target.value)} />
+          </details>
+        </form>}
+        {diagnostic && <details className="wb-recovery-diagnostic"><summary>중단 사유 자세히</summary><pre className="wb-notes">{diagnostic}</pre></details>}
+        {error && <p className="wb-error" role="alert">{error}</p>}
+      </section>}
       {paths.length > 0 && <DocumentList key={JSON.stringify([detailKey, paths])}
         workspace={workspace} id={task.id} paths={paths} previous={!!task.editedNeedsRun} onOpenFile={onOpenFile} />}
-      <section className={reportIsTarget ? 'wb-report-preview wb-target-documents' : 'wb-report-preview'}
+      {(!files || reportAvailable || !recovery) && <section className={reportIsTarget ? 'wb-report-preview wb-target-documents' : 'wb-report-preview'}
         aria-label={reportIsTarget ? '결재 대상 문서' : '업무 보고서'}>
         <h3>{reportIsTarget ? '결재 대상 문서' : task.editedNeedsRun && reportAvailable ? '수정 전 보고서' : '업무 보고서'}</h3>
         {reportIsTarget && <p className="wb-target-title">업무 보고서 · {task.title}</p>}
@@ -864,18 +915,14 @@ function Details({
           <button type="button" className="wb-btn" onClick={() => setReadAttempt(n => n + 1)}>보고서 다시 불러오기</button>
         </div> : !files ? <p role="status">보고서를 불러오는 중…</p>
           : reportAvailable ? <ReportMarkdown text={files.report} todo={todoReview} />
-          : <p className="wb-muted">아직 결재할 업무 보고서가 없습니다.</p>}
+          : <p className="wb-muted" role="status">{task.status === 'queued' ? '실행을 기다리는 중입니다.' :
+            task.status === 'running' ? (todoReview ? '할일을 조회하고 있습니다.' : '업무를 수행하고 있습니다.') : '아직 결재할 업무 보고서가 없습니다.'}</p>}
         {reportAvailable && !task.editedNeedsRun && <DownloadButton key={detailKey} name="보고서" report save={() => window.lt.workBoard.downloadReport(workspace, task.id)} />}
         {task.editedNeedsRun && <p className="wb-muted">수정된 지시의 보고서는 다시 수행한 뒤 확인할 수 있습니다.</p>}
-      </section>
+      </section>}
       {files && (files.review || task.review_agent) && <section className="wb-review-preview">
         <h3>{task.editedNeedsRun && files.review ? '수정 전 검토 결과' : '검토 결과'}{task.review_agent && ' · ' + task.review_agent}</h3>
         <p className="wb-notes">{files.review || '검토 결과 대기 중'}</p>
-      </section>}
-      {blockReason && <section className="wb-block-reason">
-        <h3>{task.status === 'failed' ? '실패 사유' : '확인 사유'}</h3>
-        <p className="wb-notes">{blockReason}</p>
-        {(bashBlocked || toolBlocked) && <details><summary>기술 정보</summary><pre className="wb-notes">{diagnostic}</pre></details>}
       </section>}
       {referencePaths.length > 0 && <DocumentList key={JSON.stringify([detailKey, referencePaths])}
         workspace={workspace} id={task.id} paths={referencePaths} references onOpenFile={onOpenFile} />}
@@ -890,9 +937,10 @@ function Details({
       {!readOnly && (
         <div className="wb-form">
           {task.status === 'awaiting_approval' && (
-            <>
+            <ApprovalControls className="wb-approval-controls">
+              {missingApprovalReport && <summary>반려 또는 수정 지시</summary>}
               <label>
-                {missingApprovalReport ? '반려 사유·수정 지시 또는 재수행 메모' : '반려 사유 또는 수정 지시'}
+                반려 사유 또는 수정 지시
                 <textarea value={reason} rows={2} onChange={(e) => setReason(e.target.value)} />
               </label>
               <div className="wb-actions">
@@ -918,59 +966,13 @@ function Details({
                   승인
                 </button>}
               </div>
-            </>
+            </ApprovalControls>
           )}
-          {task.parentId && ['failed', 'blocked'].includes(task.status) && (
-            <>
-              <label>
-                외부 실행 결과 확인 기록
-                <textarea value={reason} rows={2} onChange={(e) => setReason(e.target.value)} />
-              </label>
-              <div className="wb-actions">
-                <button
-                  className="wb-btn"
-                  disabled={busy || !reason.trim()}
-                  onClick={() => act(() => onDecision(task, 'reject', reason.trim()))}
-                >
-                  미실행 확인 · 결재함으로
-                </button>
-                <button
-                  className="wb-btn"
-                  disabled={busy || !reason.trim()}
-                  onClick={() => act(() => onDecision(task, 'complete', reason.trim()))}
-                >
-                  실행 확인 · 완료 처리
-                </button>
-              </div>
-            </>
-          )}
-          {canRetry && (
-            <>
-              {!missingApprovalReport && <label>
-                {retryTodo ? '재조회 메모 (선택)' : '추가 답변 또는 재수행 지시'}
-                <textarea value={reason} rows={2} onChange={(e) => setReason(e.target.value)} />
-              </label>}
-              {retryTodo && <>
-                <p className="wb-muted">{scopes.pinned ? '연결된 사건을 확인한 뒤' : '아래에서 할일 검토 범위를 선택한 뒤'} ‘다시 대기열에 넣기’를 누르면 할일을 다시 조회합니다.</p>
-                <ScopeField options={scopes} value={retryScope} change={setChosenScope} />
-              </>}
-              <div className="wb-actions">
-                {retryScope?.kind === 'all' && <small>{allTodosNotice}</small>}
-                <button
-                  className="wb-btn"
-                  disabled={busy || (retryTodo && !retryScope)}
-                  onClick={() => act(() => onDecision(task, 'retry', reason.trim(), undefined, retryScope))}
-                >
-                  다시 대기열에 넣기
-                </button>
-                {task.status === 'blocked' && !task.editedNeedsRun && reportAvailable && files && (!todoReview || !!task.review_agent) && (
-                  <button className="wb-btn" disabled={busy} onClick={() => act(() => onDecision(task, 'submit', '', boardRevision(task, files)))}>
-                    현재 보고서로 결재 요청
-                  </button>
-                )}
-              </div>
-            </>
-          )}
+          {canSubmit && files && !pendingChildren.length && <div className="wb-actions">
+            <button className="wb-btn" disabled={busy} onClick={() => act(() => onDecision(task, 'submit', '', boardRevision(task, files)))}>
+              현재 보고서로 결재 요청
+            </button>
+          </div>}
           {reorder && (
             <div className="wb-actions">
               <button className="wb-btn" disabled={busy} onClick={() => act(reorder)}>
@@ -980,7 +982,7 @@ function Details({
           )}
         </div>
       )}
-      {error && (
+      {error && (!recovery || !files) && (
         <p className="wb-error" role="alert">
           {error}
         </p>
@@ -989,6 +991,7 @@ function Details({
         <details>
           <summary>지시 본문</summary>
           <p className="wb-notes">{task.body}</p>
+          <small className="wb-muted">지시 ID · {task.id}</small>
         </details>
         <details>
           <summary>진행 로그 ({task.log.length})</summary>
@@ -1004,7 +1007,7 @@ function Details({
           : <p className="wb-muted">결재 이력이 없습니다.</p>}
         </details>
       </div>
-      {readOnly ? <div className="wb-management">
+      {readOnly ? !recovery && <div className="wb-management">
         <p>지시 수정·삭제와 결재는 관리 기기에서 할 수 있습니다.</p>
         {manageHere && <button className="wb-btn" onClick={manageHere}>이 PC에서 관리</button>}
       </div> : <div className="wb-management" aria-label="선택한 지시 관리">
@@ -1329,6 +1332,7 @@ function BoardWorkspace({ workspace, view, onView, bulkSeed, boundCase, onOpenFi
               folder={data.folder}
               readOnly={!!data.readOnly}
               tasks={data.tasks}
+              selectTask={setSelected}
               agents={data.agents}
               refresh={refresh}
               manageHere={requestTakeover}

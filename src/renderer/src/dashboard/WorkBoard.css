@@ -128,3 +128,24 @@
 .wb-block-reason details { margin-top: 6px; }
 .wb-block-reason summary { cursor: pointer; }
 .wb-block-reason pre { max-height: 14em; overflow: auto; }
+
+.wb-detail-meta { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; color: var(--wb-muted); font-size: 12px; }
+.wb-needs-action { border-radius: 4px; padding: 2px 8px; background: #fff0d7; color: #855510; font-weight: 650; }
+.wb-recovery { margin: 12px 0 18px; padding: 16px; border: 1px solid #b9ccdc; border-left: 4px solid #416888; border-radius: 7px; background: #f5f9fc; }
+.wb-recovery h3 { margin: 0; font-size: 18px; line-height: 1.4; }
+.wb-recovery p { margin: 4px 0 12px; }
+.wb-recovery form { gap: 6px; }
+.wb-recovery form > p { margin: 0 0 6px; }
+.wb-recovery-action { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 10px; }
+.wb-recovery-action > .wb-wide { flex: 1 1 190px; margin: 0; }
+.wb-recovery-action select, .wb-recovery-action button, .wb-recovery > .wb-primary { min-height: 38px; }
+.wb-recovery .wb-primary { padding: 8px 15px; font-weight: 650; }
+.wb-recovery details { color: var(--wb-muted); font-size: 12px; margin-top: 6px; }
+.wb-recovery details > summary { cursor: pointer; }
+.wb-recovery textarea { width: 100%; }
+.wb-recovery details textarea, .wb-recovery details pre { margin-top: 6px; }
+.wb-recovery-diagnostic pre { max-height: 9em; overflow: auto; }
+.wb-recovery small { color: var(--wb-muted); }
+
+.wb-approval-controls > label { margin-bottom: 8px; }
+.wb-approval-controls > summary { cursor: pointer; }
