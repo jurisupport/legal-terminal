@@ -53,17 +53,16 @@ async function publishNew(temporary: string, target: string) {
   }
   // On volumes without hard links, reserve the new name exclusively before publishing the completed file.
   const reservation = await open(target,'wx',0o600)
+  const empty = await reservation.stat().finally(() => reservation.close())
+  const stillReserved = async () => sameFileVersion(empty,await inspect(target))
   try {
-    const empty = await reservation.stat()
-    const stillReserved = async () => sameFileVersion(empty,await inspect(target))
-    try {
-      if (!await stillReserved()) throw new Error('저장 위치에 다른 파일이 생겼습니다. 다시 선택해 주세요.')
-      await rename(temporary,target)
-    } catch (error) {
-      if (await stillReserved()) await unlink(target)
-      throw error
-    }
-  } finally { await reservation.close() }
+    // Windows needs the reservation handle closed before replacing its directory entry.
+    if (!await stillReserved()) throw new Error('저장 위치에 다른 파일이 생겼습니다. 다시 선택해 주세요.')
+    await rename(temporary,target)
+  } catch (error) {
+    if (await stillReserved()) await unlink(target)
+    throw error
+  }
 }
 
 async function download(board: WorkBoard, parent: BrowserWindow, resolveSource: () => Promise<Source>): Promise<boolean> {
