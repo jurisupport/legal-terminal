@@ -10,8 +10,6 @@ import type { BoardStatus, BoardTask, BoardTeam } from '../shared/workBoard'
 
 const statuses: BoardStatus[] = ['queued', 'running', 'delegated', 'blocked', 'reported', 'in_review', 'awaiting_approval', 'approved', 'rejected', 'done', 'failed']
 const template = ['결론', '한 일', '산출물 경로', '결재 요청 사항', '미확인 사항', '기한·위험'].map(s => '## ' + s + '\n\n').join('')
-// Departments are the user's own organization. A new board starts without any.
-const teams: BoardTeam[] = []
 
 const idPattern = /^[a-z\d][a-z\d_-]{0,127}$/i
 function validId(id: unknown): id is string {
@@ -67,11 +65,12 @@ function parseTask(id: string, source: string, fallbackDate = new Date().toISOSt
   for (const key of ['order', 'attempts']) {
     if (v[key] != null && (!Number.isSafeInteger(v[key]) || Number(v[key]) < 0)) throw new Error('숫자 속성을 확인해 주세요: ' + key)
   }
+  if (v.cost != null && (typeof v.cost !== 'number' || !Number.isFinite(v.cost) || v.cost < 0)) throw new Error('비용 기록을 확인해 주세요.')
   for (const key of ['createdAt', 'updatedAt']) if (v[key] != null && !date(v[key])) throw new Error('날짜 속성을 확인해 주세요: ' + key)
   if (v.editedNeedsRun !== undefined && v.editedNeedsRun !== true) throw new Error('수정 후 재실행 상태를 확인해 주세요.')
   if (v.log != null && (!Array.isArray(v.log) || !v.log.every(e => e && date(e.at) && typeof e.text === 'string'))) throw new Error('진행 기록의 형식을 확인해 주세요.')
   // YAML null is common in unfilled optional fields.
-  const optionalKeys = ['agent', 'team', 'delegatedBy', 'review_agent', 'due', 'after_approval', 'sessionId', 'parentId', 'depends_on', 'allowed_tools', 'approval', 'order', 'attempts', 'createdAt', 'updatedAt', 'editedNeedsRun']
+  const optionalKeys = ['agent', 'team', 'delegatedBy', 'review_agent', 'due', 'after_approval', 'sessionId', 'parentId', 'depends_on', 'allowed_tools', 'approval', 'order', 'attempts', 'cost', 'createdAt', 'updatedAt', 'editedNeedsRun']
   const fields = Object.fromEntries(optionalKeys.filter(k => v[k] != null).map(k => [k, v[k]]))
   if (v.followUp != null) fields.followUp = followUpSnapshot(v.followUp, id)
   if (v.reportReceipt != null) {
@@ -94,9 +93,9 @@ export function validTeams(rows: unknown[]): BoardTeam[] {
     names.add(name)
     if (typeof value.color !== 'string' || !/^#[\da-f]{6}$/i.test(value.color)) throw new Error('부서 색상(#RRGGBB)을 확인해 주세요: ' + name)
     if (!strings(value.agents) || value.agents.some(agent => !agent.trim())) throw new Error('부서원 목록을 확인해 주세요: ' + name)
-    if (value.lead != null && (typeof value.lead !== 'string' || !value.lead.trim())) throw new Error('부서장 이름을 확인해 주세요: ' + name)
+    // A legacy `lead` named a specialist as head. The app's built-in head replaces it.
     const agents = [...new Set(value.agents.map(agent => agent.trim()))]
-    return {name, color: value.color, agents, ...(typeof value.lead === 'string' && {lead: value.lead.trim()})}
+    return {name, color: value.color, agents}
   })
 }
 
@@ -183,7 +182,7 @@ export class WorkBoardStore {
 
   async init(): Promise<void> {
     await this.ensureDir(this.root)
-    for (const [name, content] of [['_보고서양식.md', template], ['teams.yaml', dump({teams})]]) {
+    for (const [name, content] of [['_보고서양식.md', template]]) {
       if (await this.readText(name) === null) {
         try { await this.writeText(name, content, true) }
         catch (error) { if (await this.readText(name) === null) throw error }
@@ -557,6 +556,7 @@ export class WorkBoardStore {
     for (const {name:sidecar,content} of previous) if (content !== null) await this.removeUnchanged(fs,sidecar,content)
   }
 
+  /** Departments a board kept before they moved office-wide. Read only to offer a one-time import. */
   async teams(): Promise<BoardTeam[]> {
     const source = await this.readText('teams.yaml')
     if (source === null) return []
@@ -569,12 +569,5 @@ export class WorkBoardStore {
       this.warnings.push('teams.yaml · ' + (error instanceof Error ? error.message : String(error)))
       return []
     }
-  }
-
-  async saveTeams(input: unknown): Promise<BoardTeam[]> {
-    if (!Array.isArray(input)) throw new Error('부서 목록을 확인해 주세요.')
-    const rows = validTeams(input)
-    await this.writeText('teams.yaml', dump({teams: rows}, {noRefs: true, lineWidth: -1}))
-    return rows
   }
 }

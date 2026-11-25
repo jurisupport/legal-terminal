@@ -9,6 +9,8 @@ import { boardFollowUpRevision, boardRevision } from '../src/shared/workBoard.ts
 
 // Bundle the real dispatcher and store, replacing only the external Claude service.
 const dir = await mkdtemp(join(tmpdir(), 'work-board-flow-'))
+// Office departments live outside the board; keep them in the test folder.
+process.env.LEGAL_TERMINAL_DEPARTMENTS_DIR = join(dir, 'departments')
 const require = createRequire(import.meta.url)
 const { outputFiles } = await build({
   entryPoints: ['src/main/workBoard.ts'], bundle: true, write: false, platform: 'node', format: 'cjs',
@@ -21,7 +23,7 @@ const { outputFiles } = await build({
         contents:'export const {readBoardTodos,readBoardMcpTodos,getBoardTodoAccount,verifyBoardTodoScope}=globalThis.boardTodoFixture'
       }))
       build.onLoad({ filter: /.*/, namespace: 'mock' }, ({ path }) => ({
-        contents: path === 'remote' ? 'export {}' : 'export const listBoardAgents=async()=>[];export const runBoardAgent=(input)=>globalThis.boardRunFixture(input)'
+        contents: path === 'remote' ? 'export {}' : 'export const listBoardAgents=async()=>[];export const boardRunCost=e=>e?.costUsd;export const runBoardAgent=(input)=>globalThis.boardRunFixture(input)'
       }))
     }
   }]

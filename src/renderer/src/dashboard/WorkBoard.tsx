@@ -1,4 +1,4 @@
-import { boardDelegates, isBoardDepartmentTask, boardFollowUpRevision, boardRequestsTodoRead, boardResultKind, isBoardReport, isBoardDecisionPending, canRetryAsReport, boardReferencePaths, boardDocumentPaths, boardMutationIssue, boardReportAvailable, boardRevision, requestsCurrentBoardCase, isBoardTodoReview } from '../../../shared/workBoard'
+import { boardDelegates, boardDepartmentTools, boardInstructionCost, descriptionsOverlap, formatUsd, isBoardDepartmentTask, boardFollowUpRevision, boardRequestsTodoRead, boardResultKind, isBoardReport, isBoardDecisionPending, canRetryAsReport, boardReferencePaths, boardDocumentPaths, boardMutationIssue, boardReportAvailable, boardRevision, requestsCurrentBoardCase, isBoardTodoReview } from '../../../shared/workBoard'
 import DOMPurify from 'dompurify'
 import { marked, Renderer } from 'marked'
 import { createPortal } from 'react-dom'
@@ -12,6 +12,7 @@ import type {
   BoardStatus,
   BoardTask,
   BoardTeam,
+  BoardToolLevel,
   BoardTodoScope
 } from '../../../shared/workBoard'
 import { isBoardDueSoon, isBoardRunning } from '../../../shared/workBoardSummary'
@@ -332,7 +333,7 @@ function InstructionForm({
                   {!existing?.delegatedBy && (teams.length > 0 || d.team) && <optgroup label="부서 · 부서장이 나눠 맡김">
                     {d.team && !teams.some(team => team.name === d.team) && <option value={'team:' + d.team}>{d.team} (현재 미등록)</option>}
                     {teams.map(team => <option key={team.name} value={'team:' + team.name}>
-                      {team.name} · 부서장 {team.lead || '기본 세션'} · 부서원 {team.agents.length}명
+                      {team.name} · 부서원 {team.agents.length}명{team.description ? ' · ' + team.description : ''}
                     </option>)}
                   </optgroup>}
                   <optgroup label="개별 담당 에이전트">
@@ -521,7 +522,7 @@ function Settings({
 }
 
 function Organization({ data, edit }: { data: BoardSnapshot; edit?: () => void }) {
-  const seen = new Set(data.teams.flatMap((t) => [...t.agents, ...(t.lead ? [t.lead] : [])]))
+  const seen = new Set(data.teams.flatMap((t) => t.agents))
   const extra = new Set(
     [...data.agents.map((a) => a.name), ...data.tasks.filter(t => !t.team).map(agentName)].filter((a) => !seen.has(a))
   )
@@ -570,13 +571,20 @@ function Organization({ data, edit }: { data: BoardSnapshot; edit?: () => void }
               <i style={{ backgroundColor: team.color }} />
               {team.name}
             </h4>
+            {team.description && <p className="wb-muted wb-team-description">{team.description}</p>}
             <div className="wb-split-label wb-org-lead">
               <span>
                 {leading && <i className="wb-dot" aria-label="부서장 수행 중" />}
-                부서장 · {team.lead || '기본 세션'}
+                부서장 · 앱 기본 지침{team.leadGuide ? ' + 추가 지침' : ''}
               </span>
               <span>부서 업무 {work.filter(active).length}건</span>
             </div>
+            {(data.departments?.usage[team.name] ?? 0) > 0 && <div className="wb-split-label">
+              <span>이번 달 비용</span>
+              <span className={team.warnMonthlyUsd && (data.departments?.usage[team.name] ?? 0) >= team.warnMonthlyUsd ? 'wb-needs-action' : ''}>
+                {formatUsd(data.departments!.usage[team.name])}{team.warnMonthlyUsd ? ' / 경고선 ' + formatUsd(team.warnMonthlyUsd) : ''}
+              </span>
+            </div>}
             {team.agents.map(member)}
             {!team.agents.length && <p className="wb-muted">부서원이 없습니다.</p>}
           </section>
@@ -597,14 +605,24 @@ function Organization({ data, edit }: { data: BoardSnapshot; edit?: () => void }
 
 const teamColors = ['#376ac6', '#148369', '#c65f16', '#8c44bb', '#c42c32', '#168097']
 
-function TeamEditor({ data, save, close }: {
+const toolLevelLabel: Record<BoardToolLevel, string> = { allow: '허용 (결재 없음)', ask: '먼저 묻기 (결재함)', off: '끔' }
+
+function usdInput(value: number | undefined) {
+  return value === undefined ? '' : String(value)
+}
+
+function TeamEditor({ data, save, close, restore, importLegacy, suggest }: {
   data: BoardSnapshot
   save: (teams: BoardTeam[]) => Promise<void>
   close: () => void
+  restore: (versionId: string) => Promise<void>
+  importLegacy: () => Promise<void>
+  suggest: () => Promise<{ teams: BoardTeam[]; missing: string[] }>
 }) {
-  const [rows, setRows] = useState<BoardTeam[]>(() => data.teams.map((team) => ({ ...team, agents: [...team.agents] })))
+  const [rows, setRows] = useState<BoardTeam[]>(() => data.teams.map((team) => structuredClone(team)))
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
+  const [notice, setNotice] = useState('')
   const names = data.agents.map((agent) => agent.name)
   const describe = (name: string) => data.agents.find((agent) => agent.name === name)?.description
   const update = (index: number, patch: Partial<BoardTeam>) =>
@@ -615,30 +633,62 @@ function TeamEditor({ data, save, close }: {
   const issue = inUse.length
     ? `진행 중인 업무가 있는 부서는 삭제하거나 이름을 바꿀 수 없습니다: ${inUse.map((team) => team.name).join(', ')}`
     : undefined
+  // Overlapping descriptions make the wrong department or member easy to pick.
+  const overlaps = useMemo(() => {
+    const found: string[] = []
+    rows.forEach((a, i) => rows.slice(i + 1).forEach((b) => {
+      if (descriptionsOverlap(a.description ?? '', b.description ?? '')) found.push(`부서 설명이 겹칩니다: ${a.name || '새 부서'} · ${b.name || '새 부서'}`)
+    }))
+    for (const row of rows) row.agents.forEach((a, i) => row.agents.slice(i + 1).forEach((b) => {
+      if (descriptionsOverlap(describe(a) ?? '', describe(b) ?? '')) found.push(`${row.name || '새 부서'} 부서원 설명이 겹칩니다: ${a} · ${b}`)
+    }))
+    return found
+  }, [rows, data.agents])
+  const run = async (work: () => Promise<void>) => {
+    if (busy) return
+    setBusy(true)
+    setError('')
+    try { await work() } catch (err) {
+      setError(errMsg(err).replace(/^Error invoking remote method '[^']+': (?:Error: )?/, ''))
+    } finally { setBusy(false) }
+  }
+  const history = data.departments?.history ?? []
+  const legacy = data.departments?.legacy ?? []
   return (
     <Dialog title="부서 관리" close={() => { if (!busy) close() }}>
-      <form onSubmit={async (e) => {
+      <form onSubmit={(e) => {
         e.preventDefault()
-        if (busy || issue) return
-        setBusy(true)
-        setError('')
-        try {
-          await save(rows.map((row) => ({ ...row, name: row.name.trim(), lead: row.lead || undefined })))
+        if (issue) return
+        void run(async () => {
+          await save(rows.map((row) => ({ ...row, name: row.name.trim() })))
           close()
-        } catch (err) {
-          setError(errMsg(err).replace(/^Error invoking remote method '[^']+': (?:Error: )?/, ''))
-        } finally {
-          setBusy(false)
-        }
+        })
       }}>
         <p className="wb-muted">
-          부서에 업무를 맡기면 부서장이 업무를 나눠 부서원에게 하위 업무로 배분합니다. 부서원 보고서가 모두 도착하면 부서장이 최종 보고서를 써서 보고서함이나 결재함으로 보냅니다.
+          부서는 사무소 전체에 한 벌입니다. 부서에 업무를 맡기면 앱의 부서장이 필요한 부서원에게만 하위 업무를 나눠 맡기고, 부서원 보고서를 모아 최종 보고서를 보고서함이나 결재함으로 보냅니다.
+          {data.departments?.home && <> 저장 위치: <code>{data.departments.home}</code></>}
         </p>
         {!names.length && (
           <p className="wb-muted">
-            등록된 에이전트가 없습니다. Claude 설정 폴더의 agents 폴더(예: ~/.claude/agents)에 에이전트 정의 파일(.md)을 넣으면 부서장·부서원으로 고를 수 있습니다.
+            등록된 전문가가 없습니다. 이 업무를 실행하는 컴퓨터의 Claude 설정 폴더(~/.claude/agents)나 켜 둔 플러그인에 전문가 정의 파일(.md)이 있어야 부서원으로 고를 수 있습니다.
           </p>
         )}
+        {!rows.length && (
+          <div className="wb-actions wb-team-start">
+            <button type="button" className="wb-btn" disabled={busy} onClick={() => void run(async () => {
+              const { teams, missing } = await suggest()
+              setRows(teams)
+              setNotice(missing.length ? `전문가 파일이 없어 빼고 불러온 부서원 ${missing.length}명: ${missing.join(', ')}` : '제안 구성을 불러왔습니다. 확인 후 저장하세요.')
+            })}>제안 구성 불러오기</button>
+            {legacy.length > 0 && !data.teams.length && (
+              <button type="button" className="wb-btn" disabled={busy} onClick={() => void run(async () => {
+                await importLegacy()
+                close()
+              })}>이 보드의 기존 부서 {legacy.length}개 가져오기</button>
+            )}
+          </div>
+        )}
+        {notice && <p className="wb-muted" role="status">{notice}</p>}
         {rows.map((row, i) => (
           <fieldset className="wb-draft" key={i} disabled={busy}>
             <legend>{row.name.trim() || '새 부서'}</legend>
@@ -652,12 +702,9 @@ function TeamEditor({ data, save, close }: {
                 <input type="color" value={row.color} onChange={(e) => update(i, { color: e.target.value })} />
               </label>
               <label className="wb-wide">
-                부서장
-                <select value={row.lead || ''} onChange={(e) => update(i, { lead: e.target.value || undefined })}>
-                  <option value="">기본 세션</option>
-                  {row.lead && !names.includes(row.lead) && <option value={row.lead}>{row.lead} (현재 미등록)</option>}
-                  {names.map((name) => <option key={name} value={name} title={describe(name)}>{name}</option>)}
-                </select>
+                부서 설명
+                <input maxLength={300} value={row.description ?? ''} placeholder="이 부서가 맡는 일. 다른 부서와 겹치지 않게 적으세요."
+                  onChange={(e) => update(i, { description: e.target.value || undefined })} />
               </label>
               <div className="wb-wide wb-members" role="group" aria-label={(row.name.trim() || '새 부서') + ' 부서원'}>
                 <span>부서원</span>
@@ -668,8 +715,45 @@ function TeamEditor({ data, save, close }: {
                     {name}{!names.includes(name) && ' (현재 미등록)'}{describe(name) && <small> · {describe(name)}</small>}
                   </label>
                 ))}
-                {!names.length && !row.agents.length && <small>고를 수 있는 에이전트가 없습니다.</small>}
+                {!names.length && !row.agents.length && <small>고를 수 있는 전문가가 없습니다.</small>}
               </div>
+              <label className="wb-wide">
+                부서 규칙 <small>부서원 모두의 지침 앞에 붙습니다.</small>
+                <textarea rows={4} maxLength={20000} value={row.rules ?? ''} placeholder="예: 사건 폴더의 _사건개요.md를 먼저 읽는다. 광고 문구는 변호사법·변호사 광고 규정을 지킨다."
+                  onChange={(e) => update(i, { rules: e.target.value || undefined })} />
+              </label>
+              <label className="wb-wide">
+                부서장 추가 지침 <small>앱 기본 부서장 지침에 덧붙습니다.</small>
+                <textarea rows={3} maxLength={20000} value={row.leadGuide ?? ''} placeholder="예: 서면 초안은 반드시 법리 검토 뒤에 맡긴다."
+                  onChange={(e) => update(i, { leadGuide: e.target.value || undefined })} />
+              </label>
+              <div className="wb-wide wb-team-tools" role="group" aria-label={(row.name.trim() || '새 부서') + ' 도구 권한'}>
+                <span>도구 권한</span>
+                {boardDepartmentTools.map((tool) => (
+                  <label key={tool.key}>
+                    {tool.label}
+                    <select value={row.tools?.[tool.key] ?? 'off'} onChange={(e) => {
+                      const tools = { ...row.tools, [tool.key]: e.target.value as BoardToolLevel }
+                      if (e.target.value === 'off') delete tools[tool.key]
+                      update(i, { tools: Object.keys(tools).length ? tools : undefined })
+                    }}>
+                      {(tool.readOnly ? ['allow', 'off'] as const : ['ask', 'off'] as const).map((level) =>
+                        <option key={level} value={level}>{toolLevelLabel[level]}</option>)}
+                    </select>
+                  </label>
+                ))}
+                <small>결재 없이 허용할 수 있는 것은 읽기 전용 도구뿐입니다. 꺼 둔 도구는 결재 요청도 만들지 않습니다.</small>
+              </div>
+              <label>
+                지시 1건 경고선 (USD)
+                <input type="number" min="0.01" step="0.01" value={usdInput(row.warnInstructionUsd)}
+                  onChange={(e) => update(i, { warnInstructionUsd: e.target.value ? Number(e.target.value) : undefined })} />
+              </label>
+              <label>
+                월간 경고선 (USD)
+                <input type="number" min="0.01" step="0.01" value={usdInput(row.warnMonthlyUsd)}
+                  onChange={(e) => update(i, { warnMonthlyUsd: e.target.value ? Number(e.target.value) : undefined })} />
+              </label>
             </div>
             <div className="wb-actions">
               <button type="button" className="wb-btn wb-remove" onClick={() => setRows((current) => current.filter((_, j) => j !== i))}>
@@ -684,6 +768,26 @@ function TeamEditor({ data, save, close }: {
             ＋ 부서 추가
           </button>
         </div>
+        {overlaps.length > 0 && <ul className="wb-warning" aria-label="설명 겹침">{overlaps.map((text) => <li key={text}>{text}</li>)}</ul>}
+        {history.length > 0 && (
+          <details className="wb-team-history">
+            <summary>변경 이력 {history.length}건</summary>
+            <ol>
+              {history.map((version) => (
+                <li key={version.id}>
+                  <span>{new Date(version.at).toLocaleString('ko-KR')} 이전 판 · 부서 {version.teams}개</span>
+                  <button type="button" className="wb-btn" disabled={busy} onClick={() => {
+                    if (!window.confirm('이 판으로 되돌릴까요? 지금 구성은 변경 이력에 보관됩니다.')) return
+                    void run(async () => {
+                      await restore(version.id)
+                      close()
+                    })
+                  }}>이 판으로 되돌리기</button>
+                </li>
+              ))}
+            </ol>
+          </details>
+        )}
         {issue && <p className="wb-error" role="status">{issue}</p>}
         {error && <p className="wb-error" role="alert">{error}</p>}
         <div className="wb-actions">
@@ -1061,9 +1165,12 @@ function Details({
     <Dialog title={task.title} close={close}>
       <div className="wb-detail-meta">
         <span className={recovery ? 'wb-needs-action' : ''}>{resultKind === 'action' && task.status === 'approved' ? '승인됨 · 실행 결과 대기' : statusLabel[task.status]}</span>
-        {task.team && <span>{task.team} 부서 · 부서장 {teams.find(team => team.name === task.team)?.lead || '기본 세션'}</span>}
+        {task.team && <span>{task.team} 부서{teams.some(team => team.name === task.team) ? '' : ' (현재 미등록)'}</span>}
         {task.agent && <span>{task.delegatedBy ? '부서원 ' : ''}{agentName(task)}</span>}
         {task.due && <span>기한 {task.due}</span>}
+        {boardInstructionCost(task, tasks) > 0 && <span title="SDK가 추정한 모델 사용 비용입니다. 청구 금액과 다를 수 있습니다.">
+          비용 {formatUsd(boardInstructionCost(task, tasks))}{boardDelegates(task, tasks).length ? ' · 부서원 포함' : ''}
+        </span>}
       </div>
       {!nearReport && !nearDecision && followUpActions}
       {(isBoardDepartmentTask(task) || task.delegatedBy) && <section className="wb-delegates" aria-label="부서 배분">
@@ -1635,6 +1742,15 @@ function BoardWorkspace({ workspace, view, onView, bulkSeed, boundCase, onOpenFi
                 await api.saveTeams(workspace, teams)
                 await refresh()
               }}
+              restore={async (versionId) => {
+                await api.restoreTeams(workspace, versionId)
+                await refresh()
+              }}
+              importLegacy={async () => {
+                await api.importLegacyTeams(workspace)
+                await refresh()
+              }}
+              suggest={() => api.suggestedTeams(workspace)}
             />
           )}
           {task && (

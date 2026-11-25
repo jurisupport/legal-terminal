@@ -11,6 +11,8 @@ import { WorkBoardStore } from '../src/main/workBoardStore.ts'
 import { boardRevision } from '../src/shared/workBoard.ts'
 
 const tmp = await realpath(await mkdtemp(join(tmpdir(), 'board-edit-')))
+// Office departments live outside the board; keep them in the test folder.
+process.env.LEGAL_TERMINAL_DEPARTMENTS_DIR = join(tmp, 'departments')
 const folder = join(tmp, 'board'), app = join(tmp, 'app')
 const source = new WorkBoardStore(folder)
 const events = [], runs = []
@@ -26,7 +28,7 @@ const result = await build({
   plugins:[{name:'isolated-board',setup(b) {
     b.onResolve({filter:/^\.\/(?:workBoardRunner|workBoardScope|workBoardTodos|remoteFs)$/}, a=>({path:a.path,namespace:'fixture'}))
     b.onLoad({filter:/.*/,namespace:'fixture'},({path})=>({contents:{
-      './workBoardRunner':'export const listBoardAgents=async()=>[]; export const runBoardAgent=globalThis.editTestRunner',
+      './workBoardRunner':'export const listBoardAgents=async()=>[]; export const boardRunCost=()=>undefined; export const runBoardAgent=globalThis.editTestRunner',
       './workBoardScope':'export const verifyBoardTodoScope=async()=>true',
       './workBoardTodos':'export const getBoardTodoAccount=async()=>"test-account"; export const readBoardMcpTodos=async()=>"[]"; export const readBoardTodos=async()=>"미완료 0건"',
       './remoteFs':'export {}'

@@ -4,19 +4,22 @@ import { homedir } from 'node:os'
 import { join, sep } from 'node:path'
 import { promisify } from 'node:util'
 import { load, JSON_SCHEMA } from 'js-yaml'
-import { createSdkMcpServer, query, tool } from '@anthropic-ai/claude-agent-sdk'
+import { createSdkMcpServer, query, tool, type AgentDefinition, type EffortLevel } from '@anthropic-ai/claude-agent-sdk'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import { z } from 'zod'
-import type { BoardAgent, BoardTask } from '../shared/workBoard'
+import type { BoardAgent, BoardTask, BoardTeam } from '../shared/workBoard'
 import { prepareBoardRemoteClaude } from './agent/boardRemoteClaude'
 import { cleanEnv, packagedClaudeAgentSdkExecutable } from './agent/agent-service'
 import { isRemote, rfsBoardAgentSources, rfsBoardApprovedCommand, rfsList, rfsMkdir, rfsRealpath, rfsWriteText } from './remoteFs'
 import { readWorkspaceDocument } from './projectAgent'
 import { boardFileTools, boardPermission, boardRelativePath, readBoardPolicy } from './workBoardPolicy'
 
-async function localAgentSources(): Promise<string[]> {
-  const directory = join(process.env.CLAUDE_CONFIG_DIR || join(homedir(), '.claude'), 'agents')
+function claudeConfigDir() {
+  return process.env.CLAUDE_CONFIG_DIR || join(homedir(), '.claude')
+}
+
+async function markdownFiles(directory: string): Promise<string[]> {
   const sources: string[] = []
   const entries = await readdir(directory, { withFileTypes: true }).catch(err => {
     if (err.code === 'ENOENT') return []
@@ -29,18 +32,70 @@ async function localAgentSources(): Promise<string[]> {
   return sources
 }
 
-async function definitions(workspace: string): Promise<Map<string, BoardAgent & { prompt: string }>> {
-  const sources = isRemote(workspace) ? await rfsBoardAgentSources(workspace) : await localAgentSources()
-  const result = new Map<string, BoardAgent & { prompt: string }>()
-  for (const text of sources) {
-    const parts = /^\uFEFF?---\r?\n([\s\S]*?)\r?\n---\r?\n([\s\S]*)$/.exec(text)
+/** Plugins Claude Code has installed and enabled on this computer. */
+export async function enabledClaudePlugins(): Promise<{ name: string; path: string }[]> {
+  const config = claudeConfigDir()
+  const read = async (path: string) => JSON.parse(await readFile(path, 'utf8').catch(() => '{}'))
+  const installed = await read(join(config, 'plugins', 'installed_plugins.json')).catch(() => ({}))
+  const enabled = (await read(join(config, 'settings.json')).catch(() => ({}))).enabledPlugins ?? {}
+  const plugins: { name: string; path: string }[] = []
+  for (const [key, value] of Object.entries(installed?.plugins ?? {})) {
+    const name = key.split('@')[0]
+    const entry = (Array.isArray(value) ? value : [value]).find(row => typeof row?.installPath === 'string')
+    if (enabled[key] === true && /^[\w.-]{1,100}$/.test(name) && entry) plugins.push({ name, path: entry.installPath })
+  }
+  return plugins
+}
+
+async function localAgentSources(): Promise<AgentSource[]> {
+  const sources: AgentSource[] = (await markdownFiles(join(claudeConfigDir(), 'agents'))).map(text => ({ text }))
+  for (const plugin of await enabledClaudePlugins().catch(() => [])) {
+    for (const text of await markdownFiles(join(plugin.path, 'agents')).catch(() => [])) sources.push({ text, plugin: plugin.name })
+  }
+  return sources
+}
+
+interface AgentSource { text: string; plugin?: string }
+type EffortValue = NonNullable<AgentDefinition['effort']>
+interface AgentSpec extends BoardAgent {
+  prompt: string
+  model?: string
+  effort?: EffortValue
+  tools?: string[]
+  disallowedTools?: string[]
+  maxTurns?: number
+}
+
+function toolList(value: unknown): string[] | undefined {
+  if (typeof value === 'string') return value.split(',').map(item => item.trim()).filter(Boolean)
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string').map(item => item.trim()).filter(Boolean) : undefined
+}
+
+const efforts = ['low', 'medium', 'high', 'xhigh', 'max']
+
+async function definitions(workspace: string): Promise<Map<string, AgentSpec>> {
+  // The user's own folder comes first: a plugin specialist never replaces it.
+  const sources: AgentSource[] = isRemote(workspace) ? (await rfsBoardAgentSources(workspace)).map(text => ({ text })) : await localAgentSources()
+  const result = new Map<string, AgentSpec>()
+  for (const { text, plugin } of sources) {
+    const parts = /^﻿?---\r?\n([\s\S]*?)\r?\n---\r?\n([\s\S]*)$/.exec(text)
     if (!parts) continue
-    let data: Partial<BoardAgent> | null
-    try { data = load(parts[1], { schema: JSON_SCHEMA }) as Partial<BoardAgent> | null }
+    let data: Record<string, unknown> | null
+    try { data = load(parts[1], { schema: JSON_SCHEMA }) as Record<string, unknown> | null }
     catch { continue }
     if (!data || typeof data.name !== 'string' || !/^[\p{L}\d_-]{1,100}$/u.test(data.name) || !parts[2].trim()) continue
-    if (result.has(data.name)) throw new Error('중복된 에이전트 이름: ' + data.name)
-    result.set(data.name, { name: data.name, description: String(data.description ?? ''), prompt: parts[2] })
+    const name = plugin ? plugin + ':' + data.name : data.name
+    if (result.has(name)) {
+      if (plugin) continue
+      throw new Error('중복된 에이전트 이름: ' + name)
+    }
+    const model = typeof data.model === 'string' && /^[\w.:-]{1,100}$/.test(data.model) ? data.model : undefined
+    const effort = efforts.includes(data.effort as string) || (Number.isSafeInteger(data.effort) && Number(data.effort) > 0) ? data.effort as EffortValue : undefined
+    const maxTurns = Number.isSafeInteger(data.maxTurns) && Number(data.maxTurns) > 0 ? Number(data.maxTurns) : undefined
+    result.set(name, {
+      name, description: String(data.description ?? ''), prompt: parts[2], model, effort, maxTurns,
+      tools: toolList(data.tools), disallowedTools: toolList(data.disallowedTools)
+    })
   }
   return result
 }
@@ -74,7 +129,18 @@ function todoMcpPages(text: string): string[] {
 }
 
 /** One member sub-card the department head assigned. `after` lists earlier assignments (1-based) it needs. */
-export interface BoardAssignment { member: string; title: string; instruction: string; after: number[] }
+export interface BoardAssignment { member: string; title: string; instruction: string; after: number[]; due?: string }
+
+/** The department a head or member works for: its shared rules and the tools it may open. */
+export interface BoardDepartmentContext {
+  team: string
+  role: 'head' | 'member'
+  rules?: string
+  leadGuide?: string
+  tools?: BoardTeam['tools']
+}
+
+const lawToolPrefix = 'mcp__plugin_korean-law_korean-law__'
 
 export interface BoardRunInput {
   task: BoardTask
@@ -84,6 +150,8 @@ export interface BoardRunInput {
   agentName?: string
   /** Lets a department head split the instruction among these members. */
   delegation?: { team: string; members: BoardAgent[] }
+  /** The department this session works for. Its tool levels replace the default approval flow. */
+  department?: BoardDepartmentContext
   approvedTools: string[]
   /** Bound to the account and scope authorized by the local board dispatcher. */
   readTodos?: () => Promise<string>
@@ -96,10 +164,22 @@ export interface BoardRunInput {
   onProgress(message: string, sessionId?: string): void
 }
 
-export interface BoardRunResult { text: string; blocked?: boolean; rejected?: boolean; assignments?: BoardAssignment[] }
+export interface BoardRunResult { text: string; blocked?: boolean; rejected?: boolean; assignments?: BoardAssignment[]; costUsd?: number }
+
+/** The SDK's estimate of what a session cost. A failed session carries it on the error. */
+export function boardRunCost(error: unknown): number | undefined {
+  const cost = (error as { costUsd?: unknown } | null)?.costUsd
+  return typeof cost === 'number' && Number.isFinite(cost) && cost > 0 ? cost : undefined
+}
+
+function expertAllows(agent: AgentSpec | undefined, names: string[]) {
+  const matches = (list: string[] | undefined) => list?.some(item => names.some(name => item === name || item === name + '*' || item === name + '__*'))
+  return !(agent?.tools && !matches(agent.tools)) && !matches(agent?.disallowedTools)
+}
 
 export async function runBoardAgent(input: BoardRunInput): Promise<BoardRunResult> {
   const { task, phase, signal, onProgress } = input
+  const department = phase === 'execute' ? undefined : input.department
   signal.throwIfAborted()
   if (phase === 'work' && input.readTodos) {
     onProgress('앱의 할 일 목록 조회 · ' + (task.agent ? '지정 담당 ' + task.agent : '기본 담당'))
@@ -198,11 +278,16 @@ export async function runBoardAgent(input: BoardRunInput): Promise<BoardRunResul
   const delegation = phase === 'work' ? input.delegation : undefined
   const memberNames = delegation?.members.map(member => member.name) ?? []
   const delegate = delegation && memberNames.length ? [tool('assign_members',
-    '부서원에게 업무를 나눠 맡깁니다. 한 번만 호출하세요. 각 항목은 부서원 한 명이 독립 세션에서 수행하는 하위 업무가 됩니다. after에는 먼저 끝나야 하는 앞선 항목 번호(1부터)를 적으세요.', {
+    '부서원에게 업무를 나눠 맡깁니다. 한 번만 호출하세요. 각 항목은 부서원 한 명이 독립 세션에서 수행하는 하위 업무가 됩니다. ' +
+    '부서원은 대화 맥락을 모르므로 목표·참고 자료·범위·산출물 형식을 빠짐없이 적으세요. after에는 먼저 끝나야 하는 앞선 항목 번호(1부터)를 적으세요.', {
       assignments: z.array(z.object({
         member: z.enum(memberNames as [string, ...string[]]),
         title: z.string().min(1).max(120),
-        instruction: z.string().min(1).max(20000),
+        goal: z.string().min(1).max(500).describe('이 하위 업무로 얻을 결과 한 문장'),
+        sources: z.array(z.string().min(1).max(1024)).max(30).describe('읽을 파일의 작업 폴더 기준 상대 경로. 없으면 빈 목록'),
+        scope: z.string().min(1).max(4000).describe('할 일과 하지 않을 일'),
+        output: z.string().min(1).max(1000).describe('산출물 형식. 예: 표, 메모 2쪽, 서면 초안 md'),
+        due: z.string().regex(/^\d{4}-\d\d-\d\d$/).optional().describe('기한 YYYY-MM-DD'),
         after: z.array(z.number().int().positive()).max(12).default([])
       })).min(1).max(12)
     }, async ({ assignments: rows }) => {
@@ -211,7 +296,13 @@ export async function runBoardAgent(input: BoardRunInput): Promise<BoardRunResul
       if (assignments) return { ...reply('이미 배분했습니다. 배분 요약을 최종 답변으로 쓰고 끝내세요.'), isError: true }
       const invalid = rows.findIndex((row, i) => row.after.some(n => n > i))
       if (invalid >= 0) return { ...reply(`${invalid + 1}번 항목의 after에는 그보다 앞선 항목 번호만 적을 수 있습니다.`), isError: true }
-      assignments = rows.map(row => ({ member: row.member, title: row.title.trim(), instruction: row.instruction.trim(), after: [...new Set(row.after)] }))
+      const badSource = rows.flatMap(row => row.sources).find(path => { try { boardRelativePath(path); return false } catch { return true } })
+      if (badSource) return { ...reply('참고 자료는 작업 폴더 기준 상대 경로로 적으세요: ' + badSource), isError: true }
+      assignments = rows.map(row => ({
+        member: row.member, title: row.title.trim(), after: [...new Set(row.after)], ...(row.due && { due: row.due }),
+        instruction: ['## 목표\n' + row.goal.trim(), '## 참고 자료\n' + (row.sources.length ? row.sources.map(path => '- ' + path).join('\n') : '- 없음'),
+          '## 범위\n' + row.scope.trim(), '## 산출물 형식\n' + row.output.trim(), ...(row.due ? ['## 기한\n' + row.due] : [])].join('\n\n')
+      }))
       onProgress('부서장 배분 · ' + assignments.map(row => row.member + ' ' + row.title).join(' / ').slice(0, 1000))
       return reply(`${assignments.length}건을 부서원에게 배분합니다. 이 세션에서 하위 업무를 직접 수행하지 말고, 배분 요약을 최종 답변으로 쓰고 끝내세요.`)
     })] : []
@@ -255,6 +346,13 @@ export async function runBoardAgent(input: BoardRunInput): Promise<BoardRunResul
     }, async ({ name, args }) => {
       if (name === 'AskUserQuestion') blocked(String(args.question || '사용자 답변 필요').slice(0, 1000))
       if (phase === 'work' && (name === todoTool || name === 'mcp__jurisupport__list_todos')) return listTasks(args.page)
+      if (department) {
+        const key = name === 'Bash' ? 'bash' : name.startsWith('mcp__') ? 'mcp' : undefined
+        if (!key || (department.tools?.[key] ?? 'off') === 'off') {
+          onProgress('부서 도구 권한 없음 · ' + name)
+          return { ...reply(`「${department.team}」 부서에는 이 도구(${name})를 쓸 권한이 없습니다. 이 도구 없이 할 수 있는 데까지만 수행하고, 필요한 조치는 보고서의 결재 요청 사항에 적으세요.`), isError: true }
+        }
+      }
       const command = typeof args.command === 'string' ? args.command : undefined
       guarded(name, command)
       return withOwnership(async () => {
@@ -291,6 +389,16 @@ export async function runBoardAgent(input: BoardRunInput): Promise<BoardRunResul
   await mkdir(sandbox, { recursive: true, mode: 0o700 })
   const tools = [...boardFileTools, 'request_action', ...(delegate.length ? ['assign_members'] : [])].map(n => 'mcp__board__' + n)
   if (phase === 'work') tools.push(todoTool)
+  // korean-law comes from the Claude Code plugin, which keeps its own API key. Only read tools, only for departments that allow it.
+  let lawPlugin: string | undefined
+  if (department?.tools?.['korean-law'] === 'allow' && expertAllows(agent, ['korean-law', lawToolPrefix.slice(0, -2), 'mcp__korean-law'])) {
+    if (remote) onProgress('korean-law는 아직 SSH 작업 폴더에서 쓸 수 없습니다.')
+    else {
+      lawPlugin = (await enabledClaudePlugins().catch(() => [])).find(plugin => plugin.name === 'korean-law')?.path
+      if (!lawPlugin) onProgress('korean-law 플러그인이 설치되어 있지 않거나 꺼져 있습니다.')
+    }
+  }
+  const allowedTool = (toolName: string) => tools.includes(toolName) || (!!lawPlugin && toolName.startsWith(lawToolPrefix))
   const binding = join(sandbox, task.id + '-' + phase + '.session')
   const sessionBinding = (id: string) => remote ? 'ssh:' + id : id
   if (input.resume && (await readFile(binding, 'utf8').catch(() => '')) !== sessionBinding(input.resume)) {
@@ -301,6 +409,7 @@ export async function runBoardAgent(input: BoardRunInput): Promise<BoardRunResul
 
   let result = ''
   let sessionId = ''
+  let costUsd: number | undefined
   const summaries = new Set<string>()
   const reviewFormat = phase === 'review' ? '\n검토 근거를 적고 맨 마지막 줄에 REVIEW: PASS 또는 REVIEW: REJECT를 쓰세요.' : ''
   signal.addEventListener('abort', cancel, { once: true })
@@ -315,16 +424,29 @@ export async function runBoardAgent(input: BoardRunInput): Promise<BoardRunResul
         (delegate.length ? '\n\n당신은 「' + delegation!.team + '」 부서장입니다. 부서원 목록:\n' +
           delegation!.members.map(member => '- ' + member.name + (member.description ? ' · ' + member.description : '')).join('\n') +
           '\n여러 전문 분야가 필요하거나 단계가 나뉘는 업무는 assign_members를 한 번 호출해 부서원에게 나눠 맡기세요. ' +
-          '각 지시에는 부서원이 혼자 읽어도 알 수 있도록 목적·범위·참고 파일·산출물 형식을 적으세요. ' +
+          '이 업무에 꼭 필요한 부서원만 고르세요. 부서원 전원을 기본으로 부르지 마세요. ' +
+          '부서원은 대화 맥락을 모르므로 각 항목에 목표·참고 자료·범위·산출물 형식을 빠짐없이 적으세요. ' +
           '부서원의 보고서가 모두 도착하면 당신이 다시 호출되어 취합합니다. ' +
-          '혼자 처리할 수 있는 작은 업무면 assign_members를 호출하지 말고 직접 수행해 보고서를 작성하세요.' : ''),
+          '혼자 처리할 수 있는 작은 업무면 assign_members를 호출하지 말고 직접 수행해 보고서를 작성하세요.' : '') +
+        (department?.role === 'head' && department.rules ? '\n\n## 부서 규칙 (참고, 부서원에게도 적용됨)\n' + department.rules : '') +
+        (department?.role === 'head' && department.leadGuide ? '\n\n## 부서장 추가 지침\n' + department.leadGuide : '') +
+        (lawPlugin ? '\n\n법령·판례는 korean-law 도구(' + lawToolPrefix + '*)로 확인한 내용만 근거로 쓰고, 보고서에 법령명·조문·사건번호 같은 출처를 적으세요.' : ''),
       options: {
         ...transport, cwd: sandbox, env: cleanEnv(), pathToClaudeCodeExecutable: packagedClaudeAgentSdkExecutable(),
         abortController: controller, resume: input.resume,
-        ...(agent ? { agent: agent.name, agents: { [agent.name]: { description: agent.description || agent.name, prompt: agent.prompt } } } : {}),
-        tools: [], skills: [], plugins: [], settingSources: [], strictMcpConfig: true,
+        ...(agent ? { agent: agent.name, agents: { [agent.name]: {
+          description: agent.description || agent.name,
+          // Department rules come first so every member of the department follows them.
+          prompt: (department?.role === 'member' && department.rules ? '## 부서 규칙 · ' + department.team + '\n\n' + department.rules + '\n\n---\n\n' : '') + agent.prompt,
+          ...(agent.model && { model: agent.model }), ...(agent.effort !== undefined && { effort: agent.effort }),
+          maxTurns: Math.min(agent.maxTurns ?? 40, 40)
+        } } } : {}),
+        ...(agent?.model && agent.model !== 'inherit' && { model: agent.model }),
+        ...(typeof agent?.effort === 'string' && { effort: agent.effort as EffortLevel }),
+        // Plugin MCP servers load only without strict MCP config; canUseTool still allows nothing outside the list.
+        tools: [], skills: [], plugins: lawPlugin ? [{ type: 'local' as const, path: lawPlugin }] : [], settingSources: [], strictMcpConfig: !lawPlugin,
         managedSettings: { disableAllHooks: true }, agentProgressSummaries: true,
-        settings: { disableAllHooks: true, disableSkillShellExecution: true, disableBundledSkills: true, autoMemoryEnabled: false }, maxTurns: 40,
+        settings: { disableAllHooks: true, disableSkillShellExecution: true, disableBundledSkills: true, autoMemoryEnabled: false }, maxTurns: Math.min(agent?.maxTurns ?? 40, 40),
         mcpServers: {
           board: createSdkMcpServer({ name: 'board', tools: files }),
           ...(phase === 'work' ? { jurisupport: createSdkMcpServer({ name: 'jurisupport', tools: [
@@ -333,7 +455,7 @@ export async function runBoardAgent(input: BoardRunInput): Promise<BoardRunResul
           ] }) } : {})
         },
         permissionMode: 'default',
-        canUseTool: async name => tools.includes(name) ? { behavior: 'allow' } : blocked(name),
+        canUseTool: async name => allowedTool(name) ? { behavior: 'allow' } : blocked(name),
         onUserDialog: async req => blocked('사용자 응답 필요 · ' + req.dialogKind)
       }
     })
@@ -354,6 +476,7 @@ export async function runBoardAgent(input: BoardRunInput): Promise<BoardRunResul
           throw new Error('SSH 서버의 Claude 인증을 확인하세요. 서버에서 claude auth login 후 다시 시도하세요.')
         }
         if (message.type === 'result') {
+          if (Number.isFinite(message.total_cost_usd)) costUsd = message.total_cost_usd
           if (message.subtype !== 'success') throw new Error(message.errors.join('\n') || message.subtype)
           if (message.is_error) throw new Error(message.result)
           result = message.result
@@ -361,8 +484,9 @@ export async function runBoardAgent(input: BoardRunInput): Promise<BoardRunResul
       }
     } finally { session.close() }
   } catch (error) {
+    if (costUsd && error && typeof error === 'object') Object.assign(error, { costUsd })
     if (!notes.size || signal.aborted) {
-      if (remoteFailure && !signal.aborted) throw remoteFailure
+      if (remoteFailure && !signal.aborted) throw Object.assign(remoteFailure, costUsd ? { costUsd } : {})
       if (remote && error instanceof Error && /not logged in|authentication (?:failed|required)|invalid .*api.?key|please run .*login/i.test(error.message)) {
         throw new Error('SSH 서버의 Claude 인증을 확인하세요. 서버에서 claude auth login 후 다시 시도하세요.')
       }
@@ -370,18 +494,19 @@ export async function runBoardAgent(input: BoardRunInput): Promise<BoardRunResul
     }
   } finally { signal.removeEventListener('abort', cancel) }
   await rm(binding, { force: true })
-  if (lookupError) return { blocked: true, text: '## 할 일 조회 확인 필요\n\n' + lookupError }
+  const spent = costUsd ? { costUsd } : {}
+  if (lookupError) return { blocked: true, text: '## 할 일 조회 확인 필요\n\n' + lookupError, ...spent }
   if (!notes.size && phase === 'work' && input.readMcpTodos && (!todoPages.length || pagesRead.size !== todoPages.length)) {
     onProgress('결재 필요 · ' + todoTool)
-    return { blocked: true, text: '## 할 일 조회 확인 필요\n\n' + (pagesRead.size
+    return { blocked: true, ...spent, text: '## 할 일 조회 확인 필요\n\n' + (pagesRead.size
       ? `담당자가 전체 ${todoPages.length}페이지 중 ${pagesRead.size}페이지만 확인했습니다. 다시 조회해 주세요.`
       : '담당자가 승인 범위의 할일 조회를 수행하지 않았습니다. 다시 조회해 주세요.') }
   }
   for (const action of failedActions) notes.add('실행 결과 확인 필요 · ' + action)
-  if (notes.size) return { text: [result, ...outputs.map(p => '산출물 · ' + p), '## 결재 필요', ...notes].filter(Boolean).join('\n\n'), blocked: true }
-  if (assignments) return { text: result.trim() || assignments.length + '건 배분', assignments }
-  if (!result.trim()) throw new Error('에이전트가 보고서를 반환하지 않았습니다.')
+  if (notes.size) return { text: [result, ...outputs.map(p => '산출물 · ' + p), '## 결재 필요', ...notes].filter(Boolean).join('\n\n'), blocked: true, ...spent }
+  if (assignments) return { text: result.trim() || assignments.length + '건 배분', assignments, ...spent }
+  if (!result.trim()) throw Object.assign(new Error('에이전트가 보고서를 반환하지 않았습니다.'), spent)
   const verdict = phase === 'review' ? /(?:^|\n)REVIEW: (PASS|REJECT)\s*$/.exec(result) : null
-  if (phase === 'review' && !verdict) throw new Error('검토 결과에서 승인 또는 반려 판정을 확인하지 못했습니다.')
-  return { text: [result, ...outputs.map(p => '산출물 · ' + p)].join('\n'), rejected: verdict?.[1] === 'REJECT' }
+  if (phase === 'review' && !verdict) throw Object.assign(new Error('검토 결과에서 승인 또는 반려 판정을 확인하지 못했습니다.'), spent)
+  return { text: [result, ...outputs.map(p => '산출물 · ' + p)].join('\n'), rejected: verdict?.[1] === 'REJECT', ...spent }
 }

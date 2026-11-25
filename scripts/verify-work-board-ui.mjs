@@ -313,7 +313,15 @@ function run({ root, workspace, board, temp, home, profile, screenshot, bulk, fo
     await wait(() => evaluate("[...document.querySelectorAll('.wb-dialog button')].some(b => b.textContent.includes('부서 추가'))"), 'department editor')
     await click('.wb-dialog button', '취소')
     await evaluate(`window.lt.workBoard.saveTeams(${JSON.stringify(workspace)}, [{name:'송무팀',color:'#376ac6',agents:[]}])`)
-    await wait(() => evaluate("[...document.querySelectorAll('.wb-org .wb-org-lead')].some(el => el.textContent.includes('부서장 · 기본 세션'))"), 'department head row')
+    await wait(() => evaluate("[...document.querySelectorAll('.wb-org .wb-org-lead')].some(el => el.textContent.includes('부서장 · 앱 기본 지침'))"), 'department head row')
+    // The editor offers rules, the head's extra guide, per-tool levels and warning lines; bash can only ask or stay off.
+    await click('.wb-org button', '부서 관리')
+    await wait(() => evaluate("!!document.querySelector('.wb-dialog [aria-label=\"송무팀 도구 권한\"]')"), 'department tool levels')
+    assert.deepEqual(JSON.parse(await evaluate("JSON.stringify([...document.querySelectorAll('.wb-dialog [aria-label=\"송무팀 도구 권한\"] select')].map(s => [...s.options].map(o => o.value)))")),
+      [['allow', 'off'], ['ask', 'off'], ['ask', 'off']])
+    assert.equal(await evaluate("[...document.querySelectorAll('.wb-dialog label')].some(l => l.textContent.startsWith('부서 규칙')) && [...document.querySelectorAll('.wb-dialog label')].some(l => l.textContent.startsWith('월간 경고선'))"), true)
+    fs.writeFileSync(screenshot.replace(/board\.png$/, 'departments.png'), (await win.webContents.capturePage()).toPNG())
+    await click('.wb-dialog button', '취소')
     fs.writeFileSync(screenshot, (await win.webContents.capturePage()).toPNG())
     await click('.wb-stat', '기한 임박')
     await wait(() => evaluate("document.querySelectorAll('.wb-card').length === 2"), 'filter due cards')

@@ -1970,3 +1970,12 @@ async function walk(
       out.push({ name: e.filename, path: makeRemote(profileId, full) })
   }
 }
+
+/** The SSH account's home folder, as SFTP resolves "." for it. */
+export async function rfsRemoteHome(workspace: string): Promise<string> {
+  const { profileId } = parseRemote(workspace)
+  const sftp = await getSftp(profileId)
+  const home = await sftpRequest<string>(sftp, done => sftp.realpath('.', done))
+  if (!posix.isAbsolute(home) || /[\x00-\x1f]/u.test(home)) throw new Error('원격 홈 폴더를 확인해 주세요.')
+  return home
+}

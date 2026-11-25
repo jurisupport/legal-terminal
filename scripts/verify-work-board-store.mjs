@@ -13,14 +13,15 @@ try {
   const board = new WorkBoardStore(join(directory, '_업무지시'))
   await board.init()
   assert.match(await board.readText('_보고서양식.md'), /결재 요청 사항/)
-  // Departments belong to the user: a new board starts without any, and legacy files without a lead still load.
+  // Departments are office-wide now. A new board writes no teams.yaml; a legacy one is only read for a one-time import.
   assert.deepEqual(await board.teams(), [])
-  await board.writeText('teams.yaml', 'teams:\n  - {name: 법무팀, color: "#376ac6", agents: [contract-review]}\n')
-  assert.deepEqual(await board.teams(), [{ name: '법무팀', color: '#376ac6', agents: ['contract-review'] }])
-  assert.deepEqual(await board.saveTeams([{ name: ' 송무팀 ', color: '#148369', lead: 'lead', agents: ['fact', 'fact'] }]),
-    [{ name: '송무팀', color: '#148369', lead: 'lead', agents: ['fact'] }])
-  assert.deepEqual(await board.teams(), [{ name: '송무팀', color: '#148369', lead: 'lead', agents: ['fact'] }])
-  await assert.rejects(board.saveTeams([{ name: '', color: '#148369', agents: [] }]), /부서 이름/)
+  assert.equal(await board.readText('teams.yaml'), null)
+  await board.writeText('teams.yaml', 'teams:\n  - {name: 법무팀, color: "#376ac6", agents: [contract-review]}\n  - {name: 송무팀, color: "#148369", lead: lead, agents: [fact, fact]}\n')
+  assert.deepEqual(await board.teams(), [
+    { name: '법무팀', color: '#376ac6', agents: ['contract-review'] },
+    { name: '송무팀', color: '#148369', agents: ['fact'] }
+  ], 'a legacy specialist head is dropped')
+  assert.equal(board.saveTeams, undefined)
   await board.writeText('_보고서양식.md', '직접 편집')
   await board.init()
   assert.equal(await board.readText('_보고서양식.md'), '직접 편집')

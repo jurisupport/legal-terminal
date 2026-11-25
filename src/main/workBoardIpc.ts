@@ -150,6 +150,9 @@ export function registerWorkBoards(): () => void {
   handle('reorder', async (w: string, ids: string[]) => (await open(w)).reorder(ids))
   handle('configure', async (w: string, patch: Partial<BoardSettings>) => (await open(w)).configure(patch))
   handle('saveTeams', async (w: string, teams: BoardTeam[]) => (await open(w)).saveTeams(teams))
+  handle('restoreTeams', async (w: string, id: string) => (await open(w)).restoreTeams(id))
+  handle('importLegacyTeams', async (w: string) => (await open(w)).importLegacyTeams())
+  handle('suggestedTeams', async (w: string) => (await open(w)).suggestedTeams())
   handle('detail', async (w: string, id: string) => (await open(w)).detail(id))
   handle('documentPath', async (w: string, id: string, path: string) => (await open(w)).documentPath(id, path))
   handle('documentText', async (w: string, id: string, path: string, offset: number = 0) =>

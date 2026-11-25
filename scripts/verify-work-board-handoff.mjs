@@ -15,7 +15,7 @@ const result = await build({
       build.onResolve({ filter: /^\.\/(?:workBoardRunner|workBoardTodos|workBoardScope|remoteFs)$/ }, args => ({ path: args.path, namespace: 'fixture' }))
       build.onLoad({ filter: /.*/, namespace: 'fixture' }, () => ({
         contents: `
-      export const runBoardAgent=i=>globalThis.handoffRun(i), listBoardAgents=async()=>[];
+      export const runBoardAgent=i=>globalThis.handoffRun(i), listBoardAgents=async()=>[], boardRunCost=()=>undefined;
       export const getBoardTodoAccount=async()=>'fixture', readBoardTodos=async()=>'todo', readBoardMcpTodos=async()=>'[]', verifyBoardTodoScope=async()=>false;
     `}))
     }
@@ -25,6 +25,8 @@ const mod = { exports: {} }
 new Function('module', 'exports', 'require', result.outputFiles[0].text)(mod, mod.exports, createRequire(import.meta.url))
 const { WorkBoard } = mod.exports
 const root = await mkdtemp(join(tmpdir(), 'board-handoff-'))
+// Office departments live outside the board; keep them in the test folder.
+process.env.LEGAL_TERMINAL_DEPARTMENTS_DIR = join(root, 'departments')
 const effects = []
 const executions = []
 let resumeReport

@@ -179,3 +179,14 @@ details.wb-draft-options > .wb-fields { margin-top: 8px; }
 .wb-check small { color: var(--wb-muted); }
 .wb-delegates ol { margin: 4px 0; padding-left: 20px; display: flex; flex-direction: column; gap: 4px; }
 .wb-delegates .wb-btn { text-align: left; }
+.wb-team-description { margin: 0 0 4px; font-size: 12px; }
+.wb-team-start { justify-content: flex-start; }
+.wb-team-tools { display: flex; flex-direction: column; gap: 6px; }
+.wb-team-tools > span { font-weight: 600; }
+.wb-team-tools label { display: flex; justify-content: space-between; align-items: center; gap: 10px; font-weight: 400; }
+.wb-team-tools small, .wb-dialog label small { color: var(--wb-muted); font-weight: 400; }
+.wb-dialog textarea { width: 100%; resize: vertical; font: inherit; }
+.wb-warning { margin: 8px 0; padding: 7px 10px 7px 26px; color: #855510; background: #fff7eb; border: 1px solid #ecd2a6; border-radius: 5px; }
+.wb-team-history { margin: 10px 0; }
+.wb-team-history ol { margin: 6px 0; padding-left: 20px; display: flex; flex-direction: column; gap: 6px; }
+.wb-team-history li { display: flex; justify-content: space-between; align-items: center; gap: 10px; }

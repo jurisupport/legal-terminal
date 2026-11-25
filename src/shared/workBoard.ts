@@ -56,6 +56,8 @@ export interface BoardTask extends BoardDraft {
   parentId?: string
   /** The department instruction that delegated this member sub-card. */
   delegatedBy?: string
+  /** Estimated spend in USD of this card's own sessions. A department instruction adds its members' cards. */
+  cost?: number
 }
 export interface BoardSettings {
   concurrency: number
@@ -63,9 +65,45 @@ export interface BoardSettings {
   maxReviews: number
   dailyTime: string
 }
-/** A department. Without a lead the default session acts as the department head. */
-export interface BoardTeam { name: string; color: string; agents: string[]; lead?: string }
+/** Per-tool permission for a department: allow runs without approval (read-only tools only), ask goes to the approval inbox, off refuses. */
+export type BoardToolLevel = 'allow' | 'ask' | 'off'
+/** Tools a department can open. Only read-only tools may be allowed without approval. */
+export const boardDepartmentTools = [
+  { key: 'korean-law', label: 'korean-law 법령·판례 조회', readOnly: true },
+  { key: 'bash', label: '작업 폴더 명령 실행', readOnly: false },
+  { key: 'mcp', label: '등록된 외부 MCP 도구', readOnly: false }
+] as const
+export type BoardDepartmentToolKey = typeof boardDepartmentTools[number]['key']
+/**
+ * An office-wide department. The app's built-in head instructions split the work; `leadGuide` adds to them.
+ * `rules` is shared by every member and prepended to their own instructions.
+ */
+export interface BoardTeam {
+  name: string
+  color: string
+  agents: string[]
+  description?: string
+  rules?: string
+  leadGuide?: string
+  tools?: Partial<Record<BoardDepartmentToolKey, BoardToolLevel>>
+  /** Warning lines in USD. Crossing one records a warning; the work continues. */
+  warnInstructionUsd?: number
+  warnMonthlyUsd?: number
+}
 export interface BoardAgent { name: string; description: string }
+/** A saved version of the office departments, newest first. */
+export interface BoardTeamVersion { id: string; at: string; teams: number }
+export interface BoardDepartments {
+  /** Where the office departments live, e.g. ~/.legal-terminal/departments on the machine that runs them. */
+  home: string
+  history: BoardTeamVersion[]
+  /** This month's recorded spend per department in USD. */
+  usage: Record<string, number>
+  /** Departments still kept in this board's legacy teams.yaml, offered once while the office has none. */
+  legacy: BoardTeam[]
+  /** Descriptions that overlap and may make the wrong department or member be chosen. */
+  overlaps: string[]
+}
 export interface BoardSnapshot {
   todoCaseIds?: string[]
   workspace?: string
@@ -75,6 +113,7 @@ export interface BoardSnapshot {
   tasks: BoardTask[]
   settings: BoardSettings
   teams: BoardTeam[]
+  departments?: BoardDepartments
   agents: BoardAgent[]
   folder: string
 }
@@ -91,6 +130,9 @@ export interface BoardApi {
   reorder(workspace: string, ids: string[]): Promise<void>
   configure(workspace: string, patch: Partial<BoardSettings>): Promise<void>
   saveTeams(workspace: string, teams: BoardTeam[]): Promise<void>
+  restoreTeams(workspace: string, versionId: string): Promise<void>
+  importLegacyTeams(workspace: string): Promise<void>
+  suggestedTeams(workspace: string): Promise<{ teams: BoardTeam[]; missing: string[] }>
   detail(workspace: string, id: string): Promise<{report: string; review: string}>
   documentPath(workspace: string, id: string, path: string): Promise<string>
   downloadDocument(workspace: string, id: string, path: string): Promise<boolean>
@@ -201,4 +243,29 @@ export function boardRevision(task: BoardTask, detail?: { report: string; review
     Object.entries(task).filter(([,value]) => value !== undefined).sort(([a], [b]) => a.localeCompare(b)),
     detail?.report, detail?.review
   ])
+}
+
+/** Total estimated spend of an instruction, including a department head's member sub-cards. */
+export function boardInstructionCost(task: Pick<BoardTask, 'id' | 'cost'>, tasks: readonly BoardTask[]): number {
+  const total = (task.cost ?? 0) + boardDelegates(task, tasks).reduce((sum, child) => sum + (child.cost ?? 0), 0)
+  return Math.round(total * 10_000) / 10_000
+}
+
+export function formatUsd(value: number): string {
+  return '$' + (value < 1 ? value.toFixed(3) : value.toFixed(2))
+}
+
+function descriptionWords(text: string): Set<string> {
+  return new Set(text.normalize('NFC').toLowerCase().split(/[\s,·/()\[\]]+/u).filter(word => word.length > 1))
+}
+
+/** Two descriptions overlap when one contains the other or most of their words are shared. */
+export function descriptionsOverlap(a: string, b: string): boolean {
+  const x = a.trim(), y = b.trim()
+  if (!x || !y) return false
+  if (x === y || x.includes(y) || y.includes(x)) return true
+  const left = descriptionWords(x), right = descriptionWords(y)
+  if (!left.size || !right.size) return false
+  const shared = [...left].filter(word => right.has(word)).length
+  return shared / Math.min(left.size, right.size) >= 0.6
 }

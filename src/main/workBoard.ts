@@ -1,12 +1,13 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { lstat, mkdir, readFile, realpath, rename, rm, writeFile } from 'node:fs/promises'
 import { join, resolve, sep } from 'node:path'
-import type { BoardAgent, BoardDecision, BoardDraft, BoardSettings, BoardSnapshot, BoardTask, BoardTeam, BoardTodoScope } from '../shared/workBoard'
-import { boardDelegates, isBoardDepartmentTask, boardDocumentPaths, boardFollowUpContext, boardFollowUpRevision, boardReferencePaths, boardMutationIssue, boardReportAvailable, boardRequestsTodoRead, boardResultKind, boardRevision, canRetryAsReport, isBoardReport, isBoardDecisionPending, isBoardDocumentPath, isBoardTodoReview } from '../shared/workBoard'
+import type { BoardAgent, BoardDecision, BoardDepartments, BoardDraft, BoardSettings, BoardSnapshot, BoardTask, BoardTeam, BoardTodoScope } from '../shared/workBoard'
+import { boardDelegates, boardInstructionCost, formatUsd, isBoardDepartmentTask, boardDocumentPaths, boardFollowUpContext, boardFollowUpRevision, boardReferencePaths, boardMutationIssue, boardReportAvailable, boardRequestsTodoRead, boardResultKind, boardRevision, canRetryAsReport, isBoardReport, isBoardDecisionPending, isBoardDocumentPath, isBoardTodoReview } from '../shared/workBoard'
 import { workspaceDocumentPath } from '../shared/workBoardDocuments'
 import { kstDateKey } from '../shared/todoSummary'
 import { WorkBoardStore, followUpSnapshot, unreadReportReceipt } from './workBoardStore'
-import { runBoardAgent, listBoardAgents } from './workBoardRunner'
+import { boardRunCost, runBoardAgent, listBoardAgents, type BoardDepartmentContext } from './workBoardRunner'
+import { Departments, departmentOverlaps, fromLegacyTeams, suggestedDepartments } from './departments'
 import { getBoardTodoAccount, readBoardMcpTodos, readBoardTodos } from './workBoardTodos'
 import { verifyBoardTodoScope } from './workBoardScope'
 import { buildBoardDaily, boardReportDue } from './workBoardDaily'
@@ -88,6 +89,8 @@ export class WorkBoard {
   private prefs = defaults
   private agents: BoardAgent[] = []
   private teams: BoardTeam[] = []
+  private departmentInfo: BoardDepartments = { home: '', history: [], usage: {}, legacy: [], overlaps: [] }
+  private office?: Promise<Departments>
   private tasks: BoardTask[] = []
   private owner = ''
   private observedOwner = ''
@@ -238,21 +241,44 @@ export class WorkBoard {
     const wasWritable = this.writable
     this.observeOwner(await this.store.readText('_배분기') ?? '')
     const tasks = await this.store.list()
-    const teams = await this.store.teams()
     const agents = await listBoardAgents(this.workspace).catch(error => {
       this.store.warnings.push('담당자 목록 · ' + (error instanceof Error ? error.message : String(error)))
       return []
     })
+    const { teams, departments } = await this.loadDepartments(agents)
     const warnings = this.store.warnings.join('\n')
     if (warnings !== this.warnings) {
       this.warnings = warnings
       if (warnings) this.changed(warnings)
     }
-    if (wasWritable !== this.writable || JSON.stringify([tasks, teams, agents]) !== JSON.stringify([this.tasks, this.teams, this.agents])) {
+    if (wasWritable !== this.writable || JSON.stringify([tasks, teams, agents, departments]) !== JSON.stringify([this.tasks, this.teams, this.agents, this.departmentInfo])) {
       this.tasks = tasks
       this.teams = teams
+      this.departmentInfo = departments
       this.agents = agents
       this.changed()
+    }
+  }
+
+  // Departments are office-wide, on the machine that runs this workspace's agents.
+  private departments(): Promise<Departments> {
+    this.office ??= Departments.forWorkspace(this.workspace)
+    this.office.catch(() => { this.office = undefined })
+    return this.office
+  }
+
+  private async loadDepartments(agents: BoardAgent[]): Promise<{ teams: BoardTeam[]; departments: BoardDepartments }> {
+    const warn = (text: string) => { if (!this.store.warnings.includes(text)) this.store.warnings.push(text) }
+    try {
+      const office = await this.departments()
+      const notes: string[] = []
+      const teams = await office.teams(notes)
+      notes.forEach(warn)
+      const legacy = teams.length ? [] : fromLegacyTeams(await this.store.teams())
+      return { teams, departments: { home: office.home, history: await office.history(), usage: await office.usage(), legacy, overlaps: departmentOverlaps(teams, agents) } }
+    } catch (error) {
+      warn('부서 설정 · ' + (error instanceof Error ? error.message : String(error)))
+      return { teams: this.teams, departments: this.departmentInfo }
     }
   }
 
@@ -260,7 +286,7 @@ export class WorkBoard {
     await this.tail
     return {
       workspace: this.workspace, tasks: structuredClone(this.tasks), settings: { ...this.prefs }, agents: this.agents,
-      teams: this.teams, folder: this.folder, warnings: [...this.store.warnings], readOnly: !this.writable, ownerRevision: this.observedOwner ? ownerRevision(this.observedOwner) : undefined
+      teams: this.teams, departments: structuredClone(this.departmentInfo), folder: this.folder, warnings: [...this.store.warnings], readOnly: !this.writable, ownerRevision: this.observedOwner ? ownerRevision(this.observedOwner) : undefined
     }
   }
 
@@ -467,18 +493,41 @@ export class WorkBoard {
 
   private async checkTeams(inputs: BoardDraft[]) {
     if (!inputs.some(input => input.team)) return
-    this.teams = await this.store.teams()
+    this.teams = await (await this.departments()).teams()
     for (const input of inputs) {
       if (input.team && !this.teams.some(team => team.name === input.team)) throw new Error('등록되지 않은 부서입니다: ' + input.team)
     }
   }
 
-  async saveTeams(input: BoardTeam[]) {
+  private async updateDepartments(change: (office: Departments) => Promise<BoardTeam[]>) {
     await this.serialOwner(async () => {
-      this.teams = await this.store.saveTeams(input)
+      this.teams = await change(await this.departments())
+      this.departmentInfo = (await this.loadDepartments(this.agents)).departments
       this.changed()
     })
     this.tick()
+  }
+
+  saveTeams(input: BoardTeam[]) {
+    return this.updateDepartments(office => office.save(input))
+  }
+
+  restoreTeams(versionId: string) {
+    return this.updateDepartments(office => office.restore(versionId))
+  }
+
+  /** Moves this board's legacy departments office-wide, once, while the office has none. */
+  importLegacyTeams() {
+    return this.updateDepartments(async office => {
+      if ((await office.teams()).length) throw new Error('사무소 부서가 이미 있습니다. 부서 관리에서 직접 고쳐 주세요.')
+      const legacy = fromLegacyTeams(await this.store.teams())
+      if (!legacy.length) throw new Error('이 보드에 가져올 부서가 없습니다.')
+      return office.save(legacy)
+    })
+  }
+
+  async suggestedTeams() {
+    return suggestedDepartments(this.agents)
   }
 
   async configure(patch: Partial<BoardSettings>) {
@@ -853,6 +902,43 @@ export class WorkBoard {
     await this.transition(completed, needsApproval ? 'awaiting_approval' : 'done', needsApproval ? '결재 요청' : '업무 완료')
   }
 
+  /**
+   * Adds a session's estimated spend to its card and, for department work, to the department's month.
+   * Crossing a warning line records a warning once; the work continues.
+   */
+  private async recordCost(current: BoardTask, usd: number | undefined) {
+    if (!usd) return
+    current.cost = Math.round(((current.cost ?? 0) + usd) * 10_000) / 10_000
+    const head = isBoardDepartmentTask(current) ? current : current.delegatedBy ? this.tasks.find(t => t.id === current.delegatedBy) : undefined
+    const team = head && this.teams.find(candidate => candidate.name === head.team)
+    if (!head || !team) return
+    try {
+      const month = await (await this.departments()).addUsage(team.name, usd)
+      this.departmentInfo = { ...this.departmentInfo, usage: { ...this.departmentInfo.usage, [team.name]: month } }
+      if (team.warnMonthlyUsd && month >= team.warnMonthlyUsd && month - usd < team.warnMonthlyUsd) {
+        const text = `비용 경고 · ${team.name} 부서 이번 달 ${formatUsd(month)} (경고선 ${formatUsd(team.warnMonthlyUsd)})`
+        append(current, text)
+        this.changed(text)
+      }
+    } catch (error) {
+      this.changed('부서 사용량 기록 오류 · ' + (error instanceof Error ? error.message : String(error)))
+    }
+    if (!team.warnInstructionUsd) return
+    const tasks = this.tasks.map(t => t.id === current.id ? current : t)
+    const owner = tasks.find(t => t.id === head.id) ?? head
+    const total = boardInstructionCost(owner, tasks)
+    if (total >= team.warnInstructionUsd && !owner.log.some(entry => entry.text.startsWith('비용 경고 · 지시'))) {
+      const text = `비용 경고 · 지시 1건 ${formatUsd(total)} (경고선 ${formatUsd(team.warnInstructionUsd)})`
+      if (owner.id === current.id) append(current, text)
+      else {
+        const saved = structuredClone(owner)
+        append(saved, text)
+        await this.save(saved)
+      }
+      this.changed(text + ' · ' + owner.title)
+    }
+  }
+
   private async launch(task: BoardTask, phase: 'execute' | 'work' | 'review') {
     // A viewer may enqueue from a differently mounted copy of the same board.
     if (task.cwd === '.' || (this.workspace.startsWith('ssh://') && task.cwd === this.workspace.replace(/^ssh:\/\/[^/]+/, ''))) {
@@ -877,7 +963,7 @@ export class WorkBoard {
     let approvedTools: string[] = []
     let prompt = task.body
     let delegation: { team: string; members: BoardAgent[] } | undefined
-    let agentName: string | undefined
+    let departmentContext: BoardDepartmentContext | undefined
     let delegates: BoardTask[] = []
     const department = phase === 'work' && isBoardDepartmentTask(task)
     if (department) {
@@ -886,7 +972,7 @@ export class WorkBoard {
         await this.transition(task, 'blocked', '부서를 찾을 수 없습니다: ' + task.team + '. 업무 보드의 부서 설정을 확인해 주세요.')
         return
       }
-      agentName = team.lead
+      departmentContext = { team: team.name, role: 'head', rules: team.rules, leadGuide: team.leadGuide, tools: team.tools }
       delegates = boardDelegates(task, this.tasks)
       if (delegates.length && !task.log.some(entry => entry.text.startsWith('부서 배분 · '))) {
         // Sub-cards were saved but the head's state was not, e.g. the app closed in between.
@@ -901,6 +987,11 @@ export class WorkBoard {
         }
         delegation = { team: team.name, members }
       }
+    }
+    if (phase !== 'execute' && task.delegatedBy) {
+      const head = this.tasks.find(candidate => candidate.id === task.delegatedBy)
+      const team = head && this.teams.find(candidate => candidate.name === head.team)
+      if (team) departmentContext = { team: team.name, role: 'member', rules: team.rules, tools: team.tools }
     }
     if (phase === 'execute') {
       const parent = this.tasks.find(t => t.id === task.parentId && t.status === 'approved')
@@ -976,7 +1067,7 @@ export class WorkBoard {
           return report
         }) : undefined
         let result = await runBoardAgent({
-          task, phase, prompt, approvedTools, agentName, delegation,
+          task, phase, prompt, approvedTools, delegation, department: departmentContext,
           resume: phase === 'execute' || mcpTodo || department ? undefined : task.sessionId,
           signal: controller.signal, onProgress, policyDir: this.privatePath,
           withOwnership: operation => this.runOwned(controller.signal, operation),
@@ -992,10 +1083,11 @@ export class WorkBoard {
             return
           }
           delete current.sessionId
+          await this.recordCost(current, result.costUsd)
           if (department && !result.blocked && result.assignments?.length) {
             const ids: string[] = []
             for (const assignment of result.assignments) {
-              const child = this.newTask({ title: assignment.title, body: assignment.instruction, agent: assignment.member, due: current.due, approval: 'none' })
+              const child = this.newTask({ title: assignment.title, body: assignment.instruction, agent: assignment.member, due: assignment.due ?? current.due, approval: 'none' })
               child.delegatedBy = current.id
               const after = assignment.after.map(n => ids[n - 1]).filter(Boolean)
               if (after.length) child.depends_on = after
@@ -1043,7 +1135,9 @@ export class WorkBoard {
       } catch (err) {
         if (!controller.signal.aborted) await this.runOwned(controller.signal, async () => {
           const text = err instanceof Error ? err.message : String(err)
-          await this.transition(this.find(task.id), phase === 'execute' || nativeTodo ? 'blocked' : 'failed', text)
+          const current = structuredClone(this.find(task.id))
+          await this.recordCost(current, boardRunCost(err))
+          await this.transition(current, phase === 'execute' || nativeTodo ? 'blocked' : 'failed', text)
           this.changed('업무 확인 필요 · ' + task.title)
         })
       } finally {

@@ -10,14 +10,17 @@ import { boardPermission, boardRelativePath, readBoardPolicy } from '../src/main
 
 const directory = await mkdtemp(join(tmpdir(), 'board-runner-'))
 const compiled = await mkdtemp(join(process.cwd(), 'node_modules', '.board-runner-'))
-let scenario = '', toolCalled = false, observedTools, sawNamedAgent = false
+let scenario = '', toolCalled = false, observedTools, sawNamedAgent = false, observedSystem = '', observedModel = '', toolResult = ''
 const server = boardInference(input => {
   observedTools = input.tools?.map(t => t.name)
-  sawNamedAgent ||= JSON.stringify(input.system).includes('SYNTHETIC_AGENT_MARKER')
+  observedSystem = JSON.stringify(input.system)
+  observedModel = input.model
+  toolResult = JSON.stringify(input.messages.at(-1)?.content ?? '')
+  sawNamedAgent ||= observedSystem.includes('SYNTHETIC_AGENT_MARKER')
   const useTool = !toolCalled && scenario !== 'report'
   const name = scenario === 'draft' ? 'mcp__board__case_draft' : scenario === 'delegate' ? 'mcp__board__assign_members' : 'mcp__board__request_action'
   const args = scenario === 'draft' ? { name: '초안.md', text: '검수 본문' }
-    : scenario === 'delegate' ? { assignments: [{ member: 'fixture', title: '사실관계 정리', instruction: '기록을 시간순으로 정리', after: [] }] }
+    : scenario === 'delegate' ? { assignments: [{ member: 'fixture', title: '사실관계 정리', goal: '사건 경과표', sources: ['기록/소장.pdf'], scope: '기록을 시간순으로 정리', output: '표', after: [] }] }
     : {name:'Bash',args:{command:'echo approved'}}
   if (useTool) toolCalled = true
   return useTool ? {name,args} : {text:scenario === 'review' ? '검토 완료\nREVIEW: PASS' : '## 결론\n검수 완료'}
@@ -27,6 +30,8 @@ try {
   process.env.CLAUDE_CONFIG_DIR = join(directory, 'config')
   await mkdir(join(process.env.CLAUDE_CONFIG_DIR,'agents'), {recursive:true})
   await writeFile(join(process.env.CLAUDE_CONFIG_DIR,'agents','fixture.md'), '---\nname: fixture\ndescription: 테스트\n---\nSYNTHETIC_AGENT_MARKER')
+  // A specialist's own model and turn budget come from its file.
+  await writeFile(join(process.env.CLAUDE_CONFIG_DIR,'agents','member.md'), '---\nname: member\ndescription: 부서원\nmodel: haiku\nmaxTurns: 5\ntools: [Read]\n---\nMEMBER_AGENT_MARKER')
   const hookMarker = join(directory, 'unexpected-hook')
   await writeFile(join(process.env.CLAUDE_CONFIG_DIR,'settings.json'), JSON.stringify({
     hooks:{SessionStart:[{hooks:[{type:'command',command:`echo ran > "${hookMarker}"`}]}]}
@@ -56,7 +61,7 @@ try {
     b.onLoad({filter:/.*/,namespace:'stub'},a=>({contents:stubs[a.path]}))
   }}]})
   const {runBoardAgent,listBoardAgents} = await import(pathToFileURL(file))
-  assert.deepEqual(await listBoardAgents(),[{name:'fixture',description:'테스트'}])
+  assert.deepEqual((await listBoardAgents()).sort((a,b)=>a.name.localeCompare(b.name)),[{name:'fixture',description:'테스트'},{name:'member',description:'부서원'}])
   const progress = []
   const todoInput = {
     task: {id:'todo',cwd:join(directory,'unavailable-case')}, phase:'work', prompt:'할 일 검토',
@@ -103,9 +108,27 @@ try {
   toolCalled=false; scenario='delegate'
   const delegated = await runBoardAgent({task:{id:'dept',cwd:directory,team:'송무팀'},phase:'work',prompt:'준비서면 초안',agentName:'fixture',
     delegation:{team:'송무팀',members:[{name:'fixture',description:'테스트'}]},approvedTools:[],signal:AbortSignal.timeout(30000),policyDir:directory,onProgress:message=>progress.push(message)})
-  assert.deepEqual(delegated.assignments,[{member:'fixture',title:'사실관계 정리',instruction:'기록을 시간순으로 정리',after:[]}])
+  assert.deepEqual(delegated.assignments,[{member:'fixture',title:'사실관계 정리',after:[],
+    instruction:'## 목표\n사건 경과표\n\n## 참고 자료\n- 기록/소장.pdf\n\n## 범위\n기록을 시간순으로 정리\n\n## 산출물 형식\n표'}])
   assert.ok(observedTools?.includes('mcp__board__assign_members'))
   assert.ok(progress.some(message=>message.startsWith('부서장 배분 · fixture 사실관계 정리')))
+  // A member works under its department's rules; a tool the department keeps off is refused without an approval request.
+  toolCalled=false; scenario='command'
+  const member = await runBoardAgent({task:{id:'member',cwd:directory,agent:'member',delegatedBy:'dept'},phase:'work',prompt:'하위 업무',
+    department:{team:'송무팀',role:'member',rules:'DEPARTMENT_RULES_MARKER',tools:{}},approvedTools:[],signal:AbortSignal.timeout(30000),policyDir:directory,onProgress:message=>progress.push(message)})
+  assert.equal(member.blocked,undefined)
+  assert.match(member.text,/검수 완료/)
+  assert.ok(progress.includes('부서 도구 권한 없음 · Bash'))
+  assert.match(toolResult,/부서에는 이 도구\(Bash\)를 쓸 권한이 없습니다/)
+  assert.match(observedSystem,/DEPARTMENT_RULES_MARKER[\s\S]*MEMBER_AGENT_MARKER/)
+  assert.match(observedModel,/haiku/)
+  assert.ok(member.costUsd > 0, 'session cost is reported')
+  // A department that asks first still sends the command to the approval inbox.
+  toolCalled=false
+  const asking = await runBoardAgent({task:{id:'member2',cwd:directory,agent:'member',delegatedBy:'dept'},phase:'work',prompt:'하위 업무',
+    department:{team:'송무팀',role:'member',tools:{bash:'ask'}},approvedTools:[],signal:AbortSignal.timeout(30000),policyDir:directory,onProgress:message=>progress.push(message)})
+  assert.equal(asking.blocked,true)
+  assert.match(asking.text,/결재 필요[\s\S]*Bash\(echo approved\)/)
   scenario='review'
   assert.equal((await run('review',[],async()=>{ reads++; return report })).rejected,false)
   assert.equal(reads,1)
