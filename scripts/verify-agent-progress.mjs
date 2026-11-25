@@ -624,6 +624,11 @@ const usageEvent = eventBranch('usage:update', {
 })
 usageEvent({ type: 'usage:update', context: undefined })
 assert.equal(view.context, undefined, 'a full snapshot must be allowed to clear stale context')
+view.rateLimit = { rateLimitType: 'antigravity:Gemini', remainingPercent: 48 }
+usageEvent({ type: 'usage:update' })
+assert.equal(view.rateLimit.remainingPercent, 48)
+usageEvent({ type: 'usage:update', rateLimits: [] })
+assert.equal(view.rateLimit, undefined, 'an empty quota snapshot must clear the previous limit')
 
 const appSource = readFileSync(new URL('../src/renderer/src/App.tsx', import.meta.url), 'utf8')
 const termStatusSource = appSource.match(/const onTermStatus = [\s\S]*?\n  }/)?.[0]

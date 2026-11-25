@@ -238,6 +238,7 @@ export interface AgentRateLimitUsage {
   status?: 'allowed' | 'allowed_warning' | 'rejected'
   rateLimitType?: string
   utilization?: number
+  remainingAmount?: number
   remainingPercent?: number
   resetsAt?: number
   isUsingOverage?: boolean

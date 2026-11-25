@@ -20,6 +20,18 @@ import json, os, sys, time, uuid
 def emit(event, **fields):
     print(json.dumps({'event':event, **fields}), flush=True)
 args = sys.argv[1:]
+if args == ['--output-format', 'json', '--print', '/usage']:
+    host = 'server' if 'LT_REMOTE_AGY_CWD' in os.environ else 'local'
+    buckets = [
+        {'name': '5h', 'remaining_fraction': 0.73, 'reset_time': '2026-11-27T03:00:00Z'},
+        {'name': 'Weekly', 'remaining_fraction': 0},
+        {'name': 'Credits', 'remaining_amount': 42},
+        {'name': 'N/A', 'disabled': True, 'remaining_fraction': 0},
+        {'name': 'Invalid', 'remaining_fraction': 13}
+    ]
+    groups = [] if os.path.isfile('quota-empty') else [{'name': host + ' Gemini', 'buckets': buckets}]
+    print(json.dumps({'status': 'SUCCESS', 'command': {'name': 'usage', 'data': {'groups': groups}}}))
+    sys.exit(0)
 if args == ['models']:
     if 'LT_REMOTE_AGY_CWD' in os.environ:
         assert os.path.samefile(os.getcwd(), os.environ['LT_REMOTE_AGY_CWD'])
@@ -139,7 +151,7 @@ try {
         return execFile('python3', [fakeSsh, args.at(-1)], { ...options, env: asRemoteHost({}).env }, cb)
       }
       assert.ok(bin === 'agy' || bin === 'agy.exe')
-      assert.deepEqual(Array.from(args), ['models'])
+      assert.ok(args[0] === 'models' || args.includes('/usage'))
       return execFile(process.platform === 'win32' ? 'python' : 'python3', [fixture, ...args], options, cb)
     } },
     './remoteAgentTransport': {
@@ -177,9 +189,25 @@ try {
     assert.equal(api.setAgentModel(id).ok, true)
     assert.equal((await api.listAgentModels(id)).selectedModel, undefined)
   }
+  const checkQuota = async (id, host) => {
+    const snapshot = e => e.type === 'usage:update' && e.sessionId === id && e.rateLimits?.length === 3
+    await waitFor(snapshot)
+    const [short, week, credits] = events.find(snapshot).rateLimits
+    assert.equal(short.rateLimitType, 'antigravity:' + host + ' Gemini · 5h')
+    assert.equal(short.remainingPercent, 73)
+    assert.equal(short.resetsAt, Date.parse('2026-11-27T03:00:00Z'))
+    assert.equal(week.remainingPercent, 0)
+    assert.equal(week.status, 'rejected')
+    assert.equal(credits.remainingAmount, 42)
+    assert.equal(credits.remainingPercent, undefined)
+  }
   create('initial')
+  await checkQuota('initial', 'local')
+  await writeFile(join(root, 'quota-empty'), '')
   await checkCatalog('initial', 'local')
   const native = await reply('initial')
+  await waitFor(e => e.type === 'usage:update' && e.sessionId === 'initial' && e.rateLimits.length === 0 && !e.rateLimit)
+  await rm(join(root, 'quota-empty'))
   assert.match(native, /^[a-f0-9-]{36}$/)
   api.closeAgentSession('initial')
   create('restored', { resumeSessionId: native })
@@ -234,6 +262,7 @@ try {
     const opts = { source: 'ssh', ssh: { host: 'example.invalid', user: 'test' }, cwd: caseFolder }
     await testEditable('editable-ssh', serverConfig, opts, ['read_file(remote-only/**)'])
     create('remote', opts)
+    await checkQuota('remote', 'server')
     const remoteId = await reply('remote')
     await checkCatalog('remote', 'server')
     assert.match(remoteId, /^[a-f0-9-]{36}$/)

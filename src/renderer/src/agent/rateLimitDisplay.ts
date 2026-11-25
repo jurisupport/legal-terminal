@@ -3,6 +3,7 @@ export interface AgentRateLimitUsageView {
   rateLimitType?: string
   utilization?: number
   remainingPercent?: number
+  remainingAmount?: number
   resetsAt?: number
   isUsingOverage?: boolean
   updatedAt: number
@@ -22,6 +23,7 @@ export function percentText(value: number | undefined): string {
 }
 
 export function rateLimitTypeLabel(value: string | undefined): string {
+  if (value?.startsWith('antigravity:')) return value.slice('antigravity:'.length).trim() || '한도'
   if (value === 'five_hour') return '5시간 한도'
   if (value === 'seven_day') return '7일 한도'
   if (value === 'seven_day_fable') return '7일 Fable'
@@ -33,8 +35,9 @@ export function rateLimitTypeLabel(value: string | undefined): string {
 
 export function rateLimitLabel(value: AgentRateLimitUsageView): string {
   const reset = resetTimeText(value.resetsAt)
-  const remaining =
-    value.remainingPercent === undefined ? rateLimitStatusText(value) : `잔여 ${percentText(value.remainingPercent)}`
+  let remaining = rateLimitStatusText(value)
+  if (value.remainingPercent !== undefined) remaining = `잔여 ${percentText(value.remainingPercent)}`
+  else if (value.remainingAmount !== undefined) remaining = `잔여 ${value.remainingAmount.toLocaleString('ko-KR')}`
   return `${rateLimitTypeLabel(value.rateLimitType)} ${remaining}${reset ? ` · ${reset}` : ''}`
 }
 
