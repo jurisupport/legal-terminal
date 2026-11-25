@@ -307,7 +307,13 @@ function run({ root, workspace, board, temp, home, profile, screenshot, bulk, fo
     await wait(() => queries.length === 4, 'four independent provider sessions')
     await wait(() => evaluate("JSON.stringify([...document.querySelectorAll('.wb-stat strong')].map(el=>el.textContent)) === '[\"4\",\"3\",\"2\",\"0\"]'"), 'summary counts')
     await wait(async () => (await navBadge('결재함')) === 3,'approval header badge')
-    assert.equal(await evaluate("document.querySelectorAll('.wb-org .wb-team').length"), 6)
+    // Departments are the user's own: a new board shows none until the user creates one.
+    assert.equal(await evaluate("document.querySelector('.wb-org').textContent.includes('아직 부서가 없습니다')"), true)
+    await click('.wb-org button', '부서 관리')
+    await wait(() => evaluate("[...document.querySelectorAll('.wb-dialog button')].some(b => b.textContent.includes('부서 추가'))"), 'department editor')
+    await click('.wb-dialog button', '취소')
+    await evaluate(`window.lt.workBoard.saveTeams(${JSON.stringify(workspace)}, [{name:'송무팀',color:'#376ac6',agents:[]}])`)
+    await wait(() => evaluate("[...document.querySelectorAll('.wb-org .wb-org-lead')].some(el => el.textContent.includes('부서장 · 기본 세션'))"), 'department head row')
     fs.writeFileSync(screenshot, (await win.webContents.capturePage()).toPNG())
     await click('.wb-stat', '기한 임박')
     await wait(() => evaluate("document.querySelectorAll('.wb-card').length === 2"), 'filter due cards')
@@ -398,7 +404,7 @@ function run({ root, workspace, board, temp, home, profile, screenshot, bulk, fo
         const choice = field(draft,'업무 결과')
         if (!choice.offsetWidth || choice.value !== 'report') throw Error('새 지시는 보이는 업무 결과 선택란에서 보고서 받기로 시작해야 합니다.')
       }
-      set(field(drafts[0],'담당 에이전트'),'compliance')
+      set(field(drafts[0],'담당'),'compliance')
       set(field(drafts[1],'업무 결과'),'final')
       set(field(drafts[2],'업무 결과'),'action')
     })()`)

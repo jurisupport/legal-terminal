@@ -73,10 +73,17 @@ function todoMcpPages(text: string): string[] {
     nextPage: i + 1 < chunks.length ? i + 2 : null, tasks: rows }))
 }
 
+/** One member sub-card the department head assigned. `after` lists earlier assignments (1-based) it needs. */
+export interface BoardAssignment { member: string; title: string; instruction: string; after: number[] }
+
 export interface BoardRunInput {
   task: BoardTask
   phase: 'work' | 'review' | 'execute'
   prompt: string
+  /** The session's agent when it differs from task.agent, e.g. a department head. */
+  agentName?: string
+  /** Lets a department head split the instruction among these members. */
+  delegation?: { team: string; members: BoardAgent[] }
   approvedTools: string[]
   /** Bound to the account and scope authorized by the local board dispatcher. */
   readTodos?: () => Promise<string>
@@ -89,7 +96,9 @@ export interface BoardRunInput {
   onProgress(message: string, sessionId?: string): void
 }
 
-export async function runBoardAgent(input: BoardRunInput) {
+export interface BoardRunResult { text: string; blocked?: boolean; rejected?: boolean; assignments?: BoardAssignment[] }
+
+export async function runBoardAgent(input: BoardRunInput): Promise<BoardRunResult> {
   const { task, phase, signal, onProgress } = input
   signal.throwIfAborted()
   if (phase === 'work' && input.readTodos) {
@@ -108,7 +117,7 @@ export async function runBoardAgent(input: BoardRunInput) {
     }
   }
   const policy = await readBoardPolicy(input.policyDir)
-  const name = phase === 'review' ? task.review_agent : task.agent
+  const name = phase === 'review' ? task.review_agent : input.agentName ?? task.agent
   const agent = name ? (await definitions(task.cwd)).get(name) : undefined
   if (name && !agent) throw new Error('등록된 담당 에이전트를 찾지 못했습니다: ' + name)
   const remote = isRemote(task.cwd)
@@ -185,7 +194,29 @@ export async function runBoardAgent(input: BoardRunInput) {
       throw error
     }
   }
+  let assignments: BoardAssignment[] | undefined
+  const delegation = phase === 'work' ? input.delegation : undefined
+  const memberNames = delegation?.members.map(member => member.name) ?? []
+  const delegate = delegation && memberNames.length ? [tool('assign_members',
+    '부서원에게 업무를 나눠 맡깁니다. 한 번만 호출하세요. 각 항목은 부서원 한 명이 독립 세션에서 수행하는 하위 업무가 됩니다. after에는 먼저 끝나야 하는 앞선 항목 번호(1부터)를 적으세요.', {
+      assignments: z.array(z.object({
+        member: z.enum(memberNames as [string, ...string[]]),
+        title: z.string().min(1).max(120),
+        instruction: z.string().min(1).max(20000),
+        after: z.array(z.number().int().positive()).max(12).default([])
+      })).min(1).max(12)
+    }, async ({ assignments: rows }) => {
+      signal.throwIfAborted()
+      controller.signal.throwIfAborted()
+      if (assignments) return { ...reply('이미 배분했습니다. 배분 요약을 최종 답변으로 쓰고 끝내세요.'), isError: true }
+      const invalid = rows.findIndex((row, i) => row.after.some(n => n > i))
+      if (invalid >= 0) return { ...reply(`${invalid + 1}번 항목의 after에는 그보다 앞선 항목 번호만 적을 수 있습니다.`), isError: true }
+      assignments = rows.map(row => ({ member: row.member, title: row.title.trim(), instruction: row.instruction.trim(), after: [...new Set(row.after)] }))
+      onProgress('부서장 배분 · ' + assignments.map(row => row.member + ' ' + row.title).join(' / ').slice(0, 1000))
+      return reply(`${assignments.length}건을 부서원에게 배분합니다. 이 세션에서 하위 업무를 직접 수행하지 말고, 배분 요약을 최종 답변으로 쓰고 끝내세요.`)
+    })] : []
   const files = [
+    ...delegate,
     tool('case_list', '작업 폴더 아래의 파일 목록을 조회합니다.', { path: z.string().default('') }, async ({ path }) => {
       guarded('case_list')
       const directory = await target(path)
@@ -258,7 +289,7 @@ export async function runBoardAgent(input: BoardRunInput) {
   ]
   const sandbox = join(input.policyDir, 'sessions')
   await mkdir(sandbox, { recursive: true, mode: 0o700 })
-  const tools = [...boardFileTools, 'request_action'].map(n => 'mcp__board__' + n)
+  const tools = [...boardFileTools, 'request_action', ...(delegate.length ? ['assign_members'] : [])].map(n => 'mcp__board__' + n)
   if (phase === 'work') tools.push(todoTool)
   const binding = join(sandbox, task.id + '-' + phase + '.session')
   const sessionBinding = (id: string) => remote ? 'ssh:' + id : id
@@ -280,7 +311,13 @@ export async function runBoardAgent(input: BoardRunInput) {
         input.prompt + reviewFormat + (phase === 'work' ? (input.readMcpTodos
           ? '\n승인한 범위의 현재 할일을 mcp__jurisupport__list_tasks로 조회한 뒤 그 결과를 사용해 원래 업무를 완료하세요.'
           : '\n쥬리서포트의 현재 할일이 필요하면 mcp__jurisupport__list_tasks를 사용하세요.') : '') +
-        (phase === 'execute' ? '\n이 지시에 승인된 도구 목록: ' + JSON.stringify([...grants]) : ''),
+        (phase === 'execute' ? '\n이 지시에 승인된 도구 목록: ' + JSON.stringify([...grants]) : '') +
+        (delegate.length ? '\n\n당신은 「' + delegation!.team + '」 부서장입니다. 부서원 목록:\n' +
+          delegation!.members.map(member => '- ' + member.name + (member.description ? ' · ' + member.description : '')).join('\n') +
+          '\n여러 전문 분야가 필요하거나 단계가 나뉘는 업무는 assign_members를 한 번 호출해 부서원에게 나눠 맡기세요. ' +
+          '각 지시에는 부서원이 혼자 읽어도 알 수 있도록 목적·범위·참고 파일·산출물 형식을 적으세요. ' +
+          '부서원의 보고서가 모두 도착하면 당신이 다시 호출되어 취합합니다. ' +
+          '혼자 처리할 수 있는 작은 업무면 assign_members를 호출하지 말고 직접 수행해 보고서를 작성하세요.' : ''),
       options: {
         ...transport, cwd: sandbox, env: cleanEnv(), pathToClaudeCodeExecutable: packagedClaudeAgentSdkExecutable(),
         abortController: controller, resume: input.resume,
@@ -342,6 +379,7 @@ export async function runBoardAgent(input: BoardRunInput) {
   }
   for (const action of failedActions) notes.add('실행 결과 확인 필요 · ' + action)
   if (notes.size) return { text: [result, ...outputs.map(p => '산출물 · ' + p), '## 결재 필요', ...notes].filter(Boolean).join('\n\n'), blocked: true }
+  if (assignments) return { text: result.trim() || assignments.length + '건 배분', assignments }
   if (!result.trim()) throw new Error('에이전트가 보고서를 반환하지 않았습니다.')
   const verdict = phase === 'review' ? /(?:^|\n)REVIEW: (PASS|REJECT)\s*$/.exec(result) : null
   if (phase === 'review' && !verdict) throw new Error('검토 결과에서 승인 또는 반려 판정을 확인하지 못했습니다.')

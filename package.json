@@ -15,7 +15,7 @@
     "preview": "electron-vite preview",
     "verify:work-board-management": "node --experimental-strip-types --no-warnings scripts/verify-work-board-handoff.mjs && node --experimental-strip-types --no-warnings scripts/verify-work-board-edit.mjs",
     "verify:work-board-todos": "node --experimental-strip-types --no-warnings scripts/verify-work-board-scope.mjs && node --experimental-strip-types --no-warnings scripts/verify-work-board-todos.mjs",
-    "verify:work-board": "npm run verify:work-board-management && npm run verify:work-board-todos && node --experimental-strip-types --no-warnings scripts/verify-work-board-store.mjs && node --experimental-strip-types --no-warnings scripts/verify-work-board-daily.mjs && node --experimental-strip-types --no-warnings scripts/verify-work-board-flow.mjs && node --experimental-strip-types --no-warnings scripts/verify-work-board-runner.mjs",
+    "verify:work-board": "npm run verify:work-board-management && npm run verify:work-board-todos && node --experimental-strip-types --no-warnings scripts/verify-work-board-store.mjs && node --experimental-strip-types --no-warnings scripts/verify-work-board-daily.mjs && node --experimental-strip-types --no-warnings scripts/verify-work-board-flow.mjs && node --experimental-strip-types --no-warnings scripts/verify-work-board-departments.mjs && node --experimental-strip-types --no-warnings scripts/verify-work-board-runner.mjs",
     "verify:work-board-ui": "electron-vite build && node scripts/verify-work-board-ui.mjs",
     "verify:work-board-remote-runner": "node --experimental-strip-types --no-warnings scripts/verify-work-board-remote-runner.mjs",
     "verify:work-board-ssh": "node scripts/verify-work-board-ssh.mjs",

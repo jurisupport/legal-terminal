@@ -815,6 +815,7 @@ const workBoard: BoardApi = {
   decide: (workspace, id, action, reason, expectedRevision, todoScope) => ipcRenderer.invoke('workBoard:decide', workspace, id, action, reason, expectedRevision, todoScope),
   reorder: (workspace, ids) => ipcRenderer.invoke('workBoard:reorder', workspace, ids),
   configure: (workspace, patch) => ipcRenderer.invoke('workBoard:configure', workspace, patch),
+  saveTeams: (workspace, teams) => ipcRenderer.invoke('workBoard:saveTeams', workspace, teams),
   detail: (workspace, id) => ipcRenderer.invoke('workBoard:detail', workspace, id),
   downloadDocument: (workspace, id, path) => ipcRenderer.invoke('workBoard:downloadDocument', workspace, id, path),
   downloadReport: (workspace, id) => ipcRenderer.invoke('workBoard:downloadReport', workspace, id),

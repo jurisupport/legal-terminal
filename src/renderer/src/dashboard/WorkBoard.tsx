@@ -1,4 +1,4 @@
-import { boardFollowUpRevision, boardRequestsTodoRead, boardResultKind, isBoardReport, isBoardDecisionPending, canRetryAsReport, boardReferencePaths, boardDocumentPaths, boardMutationIssue, boardReportAvailable, boardRevision, requestsCurrentBoardCase, isBoardTodoReview } from '../../../shared/workBoard'
+import { boardDelegates, isBoardDepartmentTask, boardFollowUpRevision, boardRequestsTodoRead, boardResultKind, isBoardReport, isBoardDecisionPending, canRetryAsReport, boardReferencePaths, boardDocumentPaths, boardMutationIssue, boardReportAvailable, boardRevision, requestsCurrentBoardCase, isBoardTodoReview } from '../../../shared/workBoard'
 import DOMPurify from 'dompurify'
 import { marked, Renderer } from 'marked'
 import { createPortal } from 'react-dom'
@@ -30,6 +30,7 @@ interface Props {
 const statusLabel: Record<BoardStatus, string> = {
   queued: '대기',
   running: '수행 중',
+  delegated: '부서원 수행 중',
   blocked: '확인 필요',
   reported: '보고 완료',
   in_review: '검토 중',
@@ -41,7 +42,7 @@ const statusLabel: Record<BoardStatus, string> = {
 }
 const lanes: { title: string; statuses: BoardStatus[] }[] = [
   { title: '대기', statuses: ['queued'] },
-  { title: '수행 중', statuses: ['running', 'in_review', 'reported'] },
+  { title: '수행 중', statuses: ['running', 'delegated', 'in_review', 'reported'] },
   { title: '확인 필요', statuses: ['blocked', 'failed', 'rejected'] },
   { title: '결재 대기', statuses: ['awaiting_approval'] },
   { title: '완료', statuses: ['done', 'approved'] }
@@ -202,6 +203,7 @@ function approvalLabel(instruction: string) {
 
 function InstructionForm({
   agents,
+  teams = [],
   seed,
   existing,
   followUp = false,
@@ -210,6 +212,7 @@ function InstructionForm({
   submit
 }: {
   agents: BoardAgent[]
+  teams?: BoardTeam[]
   seed?: string
   existing?: BoardTask
   followUp?: boolean
@@ -222,7 +225,7 @@ function InstructionForm({
   const [blocks, setBlocks] = useState(false)
   const [drafts, setDrafts] = useState<FormDraft[]>(() => existing ? [{
     resultKind: boardResultKind(existing),
-    title: existing.title, body: existing.body, agent: existing.agent, due: existing.due,
+    title: existing.title, body: existing.body, agent: existing.agent, team: existing.team, due: existing.due,
     approval: existing.approval ?? 'required', review_agent: existing.review_agent,
     depends_on: existing.depends_on,
     after_approval: boardResultKind(existing) === 'action' ? existing.after_approval : undefined,
@@ -320,12 +323,24 @@ function InstructionForm({
               {followUp && <summary>업무 설정 · {resultLabels[d.resultKind]}</summary>}
               <div className="wb-fields">
               <label>
-                담당 에이전트
-                <select value={d.agent || ''} onChange={(e) => update(i, { agent: e.target.value })}>
+                담당
+                <select value={d.team ? 'team:' + d.team : d.agent || ''} onChange={(e) => {
+                  const value = e.target.value
+                  update(i, value.startsWith('team:') ? { team: value.slice(5), agent: undefined } : { agent: value || undefined, team: undefined })
+                }}>
                   <option value="">기본 세션</option>
-                  {d.agent && !agents.some(a => a.name === d.agent) && <option value={d.agent}>{d.agent} (현재 미등록)</option>}
-                  {options}
+                  {!existing?.delegatedBy && (teams.length > 0 || d.team) && <optgroup label="부서 · 부서장이 나눠 맡김">
+                    {d.team && !teams.some(team => team.name === d.team) && <option value={'team:' + d.team}>{d.team} (현재 미등록)</option>}
+                    {teams.map(team => <option key={team.name} value={'team:' + team.name}>
+                      {team.name} · 부서장 {team.lead || '기본 세션'} · 부서원 {team.agents.length}명
+                    </option>)}
+                  </optgroup>}
+                  <optgroup label="개별 담당 에이전트">
+                    {d.agent && !agents.some(a => a.name === d.agent) && <option value={d.agent}>{d.agent} (현재 미등록)</option>}
+                    {options}
+                  </optgroup>
                 </select>
+                {d.team && <small>부서장이 업무를 나눠 부서원에게 하위 업무로 맡기고, 부서원 보고서를 모아 최종 보고서를 씁니다.</small>}
               </label>
               <label>
                 기한
@@ -505,63 +520,192 @@ function Settings({
   )
 }
 
-function Organization({ data }: { data: BoardSnapshot }) {
-  const seen = new Set(data.teams.flatMap((t) => t.agents))
+function Organization({ data, edit }: { data: BoardSnapshot; edit?: () => void }) {
+  const seen = new Set(data.teams.flatMap((t) => [...t.agents, ...(t.lead ? [t.lead] : [])]))
   const extra = new Set(
-    [...data.agents.map((a) => a.name), ...data.tasks.map(agentName)].filter((a) => !seen.has(a))
+    [...data.agents.map((a) => a.name), ...data.tasks.filter(t => !t.team).map(agentName)].filter((a) => !seen.has(a))
   )
-  const teams = extra.size
-    ? [...data.teams, { name: '미분류', color: '#64748b', agents: [...extra].sort() }]
-    : data.teams
+  const active = (t: BoardTask) => !['done', 'approved', 'rejected', 'failed'].includes(t.status)
+  const member = (name: string) => {
+    const tasks = data.tasks.filter(
+      (t) => (!t.team && agentName(t) === name) || (t.status === 'in_review' && t.review_agent === name)
+    )
+    const open = tasks.filter(active)
+    const recent = tasks
+      .filter((t) => !active(t))
+      .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))[0]
+    const running = open.some((t) =>
+      t.status === 'in_review' ? t.review_agent === name : t.status === 'running'
+    )
+    return (
+      <div className="wb-split-label" key={name}>
+        <span>
+          {running && <i className="wb-dot" aria-label="수행 중" />}
+          {name}
+        </span>
+        <span>
+          {open.length}건{recent && ' · ' + statusLabel[recent.status]}
+        </span>
+      </div>
+    )
+  }
   return (
     <aside className="wb-org" aria-label="조직도">
-      <h3>조직도</h3>
+      <h3 className="wb-split-label">
+        조직도
+        {edit && <button type="button" className="wb-btn" onClick={edit}>부서 관리</button>}
+      </h3>
       <div className="wb-org-head">대표 (결재)</div>
-      <div className="wb-org-head wb-org-sub">비서실장 · 배분·취합</div>
-      {teams.map((team) => (
-        <section key={team.name} className="wb-team">
+      {!data.teams.length && (
+        <p className="wb-muted">
+          아직 부서가 없습니다. 부서를 만들면 큰 업무를 부서에 맡기고, 부서장이 부서원에게 나눠 맡깁니다.
+        </p>
+      )}
+      {data.teams.map((team) => {
+        const work = data.tasks.filter((t) => t.team === team.name && !t.delegatedBy)
+        const leading = work.some((t) => t.status === 'running')
+        return (
+          <section key={team.name} className="wb-team">
+            <h4>
+              <i style={{ backgroundColor: team.color }} />
+              {team.name}
+            </h4>
+            <div className="wb-split-label wb-org-lead">
+              <span>
+                {leading && <i className="wb-dot" aria-label="부서장 수행 중" />}
+                부서장 · {team.lead || '기본 세션'}
+              </span>
+              <span>부서 업무 {work.filter(active).length}건</span>
+            </div>
+            {team.agents.map(member)}
+            {!team.agents.length && <p className="wb-muted">부서원이 없습니다.</p>}
+          </section>
+        )
+      })}
+      {extra.size > 0 && (
+        <section className="wb-team">
           <h4>
-            <i style={{ backgroundColor: team.color }} />
-            {team.name}
+            <i style={{ backgroundColor: '#64748b' }} />
+            부서 미지정
           </h4>
-          {team.agents.map((name) => {
-            const tasks = data.tasks.filter(
-              (t) => agentName(t) === name || (t.status === 'in_review' && t.review_agent === name)
-            )
-            const active = tasks.filter((t) => !['done', 'approved', 'rejected', 'failed'].includes(t.status))
-            const recent = tasks
-              .filter((t) => ['done', 'approved', 'rejected', 'failed'].includes(t.status))
-              .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))[0]
-            const running = active.some((t) =>
-              t.status === 'in_review' ? t.review_agent === name : t.status === 'running'
-            )
-            return (
-              <div className="wb-split-label" key={name}>
-                <span>
-                  {running && <i className="wb-dot" aria-label="수행 중" />}
-                  {name}
-                </span>
-                <span>
-                  {active.length}건{recent && ' · ' + statusLabel[recent.status]}
-                </span>
-              </div>
-            )
-          })}
+          {[...extra].sort().map(member)}
         </section>
-      ))}
+      )}
     </aside>
+  )
+}
+
+const teamColors = ['#376ac6', '#148369', '#c65f16', '#8c44bb', '#c42c32', '#168097']
+
+function TeamEditor({ data, save, close }: {
+  data: BoardSnapshot
+  save: (teams: BoardTeam[]) => Promise<void>
+  close: () => void
+}) {
+  const [rows, setRows] = useState<BoardTeam[]>(() => data.teams.map((team) => ({ ...team, agents: [...team.agents] })))
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+  const names = data.agents.map((agent) => agent.name)
+  const describe = (name: string) => data.agents.find((agent) => agent.name === name)?.description
+  const update = (index: number, patch: Partial<BoardTeam>) =>
+    setRows((current) => current.map((row, i) => (i === index ? { ...row, ...patch } : row)))
+  const inUse = data.teams
+    .filter((team) => !rows.some((row) => row.name.trim() === team.name))
+    .filter((team) => data.tasks.some((t) => t.team === team.name && !['done', 'approved', 'rejected', 'failed'].includes(t.status)))
+  const issue = inUse.length
+    ? `진행 중인 업무가 있는 부서는 삭제하거나 이름을 바꿀 수 없습니다: ${inUse.map((team) => team.name).join(', ')}`
+    : undefined
+  return (
+    <Dialog title="부서 관리" close={() => { if (!busy) close() }}>
+      <form onSubmit={async (e) => {
+        e.preventDefault()
+        if (busy || issue) return
+        setBusy(true)
+        setError('')
+        try {
+          await save(rows.map((row) => ({ ...row, name: row.name.trim(), lead: row.lead || undefined })))
+          close()
+        } catch (err) {
+          setError(errMsg(err).replace(/^Error invoking remote method '[^']+': (?:Error: )?/, ''))
+        } finally {
+          setBusy(false)
+        }
+      }}>
+        <p className="wb-muted">
+          부서에 업무를 맡기면 부서장이 업무를 나눠 부서원에게 하위 업무로 배분합니다. 부서원 보고서가 모두 도착하면 부서장이 최종 보고서를 써서 보고서함이나 결재함으로 보냅니다.
+        </p>
+        {!names.length && (
+          <p className="wb-muted">
+            등록된 에이전트가 없습니다. Claude 설정 폴더의 agents 폴더(예: ~/.claude/agents)에 에이전트 정의 파일(.md)을 넣으면 부서장·부서원으로 고를 수 있습니다.
+          </p>
+        )}
+        {rows.map((row, i) => (
+          <fieldset className="wb-draft" key={i} disabled={busy}>
+            <legend>{row.name.trim() || '새 부서'}</legend>
+            <div className="wb-fields">
+              <label>
+                부서 이름
+                <input required maxLength={40} value={row.name} onChange={(e) => update(i, { name: e.target.value })} />
+              </label>
+              <label>
+                색상
+                <input type="color" value={row.color} onChange={(e) => update(i, { color: e.target.value })} />
+              </label>
+              <label className="wb-wide">
+                부서장
+                <select value={row.lead || ''} onChange={(e) => update(i, { lead: e.target.value || undefined })}>
+                  <option value="">기본 세션</option>
+                  {row.lead && !names.includes(row.lead) && <option value={row.lead}>{row.lead} (현재 미등록)</option>}
+                  {names.map((name) => <option key={name} value={name} title={describe(name)}>{name}</option>)}
+                </select>
+              </label>
+              <div className="wb-wide wb-members" role="group" aria-label={(row.name.trim() || '새 부서') + ' 부서원'}>
+                <span>부서원</span>
+                {[...new Set([...names, ...row.agents])].map((name) => (
+                  <label className="wb-check" key={name} title={describe(name)}>
+                    <input type="checkbox" checked={row.agents.includes(name)} onChange={(e) =>
+                      update(i, { agents: e.target.checked ? [...row.agents, name] : row.agents.filter((agent) => agent !== name) })} />
+                    {name}{!names.includes(name) && ' (현재 미등록)'}{describe(name) && <small> · {describe(name)}</small>}
+                  </label>
+                ))}
+                {!names.length && !row.agents.length && <small>고를 수 있는 에이전트가 없습니다.</small>}
+              </div>
+            </div>
+            <div className="wb-actions">
+              <button type="button" className="wb-btn wb-remove" onClick={() => setRows((current) => current.filter((_, j) => j !== i))}>
+                부서 삭제
+              </button>
+            </div>
+          </fieldset>
+        ))}
+        <div className="wb-actions">
+          <button type="button" className="wb-btn" disabled={busy} onClick={() =>
+            setRows((current) => [...current, { name: '', color: teamColors[current.length % teamColors.length], agents: [] }])}>
+            ＋ 부서 추가
+          </button>
+        </div>
+        {issue && <p className="wb-error" role="status">{issue}</p>}
+        {error && <p className="wb-error" role="alert">{error}</p>}
+        <div className="wb-actions">
+          <button type="button" className="wb-btn" disabled={busy} onClick={close}>취소</button>
+          <button className="wb-btn wb-primary" disabled={busy || !!issue}>부서 저장</button>
+        </div>
+      </form>
+    </Dialog>
   )
 }
 
 function TaskCard({
   task: t,
   team,
+  progress,
   open,
   move,
   dragging
 }: {
   task: BoardTask
   team?: BoardTeam
+  progress?: string
   open: () => void
   move?: (id: string) => void
   dragging: React.MutableRefObject<string | null>
@@ -597,12 +741,12 @@ function TaskCard({
         {isBoardReport(t) && t.reportReceipt?.state === 'unread' && <span className="wb-report-unread">미확인</span>}
       </strong>
       <div className="wb-split-label">
-        <span className="wb-team-label">{team?.name || agentName(t)}</span>
+        <span className="wb-team-label">{t.team ? t.team + ' 부서' : team?.name || agentName(t)}</span>
         <span className={isBoardDueSoon(t) ? 'wb-due' : ''}>{t.due || '기한 미지정'}</span>
       </div>
       <small>
-        {team && agentName(t) + ' · '}
-        {t.status === 'approved' && boardResultKind(t) === 'action' ? '승인됨 · 실행 결과 대기' : statusLabel[t.status]} · {elapsed(t)}
+        {t.delegatedBy ? '↳ 부서원 ' + agentName(t) + ' · ' : team && !t.team ? agentName(t) + ' · ' : ''}
+        {t.status === 'approved' && boardResultKind(t) === 'action' ? '승인됨 · 실행 결과 대기' : statusLabel[t.status]} · {progress ? progress + ' · ' : ''}{elapsed(t)}
       </small>
     </button>
   )
@@ -765,6 +909,7 @@ function Details({
   readOnly,
   tasks,
   agents,
+  teams,
   refresh,
   manageHere,
   scopeOptions,
@@ -780,6 +925,7 @@ function Details({
   readOnly: boolean
   tasks: BoardTask[]
   agents: BoardAgent[]
+  teams: BoardTeam[]
   refresh: () => Promise<void>
   manageHere?: () => void
   scopeOptions: ScopeOptions
@@ -820,6 +966,8 @@ function Details({
   const beginFollowUp = () => {
     if (sourceRevision) setFollowUp({ revision: sourceRevision, title: task.title })
   }
+  const delegates = boardDelegates(task, tasks)
+  const departmentHead = task.delegatedBy ? tasks.find(item => item.id === task.delegatedBy) : undefined
   const [reason, setReason] = useState('')
   const [chosenScope, setChosenScope] = useState<BoardTodoScope>()
   const retryTodo = !readOnly && canRetry && isBoardTodoReview(task.body)
@@ -913,10 +1061,33 @@ function Details({
     <Dialog title={task.title} close={close}>
       <div className="wb-detail-meta">
         <span className={recovery ? 'wb-needs-action' : ''}>{resultKind === 'action' && task.status === 'approved' ? '승인됨 · 실행 결과 대기' : statusLabel[task.status]}</span>
-        {task.agent && <span>{agentName(task)}</span>}
+        {task.team && <span>{task.team} 부서 · 부서장 {teams.find(team => team.name === task.team)?.lead || '기본 세션'}</span>}
+        {task.agent && <span>{task.delegatedBy ? '부서원 ' : ''}{agentName(task)}</span>}
         {task.due && <span>기한 {task.due}</span>}
       </div>
       {!nearReport && !nearDecision && followUpActions}
+      {(isBoardDepartmentTask(task) || task.delegatedBy) && <section className="wb-delegates" aria-label="부서 배분">
+        {task.delegatedBy ? <>
+          <h3>부서장이 맡긴 하위 업무</h3>
+          {departmentHead
+            ? <button type="button" className="wb-btn" onClick={() => selectTask(departmentHead.id)}>부서 지시 · {departmentHead.title} · {statusLabel[departmentHead.status]}</button>
+            : <p className="wb-muted">부서 지시가 현재 보드에 없습니다.</p>}
+          <p className="wb-muted">이 업무가 끝나면 보고서가 부서장에게 전달됩니다. 보고서함에는 부서장의 최종 보고서만 도착합니다.</p>
+        </> : <>
+          <h3>부서 배분 · {task.team}</h3>
+          {delegates.length ? <ol>
+            {delegates.map(child => <li key={child.id}>
+              <button type="button" className={['blocked', 'failed'].includes(child.status) ? 'wb-btn wb-needs-action' : 'wb-btn'} onClick={() => selectTask(child.id)}>
+                {child.title} · {agentName(child)} · {statusLabel[child.status]}
+              </button>
+            </li>)}
+          </ol> : <p className="wb-muted">{task.status === 'running' ? '부서장이 업무를 나누고 있습니다.' : task.status === 'queued' ? '부서장이 업무를 나눌 차례를 기다리고 있습니다.' : '배분한 하위 업무가 없습니다.'}</p>}
+          {task.status === 'delegated' && <p className="wb-muted">
+            하위 업무 {delegates.filter(child => child.status === 'done').length}/{delegates.length}건 완료. 모두 끝나면 부서장이 보고서를 취합합니다.
+            {delegates.some(child => ['blocked', 'failed'].includes(child.status)) && ' 확인 필요 상태인 하위 업무를 먼저 처리하세요.'}
+          </p>}
+        </>}
+      </section>}
       {recovery && files && <section className="wb-recovery" aria-label="다음 행동">
         {readOnly ? <>
           <h3>이 PC에서 업무를 처리하려면</h3>
@@ -982,6 +1153,7 @@ function Details({
         </div> : !files ? <p role="status">보고서를 불러오는 중…</p>
           : reportAvailable ? <ReportMarkdown text={files.report} todo={todoReview} />
           : <p className="wb-muted" role="status">{task.status === 'queued' ? '실행을 기다리는 중입니다.' :
+            task.status === 'delegated' ? '부서원이 하위 업무를 수행하고 있습니다. 모두 끝나면 부서장이 보고서를 취합합니다.' :
             task.status === 'running' ? (todoReview ? '할일을 조회하고 있습니다.' : '업무를 수행하고 있습니다.') : resultKind === 'report' ? '아직 도착한 업무 보고서가 없습니다.' : '아직 결재할 업무 보고서가 없습니다.'}</p>}
         {reportAvailable && !task.editedNeedsRun && (receipt || (resultKind === 'report' && todoReview)) && <div className="wb-receipt">
           {todoReview && <p>조회 결과를 확인해도 원본 할일 상태는 그대로 유지됩니다.</p>}
@@ -1108,7 +1280,7 @@ function Details({
           {files.review && <><strong>현재 검토 결과</strong><p className="wb-notes">{files.review}</p></>}
           <button type="button" className="wb-btn" onClick={beginFollowUp}>이 내용을 참고해 계속 작성</button>
         </details>}
-        <InstructionForm agents={agents} followUp scopeOptions={scopeOptions}
+        <InstructionForm agents={agents} teams={teams} followUp scopeOptions={scopeOptions}
           issue={sourceRevision && followUp.revision !== sourceRevision ? '변경된 원 지시를 확인한 뒤 등록하세요.' : undefined}
           submit={async ([draft], requestId) => {
             setBusy(true)
@@ -1125,7 +1297,7 @@ function Details({
           }} />
       </Dialog>}
       {mutation?.kind === 'update' && <Dialog title="지시 수정" close={() => { if (!busy) setMutation(null) }}>
-        <InstructionForm agents={agents} existing={mutation.task} scopeOptions={scopeOptions} issue={changeIssue}
+        <InstructionForm agents={agents} teams={teams} existing={mutation.task} scopeOptions={scopeOptions} issue={changeIssue}
           submit={async ([draft]) => {
             setBusy(true)
             try {
@@ -1157,6 +1329,7 @@ function BoardWorkspace({ workspace, view, onView, bulkSeed, boundCase, onOpenFi
   const [tab, setTab] = useState(view)
   const [takeover, setTakeover] = useState<string | null>(null)
   const [settings, setSettings] = useState(false)
+  const [editingTeams, setEditingTeams] = useState(false)
   const [selected, setSelected] = useState<string | null>(null)
   const [filter, setFilter] = useState<number | null>(null)
   const [report, setReport] = useState('')
@@ -1237,11 +1410,22 @@ function BoardWorkspace({ workspace, view, onView, bulkSeed, boundCase, onOpenFi
     await api.reorder(workspace, ids)
     await refresh()
   }
+  const teamOf = (t: BoardTask): BoardTeam | undefined => {
+    const teams = data?.teams ?? []
+    const head = t.delegatedBy ? ordered.find((item) => item.id === t.delegatedBy) : undefined
+    const name = t.team || head?.team
+    return name ? teams.find((team) => team.name === name) : teams.find((team) => team.agents.includes(agentName(t)))
+  }
+  const progressOf = (t: BoardTask) => {
+    const delegates = isBoardDepartmentTask(t) ? boardDelegates(t, ordered) : []
+    return delegates.length ? `하위 업무 ${delegates.filter((child) => child.status === 'done').length}/${delegates.length}` : undefined
+  }
   const card = (t: BoardTask) => (
     <TaskCard
       key={t.id}
       task={t}
-      team={data?.teams.find((team) => team.agents.includes(agentName(t)))}
+      team={teamOf(t)}
+      progress={progressOf(t)}
       open={() => setSelected(t.id)}
       dragging={drag}
       move={
@@ -1360,7 +1544,7 @@ function BoardWorkspace({ workspace, view, onView, bulkSeed, boundCase, onOpenFi
                   })}
                 </div>
               </main>
-              <Organization data={data} />
+              <Organization data={data} edit={data.readOnly ? undefined : () => setEditingTeams(true)} />
             </div>
           )}
           {tab === 'reports' && <main className="wb-page" aria-label="보고서함">
@@ -1419,6 +1603,7 @@ function BoardWorkspace({ workspace, view, onView, bulkSeed, boundCase, onOpenFi
             <Dialog title="일괄 지시" close={() => navigate('board')}>
               <InstructionForm
                 agents={data.agents}
+                teams={data.teams}
                 seed={bulkSeed}
                 scopeOptions={scopeOptions}
                 submit={async (drafts, batchId) => {
@@ -1442,6 +1627,16 @@ function BoardWorkspace({ workspace, view, onView, bulkSeed, boundCase, onOpenFi
               />
             </Dialog>
           )}
+          {editingTeams && (
+            <TeamEditor
+              data={data}
+              close={() => setEditingTeams(false)}
+              save={async (teams) => {
+                await api.saveTeams(workspace, teams)
+                await refresh()
+              }}
+            />
+          )}
           {task && (
             <Details
               key={task.id}
@@ -1453,6 +1648,7 @@ function BoardWorkspace({ workspace, view, onView, bulkSeed, boundCase, onOpenFi
               tasks={data.tasks}
               selectTask={setSelected}
               agents={data.agents}
+              teams={data.teams}
               refresh={refresh}
               manageHere={requestTakeover}
               close={() => setSelected(null)}

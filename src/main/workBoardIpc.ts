@@ -7,7 +7,7 @@ import { downloadBoardDocument, downloadBoardReport } from './workBoardDownload'
 import { readBoardDocumentText } from './workBoardDocumentText'
 import { boardTodoCaseIds } from './workBoardScope'
 import { isRemote, makeRemote, parseRemote, rfsRealpath } from './remoteFs'
-import type { BoardDecision, BoardDraft, BoardSettings, BoardTodoScope } from '../shared/workBoard'
+import type { BoardDecision, BoardDraft, BoardSettings, BoardTeam, BoardTodoScope } from '../shared/workBoard'
 
 export function registerWorkBoards(): () => void {
   const privateDir = join(app.getPath('userData'), 'work-boards')
@@ -149,6 +149,7 @@ export function registerWorkBoards(): () => void {
   handle('decide', async (w: string, id: string, action: BoardDecision, reason?: string, expectedRevision?: string, todoScope?: BoardTodoScope) => (await open(w)).decide(id, action, reason, expectedRevision, todoScope))
   handle('reorder', async (w: string, ids: string[]) => (await open(w)).reorder(ids))
   handle('configure', async (w: string, patch: Partial<BoardSettings>) => (await open(w)).configure(patch))
+  handle('saveTeams', async (w: string, teams: BoardTeam[]) => (await open(w)).saveTeams(teams))
   handle('detail', async (w: string, id: string) => (await open(w)).detail(id))
   handle('documentPath', async (w: string, id: string, path: string) => (await open(w)).documentPath(id, path))
   handle('documentText', async (w: string, id: string, path: string, offset: number = 0) =>

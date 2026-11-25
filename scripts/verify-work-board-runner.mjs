@@ -15,8 +15,10 @@ const server = boardInference(input => {
   observedTools = input.tools?.map(t => t.name)
   sawNamedAgent ||= JSON.stringify(input.system).includes('SYNTHETIC_AGENT_MARKER')
   const useTool = !toolCalled && scenario !== 'report'
-  const name = scenario === 'draft' ? 'mcp__board__case_draft' : 'mcp__board__request_action'
-  const args = scenario === 'draft' ? { name: '초안.md', text: '검수 본문' } : {name:'Bash',args:{command:'echo approved'}}
+  const name = scenario === 'draft' ? 'mcp__board__case_draft' : scenario === 'delegate' ? 'mcp__board__assign_members' : 'mcp__board__request_action'
+  const args = scenario === 'draft' ? { name: '초안.md', text: '검수 본문' }
+    : scenario === 'delegate' ? { assignments: [{ member: 'fixture', title: '사실관계 정리', instruction: '기록을 시간순으로 정리', after: [] }] }
+    : {name:'Bash',args:{command:'echo approved'}}
   if (useTool) toolCalled = true
   return useTool ? {name,args} : {text:scenario === 'review' ? '검토 완료\nREVIEW: PASS' : '## 결론\n검수 완료'}
 })
@@ -98,6 +100,12 @@ try {
   assert.equal(progress.some(message=>message.includes('승인된 실행')),false)
   toolCalled=false
   assert.match((await run('execute',['Bash(echo approved)'],async()=>{ reads++; return report })).text,/검수 완료/)
+  toolCalled=false; scenario='delegate'
+  const delegated = await runBoardAgent({task:{id:'dept',cwd:directory,team:'송무팀'},phase:'work',prompt:'준비서면 초안',agentName:'fixture',
+    delegation:{team:'송무팀',members:[{name:'fixture',description:'테스트'}]},approvedTools:[],signal:AbortSignal.timeout(30000),policyDir:directory,onProgress:message=>progress.push(message)})
+  assert.deepEqual(delegated.assignments,[{member:'fixture',title:'사실관계 정리',instruction:'기록을 시간순으로 정리',after:[]}])
+  assert.ok(observedTools?.includes('mcp__board__assign_members'))
+  assert.ok(progress.some(message=>message.startsWith('부서장 배분 · fixture 사실관계 정리')))
   scenario='review'
   assert.equal((await run('review',[],async()=>{ reads++; return report })).rejected,false)
   assert.equal(reads,1)

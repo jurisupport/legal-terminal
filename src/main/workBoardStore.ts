@@ -8,16 +8,10 @@ import { dump, JSON_SCHEMA, load } from 'js-yaml'
 import { boardReportAvailable, isBoardReport } from '../shared/workBoard.ts'
 import type { BoardStatus, BoardTask, BoardTeam } from '../shared/workBoard'
 
-const statuses: BoardStatus[] = ['queued', 'running', 'blocked', 'reported', 'in_review', 'awaiting_approval', 'approved', 'rejected', 'done', 'failed']
+const statuses: BoardStatus[] = ['queued', 'running', 'delegated', 'blocked', 'reported', 'in_review', 'awaiting_approval', 'approved', 'rejected', 'done', 'failed']
 const template = ['결론', '한 일', '산출물 경로', '결재 요청 사항', '미확인 사항', '기한·위험'].map(s => '## ' + s + '\n\n').join('')
-const teams: BoardTeam[] = [
-  { name: '준법감시', color: '#c42c32', agents: ['compliance', 'compliance-review'] },
-  { name: '법무팀', color: '#376ac6', agents: ['contract-review', 'evidence-synthesis', 'exec-summary'] },
-  { name: '콘텐츠팀', color: '#8c44bb', agents: ['sns-curator', 'content-planner', 'youtube-optimizer'] },
-  { name: '마케팅팀', color: '#c65f16', agents: ['marketing-ad-creative', 'ad-creative', 'search-ads', 'seo', 'ai-search', 'social-ads'] },
-  { name: '영업·홍보팀', color: '#148369', agents: ['newsletter', 'pr', 'proposal', 'lead-gen'] },
-  { name: '플랫폼운영팀', color: '#168097', agents: ['platform-manager'] }
-]
+// Departments are the user's own organization. A new board starts without any.
+const teams: BoardTeam[] = []
 
 const idPattern = /^[a-z\d][a-z\d_-]{0,127}$/i
 function validId(id: unknown): id is string {
@@ -61,7 +55,7 @@ function parseTask(id: string, source: string, fallbackDate = new Date().toISOSt
     throw new Error('지시서 파일명·id·제목·작업 폴더를 확인해 주세요.')
   }
   if (!statuses.includes(v.status as BoardStatus)) throw new Error('알 수 없는 업무 상태입니다.')
-  for (const field of ['agent', 'review_agent', 'due', 'after_approval', 'sessionId', 'parentId']) {
+  for (const field of ['agent', 'team', 'review_agent', 'due', 'after_approval', 'sessionId', 'parentId', 'delegatedBy']) {
     if (v[field] != null && typeof v[field] !== 'string') throw new Error('문자열 속성을 확인해 주세요: ' + field)
   }
   if (typeof v.due === 'string' && v.due && !/^\d{4}-\d\d-\d\d$/.test(v.due)) throw new Error('기한 형식을 확인해 주세요.')
@@ -69,6 +63,7 @@ function parseTask(id: string, source: string, fallbackDate = new Date().toISOSt
   if (v.depends_on != null && (!strings(v.depends_on) || !v.depends_on.every(validId))) throw new Error('선행 지시 목록을 확인해 주세요.')
   if (v.allowed_tools != null && !strings(v.allowed_tools)) throw new Error('허용 도구 목록을 확인해 주세요.')
   if (v.parentId != null && !validId(v.parentId)) throw new Error('상위 지시 ID를 확인해 주세요.')
+  if (v.delegatedBy != null && (!validId(v.delegatedBy) || v.delegatedBy === id || v.parentId != null)) throw new Error('부서 지시 ID를 확인해 주세요.')
   for (const key of ['order', 'attempts']) {
     if (v[key] != null && (!Number.isSafeInteger(v[key]) || Number(v[key]) < 0)) throw new Error('숫자 속성을 확인해 주세요: ' + key)
   }
@@ -76,7 +71,7 @@ function parseTask(id: string, source: string, fallbackDate = new Date().toISOSt
   if (v.editedNeedsRun !== undefined && v.editedNeedsRun !== true) throw new Error('수정 후 재실행 상태를 확인해 주세요.')
   if (v.log != null && (!Array.isArray(v.log) || !v.log.every(e => e && date(e.at) && typeof e.text === 'string'))) throw new Error('진행 기록의 형식을 확인해 주세요.')
   // YAML null is common in unfilled optional fields.
-  const optionalKeys = ['agent', 'review_agent', 'due', 'after_approval', 'sessionId', 'parentId', 'depends_on', 'allowed_tools', 'approval', 'order', 'attempts', 'createdAt', 'updatedAt', 'editedNeedsRun']
+  const optionalKeys = ['agent', 'team', 'delegatedBy', 'review_agent', 'due', 'after_approval', 'sessionId', 'parentId', 'depends_on', 'allowed_tools', 'approval', 'order', 'attempts', 'createdAt', 'updatedAt', 'editedNeedsRun']
   const fields = Object.fromEntries(optionalKeys.filter(k => v[k] != null).map(k => [k, v[k]]))
   if (v.followUp != null) fields.followUp = followUpSnapshot(v.followUp, id)
   if (v.reportReceipt != null) {
@@ -88,6 +83,21 @@ function parseTask(id: string, source: string, fallbackDate = new Date().toISOSt
   if (Array.isArray(v.log)) fields.log = v.log.map(({at, text}) => ({at, text}))
   return { approval: 'required', order: 0, attempts: 0, log: [], createdAt: fallbackDate, updatedAt: fallbackDate, ...fields,
     id, title: v.title, cwd: v.cwd, status: v.status as BoardStatus, body: match[2] } as BoardTask
+}
+
+export function validTeams(rows: unknown[]): BoardTeam[] {
+  const names = new Set<string>()
+  return rows.map(row => {
+    const value = record(row)
+    const name = typeof value.name === 'string' ? value.name.trim() : ''
+    if (!name || name.length > 40 || names.has(name)) throw new Error('부서 이름은 1~40자이고 서로 달라야 합니다.')
+    names.add(name)
+    if (typeof value.color !== 'string' || !/^#[\da-f]{6}$/i.test(value.color)) throw new Error('부서 색상(#RRGGBB)을 확인해 주세요: ' + name)
+    if (!strings(value.agents) || value.agents.some(agent => !agent.trim())) throw new Error('부서원 목록을 확인해 주세요: ' + name)
+    if (value.lead != null && (typeof value.lead !== 'string' || !value.lead.trim())) throw new Error('부서장 이름을 확인해 주세요: ' + name)
+    const agents = [...new Set(value.agents.map(agent => agent.trim()))]
+    return {name, color: value.color, agents, ...(typeof value.lead === 'string' && {lead: value.lead.trim()})}
+  })
 }
 
 function revision(source: string) {
@@ -552,14 +562,19 @@ export class WorkBoardStore {
     if (source === null) return []
     try {
       const data = load(source, {schema: JSON_SCHEMA})
-      const rows = Array.isArray(data) ? data : record(data).teams
-      if (!Array.isArray(rows) || !rows.every(row => row && typeof row.name === 'string' && typeof row.color === 'string' && /^#[\da-f]{6}$/i.test(row.color) && strings(row.agents))) {
-        throw new Error('팀 이름·색상(#RRGGBB)·에이전트 목록을 확인해 주세요.')
-      }
-      return rows.map(({name, color, agents}) => ({name, color, agents}))
+      const rows = data == null ? [] : Array.isArray(data) ? data : record(data).teams ?? []
+      if (!Array.isArray(rows)) throw new Error('teams 목록을 확인해 주세요.')
+      return validTeams(rows)
     } catch (error) {
       this.warnings.push('teams.yaml · ' + (error instanceof Error ? error.message : String(error)))
       return []
     }
+  }
+
+  async saveTeams(input: unknown): Promise<BoardTeam[]> {
+    if (!Array.isArray(input)) throw new Error('부서 목록을 확인해 주세요.')
+    const rows = validTeams(input)
+    await this.writeText('teams.yaml', dump({teams: rows}, {noRefs: true, lineWidth: -1}))
+    return rows
   }
 }

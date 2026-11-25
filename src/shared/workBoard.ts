@@ -1,5 +1,6 @@
 export { boardDocumentPaths, boardReferencePaths, isBoardDocumentPath } from './workBoardDocuments.ts'
-export type BoardStatus = 'queued' | 'running' | 'blocked' | 'reported' | 'in_review' | 'awaiting_approval' | 'approved' | 'rejected' | 'done' | 'failed'
+// 'delegated': a department head assigned members' sub-cards and waits for their reports.
+export type BoardStatus = 'queued' | 'running' | 'delegated' | 'blocked' | 'reported' | 'in_review' | 'awaiting_approval' | 'approved' | 'rejected' | 'done' | 'failed'
 export type BoardTodoScope = { kind: 'case'; caseId: string } | { kind: 'all' }
 
 function todoReviewText(input: string): string {
@@ -30,6 +31,8 @@ export interface BoardDraft {
   title: string
   body: string
   agent?: string
+  /** A department instruction. Its head splits the work into member sub-cards and combines their reports. */
+  team?: string
   due?: string
   review_agent?: string
   approval?: 'required' | 'none'
@@ -51,6 +54,8 @@ export interface BoardTask extends BoardDraft {
   log: { at: string; text: string }[]
   sessionId?: string
   parentId?: string
+  /** The department instruction that delegated this member sub-card. */
+  delegatedBy?: string
 }
 export interface BoardSettings {
   concurrency: number
@@ -58,7 +63,8 @@ export interface BoardSettings {
   maxReviews: number
   dailyTime: string
 }
-export interface BoardTeam { name: string; color: string; agents: string[] }
+/** A department. Without a lead the default session acts as the department head. */
+export interface BoardTeam { name: string; color: string; agents: string[]; lead?: string }
 export interface BoardAgent { name: string; description: string }
 export interface BoardSnapshot {
   todoCaseIds?: string[]
@@ -84,6 +90,7 @@ export interface BoardApi {
   decide(workspace: string, id: string, action: BoardDecision, reason?: string, expectedRevision?: string, todoScope?: BoardTodoScope): Promise<void>
   reorder(workspace: string, ids: string[]): Promise<void>
   configure(workspace: string, patch: Partial<BoardSettings>): Promise<void>
+  saveTeams(workspace: string, teams: BoardTeam[]): Promise<void>
   detail(workspace: string, id: string): Promise<{report: string; review: string}>
   documentPath(workspace: string, id: string, path: string): Promise<string>
   downloadDocument(workspace: string, id: string, path: string): Promise<boolean>
@@ -95,6 +102,15 @@ export interface BoardApi {
 }
 
 type BoardResultFields = Pick<BoardDraft, 'approval' | 'after_approval'>
+type BoardInboxFields = BoardResultFields & Pick<BoardTask, 'status' | 'parentId' | 'delegatedBy'>
+
+export function boardDelegates(task: Pick<BoardTask, 'id'>, tasks: readonly BoardTask[]): BoardTask[] {
+  return tasks.filter(candidate => candidate.delegatedBy === task.id)
+}
+
+export function isBoardDepartmentTask(task: Pick<BoardTask, 'team' | 'parentId' | 'delegatedBy'>): boolean {
+  return !!task.team && !task.parentId && !task.delegatedBy
+}
 
 export function boardRequestsTodoRead(task: BoardTask): boolean {
   if (task.status !== 'blocked' || task.parentId || task.editedNeedsRun || isBoardTodoReview(task.body) ||
@@ -115,12 +131,13 @@ export function boardResultKind(task: BoardResultFields): 'report' | 'final' | '
   return task.approval === 'required' ? 'final' : 'report'
 }
 
-export function isBoardReport(task: BoardResultFields & Pick<BoardTask, 'status' | 'parentId'>): boolean {
-  return task.status === 'done' && !task.parentId && boardResultKind(task) === 'report'
+// Member sub-cards report to their department head, not to the lawyer's inboxes.
+export function isBoardReport(task: BoardInboxFields): boolean {
+  return task.status === 'done' && !task.parentId && !task.delegatedBy && boardResultKind(task) === 'report'
 }
 
-export function isBoardDecisionPending(task: BoardResultFields & Pick<BoardTask, 'status' | 'parentId'>): boolean {
-  return task.status === 'awaiting_approval' && !task.parentId && boardResultKind(task) !== 'report'
+export function isBoardDecisionPending(task: BoardInboxFields): boolean {
+  return task.status === 'awaiting_approval' && !task.parentId && !task.delegatedBy && boardResultKind(task) !== 'report'
 }
 
 export function canRetryAsReport(task: BoardTask, tasks: readonly BoardTask[]): boolean {
@@ -131,6 +148,13 @@ export function canRetryAsReport(task: BoardTask, tasks: readonly BoardTask[]): 
 
 export function boardMutationIssue(task: BoardTask, tasks: readonly BoardTask[], action: 'update' | 'remove'): string | undefined {
   if (task.status === 'running' || task.status === 'in_review') return '수행 또는 검토가 끝난 뒤 변경할 수 있습니다.'
+  if (boardDelegates(task, tasks).length) {
+    return action === 'remove' ? '부서원 하위 업무를 먼저 삭제해 주세요.' : '부서원에게 배분한 지시는 수정할 수 없습니다. 추가 업무 지시를 이용해 주세요.'
+  }
+  if (task.delegatedBy && action === 'remove') {
+    const head = tasks.find(candidate => candidate.id === task.delegatedBy)
+    if (head && ['running', 'in_review'].includes(head.status)) return '부서장이 취합을 마친 뒤 삭제할 수 있습니다.'
+  }
   if (task.status === 'approved') return '승인 후 실행 결과를 확인한 뒤 변경할 수 있습니다.'
   if (task.parentId) {
     if (action === 'update') return '승인 후 실행 지시는 결재된 내용을 유지합니다.'

@@ -169,3 +169,13 @@ details.wb-draft-options > .wb-fields { margin-top: 8px; }
 
 .wb-followup-form .wb-draft { padding: 0; border: 0; }
 .wb-followup-added { background: #edf6ef; border-color: #8daa95; }
+
+/* Departments: a head splits work into member sub-cards. */
+.wb-org > h3.wb-split-label { align-items: center; }
+.wb-team .wb-org-lead { color: var(--wb-text, #172033); font-weight: 650; border-bottom: 1px dashed var(--wb-border); padding-bottom: 3px; margin-bottom: 3px; }
+.wb-members { display: flex; flex-direction: column; gap: 4px; }
+.wb-members > span { font-weight: 600; }
+.wb-dialog .wb-check { display: flex; align-items: baseline; gap: 6px; font-weight: 400; }
+.wb-check small { color: var(--wb-muted); }
+.wb-delegates ol { margin: 4px 0; padding-left: 20px; display: flex; flex-direction: column; gap: 4px; }
+.wb-delegates .wb-btn { text-align: left; }

@@ -2,7 +2,7 @@ import { kstDateKey } from './todoSummary.ts'
 import type { BoardTask } from './workBoard'
 
 export function isBoardRunning(task: Pick<BoardTask, 'status'>): boolean {
-  return task.status === 'running' || task.status === 'in_review'
+  return task.status === 'running' || task.status === 'delegated' || task.status === 'in_review'
 }
 
 export function isBoardDueSoon(task: Pick<BoardTask, 'due' | 'status'>, now = new Date()): boolean {
