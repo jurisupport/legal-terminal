@@ -1,4 +1,4 @@
-import { boardDelegates, boardRouted, boardChildren, isBoardChiefTask, boardDepartmentTools, boardInstructionCost, descriptionsOverlap, formatUsd, isBoardDepartmentTask, boardFollowUpRevision, boardRequestsTodoRead, boardResultKind, isBoardReport, isBoardDecisionPending, canRetryAsReport, boardReferencePaths, boardDocumentPaths, boardMutationIssue, boardReportAvailable, boardRevision, requestsCurrentBoardCase, isBoardTodoReview } from '../../../shared/workBoard'
+import { boardDelegates, maxDepartmentRoutines, boardRouted, boardChildren, isBoardChiefTask, boardDepartmentTools, boardInstructionCost, descriptionsOverlap, formatUsd, isBoardDepartmentTask, boardFollowUpRevision, boardRequestsTodoRead, boardResultKind, isBoardReport, isBoardDecisionPending, canRetryAsReport, boardReferencePaths, boardDocumentPaths, boardMutationIssue, boardReportAvailable, boardRevision, requestsCurrentBoardCase, isBoardTodoReview } from '../../../shared/workBoard'
 import DOMPurify from 'dompurify'
 import { marked, Renderer } from 'marked'
 import { createPortal } from 'react-dom'
@@ -11,6 +11,7 @@ import type {
   BoardSnapshot,
   BoardStatus,
   BoardTask,
+  BoardRoutine,
   BoardTeam,
   BoardToolLevel,
   BoardTodoScope
@@ -606,6 +607,12 @@ function Organization({ data, edit }: { data: BoardSnapshot; edit?: () => void }
             </div>}
             {team.agents.map(member)}
             {!team.agents.length && <p className="wb-muted">부서원이 없습니다.</p>}
+            {(team.routines ?? []).map((routine) => (
+              <div className="wb-split-label wb-org-routine" key={routine.id}>
+                <span>정기 · {routine.title}</span>
+                <span>{routine.days === 'weekdays' ? '평일' : '매일'} {routine.time}{routine.workspace === data.workspace ? '' : ' · 다른 보드'}</span>
+              </div>
+            ))}
           </section>
         )
       })}
@@ -628,6 +635,65 @@ const toolLevelLabel: Record<BoardToolLevel, string> = { allow: '허용 (결재 
 
 function usdInput(value: number | undefined) {
   return value === undefined ? '' : String(value)
+}
+
+const routineId = () => crypto.randomUUID().replace(/-/g, '').slice(0, 12)
+
+/** Scheduled work for one department. Each run becomes an ordinary card on the chosen board. */
+function RoutineEditor({ workspace, routines, change }: { workspace: string; routines: BoardRoutine[]; change: (routines: BoardRoutine[]) => void }) {
+  const set = (index: number, patch: Partial<BoardRoutine>) => change(routines.map((row, i) => (i === index ? { ...row, ...patch } : row)))
+  const full = routines.length >= maxDepartmentRoutines
+  return (
+    <div className="wb-routines" role="group" aria-label="정기 업무">
+      <span>정기 업무 <small>정해진 시각(한국 시간)에 이 부서 앞으로 카드가 만들어집니다. 지시 없이 비용이 나가므로 하나씩 늘리세요.</small></span>
+      {routines.map((routine, i) => (
+        <fieldset className="wb-routine" key={routine.id}>
+          <div className="wb-fields">
+            <label className="wb-wide">
+              제목
+              <input required maxLength={120} value={routine.title} onChange={(e) => set(i, { title: e.target.value })} />
+            </label>
+            <label className="wb-wide">
+              지시 내용
+              <textarea required rows={2} maxLength={20000} value={routine.body} onChange={(e) => set(i, { body: e.target.value })} />
+            </label>
+            <label>
+              시각
+              <input type="time" required value={routine.time} onChange={(e) => set(i, { time: e.target.value })} />
+            </label>
+            <label>
+              요일
+              <select value={routine.days} onChange={(e) => set(i, { days: e.target.value as BoardRoutine['days'] })}>
+                <option value="weekdays">평일</option>
+                <option value="daily">매일</option>
+              </select>
+            </label>
+            <label>
+              업무 결과
+              <select value={routine.approval ?? 'none'} onChange={(e) => set(i, { approval: e.target.value as 'none' | 'required' })}>
+                <option value="none">보고서 받기</option>
+                <option value="required">최종안 승인받기</option>
+              </select>
+            </label>
+            <small className="wb-wide">
+              {routine.workspace === workspace ? '이 업무 보드에 만듭니다.' : '다른 업무 보드에 만듭니다: ' + routine.workspace}
+            </small>
+          </div>
+          <div className="wb-actions">
+            <button type="button" className="wb-btn wb-remove" onClick={() => change(routines.filter((_, j) => j !== i))}>정기 업무 삭제</button>
+          </div>
+        </fieldset>
+      ))}
+      <div className="wb-actions wb-team-start">
+        <button type="button" className="wb-btn" disabled={full || !workspace} onClick={() => change([...routines,
+          { id: routineId(), title: '', body: '', time: '09:00', days: 'weekdays', workspace }])}>＋ 정기 업무</button>
+        <button type="button" className="wb-btn" disabled={full || !workspace} onClick={() => change([...routines,
+          { id: routineId(), title: '매일 할일 점검', body: '할일 점검', time: '09:00', days: 'weekdays', workspace, todoScope: { kind: 'all' } }])}>
+          매일 할일 점검 추가
+        </button>
+      </div>
+    </div>
+  )
 }
 
 function TeamEditor({ data, save, close, restore, importLegacy, suggest }: {
@@ -779,6 +845,8 @@ function TeamEditor({ data, save, close, restore, importLegacy, suggest }: {
                   onChange={(e) => update(i, { warnMonthlyUsd: e.target.value ? Number(e.target.value) : undefined })} />
               </label>
             </div>
+            <RoutineEditor workspace={data.workspace ?? ''} routines={row.routines ?? []}
+              change={(routines) => update(i, { routines: routines.length ? routines : undefined })} />
             <div className="wb-actions">
               <button type="button" className="wb-btn wb-remove" onClick={() => setRows((current) => current.filter((_, j) => j !== i))}>
                 부서 삭제
@@ -873,7 +941,7 @@ function TaskCard({
         <span className={isBoardDueSoon(t) ? 'wb-due' : ''}>{t.due || '기한 미지정'}</span>
       </div>
       <small>
-        {t.delegatedBy ? '↳ 부서원 ' + agentName(t) + ' · ' : t.routedBy ? '↳ 비서실장 배분 · ' : team && !t.team ? agentName(t) + ' · ' : ''}
+        {t.routine ? '정기 · ' : ''}{t.delegatedBy ? '↳ 부서원 ' + agentName(t) + ' · ' : t.routedBy ? '↳ 비서실장 배분 · ' : team && !t.team ? agentName(t) + ' · ' : ''}
         {t.status === 'approved' && boardResultKind(t) === 'action' ? '승인됨 · 실행 결과 대기' : statusLabel[t.status]} · {progress ? progress + ' · ' : ''}{elapsed(t)}
       </small>
     </button>

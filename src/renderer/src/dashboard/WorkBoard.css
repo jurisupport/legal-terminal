@@ -190,3 +190,8 @@ details.wb-draft-options > .wb-fields { margin-top: 8px; }
 .wb-team-history { margin: 10px 0; }
 .wb-team-history ol { margin: 6px 0; padding-left: 20px; display: flex; flex-direction: column; gap: 6px; }
 .wb-team-history li { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
+.wb-routines { display: flex; flex-direction: column; gap: 6px; margin-top: 10px; }
+.wb-routines > span { font-weight: 600; }
+.wb-routines > span small { color: var(--wb-muted); font-weight: 400; }
+.wb-routine { border: 1px dashed #cbd1da; border-radius: 6px; padding: 8px; }
+.wb-org-routine { font-size: 12px; color: var(--wb-muted); }

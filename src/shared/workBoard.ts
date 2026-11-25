@@ -60,6 +60,8 @@ export interface BoardTask extends BoardDraft {
   delegatedBy?: string
   /** The chief-of-staff instruction that routed this department instruction. */
   routedBy?: string
+  /** The department routine that created this card. */
+  routine?: string
   /** Estimated spend in USD of this card's own sessions. A department instruction adds its members' cards. */
   cost?: number
 }
@@ -97,6 +99,30 @@ export interface BoardTeam {
   warnMonthlyUsd?: number
   /** A hard stop for one instruction in USD, including its members. Reaching it stops the work for review. */
   stopInstructionUsd?: number
+  /** Work the department does on a schedule. Each run becomes an ordinary card on the given board. */
+  routines?: BoardRoutine[]
+}
+/** A scheduled department instruction, created as a card at `time` (Korea time) on the board for `workspace`. */
+export interface BoardRoutine {
+  id: string
+  title: string
+  body: string
+  time: string
+  days: 'daily' | 'weekdays'
+  workspace: string
+  approval?: 'required' | 'none'
+  todoScope?: BoardTodoScope
+}
+export const maxDepartmentRoutines = 5
+
+/** Whether the routine should have produced today's card by `now`, given the date it last ran. */
+export function boardRoutineDue(routine: Pick<BoardRoutine, 'time' | 'days'>, lastDate: string | undefined, now = new Date()): string | undefined {
+  if (!/^(?:[01]\d|2[0-3]):[0-5]\d$/.test(routine.time)) return
+  const parts = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Seoul', year: 'numeric', month: '2-digit', day: '2-digit', weekday: 'short' }).formatToParts(now)
+  const part = (type: string) => parts.find(entry => entry.type === type)?.value ?? ''
+  const today = `${part('year')}-${part('month')}-${part('day')}`
+  if (lastDate === today || (routine.days === 'weekdays' && ['Sat', 'Sun'].includes(part('weekday')))) return
+  return now.getTime() >= Date.parse(`${today}T${routine.time}:00+09:00`) ? today : undefined
 }
 export interface BoardAgent { name: string; description: string }
 /** A saved version of the office departments, newest first. */

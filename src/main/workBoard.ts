@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import { lstat, mkdir, readFile, realpath, rename, rm, writeFile } from 'node:fs/promises'
 import { join, resolve, sep } from 'node:path'
 import type { BoardAgent, BoardDecision, BoardDepartments, BoardDraft, BoardSettings, BoardSnapshot, BoardTask, BoardTeam, BoardTodoScope } from '../shared/workBoard'
-import { boardDelegates, boardRouted, isBoardChiefTask, boardInstructionCost, formatUsd, isBoardDepartmentTask, boardDocumentPaths, boardFollowUpContext, boardFollowUpRevision, boardReferencePaths, boardMutationIssue, boardReportAvailable, boardRequestsTodoRead, boardResultKind, boardRevision, canRetryAsReport, isBoardReport, isBoardDecisionPending, isBoardDocumentPath, isBoardTodoReview } from '../shared/workBoard'
+import { boardDelegates, boardRoutineDue, boardRouted, isBoardChiefTask, boardInstructionCost, formatUsd, isBoardDepartmentTask, boardDocumentPaths, boardFollowUpContext, boardFollowUpRevision, boardReferencePaths, boardMutationIssue, boardReportAvailable, boardRequestsTodoRead, boardResultKind, boardRevision, canRetryAsReport, isBoardReport, isBoardDecisionPending, isBoardDocumentPath, isBoardTodoReview } from '../shared/workBoard'
 import { workspaceDocumentPath } from '../shared/workBoardDocuments'
 import { kstDateKey } from '../shared/todoSummary'
 import { WorkBoardStore, followUpSnapshot, unreadReportReceipt } from './workBoardStore'
@@ -102,6 +102,8 @@ export class WorkBoard {
   private writable = false
   private warnings = ''
   private lastDaily: string | null = null
+  /** The Korea-time date each department routine last ran on this board. */
+  private routineRuns: Record<string, string> = {}
   private closed = false
   private timer?: ReturnType<typeof setInterval>
   private tail: Promise<unknown> = Promise.resolve()
@@ -203,6 +205,7 @@ export class WorkBoard {
     const config = await privateText(join(this.privatePath, 'settings.json'))
     this.prefs = settings(config ? JSON.parse(config) : {})
     this.lastDaily = await privateText(join(this.privatePath, 'daily-date')) ?? null
+    try { this.routineRuns = JSON.parse(await privateText(join(this.privatePath, 'routines.json')) ?? '{}') } catch { this.routineRuns = {} }
     await this.store.init()
     const pending = await privateText(join(this.privatePath, 'handoff-pending'))
     const installed = await privateText(join(this.privatePath, 'handoff-owner'))
@@ -834,13 +837,14 @@ export class WorkBoard {
     void this.serial(async () => {
       if (refresh) await this.refresh()
       if (!this.writable || this.closed) return
-      if (!this.pendingHandoff && !this.active.size && !this.activityRecorded && !boardReportDue(this.prefs.dailyTime, this.lastDaily)
+      if (!this.pendingHandoff && !this.active.size && !this.activityRecorded && !boardReportDue(this.prefs.dailyTime, this.lastDaily) && !this.dueRoutines().length
         && !this.tasks.some(t => ['queued','approved','reported','delegated'].includes(t.status) || (t.status === 'blocked' && t.after_approval))) return
       await this.withOwner(async () => {
         if (refresh || !this.active.size) await this.recordActivity(this.active.size > 0)
         for (const task of this.tasks.filter(t => t.status === 'approved' || (t.status === 'blocked' && t.after_approval))) await this.followApproval(task)
         for (const task of this.tasks.filter(t => t.status === 'reported' && !t.review_agent)) await this.finishReport(task)
         for (const task of this.tasks.filter(t => t.status === 'delegated')) await this.followDelegates(task)
+        await this.runRoutines()
         for (const task of this.tasks) {
           if (this.closed || this.active.size >= this.prefs.concurrency) break
           if (this.active.has(task.id)) continue
@@ -851,6 +855,33 @@ export class WorkBoard {
         if (boardReportDue(this.prefs.dailyTime, this.lastDaily)) await this.writeDaily(true)
       })
     }).catch(err => this.changed('업무 보드 · ' + String(err))).finally(() => { this.ticking = false })
+  }
+
+  private dueRoutines() {
+    const here = new Set([this.workspace, ...this.workspaceAliases()])
+    return this.teams.flatMap(team => (team.routines ?? []).filter(routine => here.has(routine.workspace)).flatMap(routine => {
+      const date = boardRoutineDue(routine, this.routineRuns[routine.id])
+      return date ? [{ team, routine, date }] : []
+    }))
+  }
+
+  /**
+   * Scheduled department work becomes an ordinary card, so approval, reports, recovery and cost apply as usual.
+   * Missed days are not made up; a routine whose previous card is still open is skipped for the day.
+   */
+  private async runRoutines() {
+    for (const { team, routine, date } of this.dueRoutines()) {
+      const open = this.tasks.find(t => t.routine === routine.id && !['done', 'rejected', 'failed'].includes(t.status))
+      if (open) this.changed(`정기 업무 건너뜀 · ${routine.title} · 이전 업무가 아직 끝나지 않았습니다.`)
+      else {
+        const task = this.newTask({ title: routine.title, body: routine.body, team: team.name, approval: routine.approval ?? 'none' })
+        task.routine = routine.id
+        task.log = [{ at: task.createdAt, text: `정기 업무 · ${team.name} · ${routine.days === 'weekdays' ? '평일' : '매일'} ${routine.time}` }]
+        await this.enqueue(task, isBoardTodoReview(task.body) ? routine.todoScope ?? { kind: 'all' } : undefined)
+      }
+      this.routineRuns = { ...this.routineRuns, [routine.id]: date }
+      await replace(join(this.privatePath, 'routines.json'), JSON.stringify(this.routineRuns))
+    }
   }
 
   private async followApproval(task: BoardTask) {

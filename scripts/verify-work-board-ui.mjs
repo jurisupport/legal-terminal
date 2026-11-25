@@ -320,6 +320,11 @@ function run({ root, workspace, board, temp, home, profile, screenshot, bulk, fo
     assert.deepEqual(JSON.parse(await evaluate("JSON.stringify([...document.querySelectorAll('.wb-dialog [aria-label=\"송무팀 도구 권한\"] select')].map(s => [...s.options].map(o => o.value)))")),
       [['allow', 'off'], ['allow', 'off'], ['allow', 'off'], ['ask', 'off'], ['ask', 'off']])
     assert.equal(await evaluate("[...document.querySelectorAll('.wb-dialog label')].some(l => l.textContent.startsWith('부서 규칙')) && [...document.querySelectorAll('.wb-dialog label')].some(l => l.textContent.startsWith('월간 경고선'))"), true)
+    // A routine starts from the preset on this board and is kept only when the department is saved.
+    await click('.wb-dialog button', '매일 할일 점검 추가')
+    await wait(() => evaluate("[...document.querySelectorAll('.wb-routine input')].some(i => i.value === '매일 할일 점검')"), 'daily todo routine row')
+    assert.equal(await evaluate("document.querySelector('.wb-routine')?.textContent.includes('이 업무 보드에 만듭니다.')"), true)
+    assert.equal(await evaluate("document.querySelector('.wb-routine input[type=time]').value"), '09:00')
     fs.writeFileSync(screenshot.replace(/board\.png$/, 'departments.png'), (await win.webContents.capturePage()).toPNG())
     await click('.wb-dialog button', '취소')
     fs.writeFileSync(screenshot, (await win.webContents.capturePage()).toPNG())

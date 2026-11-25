@@ -5,8 +5,8 @@ import { mkdir, open, readFile, rename, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { dump, JSON_SCHEMA, load } from 'js-yaml'
-import { boardDepartmentTools, descriptionsOverlap } from '../shared/workBoard.ts'
-import type { BoardAgent, BoardTeam, BoardTeamVersion, BoardToolLevel } from '../shared/workBoard'
+import { boardDepartmentTools, descriptionsOverlap, maxDepartmentRoutines } from '../shared/workBoard.ts'
+import type { BoardAgent, BoardRoutine, BoardTeam, BoardTeamVersion, BoardToolLevel } from '../shared/workBoard'
 
 const maxRuleChars = 20_000
 const maxHistory = 50
@@ -29,9 +29,35 @@ function optionalUsd(value: unknown, what: string): number | undefined {
   return Math.round(value * 100) / 100
 }
 
+function validRoutines(value: unknown, team: string, ids: Set<string>): BoardRoutine[] {
+  if (value == null) return []
+  if (!Array.isArray(value) || value.length > maxDepartmentRoutines) throw new Error(`정기 업무는 부서마다 ${maxDepartmentRoutines}건까지입니다: ` + team)
+  return value.map(row => {
+    const v = record(row, '정기 업무')
+    const title = typeof v.title === 'string' ? v.title.trim() : ''
+    const body = typeof v.body === 'string' ? v.body.trim() : ''
+    if (typeof v.id !== 'string' || !/^[a-z\d-]{4,40}$/.test(v.id) || ids.has(v.id)) throw new Error('정기 업무 번호를 확인해 주세요: ' + team)
+    ids.add(v.id)
+    if (!title || title.length > 120 || !body || body.length > 20_000) throw new Error('정기 업무의 제목과 지시 내용을 입력해 주세요: ' + team)
+    if (typeof v.time !== 'string' || !/^(?:[01]\d|2[0-3]):[0-5]\d$/.test(v.time)) throw new Error('정기 업무 시각(HH:MM)을 확인해 주세요: ' + title)
+    if (v.days !== 'daily' && v.days !== 'weekdays') throw new Error('정기 업무 요일을 확인해 주세요: ' + title)
+    if (typeof v.workspace !== 'string' || !v.workspace || v.workspace.length > 2048 || /[\x00-\x1f]/.test(v.workspace)) throw new Error('정기 업무를 만들 업무 보드를 확인해 주세요: ' + title)
+    if (v.approval != null && v.approval !== 'none' && v.approval !== 'required') throw new Error('정기 업무 결재 방식을 확인해 주세요: ' + title)
+    let todoScope: BoardRoutine['todoScope']
+    if (v.todoScope != null) {
+      const scope = record(v.todoScope, '할일 조회 범위')
+      if (scope.kind === 'all') todoScope = { kind: 'all' }
+      else if (scope.kind === 'case' && typeof scope.caseId === 'string' && /^[\w-]{1,100}$/.test(scope.caseId)) todoScope = { kind: 'case', caseId: scope.caseId }
+      else throw new Error('정기 업무의 할일 조회 범위를 확인해 주세요: ' + title)
+    }
+    return { id: v.id, title, body, time: v.time, days: v.days, workspace: v.workspace, ...(v.approval && { approval: v.approval as 'none' | 'required' }), ...(todoScope && { todoScope }) }
+  })
+}
+
 /** Validates departments as edited by the lawyer. Rules and the head guide are inline texts here. */
 export function validDepartments(rows: unknown[]): BoardTeam[] {
   const names = new Set<string>()
+  const routineIds = new Set<string>()
   return rows.map(row => {
     const value = record(row, '부서')
     const name = typeof value.name === 'string' ? value.name.trim() : ''
@@ -58,10 +84,11 @@ export function validDepartments(rows: unknown[]): BoardTeam[] {
     const warnMonthlyUsd = optionalUsd(value.warnMonthlyUsd, '월간 경고선')
     const stopInstructionUsd = optionalUsd(value.stopInstructionUsd, '지시 1건 정지선')
     if (stopInstructionUsd && warnInstructionUsd && stopInstructionUsd < warnInstructionUsd) throw new Error('지시 1건 정지선은 경고선보다 낮을 수 없습니다: ' + name)
+    const routines = validRoutines(value.routines, name, routineIds)
     return {
       ...team, ...(description && { description: description.trim() }), ...(rules && { rules }), ...(leadGuide && { leadGuide }),
       ...(Object.keys(tools).length && { tools }), ...(warnInstructionUsd && { warnInstructionUsd }), ...(warnMonthlyUsd && { warnMonthlyUsd }),
-      ...(stopInstructionUsd && { stopInstructionUsd })
+      ...(stopInstructionUsd && { stopInstructionUsd }), ...(routines.length && { routines })
     }
   })
 }
@@ -268,6 +295,7 @@ export class Departments {
         if (team.warnInstructionUsd) row.warn_instruction_usd = team.warnInstructionUsd
         if (team.warnMonthlyUsd) row.warn_monthly_usd = team.warnMonthlyUsd
         if (team.stopInstructionUsd) row.stop_instruction_usd = team.stopInstructionUsd
+        if (team.routines) row.routines = team.routines
         row.agents = team.agents
         rows.push(row)
       }

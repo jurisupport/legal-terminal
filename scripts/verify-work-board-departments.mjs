@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createRequire } from 'node:module'
 import { build } from 'esbuild'
-import { boardInstructionCost, boardMutationIssue, boardRevision, isBoardReport } from '../src/shared/workBoard.ts'
+import { boardInstructionCost, boardMutationIssue, boardRevision, boardRoutineDue, isBoardReport } from '../src/shared/workBoard.ts'
 
 const dir = await mkdtemp(join(tmpdir(), 'work-board-departments-'))
 const office = join(dir, 'office-departments')
@@ -249,6 +249,8 @@ try {
     if (title === '작성') return { text: '## 결론\nWRITE_FINAL', costUsd: 0.25 }
     if (title === '복합 업무') return { text: '## 결론\nCHIEF_FINAL' }
     if (title === '단일 조사') return { text: '## 결론\nSINGLE_FINAL' }
+    if (title === '매일 점검') return { text: '## 결론\nROUTINE_REPORT' }
+    if (title === '보류 점검') return { blocked: true, text: '## 결재 필요\n\nBash(ls)' }
     if (title === '정지 확인') return { text: '1건 배분', costUsd: 0.4, assignments: [{ member: 'law', title: '정지 하위', instruction: '작성', after: [] }] }
     throw Error('unexpected chief run ' + title)
   }
@@ -307,7 +309,44 @@ try {
   tasks = await until(ts => ts.some(t => t.title === '정지 하위' && t.status === 'blocked'))
   assert.match(tasks.find(t => t.title === '정지 하위').log.at(-1).text, /비용 정지선 도달 · 작성부/)
   assert.equal(chiefRuns.some(r => r.title === '정지 하위'), false)
-  console.log('부서 위임 · 사무소 부서·규칙·도구 권한·앱 부서장·부서원 배분·보완 1회·비서실장 배분·부서 순서·취합·비용 경고·정지선·변경 이력·가져오기 확인')
+
+  // Stage 3: department routines become ordinary cards at their time, once a day, on their own board only.
+  assert.equal(boardRoutineDue({ time: '09:00', days: 'weekdays' }, undefined, new Date('2026-11-28T01:00:00Z')), undefined, 'Saturday in Korea')
+  assert.equal(boardRoutineDue({ time: '09:00', days: 'daily' }, undefined, new Date('2026-11-28T01:00:00Z')), '2026-11-28')
+  assert.equal(boardRoutineDue({ time: '09:00', days: 'daily' }, undefined, new Date('2026-11-27T23:59:00Z')), undefined, '08:59 in Korea')
+  assert.equal(boardRoutineDue({ time: '09:00', days: 'daily' }, '2026-11-28', new Date('2026-11-28T05:00:00Z')), undefined, 'already ran today')
+  const routine = (id, title, extra = {}) => ({ id, title, body: title + ' 지시', time: '00:00', days: 'daily', workspace: join(dir, 'chief-case'), ...extra })
+  await assert.rejects(board.saveTeams([{ name: '사건관리', color: '#c65f16', agents: [], routines: Array.from({ length: 6 }, (_, i) => routine('many-' + i, '점검 ' + i)) }]), /5건까지/)
+  await assert.rejects(board.saveTeams([{ name: '사건관리', color: '#c65f16', agents: [], routines: [routine('bad-time', '점검', { time: '9시' })] }]), /HH:MM/)
+  const teamsNow = (await board.snapshot()).teams
+  await board.saveTeams([...teamsNow, { name: '사건관리', color: '#c65f16', agents: [], routines: [
+    routine('daily-check', '매일 점검'), routine('held-check', '보류 점검'), routine('elsewhere', '다른 보드 점검', { workspace: join(dir, 'other-board') })
+  ] }])
+  assert.match(await readFile(join(dir, 'chief-office', 'teams.yaml'), 'utf8'), /routines:/)
+  board.tick(true)
+  tasks = await until(ts => ts.some(t => t.routine === 'daily-check' && t.status === 'done') && ts.some(t => t.routine === 'held-check' && t.status === 'blocked'))
+  const daily = tasks.find(t => t.routine === 'daily-check')
+  assert.equal(daily.team, '사건관리')
+  assert.equal(daily.body, '매일 점검 지시')
+  assert.equal(daily.log[0].text, '정기 업무 · 사건관리 · 매일 00:00')
+  assert.match((await board.detail(daily.id)).report, /ROUTINE_REPORT/)
+  assert.equal(tasks.some(t => t.routine === 'elsewhere'), false, 'a routine for another board stays there')
+  // Later ticks the same day add nothing.
+  board.tick(true)
+  await new Promise(r => setTimeout(r, 200))
+  assert.equal((await board.snapshot()).tasks.filter(t => t.routine).length, 2)
+  // The next day, a routine whose previous card is still open is skipped instead of piling up.
+  const privatePath = board.privatePath
+  const { writeFile: write } = await import('node:fs/promises')
+  await write(join(privatePath, 'routines.json'), JSON.stringify({ 'daily-check': '2000-01-01', 'held-check': '2000-01-01' }))
+  board.stop()
+  await board.snapshot()
+  board = new WorkBoard(join(dir, 'chief-case'), join(dir, 'chief-case', '_업무지시'), join(dir, 'chief-profile'), m => { if (m) notes.push(m) })
+  await board.start()
+  tasks = await until(ts => ts.filter(t => t.routine === 'daily-check').length === 2)
+  assert.equal(tasks.filter(t => t.routine === 'held-check').length, 1)
+  assert.ok(notes.some(n => n === '정기 업무 건너뜀 · 보류 점검 · 이전 업무가 아직 끝나지 않았습니다.'))
+  console.log('부서 위임 · 사무소 부서·규칙·도구 권한·앱 부서장·부서원 배분·보완 1회·비서실장 배분·부서 순서·취합·비용 경고·정지선·정기 업무·변경 이력·가져오기 확인')
 } finally {
   board?.stop()
   await board?.snapshot()
