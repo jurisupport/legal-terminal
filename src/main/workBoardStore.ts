@@ -53,7 +53,7 @@ function parseTask(id: string, source: string, fallbackDate = new Date().toISOSt
     throw new Error('지시서 파일명·id·제목·작업 폴더를 확인해 주세요.')
   }
   if (!statuses.includes(v.status as BoardStatus)) throw new Error('알 수 없는 업무 상태입니다.')
-  for (const field of ['agent', 'team', 'review_agent', 'due', 'after_approval', 'sessionId', 'parentId', 'delegatedBy']) {
+  for (const field of ['agent', 'team', 'review_agent', 'due', 'after_approval', 'sessionId', 'parentId', 'delegatedBy', 'routedBy']) {
     if (v[field] != null && typeof v[field] !== 'string') throw new Error('문자열 속성을 확인해 주세요: ' + field)
   }
   if (typeof v.due === 'string' && v.due && !/^\d{4}-\d\d-\d\d$/.test(v.due)) throw new Error('기한 형식을 확인해 주세요.')
@@ -62,6 +62,8 @@ function parseTask(id: string, source: string, fallbackDate = new Date().toISOSt
   if (v.allowed_tools != null && !strings(v.allowed_tools)) throw new Error('허용 도구 목록을 확인해 주세요.')
   if (v.parentId != null && !validId(v.parentId)) throw new Error('상위 지시 ID를 확인해 주세요.')
   if (v.delegatedBy != null && (!validId(v.delegatedBy) || v.delegatedBy === id || v.parentId != null)) throw new Error('부서 지시 ID를 확인해 주세요.')
+  if (v.routedBy != null && (!validId(v.routedBy) || v.routedBy === id || v.parentId != null || v.delegatedBy != null || v.team == null)) throw new Error('비서실장 지시 ID를 확인해 주세요.')
+  if (v.chief != null && (v.chief !== true || v.agent != null || v.team != null)) throw new Error('비서실장 지시 설정을 확인해 주세요.')
   for (const key of ['order', 'attempts']) {
     if (v[key] != null && (!Number.isSafeInteger(v[key]) || Number(v[key]) < 0)) throw new Error('숫자 속성을 확인해 주세요: ' + key)
   }
@@ -70,7 +72,7 @@ function parseTask(id: string, source: string, fallbackDate = new Date().toISOSt
   if (v.editedNeedsRun !== undefined && v.editedNeedsRun !== true) throw new Error('수정 후 재실행 상태를 확인해 주세요.')
   if (v.log != null && (!Array.isArray(v.log) || !v.log.every(e => e && date(e.at) && typeof e.text === 'string'))) throw new Error('진행 기록의 형식을 확인해 주세요.')
   // YAML null is common in unfilled optional fields.
-  const optionalKeys = ['agent', 'team', 'delegatedBy', 'review_agent', 'due', 'after_approval', 'sessionId', 'parentId', 'depends_on', 'allowed_tools', 'approval', 'order', 'attempts', 'cost', 'createdAt', 'updatedAt', 'editedNeedsRun']
+  const optionalKeys = ['agent', 'team', 'chief', 'delegatedBy', 'routedBy', 'review_agent', 'due', 'after_approval', 'sessionId', 'parentId', 'depends_on', 'allowed_tools', 'approval', 'order', 'attempts', 'cost', 'createdAt', 'updatedAt', 'editedNeedsRun']
   const fields = Object.fromEntries(optionalKeys.filter(k => v[k] != null).map(k => [k, v[k]]))
   if (v.followUp != null) fields.followUp = followUpSnapshot(v.followUp, id)
   if (v.reportReceipt != null) {

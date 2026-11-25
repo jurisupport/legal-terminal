@@ -10,16 +10,28 @@ import { boardPermission, boardRelativePath, readBoardPolicy } from '../src/main
 
 const directory = await mkdtemp(join(tmpdir(), 'board-runner-'))
 const compiled = await mkdtemp(join(process.cwd(), 'node_modules', '.board-runner-'))
+let researchCalls = 0
 let scenario = '', toolCalled = false, observedTools, sawNamedAgent = false, observedSystem = '', observedModel = '', toolResult = ''
 const server = boardInference(input => {
   observedTools = input.tools?.map(t => t.name)
   observedSystem = JSON.stringify(input.system)
   observedModel = input.model
-  toolResult = JSON.stringify(input.messages.at(-1)?.content ?? '')
+  toolResult = JSON.stringify(input.messages)
   sawNamedAgent ||= observedSystem.includes('SYNTHETIC_AGENT_MARKER')
+  if (scenario === 'research') {
+    // Two read-only lookups, then the report.
+    const step = researchCalls++
+    if (step === 0) return { name: 'mcp__research__legal_books_search', args: { query: '소멸시효', top_k: 2 } }
+    if (step === 1) return { name: 'mcp__research__lbox_search', args: { queries: ['소멸시효 중단'], limit: 3 } }
+    return { text: '## 결론\n조사 완료' }
+  }
   const useTool = !toolCalled && scenario !== 'report'
-  const name = scenario === 'draft' ? 'mcp__board__case_draft' : scenario === 'delegate' ? 'mcp__board__assign_members' : 'mcp__board__request_action'
+  const name = scenario === 'draft' ? 'mcp__board__case_draft' : scenario === 'delegate' ? 'mcp__board__assign_members'
+    : scenario === 'route' ? 'mcp__board__assign_departments' : 'mcp__board__request_action'
   const args = scenario === 'draft' ? { name: '초안.md', text: '검수 본문' }
+    : scenario === 'route' ? { routes: [
+      { team: '조사부', title: '판결 조사', goal: '판결 목록', sources: [], scope: '대법원 판결만', output: '표', after: [] },
+      { team: '작성부', title: '의견서', goal: '의견서 초안', sources: [], scope: '조사 결과로 작성', output: '서면 md', after: [1] }] }
     : scenario === 'delegate' ? { assignments: [{ member: 'fixture', title: '사실관계 정리', goal: '사건 경과표', sources: ['기록/소장.pdf'], scope: '기록을 시간순으로 정리', output: '표', after: [] }] }
     : {name:'Bash',args:{command:'echo approved'}}
   if (useTool) toolCalled = true
@@ -129,6 +141,50 @@ try {
     department:{team:'송무팀',role:'member',tools:{bash:'ask'}},approvedTools:[],signal:AbortSignal.timeout(30000),policyDir:directory,onProgress:message=>progress.push(message)})
   assert.equal(asking.blocked,true)
   assert.match(asking.text,/결재 필요[\s\S]*Bash\(echo approved\)/)
+  // The chief of staff routes to departments in order with the same instruction form.
+  toolCalled=false; scenario='route'
+  const routed = await runBoardAgent({task:{id:'chief',cwd:directory,chief:true},phase:'work',prompt:'의견서',
+    routing:{teams:[{name:'조사부',description:'조사',members:1},{name:'작성부',members:1}]},approvedTools:[],signal:AbortSignal.timeout(30000),policyDir:directory,onProgress:message=>progress.push(message)})
+  assert.deepEqual(routed.routes.map(r => [r.team, r.title, r.after]), [['조사부','판결 조사',[]],['작성부','의견서',[1]]])
+  assert.match(routed.routes[1].instruction, /^## 목표\n의견서 초안/)
+  assert.ok(observedTools?.includes('mcp__board__assign_departments'))
+  assert.match(observedSystem + JSON.stringify(observedTools), /assign_departments/)
+  assert.ok(progress.some(message=>message.startsWith('비서실장 배분 · 조사부 판결 조사')))
+
+  // legal-books and lbox open only where the department allows them, through the services' own HTTP APIs.
+  const { createServer } = await import('node:http')
+  const research = []
+  const services = createServer(async (req,res) => {
+    let body=''; for await (const chunk of req) body+=chunk
+    research.push([req.url, JSON.parse(body)])
+    res.writeHead(200,{'content-type':'application/json'}).end(JSON.stringify(req.url === '/search' && JSON.parse(body).query
+      ? { results: [{ cite: '저자, 『민법』, 2020, 10면', text: 'BOOK_TEXT' }] } : { op: 'search', result: [{ case_no: '2020다1', url: 'https://lbox.kr/case/1' }] }))
+  })
+  await new Promise(resolve => services.listen(0,'127.0.0.1',resolve))
+  process.env.LEGAL_BOOKS_URL = process.env.LBOX_SERVER_URL = 'http://127.0.0.1:' + services.address().port
+  try {
+    scenario='research'; researchCalls=0
+    const looked = await runBoardAgent({task:{id:'look',cwd:directory,agent:'fixture',delegatedBy:'dept'},phase:'work',prompt:'조사',
+      department:{team:'조사부',role:'member',tools:{'legal-books':'allow',lbox:'allow'}},approvedTools:[],signal:AbortSignal.timeout(30000),policyDir:directory,onProgress:message=>progress.push(message)})
+    assert.match(looked.text,/조사 완료/)
+    assert.deepEqual(research.map(([url,body]) => [url, body.query ?? body.queries]), [['/search','소멸시효'],['/search',['소멸시효 중단']]])
+    assert.match(toolResult, /2020다1/)
+    assert.ok(observedTools.includes('mcp__research__legal_books_search') && observedTools.includes('mcp__research__lbox_fetch'))
+    // Without the department's permission the tools are not offered at all.
+    toolCalled=false; scenario='report'
+    await runBoardAgent({task:{id:'plain',cwd:directory,agent:'fixture',delegatedBy:'dept'},phase:'work',prompt:'조사',
+      department:{team:'조사부',role:'member',tools:{}},approvedTools:[],signal:AbortSignal.timeout(30000),policyDir:directory,onProgress:()=>{}})
+    assert.equal(observedTools.some(name => name.startsWith('mcp__research__')), false)
+  } finally { services.close(); delete process.env.LEGAL_BOOKS_URL; delete process.env.LBOX_SERVER_URL }
+
+  // A session past the department's stop line ends as a review item, not a failure.
+  toolCalled=false; scenario='command'
+  const stopped = await runBoardAgent({task:{id:'budget',cwd:directory,agent:'member',delegatedBy:'dept'},phase:'work',prompt:'하위 업무',budgetUsd:0.0000001,
+    department:{team:'송무팀',role:'member',tools:{}},approvedTools:[],signal:AbortSignal.timeout(30000),policyDir:directory,onProgress:message=>progress.push(message)})
+  assert.equal(stopped.blocked,true)
+  assert.match(stopped.text,/비용 정지선 도달/)
+  assert.ok(stopped.costUsd > 0)
+
   scenario='review'
   assert.equal((await run('review',[],async()=>{ reads++; return report })).rejected,false)
   assert.equal(reads,1)

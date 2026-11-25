@@ -318,7 +318,7 @@ function run({ root, workspace, board, temp, home, profile, screenshot, bulk, fo
     await click('.wb-org button', '부서 관리')
     await wait(() => evaluate("!!document.querySelector('.wb-dialog [aria-label=\"송무팀 도구 권한\"]')"), 'department tool levels')
     assert.deepEqual(JSON.parse(await evaluate("JSON.stringify([...document.querySelectorAll('.wb-dialog [aria-label=\"송무팀 도구 권한\"] select')].map(s => [...s.options].map(o => o.value)))")),
-      [['allow', 'off'], ['ask', 'off'], ['ask', 'off']])
+      [['allow', 'off'], ['allow', 'off'], ['allow', 'off'], ['ask', 'off'], ['ask', 'off']])
     assert.equal(await evaluate("[...document.querySelectorAll('.wb-dialog label')].some(l => l.textContent.startsWith('부서 규칙')) && [...document.querySelectorAll('.wb-dialog label')].some(l => l.textContent.startsWith('월간 경고선'))"), true)
     fs.writeFileSync(screenshot.replace(/board\.png$/, 'departments.png'), (await win.webContents.capturePage()).toPNG())
     await click('.wb-dialog button', '취소')
@@ -399,6 +399,15 @@ function run({ root, workspace, board, temp, home, profile, screenshot, bulk, fo
     await evaluate(`(() => { const input = [...document.querySelectorAll('.agent-composer textarea')].find(el=>el.offsetWidth)
       Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value').set.call(input, ${JSON.stringify(bulk)})
       input.dispatchEvent(new Event('input', {bubbles:true})) })()`)
+    // "부서에 맡기기" sends the whole text as one instruction and waits for a department or the chief of staff.
+    await click('.agent-composer button', '부서에 맡기기')
+    await wait(() => evaluate("document.querySelectorAll('.wb-dialog .wb-draft').length === 1"), 'one department instruction')
+    assert.equal(await evaluate("document.querySelector('.wb-dialog .wb-draft textarea').value"), bulk.trim())
+    assert.equal(await evaluate("document.querySelector('.wb-dialog .wb-primary').disabled"), true, 'a department must be chosen')
+    assert.deepEqual(JSON.parse(await evaluate("JSON.stringify([...[...document.querySelectorAll('.wb-draft label')].find(el=>el.textContent.trim().startsWith('담당')).querySelector('select').options].map(o=>o.value).filter(v=>v==='chief'||v.startsWith('team:')))")),
+      ['chief', 'team:송무팀'])
+    await click('.wb-dialog button', '닫기')
+    await evaluate("document.querySelector('.work-board-window button[aria-label=\"작업 공간으로 돌아가기\"]').click()")
     await click('.agent-composer button', '일괄 지시')
     await visible('.wb-dialog textarea')
     assert.equal(await evaluate("document.querySelector('.wb-dialog textarea').value"), bulk)

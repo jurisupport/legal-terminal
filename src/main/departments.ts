@@ -56,9 +56,12 @@ export function validDepartments(rows: unknown[]): BoardTeam[] {
     const leadGuide = optionalText(value.leadGuide, '부서장 추가 지침', maxRuleChars)
     const warnInstructionUsd = optionalUsd(value.warnInstructionUsd, '지시 1건 경고선')
     const warnMonthlyUsd = optionalUsd(value.warnMonthlyUsd, '월간 경고선')
+    const stopInstructionUsd = optionalUsd(value.stopInstructionUsd, '지시 1건 정지선')
+    if (stopInstructionUsd && warnInstructionUsd && stopInstructionUsd < warnInstructionUsd) throw new Error('지시 1건 정지선은 경고선보다 낮을 수 없습니다: ' + name)
     return {
       ...team, ...(description && { description: description.trim() }), ...(rules && { rules }), ...(leadGuide && { leadGuide }),
-      ...(Object.keys(tools).length && { tools }), ...(warnInstructionUsd && { warnInstructionUsd }), ...(warnMonthlyUsd && { warnMonthlyUsd })
+      ...(Object.keys(tools).length && { tools }), ...(warnInstructionUsd && { warnInstructionUsd }), ...(warnMonthlyUsd && { warnMonthlyUsd }),
+      ...(stopInstructionUsd && { stopInstructionUsd })
     }
   })
 }
@@ -80,7 +83,7 @@ export function departmentOverlaps(teams: BoardTeam[], agents: BoardAgent[]): st
 
 /** The departments proposed in the specialist design note (2026-11-25). The lawyer loads them on purpose. */
 const proposal: BoardTeam[] = [
-  { name: '법률지원', color: '#376ac6', description: '계약 검토, 증거 정리, 사건 요약 보고', agents: ['lawpid-contract-review', 'lawpid-evidence-synthesis', 'lawpid-exec-summary'], tools: { 'korean-law': 'allow' } },
+  { name: '법률지원', color: '#376ac6', description: '계약 검토, 증거 정리, 사건 요약 보고', agents: ['lawpid-contract-review', 'lawpid-evidence-synthesis', 'lawpid-exec-summary'], tools: { 'korean-law': 'allow', 'legal-books': 'allow', lbox: 'allow' } },
   { name: '콘텐츠', color: '#148369', description: '콘텐츠 기획, 유튜브·SNS·뉴스레터 원고', agents: ['lawpid-content-planner', 'lawpid-youtube-optimizer', 'lawpid-sns-curator', 'lawpid-newsletter'] },
   { name: '마케팅', color: '#c65f16', description: '검색 노출, 홍보, 광고 기획과 소재', agents: ['lawpid-seo', 'lawpid-ai-search', 'lawpid-pr', 'lawpid-search-ads', 'lawpid-ad-creative', 'lawpid-social-ads'] },
   { name: '영업', color: '#8c44bb', description: '제안서 작성, 잠재 의뢰인 발굴', agents: ['lawpid-proposal', 'lawpid-lead-gen'] },
@@ -211,8 +214,10 @@ export class Departments {
         }
         if (value.warn_instruction_usd != null) value.warnInstructionUsd = value.warn_instruction_usd
         if (value.warn_monthly_usd != null) value.warnMonthlyUsd = value.warn_monthly_usd
+        if (value.stop_instruction_usd != null) value.stopInstructionUsd = value.stop_instruction_usd
         delete value.warn_instruction_usd
         delete value.warn_monthly_usd
+        delete value.stop_instruction_usd
         delete value.lead
         teams.push(value)
       }
@@ -262,6 +267,7 @@ export class Departments {
         if (team.tools) row.tools = team.tools
         if (team.warnInstructionUsd) row.warn_instruction_usd = team.warnInstructionUsd
         if (team.warnMonthlyUsd) row.warn_monthly_usd = team.warnMonthlyUsd
+        if (team.stopInstructionUsd) row.stop_instruction_usd = team.stopInstructionUsd
         row.agents = team.agents
         rows.push(row)
       }

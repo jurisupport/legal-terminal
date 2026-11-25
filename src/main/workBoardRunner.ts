@@ -130,6 +130,48 @@ function todoMcpPages(text: string): string[] {
 
 /** One member sub-card the department head assigned. `after` lists earlier assignments (1-based) it needs. */
 export interface BoardAssignment { member: string; title: string; instruction: string; after: number[]; due?: string }
+/** One department instruction the chief of staff routed. `after` lists earlier routes (1-based) whose reports it needs. */
+export interface BoardRoute { team: string; title: string; instruction: string; after: number[]; due?: string }
+
+const assignmentFields = {
+  title: z.string().min(1).max(120),
+  goal: z.string().min(1).max(500).describe('이 업무로 얻을 결과 한 문장'),
+  sources: z.array(z.string().min(1).max(1024)).max(30).describe('읽을 파일의 작업 폴더 기준 상대 경로. 없으면 빈 목록'),
+  scope: z.string().min(1).max(4000).describe('할 일과 하지 않을 일'),
+  output: z.string().min(1).max(1000).describe('산출물 형식. 예: 표, 메모 2쪽, 서면 초안 md'),
+  due: z.string().regex(/^\d{4}-\d\d-\d\d$/).optional().describe('기한 YYYY-MM-DD'),
+  after: z.array(z.number().int().positive()).max(12).default([])
+}
+type AssignmentRow = { title: string; goal: string; sources: string[]; scope: string; output: string; due?: string; after: number[] }
+
+/** Checks the order and paths of a split, then writes each item as the fixed instruction form. */
+function assignmentForm(rows: AssignmentRow[]): string | { title: string; instruction: string; after: number[]; due?: string }[] {
+  const invalid = rows.findIndex((row, i) => row.after.some(n => n > i))
+  if (invalid >= 0) return `${invalid + 1}번 항목의 after에는 그보다 앞선 항목 번호만 적을 수 있습니다.`
+  const badSource = rows.flatMap(row => row.sources).find(path => { try { boardRelativePath(path); return false } catch { return true } })
+  if (badSource) return '참고 자료는 작업 폴더 기준 상대 경로로 적으세요: ' + badSource
+  return rows.map(row => ({
+    title: row.title.trim(), after: [...new Set(row.after)], ...(row.due && { due: row.due }),
+    instruction: ['## 목표\n' + row.goal.trim(), '## 참고 자료\n' + (row.sources.length ? row.sources.map(path => '- ' + path).join('\n') : '- 없음'),
+      '## 범위\n' + row.scope.trim(), '## 산출물 형식\n' + row.output.trim(), ...(row.due ? ['## 기한\n' + row.due] : [])].join('\n\n')
+  }))
+}
+
+/** Read-only research services on this computer, reached the way their skills reach them. */
+const researchServices = {
+  'legal-books': () => (process.env.LEGAL_BOOKS_URL || 'http://127.0.0.1:8766').replace(/\/+$/, ''),
+  lbox: () => (process.env.LBOX_SERVER_URL || 'http://127.0.0.1:8769').replace(/\/+$/, '')
+}
+
+async function researchPost(base: string, path: string, body: unknown, timeoutMs: number, signal: AbortSignal): Promise<unknown> {
+  const response = await fetch(base + path, {
+    method: 'POST', headers: { 'content-type': 'application/json; charset=utf-8' }, body: JSON.stringify(body), redirect: 'error',
+    signal: AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)])
+  })
+  const text = await response.text()
+  if (!response.ok) throw new Error(`${base}${path} 응답 ${response.status}`)
+  return JSON.parse(text)
+}
 
 /** The department a head or member works for: its shared rules and the tools it may open. */
 export interface BoardDepartmentContext {
@@ -148,8 +190,12 @@ export interface BoardRunInput {
   prompt: string
   /** The session's agent when it differs from task.agent, e.g. a department head. */
   agentName?: string
-  /** Lets a department head split the instruction among these members. */
-  delegation?: { team: string; members: BoardAgent[] }
+  /** Lets a department head split the instruction among these members. With `supplement`, a second, last round after reading their reports. */
+  delegation?: { team: string; members: BoardAgent[]; supplement?: boolean }
+  /** Lets the chief of staff route the instruction to these departments. */
+  routing?: { teams: { name: string; description?: string; members: number }[] }
+  /** What this session may still spend in USD before the department's stop line. */
+  budgetUsd?: number
   /** The department this session works for. Its tool levels replace the default approval flow. */
   department?: BoardDepartmentContext
   approvedTools: string[]
@@ -164,7 +210,7 @@ export interface BoardRunInput {
   onProgress(message: string, sessionId?: string): void
 }
 
-export interface BoardRunResult { text: string; blocked?: boolean; rejected?: boolean; assignments?: BoardAssignment[]; costUsd?: number }
+export interface BoardRunResult { text: string; blocked?: boolean; rejected?: boolean; assignments?: BoardAssignment[]; routes?: BoardRoute[]; costUsd?: number }
 
 /** The SDK's estimate of what a session cost. A failed session carries it on the error. */
 export function boardRunCost(error: unknown): number | undefined {
@@ -280,34 +326,37 @@ export async function runBoardAgent(input: BoardRunInput): Promise<BoardRunResul
   const delegate = delegation && memberNames.length ? [tool('assign_members',
     '부서원에게 업무를 나눠 맡깁니다. 한 번만 호출하세요. 각 항목은 부서원 한 명이 독립 세션에서 수행하는 하위 업무가 됩니다. ' +
     '부서원은 대화 맥락을 모르므로 목표·참고 자료·범위·산출물 형식을 빠짐없이 적으세요. after에는 먼저 끝나야 하는 앞선 항목 번호(1부터)를 적으세요.', {
-      assignments: z.array(z.object({
-        member: z.enum(memberNames as [string, ...string[]]),
-        title: z.string().min(1).max(120),
-        goal: z.string().min(1).max(500).describe('이 하위 업무로 얻을 결과 한 문장'),
-        sources: z.array(z.string().min(1).max(1024)).max(30).describe('읽을 파일의 작업 폴더 기준 상대 경로. 없으면 빈 목록'),
-        scope: z.string().min(1).max(4000).describe('할 일과 하지 않을 일'),
-        output: z.string().min(1).max(1000).describe('산출물 형식. 예: 표, 메모 2쪽, 서면 초안 md'),
-        due: z.string().regex(/^\d{4}-\d\d-\d\d$/).optional().describe('기한 YYYY-MM-DD'),
-        after: z.array(z.number().int().positive()).max(12).default([])
-      })).min(1).max(12)
+      assignments: z.array(z.object({ member: z.enum(memberNames as [string, ...string[]]), ...assignmentFields })).min(1).max(12)
     }, async ({ assignments: rows }) => {
       signal.throwIfAborted()
       controller.signal.throwIfAborted()
       if (assignments) return { ...reply('이미 배분했습니다. 배분 요약을 최종 답변으로 쓰고 끝내세요.'), isError: true }
-      const invalid = rows.findIndex((row, i) => row.after.some(n => n > i))
-      if (invalid >= 0) return { ...reply(`${invalid + 1}번 항목의 after에는 그보다 앞선 항목 번호만 적을 수 있습니다.`), isError: true }
-      const badSource = rows.flatMap(row => row.sources).find(path => { try { boardRelativePath(path); return false } catch { return true } })
-      if (badSource) return { ...reply('참고 자료는 작업 폴더 기준 상대 경로로 적으세요: ' + badSource), isError: true }
-      assignments = rows.map(row => ({
-        member: row.member, title: row.title.trim(), after: [...new Set(row.after)], ...(row.due && { due: row.due }),
-        instruction: ['## 목표\n' + row.goal.trim(), '## 참고 자료\n' + (row.sources.length ? row.sources.map(path => '- ' + path).join('\n') : '- 없음'),
-          '## 범위\n' + row.scope.trim(), '## 산출물 형식\n' + row.output.trim(), ...(row.due ? ['## 기한\n' + row.due] : [])].join('\n\n')
-      }))
+      const form = assignmentForm(rows)
+      if (typeof form === 'string') return { ...reply(form), isError: true }
+      assignments = form.map((row, i) => ({ member: rows[i].member, ...row }))
       onProgress('부서장 배분 · ' + assignments.map(row => row.member + ' ' + row.title).join(' / ').slice(0, 1000))
       return reply(`${assignments.length}건을 부서원에게 배분합니다. 이 세션에서 하위 업무를 직접 수행하지 말고, 배분 요약을 최종 답변으로 쓰고 끝내세요.`)
     })] : []
+  let routes: BoardRoute[] | undefined
+  const routing = phase === 'work' ? input.routing : undefined
+  const teamNames = routing?.teams.map(team => team.name) ?? []
+  const route = routing && teamNames.length ? [tool('assign_departments',
+    '대표의 지시를 부서에 맡깁니다. 한 번만 호출하세요. 각 항목은 그 부서장이 받는 부서 지시가 됩니다. 꼭 필요한 부서만 고르세요. ' +
+    '앞 부서의 최종 보고서가 필요하면 after에 그 항목 번호(1부터)를 적으세요. 부서장은 대화 맥락을 모르므로 목표·참고 자료·범위·산출물 형식을 빠짐없이 적으세요.', {
+      routes: z.array(z.object({ team: z.enum(teamNames as [string, ...string[]]), ...assignmentFields })).min(1).max(8)
+    }, async ({ routes: rows }) => {
+      signal.throwIfAborted()
+      controller.signal.throwIfAborted()
+      if (routes) return { ...reply('이미 배분했습니다. 배분 요약을 최종 답변으로 쓰고 끝내세요.'), isError: true }
+      const form = assignmentForm(rows)
+      if (typeof form === 'string') return { ...reply(form), isError: true }
+      routes = form.map((row, i) => ({ team: rows[i].team, ...row }))
+      onProgress('비서실장 배분 · ' + routes.map(row => row.team + ' ' + row.title).join(' / ').slice(0, 1000))
+      return reply(`${routes.length}건을 부서에 배분합니다. 이 세션에서 업무를 직접 수행하지 말고, 배분 요약을 최종 답변으로 쓰고 끝내세요.`)
+    })] : []
   const files = [
     ...delegate,
+    ...route,
     tool('case_list', '작업 폴더 아래의 파일 목록을 조회합니다.', { path: z.string().default('') }, async ({ path }) => {
       guarded('case_list')
       const directory = await target(path)
@@ -387,7 +436,7 @@ export async function runBoardAgent(input: BoardRunInput): Promise<BoardRunResul
   ]
   const sandbox = join(input.policyDir, 'sessions')
   await mkdir(sandbox, { recursive: true, mode: 0o700 })
-  const tools = [...boardFileTools, 'request_action', ...(delegate.length ? ['assign_members'] : [])].map(n => 'mcp__board__' + n)
+  const tools = [...boardFileTools, 'request_action', ...(delegate.length ? ['assign_members'] : []), ...(route.length ? ['assign_departments'] : [])].map(n => 'mcp__board__' + n)
   if (phase === 'work') tools.push(todoTool)
   // korean-law comes from the Claude Code plugin, which keeps its own API key. Only read tools, only for departments that allow it.
   let lawPlugin: string | undefined
@@ -398,7 +447,39 @@ export async function runBoardAgent(input: BoardRunInput): Promise<BoardRunResul
       if (!lawPlugin) onProgress('korean-law 플러그인이 설치되어 있지 않거나 꺼져 있습니다.')
     }
   }
-  const allowedTool = (toolName: string) => tools.includes(toolName) || (!!lawPlugin && toolName.startsWith(lawToolPrefix))
+  // legal-books and lbox: read-only services on this computer, wrapped as in-app tools so no skill script runs.
+  const opened = (key: keyof typeof researchServices) => department?.tools?.[key] === 'allow' && expertAllows(agent, [key, 'mcp__research'])
+  const trimmed = (value: unknown) => JSON.stringify(value).slice(0, 50_000)
+  const research = [
+    ...(opened('legal-books') ? [tool('legal_books_search', '사무소 법률서적 166권을 하이브리드 검색합니다. 인용할 때는 결과의 cite를 그대로 쓰세요.', {
+      query: z.string().min(1).max(500), top_k: z.number().int().min(1).max(10).default(8)
+    }, async ({ query: text, top_k }) => {
+      controller.signal.throwIfAborted()
+      onProgress('legal-books 검색 · ' + text.slice(0, 100))
+      try { return reply(trimmed(await researchPost(researchServices['legal-books'](), '/search', { query: text, top_k }, 60_000, controller.signal))) }
+      catch (error) { return { ...reply('legal-books 서버에 연결하지 못했습니다(맥미니 터널 확인 필요): ' + (error instanceof Error ? error.message : String(error))), isError: true } }
+    })] : []),
+    ...(opened('lbox') ? [
+      tool('lbox_search', 'lbox에서 판례를 검색합니다. 키워드 여러 개를 함께 넣을 수 있습니다.', {
+        queries: z.array(z.string().min(1).max(200)).min(1).max(5), limit: z.number().int().min(1).max(20).default(10)
+      }, async ({ queries, limit }) => {
+        controller.signal.throwIfAborted()
+        onProgress('lbox 검색 · ' + queries.join(', ').slice(0, 100))
+        try { return reply(trimmed(await researchPost(researchServices.lbox(), '/search', { queries, limit, timeout: 120 }, 150_000, controller.signal))) }
+        catch (error) { return { ...reply('lbox 서버에 연결하지 못했습니다(맥미니 lbox_server 확인 필요): ' + (error instanceof Error ? error.message : String(error))), isError: true } }
+      }),
+      tool('lbox_fetch', 'lbox 판례 전문을 읽습니다. lbox_search 결과의 URL을 넣으세요.', {
+        urls: z.array(z.string().url().regex(/^https:\/\/lbox\.kr\//)).min(1).max(3), max_chars: z.number().int().min(1000).max(20_000).default(20_000)
+      }, async ({ urls, max_chars }) => {
+        controller.signal.throwIfAborted()
+        onProgress('lbox 전문 조회 · ' + urls.length + '건')
+        try { return reply(trimmed(await researchPost(researchServices.lbox(), '/fetch', { urls, max_chars, timeout: 120 }, 150_000, controller.signal))) }
+        catch (error) { return { ...reply('lbox 서버에 연결하지 못했습니다(맥미니 lbox_server 확인 필요): ' + (error instanceof Error ? error.message : String(error))), isError: true } }
+      })
+    ] : [])
+  ]
+  const researchTools = research.map(entry => 'mcp__research__' + entry.name)
+  const allowedTool = (toolName: string) => tools.includes(toolName) || researchTools.includes(toolName) || (!!lawPlugin && toolName.startsWith(lawToolPrefix))
   const binding = join(sandbox, task.id + '-' + phase + '.session')
   const sessionBinding = (id: string) => remote ? 'ssh:' + id : id
   if (input.resume && (await readFile(binding, 'utf8').catch(() => '')) !== sessionBinding(input.resume)) {
@@ -410,6 +491,7 @@ export async function runBoardAgent(input: BoardRunInput): Promise<BoardRunResul
   let result = ''
   let sessionId = ''
   let costUsd: number | undefined
+  let budgetStop = false
   const summaries = new Set<string>()
   const reviewFormat = phase === 'review' ? '\n검토 근거를 적고 맨 마지막 줄에 REVIEW: PASS 또는 REVIEW: REJECT를 쓰세요.' : ''
   signal.addEventListener('abort', cancel, { once: true })
@@ -421,7 +503,13 @@ export async function runBoardAgent(input: BoardRunInput): Promise<BoardRunResul
           ? '\n승인한 범위의 현재 할일을 mcp__jurisupport__list_tasks로 조회한 뒤 그 결과를 사용해 원래 업무를 완료하세요.'
           : '\n쥬리서포트의 현재 할일이 필요하면 mcp__jurisupport__list_tasks를 사용하세요.') : '') +
         (phase === 'execute' ? '\n이 지시에 승인된 도구 목록: ' + JSON.stringify([...grants]) : '') +
-        (delegate.length ? '\n\n당신은 「' + delegation!.team + '」 부서장입니다. 부서원 목록:\n' +
+        (delegate.length && delegation!.supplement ? '\n\n당신은 「' + delegation!.team + '」 부서장입니다. 위 부서원 보고서로 최종 보고서를 쓰기에 부족한 점이 분명하면, ' +
+          'assign_members를 한 번만 호출해 보완 하위 업무를 낼 수 있습니다. 보완은 이번 한 번뿐이고 이후에는 바로 취합합니다. 충분하면 assign_members를 호출하지 말고 최종 보고서를 쓰세요. 부서원 목록:\n' +
+          delegation!.members.map(member => '- ' + member.name + (member.description ? ' · ' + member.description : '')).join('\n') : '') +
+        (route.length ? '\n\n당신은 비서실장입니다. 대표의 지시를 읽고 맡을 부서를 고르세요. 업무를 직접 수행하지 말고 assign_departments를 한 번 호출하세요. ' +
+          '꼭 필요한 부서만 고르고, 여러 부서가 이어서 일해야 하면 after로 순서를 정하세요. 맞는 부서가 없으면 assign_departments를 호출하지 말고 그 이유만 적으세요. 부서 목록:\n' +
+          routing!.teams.map(team => '- ' + team.name + ' · 부서원 ' + team.members + '명' + (team.description ? ' · ' + team.description : '')).join('\n') : '') +
+        (delegate.length && !delegation!.supplement ? '\n\n당신은 「' + delegation!.team + '」 부서장입니다. 부서원 목록:\n' +
           delegation!.members.map(member => '- ' + member.name + (member.description ? ' · ' + member.description : '')).join('\n') +
           '\n여러 전문 분야가 필요하거나 단계가 나뉘는 업무는 assign_members를 한 번 호출해 부서원에게 나눠 맡기세요. ' +
           '이 업무에 꼭 필요한 부서원만 고르세요. 부서원 전원을 기본으로 부르지 마세요. ' +
@@ -430,7 +518,8 @@ export async function runBoardAgent(input: BoardRunInput): Promise<BoardRunResul
           '혼자 처리할 수 있는 작은 업무면 assign_members를 호출하지 말고 직접 수행해 보고서를 작성하세요.' : '') +
         (department?.role === 'head' && department.rules ? '\n\n## 부서 규칙 (참고, 부서원에게도 적용됨)\n' + department.rules : '') +
         (department?.role === 'head' && department.leadGuide ? '\n\n## 부서장 추가 지침\n' + department.leadGuide : '') +
-        (lawPlugin ? '\n\n법령·판례는 korean-law 도구(' + lawToolPrefix + '*)로 확인한 내용만 근거로 쓰고, 보고서에 법령명·조문·사건번호 같은 출처를 적으세요.' : ''),
+        (lawPlugin || research.length ? '\n\n법률 판단의 근거는 ' + [lawPlugin && 'korean-law(' + lawToolPrefix + '*)', opened('legal-books') && 'legal_books_search', opened('lbox') && 'lbox_search·lbox_fetch'].filter(Boolean).join(', ') +
+          ' 도구로 확인한 내용만 쓰고, 보고서에 법령명·조문·사건번호·서적 cite 같은 출처를 적으세요.' : ''),
       options: {
         ...transport, cwd: sandbox, env: cleanEnv(), pathToClaudeCodeExecutable: packagedClaudeAgentSdkExecutable(),
         abortController: controller, resume: input.resume,
@@ -447,8 +536,10 @@ export async function runBoardAgent(input: BoardRunInput): Promise<BoardRunResul
         tools: [], skills: [], plugins: lawPlugin ? [{ type: 'local' as const, path: lawPlugin }] : [], settingSources: [], strictMcpConfig: !lawPlugin,
         managedSettings: { disableAllHooks: true }, agentProgressSummaries: true,
         settings: { disableAllHooks: true, disableSkillShellExecution: true, disableBundledSkills: true, autoMemoryEnabled: false }, maxTurns: Math.min(agent?.maxTurns ?? 40, 40),
+        ...(input.budgetUsd !== undefined && { maxBudgetUsd: input.budgetUsd }),
         mcpServers: {
           board: createSdkMcpServer({ name: 'board', tools: files }),
+          ...(research.length ? { research: createSdkMcpServer({ name: 'research', tools: research }) } : {}),
           ...(phase === 'work' ? { jurisupport: createSdkMcpServer({ name: 'jurisupport', tools: [
             tool('list_tasks', '승인 범위의 미완료 할일을 조회합니다. 응답에 nextPage 번호가 있으면 그 번호로 다시 호출해 모든 페이지를 확인하세요.',
               { page: z.number().int().positive().optional() }, ({ page }) => listTasks(page))
@@ -477,6 +568,10 @@ export async function runBoardAgent(input: BoardRunInput): Promise<BoardRunResul
         }
         if (message.type === 'result') {
           if (Number.isFinite(message.total_cost_usd)) costUsd = message.total_cost_usd
+          if (message.subtype === 'error_max_budget_usd') {
+            budgetStop = true
+            break
+          }
           if (message.subtype !== 'success') throw new Error(message.errors.join('\n') || message.subtype)
           if (message.is_error) throw new Error(message.result)
           result = message.result
@@ -495,6 +590,11 @@ export async function runBoardAgent(input: BoardRunInput): Promise<BoardRunResul
   } finally { signal.removeEventListener('abort', cancel) }
   await rm(binding, { force: true })
   const spent = costUsd ? { costUsd } : {}
+  if (budgetStop) {
+    onProgress('비용 정지선 도달')
+    return { blocked: true, ...spent, text: '## 비용 정지선 도달\n\n이 지시의 비용이 부서 정지선에 닿아 멈췄습니다. 이어서 하려면 부서 관리에서 정지선을 올린 뒤 다시 실행하세요.' +
+      (result ? '\n\n' + result : '') + (outputs.length ? '\n\n' + outputs.map(p => '산출물 · ' + p).join('\n') : '') }
+  }
   if (lookupError) return { blocked: true, text: '## 할 일 조회 확인 필요\n\n' + lookupError, ...spent }
   if (!notes.size && phase === 'work' && input.readMcpTodos && (!todoPages.length || pagesRead.size !== todoPages.length)) {
     onProgress('결재 필요 · ' + todoTool)
@@ -505,6 +605,7 @@ export async function runBoardAgent(input: BoardRunInput): Promise<BoardRunResul
   for (const action of failedActions) notes.add('실행 결과 확인 필요 · ' + action)
   if (notes.size) return { text: [result, ...outputs.map(p => '산출물 · ' + p), '## 결재 필요', ...notes].filter(Boolean).join('\n\n'), blocked: true, ...spent }
   if (assignments) return { text: result.trim() || assignments.length + '건 배분', assignments, ...spent }
+  if (routes) return { text: result.trim() || routes.length + '건 배분', routes, ...spent }
   if (!result.trim()) throw Object.assign(new Error('에이전트가 보고서를 반환하지 않았습니다.'), spent)
   const verdict = phase === 'review' ? /(?:^|\n)REVIEW: (PASS|REJECT)\s*$/.exec(result) : null
   if (phase === 'review' && !verdict) throw Object.assign(new Error('검토 결과에서 승인 또는 반려 판정을 확인하지 못했습니다.'), spent)

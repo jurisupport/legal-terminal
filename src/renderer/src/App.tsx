@@ -287,7 +287,7 @@ const NOTIFICATION_TONES: Record<Exclude<NotificationSound, 'none'>, Notificatio
   ]
 }
 
-interface OpenBoard { workspace: string; view: WorkBoardView; bulkSeed?: string; boundCase?: { id: string; label: string } }
+interface OpenBoard { workspace: string; view: WorkBoardView; bulkSeed?: string; bulkDepartment?: boolean; boundCase?: { id: string; label: string } }
 
 const normalizePasteForPty = (text: string): string =>
   text.replace(/\r\n/g, '\n').replace(/\r/g, '\n').replace(/\n/g, '\r')
@@ -4781,12 +4781,12 @@ export default function App(): JSX.Element {
   const sessionCaseSource = currentCaseSessionSource(currentCase, sshProfiles)
   const boardSource = activeTermTab ?? sessionCaseSource
   const boardSourceFolder = boardTermFolder(boardSource)
-  const selectBoard = (workspace: string, view: WorkBoardView, source = boardSource, bulkSeed?: string): void => {
+  const selectBoard = (workspace: string, view: WorkBoardView, source = boardSource, bulkSeed?: string, bulkDepartment?: boolean): void => {
     const boundCase = workspace === board?.workspace ? board.boundCase
       : source?.jsId && resolveAgentContextKind(source) === 'case' && workspace === boardTermFolder(source)
         ? { id: source.jsId, label: [source.caseNumber, source.caseName].filter(Boolean).join(' · ') || source.jsId }
         : undefined
-    setBoard({ workspace, view, bulkSeed, boundCase })
+    setBoard({ workspace, view, bulkSeed, bulkDepartment, boundCase })
   }
   const pickBoardFolder = async (view: WorkBoardView, profileId?: string, startPath?: string): Promise<void> => {
     if (profileId) {
@@ -4798,7 +4798,7 @@ export default function App(): JSX.Element {
     const picked = await window.lt.dialog.pickFolder({ title: '업무 보드 작업 폴더 선택', defaultPath: startPath || draftsRoot })
     if (picked) selectBoard(picked.path, view)
   }
-  const openBoard = async (view: WorkBoardView, term?: TermTab, bulkSeed?: string): Promise<void> => {
+  const openBoard = async (view: WorkBoardView, term?: TermTab, bulkSeed?: string, bulkDepartment?: boolean): Promise<void> => {
     const source = term ?? boardSource
     const folder = term ? boardTermFolder(term) : board?.workspace || boardSourceFolder
     if (source && !folder) {
@@ -4813,7 +4813,7 @@ export default function App(): JSX.Element {
     const counts = view === 'reports' ? unreadReportCounts : view === 'approvals' ? boardCounts : undefined
     if (!board && counts && !term && !counts[target ?? '']) target = known.find(path => counts[path] > 0) ?? target
     target ||= known[0]
-    if (target) selectBoard(target, view, source, bulkSeed)
+    if (target) selectBoard(target, view, source, bulkSeed, bulkDepartment)
     else await pickBoardFolder(view, profileId)
   }
   const activeRecordsFolder = activeTermTab?.recordsFolder ?? currentCase?.records
@@ -8995,7 +8995,7 @@ export default function App(): JSX.Element {
                 caseContext={agentCaseContextForTerm(t)}
                 workspaceContext={agentWorkspaceContextForTerm(t, contextAppVersion)}
                 onTasksChanged={() => setTodoNonce((value) => value + 1)}
-                onBulkInstructions={(text) => void openBoard('bulk', t, text)}
+                onBulkInstructions={(text, department) => void openBoard('bulk', t, text, department)}
                 visible={t.id === activeTerm}
                 focusNonce={termFocusNonce[t.id] ?? 0}
                 initialDraft={agentDrafts[t.id]}
@@ -9389,7 +9389,7 @@ export default function App(): JSX.Element {
                   caseContext={agentCaseContextForTerm(t)}
                 workspaceContext={agentWorkspaceContextForTerm(t, contextAppVersion)}
                 onTasksChanged={() => setTodoNonce((value) => value + 1)}
-                onBulkInstructions={(text) => void openBoard('bulk', t, text)}
+                onBulkInstructions={(text, department) => void openBoard('bulk', t, text, department)}
                   visible={t.id === visibleTermId}
                   focusNonce={termFocusNonce[t.id] ?? 0}
                   initialDraft={agentDrafts[t.id]}
@@ -9766,7 +9766,7 @@ export default function App(): JSX.Element {
         </label>
       </header>
       <WorkBoard key={board.workspace} {...board}
-        onView={view => setBoard({ ...board, view, bulkSeed: undefined })}
+        onView={view => setBoard({ ...board, view, bulkSeed: undefined, bulkDepartment: undefined })}
         onOpenFile={path => window.lt.app.newWindow({ docOnly: true, tabs: [{ kind: 'doc', path, title: fileNameFromPath(path) }] })}
       />
     </dialog>)}

@@ -146,7 +146,8 @@ interface AgentPanelProps {
   caseTabId?: string
   caseContext?: string
   workspaceContext?: AgentWorkspaceContext
-  onBulkInstructions?: (text: string) => void
+  /** Opens the work board with this text: split into instructions, or as one instruction for a department. */
+  onBulkInstructions?: (text: string, department?: boolean) => void
   onTasksChanged?: () => void
   visible: boolean
   focusNonce?: number
@@ -5222,6 +5223,11 @@ export default function AgentPanel({
             {onBulkInstructions && attachments.length === 0 && !quotedMessage && input.trim() && (
               <button type="button" title="작성한 내용을 업무별로 나누고 담당자를 지정합니다" onClick={() => onBulkInstructions(input)}>
                 일괄 지시
+              </button>
+            )}
+            {onBulkInstructions && attachments.length === 0 && !quotedMessage && input.trim() && (
+              <button type="button" title="작성한 내용을 지시 하나로 업무 보드에 올리고 맡을 부서나 비서실장을 고릅니다" onClick={() => onBulkInstructions(input, true)}>
+                부서에 맡기기
               </button>
             )}
             <AgentDictationButton

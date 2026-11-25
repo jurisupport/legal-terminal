@@ -1,4 +1,4 @@
-import { boardDelegates, boardDepartmentTools, boardInstructionCost, descriptionsOverlap, formatUsd, isBoardDepartmentTask, boardFollowUpRevision, boardRequestsTodoRead, boardResultKind, isBoardReport, isBoardDecisionPending, canRetryAsReport, boardReferencePaths, boardDocumentPaths, boardMutationIssue, boardReportAvailable, boardRevision, requestsCurrentBoardCase, isBoardTodoReview } from '../../../shared/workBoard'
+import { boardDelegates, boardRouted, boardChildren, isBoardChiefTask, boardDepartmentTools, boardInstructionCost, descriptionsOverlap, formatUsd, isBoardDepartmentTask, boardFollowUpRevision, boardRequestsTodoRead, boardResultKind, isBoardReport, isBoardDecisionPending, canRetryAsReport, boardReferencePaths, boardDocumentPaths, boardMutationIssue, boardReportAvailable, boardRevision, requestsCurrentBoardCase, isBoardTodoReview } from '../../../shared/workBoard'
 import DOMPurify from 'dompurify'
 import { marked, Renderer } from 'marked'
 import { createPortal } from 'react-dom'
@@ -26,12 +26,14 @@ interface Props {
   onView?: (view: WorkBoardView) => void
   onOpenFile: (path: string) => Promise<void>
   bulkSeed?: string
+  /** The seed is one instruction for a department or the chief of staff, not a list to split. */
+  bulkDepartment?: boolean
   boundCase?: { id: string; label: string }
 }
 const statusLabel: Record<BoardStatus, string> = {
   queued: '대기',
   running: '수행 중',
-  delegated: '부서원 수행 중',
+  delegated: '하위 업무 수행 중',
   blocked: '확인 필요',
   reported: '보고 완료',
   in_review: '검토 중',
@@ -206,6 +208,7 @@ function InstructionForm({
   agents,
   teams = [],
   seed,
+  whole = false,
   existing,
   followUp = false,
   issue,
@@ -215,6 +218,7 @@ function InstructionForm({
   agents: BoardAgent[]
   teams?: BoardTeam[]
   seed?: string
+  whole?: boolean
   existing?: BoardTask
   followUp?: boolean
   issue?: string
@@ -231,7 +235,8 @@ function InstructionForm({
     depends_on: existing.depends_on,
     after_approval: boardResultKind(existing) === 'action' ? existing.after_approval : undefined,
     allowed_tools: boardResultKind(existing) === 'action' ? existing.allowed_tools : undefined
-  }] : followUp ? [{ title: '', body: '', resultKind: 'report' }] : [])
+  }] : followUp ? [{ title: '', body: '', resultKind: 'report' }]
+    : whole && seed?.trim() ? [{ title: seed.trim().split(/\r?\n/, 1)[0].slice(0, 120), body: seed.trim(), resultKind: 'report' }] : [])
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const update = (index: number, patch: Partial<FormDraft>) =>
@@ -255,6 +260,8 @@ function InstructionForm({
   const emptyFollowUp = followUp && !drafts[0]?.body.trim()
   const missingAction = drafts.some(d => d.resultKind === 'action' && !d.after_approval?.trim())
   const missingScope = ready.some((d, i) => reviewRows[i] && !d.todoScope)
+  // Sent from a conversation to a department: the lawyer picks the department or the chief of staff.
+  const missingDepartment = whole && drafts.some(d => !d.team && !d.chief)
   const options = agents.map((a) => (
     <option key={a.name} value={a.name} title={a.description}>
       {a.name}
@@ -276,7 +283,7 @@ function InstructionForm({
           )
           return
         }
-        if (busy || issue || emptyFollowUp || missingScope || missingAction) return
+        if (busy || issue || emptyFollowUp || missingScope || missingAction || missingDepartment) return
         setBusy(true)
         setError('')
         try {
@@ -325,11 +332,14 @@ function InstructionForm({
               <div className="wb-fields">
               <label>
                 담당
-                <select value={d.team ? 'team:' + d.team : d.agent || ''} onChange={(e) => {
+                <select value={d.chief ? 'chief' : d.team ? 'team:' + d.team : d.agent || ''} onChange={(e) => {
                   const value = e.target.value
-                  update(i, value.startsWith('team:') ? { team: value.slice(5), agent: undefined } : { agent: value || undefined, team: undefined })
+                  update(i, value === 'chief' ? { chief: true, team: undefined, agent: undefined }
+                    : value.startsWith('team:') ? { team: value.slice(5), agent: undefined, chief: undefined } : { agent: value || undefined, team: undefined, chief: undefined })
                 }}>
                   <option value="">기본 세션</option>
+                  {!existing?.delegatedBy && !existing?.routedBy && (teams.length > 0 || d.chief) &&
+                    <option value="chief">비서실장에게 맡김 · 부서를 골라 순서대로 맡김</option>}
                   {!existing?.delegatedBy && (teams.length > 0 || d.team) && <optgroup label="부서 · 부서장이 나눠 맡김">
                     {d.team && !teams.some(team => team.name === d.team) && <option value={'team:' + d.team}>{d.team} (현재 미등록)</option>}
                     {teams.map(team => <option key={team.name} value={'team:' + team.name}>
@@ -342,6 +352,7 @@ function InstructionForm({
                   </optgroup>
                 </select>
                 {d.team && <small>부서장이 업무를 나눠 부서원에게 하위 업무로 맡기고, 부서원 보고서를 모아 최종 보고서를 씁니다.</small>}
+                {d.chief && <small>비서실장이 맡을 부서를 고르고, 여러 부서가 필요하면 순서대로 맡긴 뒤 부서 보고서를 모아 최종 보고서를 씁니다.</small>}
               </label>
               <label>
                 기한
@@ -425,7 +436,8 @@ function InstructionForm({
       {existing && <p className="wb-muted">내용을 변경하면 확인 필요 상태로 저장됩니다. 수정한 지시를 수행하려면 다시 대기열에 넣으세요.</p>}
       <div className="wb-actions">
         {ready.some(d => d.todoScope?.kind === 'all') && <small>{allTodosNotice}</small>}
-        <button disabled={busy || !!issue || emptyFollowUp || (!existing && !followUp && !raw.trim()) || missingScope || missingAction} className="wb-btn wb-primary">
+        {missingDepartment && <small role="status">{teams.length ? '담당에서 맡을 부서나 비서실장을 고르세요.' : '부서가 없습니다. 조직도의 부서 관리에서 부서를 먼저 만드세요.'}</small>}
+        <button disabled={busy || !!issue || emptyFollowUp || (!existing && !followUp && !raw.trim()) || missingScope || missingAction || missingDepartment} className="wb-btn wb-primary">
           {existing ? '변경 저장' : followUp ? '추가 지시 등록' : drafts.length ? drafts.length + '건 등록' : '지시 내용 확인'}
         </button>
       </div>
@@ -524,7 +536,7 @@ function Settings({
 function Organization({ data, edit }: { data: BoardSnapshot; edit?: () => void }) {
   const seen = new Set(data.teams.flatMap((t) => t.agents))
   const extra = new Set(
-    [...data.agents.map((a) => a.name), ...data.tasks.filter(t => !t.team).map(agentName)].filter((a) => !seen.has(a))
+    [...data.agents.map((a) => a.name), ...data.tasks.filter(t => !t.team && !t.chief).map(agentName)].filter((a) => !seen.has(a))
   )
   const active = (t: BoardTask) => !['done', 'approved', 'rejected', 'failed'].includes(t.status)
   const member = (name: string) => {
@@ -557,6 +569,13 @@ function Organization({ data, edit }: { data: BoardSnapshot; edit?: () => void }
         {edit && <button type="button" className="wb-btn" onClick={edit}>부서 관리</button>}
       </h3>
       <div className="wb-org-head">대표 (결재)</div>
+      {data.teams.length > 0 && <div className="wb-split-label wb-org-lead">
+        <span>
+          {data.tasks.some((t) => isBoardChiefTask(t) && t.status === 'running') && <i className="wb-dot" aria-label="비서실장 수행 중" />}
+          비서실장 · 부서 배분·취합
+        </span>
+        <span>{data.tasks.filter((t) => isBoardChiefTask(t) && active(t)).length}건</span>
+      </div>}
       {!data.teams.length && (
         <p className="wb-muted">
           아직 부서가 없습니다. 부서를 만들면 큰 업무를 부서에 맡기고, 부서장이 부서원에게 나눠 맡깁니다.
@@ -750,6 +769,11 @@ function TeamEditor({ data, save, close, restore, importLegacy, suggest }: {
                   onChange={(e) => update(i, { warnInstructionUsd: e.target.value ? Number(e.target.value) : undefined })} />
               </label>
               <label>
+                지시 1건 정지선 (USD)
+                <input type="number" min="0.01" step="0.01" value={usdInput(row.stopInstructionUsd)} title="닿으면 업무를 멈추고 확인 필요로 표시합니다. 실제 사용량을 본 뒤 정하세요."
+                  onChange={(e) => update(i, { stopInstructionUsd: e.target.value ? Number(e.target.value) : undefined })} />
+              </label>
+              <label>
                 월간 경고선 (USD)
                 <input type="number" min="0.01" step="0.01" value={usdInput(row.warnMonthlyUsd)}
                   onChange={(e) => update(i, { warnMonthlyUsd: e.target.value ? Number(e.target.value) : undefined })} />
@@ -845,11 +869,11 @@ function TaskCard({
         {isBoardReport(t) && t.reportReceipt?.state === 'unread' && <span className="wb-report-unread">미확인</span>}
       </strong>
       <div className="wb-split-label">
-        <span className="wb-team-label">{t.team ? t.team + ' 부서' : team?.name || agentName(t)}</span>
+        <span className="wb-team-label">{t.chief ? '비서실장' : t.team ? t.team + ' 부서' : team?.name || agentName(t)}</span>
         <span className={isBoardDueSoon(t) ? 'wb-due' : ''}>{t.due || '기한 미지정'}</span>
       </div>
       <small>
-        {t.delegatedBy ? '↳ 부서원 ' + agentName(t) + ' · ' : team && !t.team ? agentName(t) + ' · ' : ''}
+        {t.delegatedBy ? '↳ 부서원 ' + agentName(t) + ' · ' : t.routedBy ? '↳ 비서실장 배분 · ' : team && !t.team ? agentName(t) + ' · ' : ''}
         {t.status === 'approved' && boardResultKind(t) === 'action' ? '승인됨 · 실행 결과 대기' : statusLabel[t.status]} · {progress ? progress + ' · ' : ''}{elapsed(t)}
       </small>
     </button>
@@ -1071,6 +1095,8 @@ function Details({
     if (sourceRevision) setFollowUp({ revision: sourceRevision, title: task.title })
   }
   const delegates = boardDelegates(task, tasks)
+  const routed = boardRouted(task, tasks)
+  const chiefTask = task.routedBy ? tasks.find(candidate => candidate.id === task.routedBy) : undefined
   const departmentHead = task.delegatedBy ? tasks.find(item => item.id === task.delegatedBy) : undefined
   const [reason, setReason] = useState('')
   const [chosenScope, setChosenScope] = useState<BoardTodoScope>()
@@ -1169,10 +1195,32 @@ function Details({
         {task.agent && <span>{task.delegatedBy ? '부서원 ' : ''}{agentName(task)}</span>}
         {task.due && <span>기한 {task.due}</span>}
         {boardInstructionCost(task, tasks) > 0 && <span title="SDK가 추정한 모델 사용 비용입니다. 청구 금액과 다를 수 있습니다.">
-          비용 {formatUsd(boardInstructionCost(task, tasks))}{boardDelegates(task, tasks).length ? ' · 부서원 포함' : ''}
+          비용 {formatUsd(boardInstructionCost(task, tasks))}{boardRouted(task, tasks).length ? ' · 부서 포함' : boardDelegates(task, tasks).length ? ' · 부서원 포함' : ''}
         </span>}
       </div>
       {!nearReport && !nearDecision && followUpActions}
+      {(isBoardChiefTask(task) || task.routedBy) && <section className="wb-delegates" aria-label="비서실장 배분">
+        {task.routedBy ? <>
+          <h3>비서실장이 맡긴 부서 업무</h3>
+          {chiefTask
+            ? <button type="button" className="wb-btn" onClick={() => selectTask(chiefTask.id)}>대표 지시 · {chiefTask.title} · {statusLabel[chiefTask.status]}</button>
+            : <p className="wb-muted">대표 지시가 현재 보드에 없습니다.</p>}
+          <p className="wb-muted">이 부서의 최종 보고서는 비서실장에게 전달됩니다. 보고서함에는 비서실장의 최종 보고서만 도착합니다.</p>
+        </> : <>
+          <h3>비서실장 배분</h3>
+          {routed.length ? <ol>
+            {routed.map(child => <li key={child.id}>
+              <button type="button" className={['blocked', 'failed'].includes(child.status) ? 'wb-btn wb-needs-action' : 'wb-btn'} onClick={() => selectTask(child.id)}>
+                {child.team} · {child.title} · {statusLabel[child.status]}
+              </button>
+            </li>)}
+          </ol> : <p className="wb-muted">{task.status === 'running' ? '비서실장이 맡을 부서를 고르고 있습니다.' : task.status === 'queued' ? '비서실장이 부서를 고를 차례를 기다리고 있습니다.' : '배분한 부서 업무가 없습니다.'}</p>}
+          {task.status === 'delegated' && <p className="wb-muted">
+            부서 업무 {routed.filter(child => child.status === 'done').length}/{routed.length}건 완료. 모두 끝나면 비서실장이 보고서를 취합합니다.
+            {routed.some(child => ['blocked', 'failed'].includes(child.status)) && ' 확인 필요 상태인 부서 업무를 먼저 처리하세요.'}
+          </p>}
+        </>}
+      </section>}
       {(isBoardDepartmentTask(task) || task.delegatedBy) && <section className="wb-delegates" aria-label="부서 배분">
         {task.delegatedBy ? <>
           <h3>부서장이 맡긴 하위 업무</h3>
@@ -1190,7 +1238,7 @@ function Details({
             </li>)}
           </ol> : <p className="wb-muted">{task.status === 'running' ? '부서장이 업무를 나누고 있습니다.' : task.status === 'queued' ? '부서장이 업무를 나눌 차례를 기다리고 있습니다.' : '배분한 하위 업무가 없습니다.'}</p>}
           {task.status === 'delegated' && <p className="wb-muted">
-            하위 업무 {delegates.filter(child => child.status === 'done').length}/{delegates.length}건 완료. 모두 끝나면 부서장이 보고서를 취합합니다.
+            하위 업무 {delegates.filter(child => child.status === 'done').length}/{delegates.length}건 완료. 모두 끝나면 부서장이 보고서를 취합합니다. 부족하면 부서장이 보완 업무를 한 번 더 맡길 수 있습니다.
             {delegates.some(child => ['blocked', 'failed'].includes(child.status)) && ' 확인 필요 상태인 하위 업무를 먼저 처리하세요.'}
           </p>}
         </>}
@@ -1429,7 +1477,7 @@ function Details({
 export function WorkBoard(props: Props) {
   return <BoardWorkspace key={props.workspace} {...props} />
 }
-function BoardWorkspace({ workspace, view, onView, bulkSeed, boundCase, onOpenFile }: Props) {
+function BoardWorkspace({ workspace, view, onView, bulkSeed, bulkDepartment, boundCase, onOpenFile }: Props) {
   const api = window.lt.workBoard
   const [data, setData] = useState<BoardSnapshot | null>(null)
   const [error, setError] = useState('')
@@ -1524,8 +1572,8 @@ function BoardWorkspace({ workspace, view, onView, bulkSeed, boundCase, onOpenFi
     return name ? teams.find((team) => team.name === name) : teams.find((team) => team.agents.includes(agentName(t)))
   }
   const progressOf = (t: BoardTask) => {
-    const delegates = isBoardDepartmentTask(t) ? boardDelegates(t, ordered) : []
-    return delegates.length ? `하위 업무 ${delegates.filter((child) => child.status === 'done').length}/${delegates.length}` : undefined
+    const children = isBoardDepartmentTask(t) || isBoardChiefTask(t) ? boardChildren(t, ordered) : []
+    return children.length ? `${isBoardChiefTask(t) ? '부서 업무' : '하위 업무'} ${children.filter((child) => child.status === 'done').length}/${children.length}` : undefined
   }
   const card = (t: BoardTask) => (
     <TaskCard
@@ -1712,6 +1760,7 @@ function BoardWorkspace({ workspace, view, onView, bulkSeed, boundCase, onOpenFi
                 agents={data.agents}
                 teams={data.teams}
                 seed={bulkSeed}
+                whole={bulkDepartment}
                 scopeOptions={scopeOptions}
                 submit={async (drafts, batchId) => {
                   await api.add(workspace, drafts, batchId)

@@ -33,6 +33,8 @@ export interface BoardDraft {
   agent?: string
   /** A department instruction. Its head splits the work into member sub-cards and combines their reports. */
   team?: string
+  /** Left to the chief of staff, who picks the departments, orders them and combines their reports. */
+  chief?: true
   due?: string
   review_agent?: string
   approval?: 'required' | 'none'
@@ -56,6 +58,8 @@ export interface BoardTask extends BoardDraft {
   parentId?: string
   /** The department instruction that delegated this member sub-card. */
   delegatedBy?: string
+  /** The chief-of-staff instruction that routed this department instruction. */
+  routedBy?: string
   /** Estimated spend in USD of this card's own sessions. A department instruction adds its members' cards. */
   cost?: number
 }
@@ -70,6 +74,8 @@ export type BoardToolLevel = 'allow' | 'ask' | 'off'
 /** Tools a department can open. Only read-only tools may be allowed without approval. */
 export const boardDepartmentTools = [
   { key: 'korean-law', label: 'korean-law 법령·판례 조회', readOnly: true },
+  { key: 'legal-books', label: 'legal-books 법률서적 검색', readOnly: true },
+  { key: 'lbox', label: 'lbox 판례 검색·전문 조회', readOnly: true },
   { key: 'bash', label: '작업 폴더 명령 실행', readOnly: false },
   { key: 'mcp', label: '등록된 외부 MCP 도구', readOnly: false }
 ] as const
@@ -89,6 +95,8 @@ export interface BoardTeam {
   /** Warning lines in USD. Crossing one records a warning; the work continues. */
   warnInstructionUsd?: number
   warnMonthlyUsd?: number
+  /** A hard stop for one instruction in USD, including its members. Reaching it stops the work for review. */
+  stopInstructionUsd?: number
 }
 export interface BoardAgent { name: string; description: string }
 /** A saved version of the office departments, newest first. */
@@ -144,14 +152,28 @@ export interface BoardApi {
 }
 
 type BoardResultFields = Pick<BoardDraft, 'approval' | 'after_approval'>
-type BoardInboxFields = BoardResultFields & Pick<BoardTask, 'status' | 'parentId' | 'delegatedBy'>
+type BoardInboxFields = BoardResultFields & Pick<BoardTask, 'status' | 'parentId' | 'delegatedBy' | 'routedBy'>
 
 export function boardDelegates(task: Pick<BoardTask, 'id'>, tasks: readonly BoardTask[]): BoardTask[] {
   return tasks.filter(candidate => candidate.delegatedBy === task.id)
 }
 
+/** Department instructions the chief of staff routed from this instruction. */
+export function boardRouted(task: Pick<BoardTask, 'id'>, tasks: readonly BoardTask[]): BoardTask[] {
+  return tasks.filter(candidate => candidate.routedBy === task.id)
+}
+
+/** Cards that report to this one instead of the lawyer: member sub-cards and routed department instructions. */
+export function boardChildren(task: Pick<BoardTask, 'id'>, tasks: readonly BoardTask[]): BoardTask[] {
+  return tasks.filter(candidate => candidate.delegatedBy === task.id || candidate.routedBy === task.id)
+}
+
 export function isBoardDepartmentTask(task: Pick<BoardTask, 'team' | 'parentId' | 'delegatedBy'>): boolean {
   return !!task.team && !task.parentId && !task.delegatedBy
+}
+
+export function isBoardChiefTask(task: Pick<BoardTask, 'chief' | 'parentId' | 'delegatedBy' | 'routedBy'>): boolean {
+  return !!task.chief && !task.parentId && !task.delegatedBy && !task.routedBy
 }
 
 export function boardRequestsTodoRead(task: BoardTask): boolean {
@@ -173,13 +195,13 @@ export function boardResultKind(task: BoardResultFields): 'report' | 'final' | '
   return task.approval === 'required' ? 'final' : 'report'
 }
 
-// Member sub-cards report to their department head, not to the lawyer's inboxes.
+// Member sub-cards report to their department head, and routed departments to the chief of staff, not to the lawyer's inboxes.
 export function isBoardReport(task: BoardInboxFields): boolean {
-  return task.status === 'done' && !task.parentId && !task.delegatedBy && boardResultKind(task) === 'report'
+  return task.status === 'done' && !task.parentId && !task.delegatedBy && !task.routedBy && boardResultKind(task) === 'report'
 }
 
 export function isBoardDecisionPending(task: BoardInboxFields): boolean {
-  return task.status === 'awaiting_approval' && !task.parentId && !task.delegatedBy && boardResultKind(task) !== 'report'
+  return task.status === 'awaiting_approval' && !task.parentId && !task.delegatedBy && !task.routedBy && boardResultKind(task) !== 'report'
 }
 
 export function canRetryAsReport(task: BoardTask, tasks: readonly BoardTask[]): boolean {
@@ -192,6 +214,13 @@ export function boardMutationIssue(task: BoardTask, tasks: readonly BoardTask[],
   if (task.status === 'running' || task.status === 'in_review') return '수행 또는 검토가 끝난 뒤 변경할 수 있습니다.'
   if (boardDelegates(task, tasks).length) {
     return action === 'remove' ? '부서원 하위 업무를 먼저 삭제해 주세요.' : '부서원에게 배분한 지시는 수정할 수 없습니다. 추가 업무 지시를 이용해 주세요.'
+  }
+  if (boardRouted(task, tasks).length) {
+    return action === 'remove' ? '비서실장이 배분한 부서 업무를 먼저 삭제해 주세요.' : '부서에 배분한 지시는 수정할 수 없습니다. 추가 업무 지시를 이용해 주세요.'
+  }
+  if (task.routedBy && action === 'remove') {
+    const chief = tasks.find(candidate => candidate.id === task.routedBy)
+    if (chief && ['running', 'in_review'].includes(chief.status)) return '비서실장이 취합을 마친 뒤 삭제할 수 있습니다.'
   }
   if (task.delegatedBy && action === 'remove') {
     const head = tasks.find(candidate => candidate.id === task.delegatedBy)
@@ -245,9 +274,9 @@ export function boardRevision(task: BoardTask, detail?: { report: string; review
   ])
 }
 
-/** Total estimated spend of an instruction, including a department head's member sub-cards. */
+/** Total estimated spend of an instruction, including routed departments and member sub-cards. */
 export function boardInstructionCost(task: Pick<BoardTask, 'id' | 'cost'>, tasks: readonly BoardTask[]): number {
-  const total = (task.cost ?? 0) + boardDelegates(task, tasks).reduce((sum, child) => sum + (child.cost ?? 0), 0)
+  const total = (task.cost ?? 0) + boardChildren(task, tasks).reduce((sum, child) => sum + boardInstructionCost(child, tasks), 0)
   return Math.round(total * 10_000) / 10_000
 }
 

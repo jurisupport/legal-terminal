@@ -35,13 +35,13 @@ const runs = []
 let lawBlockedOnce = false
 globalThis.boardRunFixture = async i => {
   runs.push({ title: i.task.title, phase: i.phase, agent: i.agentName ?? i.task.agent, delegation: i.delegation, department: i.department, prompt: i.prompt, delegatedBy: i.task.delegatedBy })
-  if (i.delegation?.team === '송무팀') {
+  if (i.delegation?.team === '송무팀' && !i.delegation.supplement) {
     return { text: '2건 배분', costUsd: 0.4, assignments: [
       { member: 'fact', title: '사실관계 정리', instruction: '기록에서 사실관계를 시간순으로 정리', after: [] },
       { member: 'law', title: '법리 검토', instruction: '정리된 사실관계로 법리 검토', after: [1] }
     ] }
   }
-  if (i.delegation) return { text: '## 결론\n부서장이 직접 처리 DIRECT_REPORT' }
+  if (i.delegation && !i.delegation.supplement) return { text: '## 결론\n부서장이 직접 처리 DIRECT_REPORT' }
   if (i.task.title === '사실관계 정리') return { text: '## 결론\n사실관계 보고 FACT_REPORT', costUsd: 0.7 }
   if (i.task.title === '법리 검토') {
     if (!lawBlockedOnce) {
@@ -151,7 +151,7 @@ try {
   assert.equal(synthesis.title, '준비서면 초안')
   assert.equal(synthesis.agent, undefined)
   assert.equal(synthesis.department.role, 'head')
-  assert.equal(synthesis.delegation, undefined)
+  assert.equal(synthesis.delegation.supplement, true, 'the head may send one follow-up round after reading reports')
   assert.match(synthesis.prompt, /FACT_REPORT[\s\S]*LAW_REPORT/)
   assert.match((await board.detail(head.id)).report, /FINAL_REPORT/)
   // Spend: the head 0.4 + 0.2 and the fact member 0.7 cross both warning lines once each.
@@ -222,7 +222,92 @@ try {
   await assert.rejects(legacy.importLegacyTeams(), /이미 있습니다/)
   legacy.stop()
   await legacy.snapshot()
-  console.log('부서 위임 · 사무소 부서 저장·규칙·도구 권한·앱 부서장·부서원 배분·비용 경고·변경 이력·되돌리기·기존 보드 가져오기 확인')
+
+  // Stage 2: the chief of staff routes across departments, a head sends one follow-up round, and a stop line halts spending.
+  process.env.LEGAL_TERMINAL_DEPARTMENTS_DIR = join(dir, 'chief-office')
+  const chiefRuns = []
+  let researchSyntheses = 0
+  globalThis.boardRunFixture = async i => {
+    chiefRuns.push({ title: i.task.title, routing: i.routing, delegation: i.delegation, budgetUsd: i.budgetUsd, prompt: i.prompt })
+    const title = i.task.title
+    if (i.routing) {
+      if (title === '복합 업무') return { text: '2개 부서 배분', costUsd: 0.1, routes: [
+        { team: '조사부', title: '조사', instruction: '판결 조사 지시', after: [] },
+        { team: '작성부', title: '작성', instruction: '의견서 작성 지시', after: [1] }
+      ] }
+      if (title === '단일 업무') return { text: '1개 부서 배분', routes: [{ team: '조사부', title: '단일 조사', instruction: '단일 조사 지시', after: [] }] }
+      return { text: '맞는 부서가 없습니다 NO_DEPARTMENT' }
+    }
+    if (title === '조사' && i.delegation && !i.delegation.supplement) return { text: '1건 배분', assignments: [{ member: 'fact', title: '조사 하위', instruction: '판결 수집', after: [] }] }
+    if (title === '조사 하위') return { text: '## 결론\nSUB_ONE' }
+    if (title === '조사' && i.delegation?.supplement) {
+      researchSyntheses++
+      return { text: '보완 1건', assignments: [{ member: 'fact', title: '조사 보완', instruction: '누락 판결 보완', after: [] }] }
+    }
+    if (title === '조사 보완') return { text: '## 결론\nSUB_TWO' }
+    if (title === '조사') { researchSyntheses++; return { text: '## 결론\nRESEARCH_FINAL' } }
+    if (title === '작성') return { text: '## 결론\nWRITE_FINAL', costUsd: 0.25 }
+    if (title === '복합 업무') return { text: '## 결론\nCHIEF_FINAL' }
+    if (title === '단일 조사') return { text: '## 결론\nSINGLE_FINAL' }
+    if (title === '정지 확인') return { text: '1건 배분', costUsd: 0.4, assignments: [{ member: 'law', title: '정지 하위', instruction: '작성', after: [] }] }
+    throw Error('unexpected chief run ' + title)
+  }
+  const chiefBoard = new WorkBoard(join(dir, 'chief-case'), join(dir, 'chief-case', '_업무지시'), join(dir, 'chief-profile'), m => { if (m) notes.push(m) })
+  board.stop()
+  board = chiefBoard
+  await board.start()
+  await assert.rejects(board.add([{ title: 'x', body: 'x', chief: true }]), /부서가 하나 이상/)
+  await assert.rejects(board.add([{ title: 'x', body: 'x', chief: true, team: '조사부' }]), /하나만/)
+  await board.saveTeams([
+    { name: '조사부', color: '#376ac6', description: '판결과 문헌 조사', agents: ['fact'] },
+    { name: '작성부', color: '#148369', description: '의견서 작성', agents: ['law'], stopInstructionUsd: 0.3 }
+  ])
+  await board.add([{ title: '복합 업무', body: '판결을 조사해 의견서를 써 줘 CHIEF_BODY', chief: true, approval: 'none' }])
+  tasks = await until(ts => ts.some(t => t.title === '복합 업무' && t.status === 'done'))
+  const chiefTask = tasks.find(t => t.title === '복합 업무')
+  const research = tasks.find(t => t.title === '조사'), writing = tasks.find(t => t.title === '작성')
+  assert.equal(research.routedBy, chiefTask.id)
+  assert.equal(research.team, '조사부')
+  assert.deepEqual(writing.depends_on, [research.id])
+  assert.ok(chiefTask.log.some(e => e.text === '비서실장 배분 · 조사부, 작성부 · 2건'))
+  // One follow-up round, then the head combines without another offer.
+  assert.ok(research.log.some(e => e.text === '부서 보완 배분 · 조사부 · 1건'))
+  assert.equal(researchSyntheses, 2)
+  assert.equal(chiefRuns.filter(r => r.title === '조사' && r.delegation?.supplement).length, 1)
+  assert.equal(chiefRuns.find(r => r.title === '조사' && !r.delegation).prompt.match(/SUB_ONE|SUB_TWO/g).length, 2)
+  // The later department reads the earlier one's final report and the lawyer's original instruction.
+  const writeRun = chiefRuns.find(r => r.title === '작성')
+  assert.match(writeRun.prompt, /RESEARCH_FINAL/)
+  assert.match(writeRun.prompt, /CHIEF_BODY/)
+  assert.equal(writeRun.budgetUsd, 0.3, 'a stop line caps the session')
+  const combine = chiefRuns.filter(r => r.title === '복합 업무').at(-1)
+  assert.equal(combine.routing, undefined)
+  assert.match(combine.prompt, /RESEARCH_FINAL[\s\S]*WRITE_FINAL/)
+  assert.match((await board.detail(chiefTask.id)).report, /CHIEF_FINAL/)
+  // Only the chief's report reaches the lawyer.
+  assert.equal(isBoardReport(research), false)
+  assert.equal(isBoardReport(chiefTask), true)
+  assert.equal(board.unreadReportCount(), 1)
+  assert.equal(boardInstructionCost(chiefTask, tasks), 0.35)
+  assert.match(boardMutationIssue(chiefTask, tasks, 'remove'), /비서실장이 배분한/)
+
+  // A single department's report is passed on without another chief session.
+  await board.add([{ title: '단일 업무', body: '조사만', chief: true, approval: 'none' }])
+  tasks = await until(ts => ts.some(t => t.title === '단일 업무' && t.status === 'done'))
+  assert.equal(chiefRuns.filter(r => r.title === '단일 업무').length, 1)
+  assert.match((await board.detail(tasks.find(t => t.title === '단일 업무').id)).report, /SINGLE_FINAL/)
+
+  // No fitting department: the chief stops with its reason instead of guessing.
+  await board.add([{ title: '맞는 부서 없음', body: '세무 신고', chief: true }])
+  tasks = await until(ts => ts.some(t => t.title === '맞는 부서 없음' && t.status === 'blocked'))
+  assert.match((await board.detail(tasks.find(t => t.title === '맞는 부서 없음').id)).report, /NO_DEPARTMENT/)
+
+  // Past the stop line, a member's session does not start.
+  await board.add([{ title: '정지 확인', body: '작성', team: '작성부', approval: 'none' }])
+  tasks = await until(ts => ts.some(t => t.title === '정지 하위' && t.status === 'blocked'))
+  assert.match(tasks.find(t => t.title === '정지 하위').log.at(-1).text, /비용 정지선 도달 · 작성부/)
+  assert.equal(chiefRuns.some(r => r.title === '정지 하위'), false)
+  console.log('부서 위임 · 사무소 부서·규칙·도구 권한·앱 부서장·부서원 배분·보완 1회·비서실장 배분·부서 순서·취합·비용 경고·정지선·변경 이력·가져오기 확인')
 } finally {
   board?.stop()
   await board?.snapshot()
