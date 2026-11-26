@@ -1,6 +1,7 @@
 import DOMPurify from 'dompurify'
 import { mediaMimeType, mediaSelectionKey, formatMediaTime, normalizeMediaSelection, type MediaAskRequest, type MediaSelection, type MediaViewState } from '../../shared/media'
 import MediaViewer from './viewer/MediaViewer'
+import DocWarpEditor from './viewer/DocWarpEditor'
 import {
   Fragment,
   useCallback,
@@ -986,7 +987,7 @@ const docKindForPath = (path: string): DocTab['kind'] => {
   const lower = path.toLowerCase()
   if (mediaMimeType(lower)) return 'media'
   if (lower.endsWith('.pdf')) return 'pdf'
-  if (/\.(png|jpe?g|gif|webp|bmp|svg|ico|tiff?|avif)$/.test(lower)) return 'image'
+  if (/\.(png|jpe?g|gif|webp|bmp|svg|ico|tiff?|avif|heic|heif)$/.test(lower)) return 'image'
   if (/\.(hwp|hwpx)$/.test(lower)) return 'hwp'
   if (lower.endsWith('.docx')) return 'docx'
   if (lower.endsWith('.hearing.json')) return 'hearing'
@@ -2760,7 +2761,7 @@ export default function App(): JSX.Element {
   }
 
   // 이미지 뷰어: 같은 폴더의 정렬순 이전/다음 이미지로 현재 탭에서 이동
-  const IMG_RE = /\.(png|jpe?g|gif|webp|bmp|svg|ico|tiff?|avif)$/i
+  const IMG_RE = /\.(png|jpe?g|gif|webp|bmp|svg|ico|tiff?|avif|heic|heif)$/i
   const navigateImage = async (curPath: string, dir: 1 | -1): Promise<void> => {
     const parent = curPath.replace(/[\\/][^\\/]*$/, '')
     if (!parent || parent === curPath) return
@@ -8641,6 +8642,7 @@ export default function App(): JSX.Element {
           initialScroll={scrollPositionForDoc(tab)}
           onScrollPosition={(position) => updateDocScrollPosition(tab.id, position)}
           onNavigate={(dir) => navigateImage(tab.path as string, dir)}
+          onOpenFile={(path) => openFile(path, path.replace(/^.*[\\/]/, ''), docSide(tab))}
         />
       )}
       {tab?.kind === 'hwp' && (
@@ -13100,16 +13102,20 @@ function ImageViewer({
   scrollKey,
   initialScroll,
   onScrollPosition,
-  onNavigate
+  onNavigate,
+  onOpenFile
 }: {
   path: string
   scrollKey?: string
   initialScroll?: DocScrollPosition
   onScrollPosition?: (position: DocScrollPosition) => void
   onNavigate?: (dir: 1 | -1) => void
+  onOpenFile?: (path: string) => void
 }): JSX.Element {
   const remoteVersion = useRemoteFileVersion(path)
   const [url, setUrl] = useState('')
+  const [warping, setWarping] = useState(false)
+  const warpable = /\.(png|jpe?g|webp|bmp|tiff?|avif|heic|heif)$/i.test(path)
   const [err, setErr] = useState('')
   const [mode, setMode] = useState<'fit_page' | 'fit_width' | 'custom'>('fit_page')
   const [scale, setScale] = useState(1)
@@ -13125,8 +13131,11 @@ function ImageViewer({
     let alive = true
     let made = ''
     setErr('')
-    window.lt.fs
-      .readBytes(path)
+    // HEIC는 Chromium이 못 그리므로 문서 펴기용 디코더(macOS sips)로 JPEG 변환해 보여 준다
+    const read = /\.(heic|heif)$/i.test(path)
+      ? window.lt.docWarp.decode(path).then((r) => r.bytes)
+      : window.lt.fs.readBytes(path)
+    read
       .then((ab) => {
         if (!alive) return
         made = URL.createObjectURL(new Blob([ab]))
@@ -13211,6 +13220,7 @@ function ImageViewer({
         ? { width: '100%', height: 'auto' }
         : { width: `${scale * 100}%`, height: 'auto' }
 
+  if (warping) return <DocWarpEditor path={path} onClose={() => setWarping(false)} onOpenFile={onOpenFile} />
   if (err) return <div className="welcome"><p className="muted">이미지 열기 실패: {err}</p></div>
   return (
     <div className="image-doc">
@@ -13238,6 +13248,15 @@ function ImageViewer({
         <button className="tb-btn" title="확대" onClick={() => zoomBy(1.1)}>
           ＋
         </button>
+        {warpable && (
+          <button
+            className="tb-btn"
+            title="문서 사진의 네 꼭짓점을 찍어 종이만 반듯하게 펴서 보정이미지/에 저장합니다"
+            onClick={() => setWarping(true)}
+          >
+            문서 펴기
+          </button>
+        )}
       </div>
       <div
         className={`image-wrap ${mode === 'fit_page' ? 'center' : ''} ${mode === 'custom' ? 'pannable' : ''}`}

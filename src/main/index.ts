@@ -3,6 +3,7 @@ import { applySharedUi, readSharedUi } from './sharedUi'
 import type { SharedUiOperation } from '../shared/sharedUiState'
 import { openRemotionPreview, closeRemotionPreview, disposeRemotionPreviews } from './remotionPreview'
 import { registerFileDragIpc } from './fileDrag'
+import { registerDocWarpIpc } from './docWarp'
 import { registerClaudeRemoteControlIpc, disposeClaudeRemoteControls } from './claudeRemoteControl'
 import type { RemotionPreviewOptions } from '../shared/remotionPreview'
 import type { SendClaudeOptions } from '../shared/claudeAsk'
@@ -137,6 +138,7 @@ function applyDockIcon(): void {
 }
 
 registerFileDragIpc(ipcMain, getAppIconPath)
+registerDocWarpIpc(ipcMain, (path) => (isRemote(path) ? rfsReadBytes(path) : readLocalBytes(path)))
 
 async function checkForUpdates(win: BrowserWindow): Promise<void> {
   try {

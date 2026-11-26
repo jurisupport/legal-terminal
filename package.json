@@ -63,6 +63,7 @@
     "verify:pdf-layout": "node scripts/verify-pdf-layout.mjs",
     "verify:hwp-text": "node --experimental-strip-types --no-warnings scripts/verify-hwp-text.mjs",
     "verify:hwpx-court": "node --experimental-strip-types --no-warnings scripts/verify-hwpx-court-template.mjs",
+    "verify:doc-warp": "node --experimental-strip-types --no-warnings scripts/verify-doc-warp.mjs",
     "verify:node-pty": "node scripts/verify-node-pty-binary.cjs",
     "verify:node-pty:win": "node scripts/verify-node-pty-binary.cjs --platform win32 --arch x64",
     "dist": "electron-vite build && electron-builder --mac",

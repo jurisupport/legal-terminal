@@ -979,6 +979,15 @@ export interface LtApi {
     backups: (query: DictationBackupQuery) => Promise<DictationBackup[]>
     removeBackup: (id: string) => Promise<void>
   }
+  docWarp: {
+    decode: (path: string) => Promise<{ bytes: ArrayBuffer; converted: boolean }>
+    loadSidecar: (path: string) => Promise<string | null>
+    save: (input: {
+      sourcePath: string
+      outputs: { name: string; data: Uint8Array }[]
+      sidecar: string
+    }) => Promise<{ dir: string; files: string[]; sidecar: string }>
+  }
   export: {
     mdToPdf: (
       html: string,

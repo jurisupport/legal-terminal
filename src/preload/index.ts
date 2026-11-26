@@ -931,6 +931,16 @@ const api = {
     backups: (query: DictationBackupQuery): Promise<DictationBackup[]> => ipcRenderer.invoke('dictation:backups', query),
     removeBackup: (id: string): Promise<void> => ipcRenderer.invoke('dictation:removeBackup', id)
   },
+  docWarp: {
+    decode: (path: string): Promise<{ bytes: ArrayBuffer; converted: boolean }> =>
+      ipcRenderer.invoke('docwarp:decode', path),
+    loadSidecar: (path: string): Promise<string | null> => ipcRenderer.invoke('docwarp:loadSidecar', path),
+    save: (input: {
+      sourcePath: string
+      outputs: { name: string; data: Uint8Array }[]
+      sidecar: string
+    }): Promise<{ dir: string; files: string[]; sidecar: string }> => ipcRenderer.invoke('docwarp:save', input)
+  },
   export: {
     mdToPdf: (
       html: string,
