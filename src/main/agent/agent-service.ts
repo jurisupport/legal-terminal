@@ -705,7 +705,7 @@ function remoteClaudeUsageCommand(): string {
     'cd "${TMPDIR:-/tmp}" || exit',
     'claude_bin=$(command -v claude 2>/dev/null || true)',
     'if [ -z "$claude_bin" ]; then echo "claude command not found on remote PATH" >&2; exit 127; fi',
-    `exec "$claude_bin" -p --verbose --output-format stream-json ${shq('/usage')}`
+    `exec "$claude_bin" -p --verbose --output-format stream-json --no-session-persistence ${shq('/usage')}`
   ].join('; ')
   return `exec $SHELL -ilc ${shq(inner)}`
 }
@@ -2057,7 +2057,7 @@ function refreshClaudeUsageSummary(session: AgentSession): boolean {
           })
         : spawn(
             packagedClaudeAgentSdkExecutable() ?? CLAUDE_AGENT_SDK_BINARY_BY_PLATFORM[process.platform] ?? 'claude',
-            ['-p', '--verbose', '--output-format', 'stream-json', '/usage'],
+            ['-p', '--verbose', '--output-format', 'stream-json', '--no-session-persistence', '/usage'],
             {
               cwd: tmpdir(),
               windowsHide: true,
@@ -2678,6 +2678,116 @@ function maybeGenerateSessionTitle(session: AgentSession): void {
     })
 }
 
+// 제목·요약 같은 짧은 보조 질의. 대화가 실제로 쓰는 로그인으로 돌린다: SSH 세션은 그 서버의 Claude,
+// 로컬 세션은 이 컴퓨터의 Claude. 세션 기록을 남기지 않아 작업일지·세션 목록에 섞이지 않는다.
+// 로그인이 안 되면 매 턴 실패를 반복하지 않도록 한동안 다시 시도하지 않는다.
+const SIDE_QUERY_AUTH_BACKOFF_MS = 30 * 60_000
+const SIDE_QUERY_SYSTEM_PROMPT = 'You write short Korean titles and progress summaries for a law office app. Follow the requested format exactly.'
+const sideQueryAuthFailedAt = new Map<string, number>()
+
+type SideQueryOutcome = { text?: string; authFailed?: boolean }
+
+function sideQueryKey(session: AgentSession): string {
+  return session.source === 'ssh' && session.ssh ? `ssh:${session.ssh.user}@${session.ssh.host}:${session.ssh.port ?? 22}` : 'local'
+}
+
+async function runSideQuery(session: AgentSession, prompt: string): Promise<string | undefined> {
+  const key = sideQueryKey(session)
+  const failedAt = sideQueryAuthFailedAt.get(key)
+  if (failedAt !== undefined && Date.now() - failedAt < SIDE_QUERY_AUTH_BACKOFF_MS) return undefined
+  const outcome = session.source === 'ssh' && session.ssh ? await remoteSideQuery(session.ssh, prompt) : await localSideQuery(prompt)
+  if (outcome.authFailed) sideQueryAuthFailedAt.set(key, Date.now())
+  else if (outcome.text !== undefined) sideQueryAuthFailedAt.delete(key)
+  return outcome.text
+}
+
+async function localSideQuery(prompt: string): Promise<SideQueryOutcome> {
+  const abortController = new AbortController()
+  const timer = setTimeout(() => abortController.abort(), TITLE_GEN_TIMEOUT_MS)
+  try {
+    const response = query({
+      prompt,
+      options: {
+        abortController,
+        cwd: tmpdir(),
+        model: TITLE_GEN_MODEL,
+        maxTurns: 1,
+        tools: [],
+        allowedTools: [],
+        persistSession: false,
+        pathToClaudeCodeExecutable: packagedClaudeAgentSdkExecutable(),
+        env: cleanEnv()
+      }
+    })
+    const outcome: SideQueryOutcome = {}
+    for await (const sdkMessage of response) {
+      const message = asRecord(sdkMessage)
+      if (message?.type === 'assistant' && message.error === 'authentication_failed') outcome.authFailed = true
+      if (message?.type !== 'result') continue
+      const result = stringValue(message.result)
+      if (message.is_error === true || message.subtype !== 'success') {
+        if (isAuthFailureOutput(result ?? '')) outcome.authFailed = true
+      } else outcome.text = result
+    }
+    return outcome
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+function remoteClaudeSideQueryCommand(): string {
+  const inner = [
+    'PATH="/opt/homebrew/bin:/usr/local/bin:/opt/local/bin:$PATH"',
+    unsetClaudeAuthEnvCommand(),
+    'cd "${TMPDIR:-/tmp}" || exit',
+    'claude_bin=$(command -v claude 2>/dev/null || true)',
+    'if [ -z "$claude_bin" ]; then echo "claude command not found on remote PATH" >&2; exit 127; fi',
+    // 서버 Claude는 사용자 설정(MCP·스킬·플러그인)을 다 읽으면 한 줄 질문도 수십만 토큰이 된다. 도구·MCP·스킬을 끄고
+    // 짧은 시스템 프롬프트만 둔다. --bare는 OAuth 로그인을 읽지 않으므로 쓰지 않는다.
+    `exec "$claude_bin" -p --output-format json --no-session-persistence --model ${shq(TITLE_GEN_MODEL)} --tools '' --strict-mcp-config --disable-slash-commands --exclude-dynamic-system-prompt-sections --system-prompt ${shq(SIDE_QUERY_SYSTEM_PROMPT)}`
+  ].join('; ')
+  return `exec $SHELL -ilc ${shq(inner)}`
+}
+
+// 서버에서 한 번 묻고 JSON 결과 하나를 받는다. 질문은 표준 입력으로 넘겨 따옴표 처리를 피한다.
+export function parseSideQueryOutput(stdout: string, stderr: string): SideQueryOutcome {
+  const line = stdout.trim().split('\n').reverse().find((l) => l.trim().startsWith('{'))
+  if (line) {
+    try {
+      const parsed = asRecord(JSON.parse(line))
+      const result = stringValue(parsed?.result)
+      if (parsed?.is_error === true || (parsed?.subtype !== undefined && parsed.subtype !== 'success')) {
+        return isAuthFailureOutput(result ?? '') ? { authFailed: true } : {}
+      }
+      return { text: result }
+    } catch {
+      /* 아래에서 출력 전체로 판단한다. */
+    }
+  }
+  return isAuthFailureOutput(stdout + '\n' + stderr) ? { authFailed: true } : {}
+}
+
+function remoteSideQuery(ssh: AgentSshConn, prompt: string): Promise<SideQueryOutcome> {
+  return new Promise((resolve) => {
+    let proc: ChildProcessWithoutNullStreams
+    try {
+      proc = spawn(sshBin, [...sshArgs(ssh), remoteClaudeSideQueryCommand()], { windowsHide: true, env: cleanEnv() })
+    } catch {
+      resolve({})
+      return
+    }
+    let stdout = ''
+    let stderr = ''
+    const timer = setTimeout(() => proc.kill(), TITLE_GEN_TIMEOUT_MS)
+    proc.stdout.on('data', (chunk: Buffer) => { if (stdout.length < 1_000_000) stdout += chunk.toString('utf8') })
+    proc.stderr.on('data', (chunk: Buffer) => { if (stderr.length < 100_000) stderr += chunk.toString('utf8') })
+    proc.on('error', () => { clearTimeout(timer); resolve({}) })
+    proc.on('close', () => { clearTimeout(timer); resolve(parseSideQueryOutput(stdout, stderr)) })
+    proc.stdin.on('error', () => {})
+    proc.stdin.end(prompt)
+  })
+}
+
 async function generateSessionTitle(session: AgentSession): Promise<void> {
   const assistantText =
     session.assistantText.get(session.turnAssistantMessageId ?? '') ??
@@ -2698,41 +2808,17 @@ async function generateSessionTitle(session: AgentSession): Promise<void> {
     assistantText ? `[답변 발췌] ${clipForTitlePrompt(assistantText, 1200)}` : ''
   ].filter(Boolean)
 
-  const abortController = new AbortController()
-  const timer = setTimeout(() => abortController.abort(), TITLE_GEN_TIMEOUT_MS)
-  try {
-    // cwd를 임시 폴더로 두어 제목 생성용 transcript가 사건 폴더 세션 목록에 섞이지 않게 한다.
-    const response = query({
-      prompt: parts.join('\n'),
-      options: {
-        abortController,
-        cwd: tmpdir(),
-        model: TITLE_GEN_MODEL,
-        maxTurns: 1,
-        tools: [],
-        allowedTools: [],
-        pathToClaudeCodeExecutable: packagedClaudeAgentSdkExecutable(),
-        env: cleanEnv()
-      }
+  const title = sanitizeGeneratedTitle(await runSideQuery(session, parts.join('\n')))
+  if (!title) return
+  session.generatedTitle = title
+  session.titleGeneratedAtTurn = session.turnCount ?? 1
+  if (session.resumeSessionId) {
+    await rememberSessionMeta({
+      sessionId: session.resumeSessionId,
+      cwd: session.cwd,
+      generatedTitle: title,
+      ssh: session.source === 'ssh' ? session.ssh : undefined
     })
-    let title: string | undefined
-    for await (const sdkMessage of response) {
-      const message = asRecord(sdkMessage)
-      if (message?.type === 'result') title = sanitizeGeneratedTitle(stringValue(message.result))
-    }
-    if (!title) return
-    session.generatedTitle = title
-    session.titleGeneratedAtTurn = session.turnCount ?? 1
-    if (session.resumeSessionId) {
-      await rememberSessionMeta({
-        sessionId: session.resumeSessionId,
-        cwd: session.cwd,
-        generatedTitle: title,
-        ssh: session.source === 'ssh' ? session.ssh : undefined
-      })
-    }
-  } finally {
-    clearTimeout(timer)
   }
 }
 
@@ -2800,41 +2886,17 @@ async function generateWorkSummary(session: AgentSession, turns: number): Promis
     assistantText ? `[답변 발췌] ${clipForTitlePrompt(assistantText, 1200)}` : ''
   ].filter(Boolean)
 
-  const abortController = new AbortController()
-  const timer = setTimeout(() => abortController.abort(), TITLE_GEN_TIMEOUT_MS)
-  try {
-    // 제목 생성과 동일: cwd를 임시 폴더로 두어 요약용 transcript가 사건 세션 목록에 섞이지 않게 한다.
-    const response = query({
-      prompt: parts.join('\n'),
-      options: {
-        abortController,
-        cwd: tmpdir(),
-        model: TITLE_GEN_MODEL,
-        maxTurns: 1,
-        tools: [],
-        allowedTools: [],
-        pathToClaudeCodeExecutable: packagedClaudeAgentSdkExecutable(),
-        env: cleanEnv()
-      }
-    })
-    let summary: string | undefined
-    for await (const sdkMessage of response) {
-      const message = asRecord(sdkMessage)
-      if (message?.type === 'result') summary = sanitizeWorkSummary(stringValue(message.result))
-    }
-    if (!summary || !session.resumeSessionId) return
-    session.workSummaryAtTurn = turns
-    await rememberSessionMeta({
-      sessionId: session.resumeSessionId,
-      cwd: session.cwd,
-      workSummary: summary,
-      workSummaryAt: Date.now(),
-      workSummaryAtTurn: turns,
-      ssh: session.source === 'ssh' ? session.ssh : undefined
-    })
-  } finally {
-    clearTimeout(timer)
-  }
+  const summary = sanitizeWorkSummary(await runSideQuery(session, parts.join('\n')))
+  if (!summary || !session.resumeSessionId) return
+  session.workSummaryAtTurn = turns
+  await rememberSessionMeta({
+    sessionId: session.resumeSessionId,
+    cwd: session.cwd,
+    workSummary: summary,
+    workSummaryAt: Date.now(),
+    workSummaryAtTurn: turns,
+    ssh: session.source === 'ssh' ? session.ssh : undefined
+  })
 }
 
 function handleSdkMessage(session: AgentSession, sdkMessage: unknown): void {

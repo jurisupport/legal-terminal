@@ -151,7 +151,8 @@ const NOISE_COMMANDS = new Set([
 // 임시 폴더 세션(제목·요약 자동생성 등 앱 내부 호출) — 작업일지에서 제외
 export function isEphemeralCwd(cwd?: string): boolean {
   if (!cwd) return false
-  return /^\/(private\/)?(var\/folders|tmp)\//.test(cwd) || /[\\/]Temp[\\/]/i.test(cwd)
+  // Windows 임시 폴더는 끝에 구분자 없이 기록된다(C:\Users\…\AppData\Local\Temp).
+  return /^\/(private\/)?(var\/folders|tmp)(\/|$)/.test(cwd) || /[\\/]Temp([\\/]|$)/i.test(cwd)
 }
 
 // 내부 태그·명령 래퍼를 걷어낸 사용자 지시 텍스트. 지시가 아니면 undefined.

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { buildCaseActivity, buildFolderActivity } from '../src/main/caseActivityData.ts'
-import { cleanUserInstruction, daysFromTranscriptContent, mergeWorkLog } from '../src/main/workLogData.ts'
+import { cleanUserInstruction, daysFromTranscriptContent, isEphemeralCwd, mergeWorkLog } from '../src/main/workLogData.ts'
 
 const now = Date.now()
 const iso = (msAgo) => new Date(now - msAgo).toISOString()
@@ -264,6 +264,18 @@ assert.equal(
   assert.equal(board[0].workSummary, '신청서 초안 완성.')
   assert.deepEqual(board[0].files, [{ path: '/drafts/사건C/신청서.hwpx', kind: 'write' }])
   assert.deepEqual(board[0].board.children.map((c) => [c.who, c.status, c.costUsd]), [['조사부 부서장', 'done', 0.2], ['조사부 부서원 · fact', 'done', 0.3]])
+}
+
+// 8d) 앱이 제목·요약을 만들던 임시 폴더 세션은 OS와 관계없이 작업일지에서 빠진다.
+{
+  for (const cwd of ['C:\\Users\\u\\AppData\\Local\\Temp', 'C:\\Users\\u\\AppData\\Local\\Temp\\', '/var/folders/ab/xyz/T', '/private/var/folders/ab/T/', '/tmp', '/tmp/x'])
+    assert.equal(isEphemeralCwd(cwd), true, cwd)
+  for (const cwd of ['C:\\cases\\Temporary', '/Users/u/Temple', '/tmpwork', 'D:\\사건\\Temp자료'])
+    assert.equal(isEphemeralCwd(cwd), false, cwd)
+  const temp = 'C:\\Users\\u\\AppData\\Local\\Temp'
+  const log = mergeWorkLog([{ sourceKey: 'local', sessions: [{ sessionId: 'title-gen', cwd: temp, days: [{ date: dateKey(now), count: 1, firstText: '아래 대화에 붙일 간결한 한국어 제목을 지어줘.', lastTs: now }], end: { state: 'error', ts: now } }] }],
+    [meta({ sessionId: 'title-gen-2', cwd: temp, mtime: now, sourceKey: 'local' })], now, 30)
+  assert.equal(log.length, 0)
 }
 
 function dateKey(ts) {

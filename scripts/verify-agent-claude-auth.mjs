@@ -44,7 +44,7 @@ const context = vm.createContext({
 })
 const names = ['projectWorkspaceUpdating', 'isAuthFailureOutput', 'loggedInFromAuthStatusOutput', 'emitAuthStatus',
   'refreshAgentAuthStatus', 'startAgentAuthLogin', 'startNextQueuedMessage', 'handleSdkMessage',
-  'handleResultMessage', 'sendAgentMessage']
+  'handleResultMessage', 'sendAgentMessage', 'parseSideQueryOutput']
 const workspaceUpdateState = ['projectWorkspaceUpdates', 'PROJECT_WORKSPACE_UPDATING'].map(name => {
   const source = service.match(new RegExp(`const ${name} = [^\\n]+`))?.[0]
   assert.ok(source, `Missing project update state: ${name}`)
@@ -57,6 +57,13 @@ const expired = 'Failed to authenticate: OAuth session expired and could not be 
 assert.equal(context.isAuthFailureOutput(expired), true, 'recognize the screenshot error')
 assert.equal(context.isAuthFailureOutput('authentication_failed'), true)
 assert.equal(context.isAuthFailureOutput('API Error: 429 rate limit exceeded'), false)
+// Title and summary questions run on the session's own login: the server's JSON answer, its login failure, and other errors.
+const sideQuery = (stdout, stderr = '') => JSON.parse(JSON.stringify(context.parseSideQueryOutput(stdout, stderr)))
+assert.deepEqual(sideQuery('banner\n{"type":"result","subtype":"success","is_error":false,"result":"임차권등기명령 신청서"}'), { text: '임차권등기명령 신청서' })
+assert.deepEqual(sideQuery('{"type":"result","subtype":"success","is_error":true,"result":"' + expired + '"}'), { authFailed: true })
+assert.deepEqual(sideQuery('{"type":"result","subtype":"success","is_error":true,"result":"Prompt is too long"}'), {})
+assert.deepEqual(sideQuery('', 'Not logged in · Please run /login'), { authFailed: true })
+assert.deepEqual(sideQuery('', 'ssh: connect to host timed out'), {})
 
 for (const platform of ['win32', 'darwin']) {
   processInfo.platform = platform
