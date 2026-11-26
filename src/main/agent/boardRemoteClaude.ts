@@ -7,14 +7,25 @@ import { rfsBoardClaudeConnection } from '../remoteFs'
 import { boardRemoteShell, quoteBoardShellWord } from './boardRemoteShell'
 
 // The SDK sends the prompt, agent definition and in-process MCP traffic over stdin.
-// Only the board's pinned SDK launch flags may cross to the remote shell.
+// Only the board's pinned SDK launch flags, and a few checked per-session values, may cross to the remote shell.
 export function boardClaudeCommand(cwd: string, args: readonly string[]): string {
   const required = new Map<string,string | null>([
     ['--output-format','stream-json'], ['--input-format','stream-json'], ['--verbose',null],
-    ['--max-turns','40'], ['--permission-prompt-tool','stdio'], ['--tools',''],
-    ['--setting-sources',''], ['--strict-mcp-config',null], ['--permission-mode','default'],
+    ['--permission-prompt-tool','stdio'], ['--tools',''],
+    ['--setting-sources',''], ['--permission-mode','default'],
     ['--managed-settings',JSON.stringify({disableAllHooks:true})],
     ['--settings',JSON.stringify({disableAllHooks:true,disableSkillShellExecution:true,disableBundledSkills:true,autoMemoryEnabled:false})]
+  ])
+  // A specialist's own model, effort and turn budget, the department's stop line, and the korean-law plugin.
+  const checked = new Map<string, (value: string) => boolean>([
+    ['--max-turns', value => /^(?:[1-9]|[1-3]\d|40)$/.test(value)],
+    ['--model', value => /^[\w.:-]{1,100}$/.test(value)],
+    ['--effort', value => ['low', 'medium', 'high', 'xhigh', 'max'].includes(value)],
+    ['--max-budget-usd', value => /^\d{1,6}(?:\.\d{1,20})?(?:e-\d{1,2})?$/.test(value) && Number(value) > 0],
+    ['--plugin-dir', value => posix.isAbsolute(value) && posix.normalize(value) === value && !/[\x00-\x1f]/.test(value) &&
+      /\/plugins\/cache\/[^/]+\/korean-law\/[^/]+$/.test(value)],
+    ['--agent', value => /^(?:[\w.-]{1,100}:)?[\p{L}\d_][\p{L}\d_-]{0,99}$/u.test(value)],
+    ['--resume', value => /^[a-f\d]{8}(?:-[a-f\d]{4}){3}-[a-f\d]{12}$/i.test(value)]
   ])
   const seen = new Set<string>()
   const flags: string[] = []
@@ -23,23 +34,23 @@ export function boardClaudeCommand(cwd: string, args: readonly string[]): string
     const arg = args[index]
     const eq = arg.indexOf('=')
     const key = eq < 0 ? arg : arg.slice(0,eq)
-    if (seen.has(key) || (!required.has(key) && key !== '--agent' && key !== '--resume')) throw new Error('지원하지 않는 원격 보드 SDK 실행 옵션입니다.')
+    if (seen.has(key) || (!required.has(key) && !checked.has(key) && key !== '--strict-mcp-config')) throw new Error('지원하지 않는 원격 보드 SDK 실행 옵션입니다.')
     seen.add(key)
-    const expected = required.get(key)
-    if (expected === null) {
+    if (key === '--strict-mcp-config' || required.get(key) === null) {
       if (eq !== -1) throw new Error('원격 보드의 실행 옵션 값이 잘못되었습니다.')
       flags.push(key)
       continue
     }
     const value = eq < 0 ? args[++index] : arg.slice(eq+1)
-    if (value === undefined || (expected !== undefined && value !== expected) ||
-        (key === '--agent' && !/^[\p{L}\d_][\p{L}\d_-]{0,99}$/u.test(value)) ||
-        (key === '--resume' && !/^[a-f\d]{8}(?:-[a-f\d]{4}){3}-[a-f\d]{12}$/i.test(value))) {
+    const expected = required.get(key)
+    if (value === undefined || (expected !== undefined && value !== expected) || (checked.has(key) && !checked.get(key)!(value))) {
       throw new Error('원격 보드의 실행 옵션을 안전하게 전달할 수 없습니다.')
     }
     flags.push(key + '=' + value)
   }
-  if ([...required.keys()].some(key => !seen.has(key))) throw new Error('보드 세션의 필수 권한 설정이 누락되었습니다.')
+  if ([...required.keys(), '--max-turns'].some(key => !seen.has(key))) throw new Error('보드 세션의 필수 권한 설정이 누락되었습니다.')
+  // Only the korean-law plugin may lift strict MCP config; the app still allows nothing outside its own list.
+  if (!seen.has('--strict-mcp-config') && !seen.has('--plugin-dir')) throw new Error('보드 세션의 필수 권한 설정이 누락되었습니다.')
   const script = [
     'umask 077',
     'PATH="$PATH:$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/opt/local/bin"; export PATH',

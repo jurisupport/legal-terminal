@@ -66,9 +66,10 @@ const source = buildSync({
     export * from './src/main/workBoardDownload'
     export {boardRevision, boardFollowUpRevision} from './src/shared/workBoard'
     export {WorkBoardStore} from './src/main/workBoardStore'
+    export {Departments} from './src/main/departments'
     export {readBoardDocumentText} from './src/main/workBoardDocumentText'
     export {setJsPairing} from './src/main/caseStore'
-    export {disposeRemote, rfsBoardAgentSources} from './src/main/remoteFs'
+    export {disposeRemote, rfsBoardAgentSources, rfsBoardPluginAgents} from './src/main/remoteFs'
   `, resolveDir: process.cwd()},
   bundle: true, write: false, format: 'cjs', platform: 'node', packages: 'external'
 }).outputFiles[0].text
@@ -122,13 +123,36 @@ try {
     await mkdir(join(configOverride,'agents'),{recursive:true})
     await writeFile(join(configOverride,'agents','custom.md'), agentFile.replace('REMOTE_AGENT_MARKER','REMOTE_CONFIG_MARKER'))
     assert.deepEqual(await lookup(),[agentFile.replace('REMOTE_AGENT_MARKER','REMOTE_CONFIG_MARKER')])
+    // Enabled plugins installed under the server's Claude folder bring their specialists; others are ignored.
+    const pluginRoot = join(configOverride, 'plugins', 'cache', 'market')
+    const lawPlugin = join(pluginRoot, 'korean-law', '4.4.1'), offPlugin = join(pluginRoot, 'off', '1.0.0'), outside = join(root, 'outside-plugin')
+    for (const dir of [lawPlugin, offPlugin, outside]) await mkdir(join(dir, 'agents'), {recursive:true})
+    const pluginAgent = '---\nname: law-expert\ndescription: 법령\n---\nPLUGIN_AGENT_MARKER'
+    for (const dir of [lawPlugin, offPlugin, outside]) await writeFile(join(dir, 'agents', 'law.md'), pluginAgent)
+    await writeFile(join(configOverride, 'plugins', 'installed_plugins.json'), JSON.stringify({ version: 2, plugins: {
+      'korean-law@market': [{ scope: 'user', installPath: lawPlugin }], 'off@market': [{ installPath: offPlugin }], 'outside@market': [{ installPath: outside }]
+    } }))
+    await writeFile(join(configOverride, 'settings.json'), JSON.stringify({ enabledPlugins: { 'korean-law@market': true, 'off@market': false, 'outside@market': true } }))
+    elapsed += 121_000
+    assert.deepEqual(await mod.exports.rfsBoardPluginAgents(sshWorkspace), [{ name: 'korean-law', path: await realpath(lawPlugin), agents: [pluginAgent] }])
   } finally { Date.now = realClock }
   const folder = join(root, '_업무지시')
   const board = new mod.exports.WorkBoardStore('ssh://test' + folder)
   await board.init()
   assert.equal(await board.claimOwner('one'), true)
   assert.equal(await board.claimOwner('two'), false)
-  assert.ok((await board.teams()).length)
+  // Departments are office-wide now: a remote board keeps none of its own, and the office set lives on the server.
+  assert.equal(await board.readText('teams.yaml'), null)
+  const office = await mod.exports.Departments.forWorkspace('ssh://test' + root)
+  assert.equal(office.home, 'ssh://test' + root + '/.legal-terminal/departments')
+  await office.save([{ name: '송무팀', color: '#376ac6', agents: ['custom'], rules: '원격 부서 규칙', tools: { 'korean-law': 'allow' } }])
+  assert.match(await readFile(join(root, '.legal-terminal', 'departments', 'teams.yaml'), 'utf8'), /rules: rules\/송무팀\.md/)
+  assert.equal(await readFile(join(root, '.legal-terminal', 'departments', 'rules', '송무팀.md'), 'utf8'), '원격 부서 규칙')
+  assert.deepEqual((await office.teams()).map(team => [team.name, team.rules, team.tools]), [['송무팀', '원격 부서 규칙', { 'korean-law': 'allow' }]])
+  await office.save([])
+  assert.equal((await office.history()).length, 1)
+  assert.equal(await office.addUsage('송무팀', 0.5), 0.5)
+  assert.equal(await office.addUsage('송무팀', 0.25), 0.75)
   const at = new Date().toISOString()
   const task = {id:'20261124-001', title:'검토', cwd:'ssh://test' + root, body:'확인', createdAt:at, updatedAt:at, order:0, attempts:0, status:'queued', log:[]}
   await board.save(task)

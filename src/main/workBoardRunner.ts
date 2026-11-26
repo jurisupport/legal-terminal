@@ -11,7 +11,7 @@ import { z } from 'zod'
 import type { BoardAgent, BoardTask, BoardTeam } from '../shared/workBoard'
 import { prepareBoardRemoteClaude } from './agent/boardRemoteClaude'
 import { cleanEnv, packagedClaudeAgentSdkExecutable } from './agent/agent-service'
-import { isRemote, rfsBoardAgentSources, rfsBoardApprovedCommand, rfsList, rfsMkdir, rfsRealpath, rfsWriteText } from './remoteFs'
+import { isRemote, rfsBoardAgentSources, rfsBoardPluginAgents, rfsBoardApprovedCommand, rfsList, rfsMkdir, rfsRealpath, rfsWriteText } from './remoteFs'
 import { readWorkspaceDocument } from './projectAgent'
 import { boardFileTools, boardPermission, boardRelativePath, readBoardPolicy } from './workBoardPolicy'
 
@@ -75,7 +75,10 @@ const efforts = ['low', 'medium', 'high', 'xhigh', 'max']
 
 async function definitions(workspace: string): Promise<Map<string, AgentSpec>> {
   // The user's own folder comes first: a plugin specialist never replaces it.
-  const sources: AgentSource[] = isRemote(workspace) ? (await rfsBoardAgentSources(workspace)).map(text => ({ text })) : await localAgentSources()
+  const sources: AgentSource[] = isRemote(workspace)
+    ? [...(await rfsBoardAgentSources(workspace)).map(text => ({ text })),
+      ...(await rfsBoardPluginAgents(workspace)).flatMap(plugin => plugin.agents.map(text => ({ text, plugin: plugin.name })))]
+    : await localAgentSources()
   const result = new Map<string, AgentSpec>()
   for (const { text, plugin } of sources) {
     const parts = /^﻿?---\r?\n([\s\S]*?)\r?\n---\r?\n([\s\S]*)$/.exec(text)
@@ -441,11 +444,10 @@ export async function runBoardAgent(input: BoardRunInput): Promise<BoardRunResul
   // korean-law comes from the Claude Code plugin, which keeps its own API key. Only read tools, only for departments that allow it.
   let lawPlugin: string | undefined
   if (department?.tools?.['korean-law'] === 'allow' && expertAllows(agent, ['korean-law', lawToolPrefix.slice(0, -2), 'mcp__korean-law'])) {
-    if (remote) onProgress('korean-law는 아직 SSH 작업 폴더에서 쓸 수 없습니다.')
-    else {
-      lawPlugin = (await enabledClaudePlugins().catch(() => [])).find(plugin => plugin.name === 'korean-law')?.path
-      if (!lawPlugin) onProgress('korean-law 플러그인이 설치되어 있지 않거나 꺼져 있습니다.')
-    }
+    // On SSH the plugin is the one the server's Claude Code has installed and enabled; its path is on the server.
+    const plugins = remote ? await rfsBoardPluginAgents(task.cwd).catch(() => []) : await enabledClaudePlugins().catch(() => [])
+    lawPlugin = plugins.find(plugin => plugin.name === 'korean-law')?.path
+    if (!lawPlugin) onProgress((remote ? 'SSH 서버의 ' : '') + 'korean-law 플러그인이 설치되어 있지 않거나 꺼져 있습니다.')
   }
   // legal-books and lbox: read-only services on this computer, wrapped as in-app tools so no skill script runs.
   const opened = (key: keyof typeof researchServices) => department?.tools?.[key] === 'allow' && expertAllows(agent, [key, 'mcp__research'])

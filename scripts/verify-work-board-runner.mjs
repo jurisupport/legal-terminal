@@ -64,7 +64,7 @@ try {
   const stubs = {
     './agent/agent-service': 'export const cleanEnv=()=>(' + JSON.stringify(fixtureEnv) + '); export const packagedClaudeAgentSdkExecutable=()=>undefined;',
     './projectAgent': 'export function readWorkspaceDocument(){throw Error("unexpected read")}',
-    './remoteFs': 'export const isRemote=()=>false; export function remote(){throw Error("unexpected SSH")} export {remote as rfsBoardAgentSources,remote as rfsBoardClaudeConnection,remote as rfsList,remote as rfsRealpath,remote as rfsMkdir,remote as rfsWriteText,remote as rfsBoardApprovedCommand}'
+    './remoteFs': 'export const isRemote=()=>false; export function remote(){throw Error("unexpected SSH")} export {remote as rfsBoardAgentSources,remote as rfsBoardPluginAgents,remote as rfsBoardClaudeConnection,remote as rfsList,remote as rfsRealpath,remote as rfsMkdir,remote as rfsWriteText,remote as rfsBoardApprovedCommand}'
   }
   const file = join(compiled,'runner.mjs')
   await build({entryPoints:['src/main/workBoardRunner.ts'],outfile:file,format:'esm',platform:'node',bundle:true,packages:'external',plugins:[{ name:'local-fixtures',setup(b) {

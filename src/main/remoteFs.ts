@@ -1465,9 +1465,20 @@ export class RemoteFileConflict extends Error {
 }
 
 // Share discovery between boards for one authenticated SSH connection.
-const boardAgentCache = new WeakMap<Client, {until: number; sources: Promise<string[]>}>()
+/** Specialists in the server's ~/.claude/agents, and those of the Claude Code plugins enabled there. */
+interface RemoteBoardAgents { user: string[]; plugins: { name: string; path: string; agents: string[] }[] }
+const boardAgentCache = new WeakMap<Client, {until: number; sources: Promise<RemoteBoardAgents>}>()
 
 export async function rfsBoardAgentSources(workspace: string): Promise<string[]> {
+  return (await remoteBoardAgents(workspace)).user
+}
+
+/** Plugins enabled in the server's Claude Code, with their server paths and specialist files. */
+export async function rfsBoardPluginAgents(workspace: string): Promise<RemoteBoardAgents['plugins']> {
+  return (await remoteBoardAgents(workspace)).plugins
+}
+
+async function remoteBoardAgents(workspace: string): Promise<RemoteBoardAgents> {
   const {profileId} = parseRemote(workspace)
   const connection = await getConnection(profileId)
   const profile = projectSsh(await getProfile(profileId))
@@ -1486,7 +1497,7 @@ export async function rfsBoardAgentSources(workspace: string): Promise<string[]>
   }
 }
 
-async function loadRemoteBoardAgents(profileId: string, sftp: SFTPWrapper): Promise<string[]> {
+async function loadRemoteBoardAgents(profileId: string, sftp: SFTPWrapper): Promise<RemoteBoardAgents> {
   // SFTP-only accounts expose their home through realpath(".") even when exec is unavailable.
   const { boardRemoteShell } = await import('./agent/boardRemoteShell')
   const lookup = boardRemoteShell('printf %s "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"')
@@ -1505,8 +1516,31 @@ async function loadRemoteBoardAgents(profileId: string, sftp: SFTPWrapper): Prom
     if (error.code === 2) return null
     throw error
   })
-  if (!canonicalConfig) return []
-  const directory = posix.join(canonicalConfig, 'agents')
+  if (!canonicalConfig) return { user: [], plugins: [] }
+  const user = await readRemoteAgentDirectory(sftp, request, posix.join(canonicalConfig, 'agents'))
+  // Plugins live under the config folder; anything installed elsewhere is not followed.
+  const json = async (path: string): Promise<Record<string, unknown>> => {
+    const stat = await request<Stats>(done => sftp.lstat(path, done)).catch(error => { if (error.code === 2) return null; throw error })
+    if (!stat?.isFile() || stat.size > 1024 * 1024) return {}
+    try { return JSON.parse((await request<Buffer>(done => sftp.readFile(path, done))).toString('utf8')) } catch { return {} }
+  }
+  const installed = (await json(posix.join(canonicalConfig, 'plugins', 'installed_plugins.json'))).plugins
+  const enabled = (await json(posix.join(canonicalConfig, 'settings.json'))).enabledPlugins as Record<string, unknown> | undefined
+  const plugins: RemoteBoardAgents['plugins'] = []
+  for (const [key, value] of Object.entries(installed && typeof installed === 'object' ? installed : {})) {
+    const name = key.split('@')[0]
+    const entry = (Array.isArray(value) ? value : [value]).find(row => typeof row?.installPath === 'string')
+    if (enabled?.[key] !== true || !/^[\w.-]{1,100}$/.test(name) || !entry || !posix.isAbsolute(entry.installPath)) continue
+    const path = await request<string>(done => sftp.realpath(entry.installPath, done)).catch(() => '')
+    if (!path.startsWith(posix.join(canonicalConfig, 'plugins') + '/') || /[\x00-\x1f]/u.test(path)) continue
+    plugins.push({ name, path, agents: await readRemoteAgentDirectory(sftp, request, posix.join(path, 'agents')).catch(() => []) })
+  }
+  return { user, plugins }
+}
+
+type SftpCall = <T>(op: (done: (err?: Error | null, value?: T) => void) => void) => Promise<T>
+
+async function readRemoteAgentDirectory(sftp: SFTPWrapper, request: SftpCall, directory: string): Promise<string[]> {
   const definitions: string[] = []
   const directoryStat = await request<Stats>(done => sftp.lstat(directory, done)).catch(error => {
     if (error.code === 2) return null

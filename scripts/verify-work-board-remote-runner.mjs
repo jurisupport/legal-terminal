@@ -94,8 +94,10 @@ try {
   // No real account state is used, even if the developer happens to be signed in.
   Object.assign(process.env, local)
   for (const key of ['ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'CLAUDE_CODE_OAUTH_TOKEN']) delete process.env[key]
+  let remotePlugins = []
   globalThis.boardRemoteFixture = {
     async rfsBoardAgentSources(uri) { assert.equal(uri, workspace); return [definition] },
+    async rfsBoardPluginAgents(uri) { assert.equal(uri, workspace); return remotePlugins },
     async rfsBoardClaudeConnection(uri) { assert.equal(uri, workspace); return { client, cwd: sandbox } },
     async rfsRealpath(uri) { return 'ssh://office' + await realpath(disk(uri)) },
     async rfsMkdir(uri, name) { await mkdir(join(disk(uri), name)) },
@@ -105,7 +107,7 @@ try {
     rfsList() { throw Error('unexpected list') }
   }
   const stubs = {
-    remoteFs: `export const {rfsBoardAgentSources,rfsBoardClaudeConnection,rfsRealpath,rfsMkdir,rfsWriteText,rfsBoardApprovedCommand,rfsList}=globalThis.boardRemoteFixture; export const isRemote=p=>p.startsWith('ssh://')`,
+    remoteFs: `export const {rfsBoardAgentSources,rfsBoardPluginAgents,rfsBoardClaudeConnection,rfsRealpath,rfsMkdir,rfsWriteText,rfsBoardApprovedCommand,rfsList}=globalThis.boardRemoteFixture; export const isRemote=p=>p.startsWith('ssh://')`,
     projectAgent: 'export const {readWorkspaceDocument}=globalThis.boardRemoteFixture',
     'agent-service': 'export const cleanEnv=()=>(' + JSON.stringify(local) + '); export const packagedClaudeAgentSdkExecutable=()=>"/nonexistent-fixture/local-claude"'
   }
@@ -157,6 +159,45 @@ try {
     args.map(a => a === '--agent=remote-writer' ? '--agent=invalid name' : a)
   ]) assert.throws(() => boardClaudeCommand(sandbox, unsafeArgs))
   assert.throws(() => boardClaudeCommand('../sessions', args))
+  for (const unsafeArgs of [
+    [...args.filter(a => a !== '--strict-mcp-config'), '--plugin-dir=/home/u/.claude/plugins/cache/m/other-plugin/1.0.0'],
+    [...args, '--model=haiku;rm'],
+    [...args, '--max-budget-usd=-1'],
+    args.map(a => a.startsWith('--max-turns') ? '--max-turns=99' : a)
+  ]) assert.throws(() => boardClaudeCommand(sandbox, unsafeArgs))
+
+  // The server's own korean-law plugin and its specialists: model, stop line and plugin MCP reach the remote CLI.
+  const pluginDir = join(remoteHome, '.claude/plugins/cache/fixture-market/korean-law/1.0.0')
+  await mkdir(join(pluginDir, '.claude-plugin'), { recursive: true })
+  await writeFile(join(pluginDir, 'law-server.mjs'), `import readline from 'node:readline'
+const send = message => process.stdout.write(JSON.stringify(message) + '\\n')
+readline.createInterface({ input: process.stdin }).on('line', line => {
+  const m = JSON.parse(line)
+  if (m.id === undefined) return
+  if (m.method === 'initialize') send({ jsonrpc: '2.0', id: m.id, result: { protocolVersion: m.params.protocolVersion, capabilities: { tools: {} }, serverInfo: { name: 'korean-law', version: '1.0.0' } } })
+  else if (m.method === 'tools/list') send({ jsonrpc: '2.0', id: m.id, result: { tools: [{ name: 'search_law', description: '법령 검색', inputSchema: { type: 'object', properties: { query: { type: 'string' } } } }] } })
+  else if (m.method === 'tools/call') send({ jsonrpc: '2.0', id: m.id, result: { content: [{ type: 'text', text: 'FIXTURE_LAW_RESULT ' + m.params.arguments.query }] } })
+  else send({ jsonrpc: '2.0', id: m.id, result: {} })
+})
+`)
+  await writeFile(join(pluginDir, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: 'korean-law', version: '1.0.0',
+    mcpServers: { 'korean-law': { command: process.execPath, args: [join(pluginDir, 'law-server.mjs')] } } }))
+  remotePlugins = [{ name: 'korean-law', path: pluginDir, agents: ['---\nname: law-expert\ndescription: 법령 전문가\nmodel: haiku\n---\nPLUGIN_AGENT_MARKER'] }]
+  assert.deepEqual((await listBoardAgents(workspace)).map(agent => agent.name), ['remote-writer', 'korean-law:law-expert'])
+  requestedTool = { name: 'mcp__plugin_korean-law_korean-law__search_law', args: { query: '민법 제750조' } }
+  const lawRun = await runBoardAgent({
+    task: { id: 'law', cwd: workspace, agent: 'korean-law:law-expert', delegatedBy: 'dept' }, phase: 'work', prompt: '법령 확인', policyDir: localHome,
+    signal: AbortSignal.timeout(60_000), approvedTools: [], budgetUsd: 5, department: { team: '법률지원', role: 'member', tools: { 'korean-law': 'allow' } },
+    onProgress: message => progress.push(message)
+  })
+  assert.match(lawRun.text, /원격 보고 완료/)
+  const lawArgs = (await readFile(join(remoteHome, 'launch-argv'), 'utf8')).split('\0').slice(0, -1)
+  for (const flag of ['--plugin-dir=' + pluginDir, '--model=haiku', '--max-budget-usd=5', '--agent=korean-law:law-expert']) assert.ok(lawArgs.includes(flag), flag)
+  assert.ok(!lawArgs.includes('--strict-mcp-config'))
+  assert.ok(requests.at(-1).tools.includes('mcp__plugin_korean-law_korean-law__search_law'))
+  assert.ok(requests.at(-1).history.includes('FIXTURE_LAW_RESULT 민법 제750조'), 'the server plugin answered')
+  assert.ok(requests.at(-1).system.includes('PLUGIN_AGENT_MARKER'))
+  remotePlugins = []
 
   const legacyId = 'f625cf46-64a2-4073-9fa3-74b9942b9f94'
   await writeFile(join(localHome, 'sessions', 'legacy-work.session'), legacyId)
