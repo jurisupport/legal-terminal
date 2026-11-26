@@ -22,6 +22,14 @@ assert.equal(
   `7일 Fable 잔여 8% · ${reset}`
 )
 assert.equal(resetTimeText(undefined), undefined)
+assert.equal(
+  rateLimitLabel({ rateLimitType: 'antigravity:Gemini', remainingAmount: 1250, updatedAt: resetsAt }),
+  'Gemini 잔여 1,250'
+)
+assert.equal(
+  rateLimitLabel({ rateLimitType: 'antigravity:Gemini 5시간', remainingPercent: 0, resetsAt, updatedAt: resetsAt }),
+  `Gemini 5시간 잔여 0% · ${reset}`
+)
 assert.equal(rateLimitTone({ status: 'allowed', remainingPercent: 93, updatedAt: resetsAt }), '')
 assert.equal(rateLimitTone({ status: 'allowed_warning', updatedAt: resetsAt }), 'warn')
 assert.equal(rateLimitTone({ status: 'rejected', updatedAt: resetsAt }), 'error')

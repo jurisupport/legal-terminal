@@ -140,6 +140,7 @@ interface AgentSession {
   authStatus?: AgentAuthStatus
   commandProbe?: AbortController
   slashCommands?: AgentSlashCommand[]
+  antigravityQuotaProbe?: AbortController
   claudeUsageProbeRunning?: boolean
   claudeUsageProbeLastAt?: number
   claudeUsageSummaryLastContextTokens?: number
@@ -4149,6 +4150,7 @@ async function runAntigravityMessage(
           stringValue(asRecord(tool?.error)?.message), tool?.error ? 'error' : step.state === 'DONE' ? 'completed' : 'running')
       }
     } else if (message.event === 'result') {
+      refreshAntigravityQuota(session)
       const result = asRecord(message.result)
       if (result?.status === 'SUCCESS' && typeof result.response === 'string') {
         reconcileAssistantSnapshot(session, assistantMessageId, result.response)
@@ -4846,6 +4848,7 @@ export function createAgentSession(opts: AgentCreateOptions, webContents: WebCon
     }
     emitCurrentSessionStatus(existing)
     emitUsageUpdate(existing)
+    if (existing.provider === 'antigravity') refreshAntigravityQuota(existing)
     if (existing.provider === 'claude') prefetchClaudeSlashCommands(existing)
     return { ok: true }
   }
@@ -4915,6 +4918,7 @@ export function createAgentSession(opts: AgentCreateOptions, webContents: WebCon
   })
   emit(session, { type: 'status', sessionId: session.id, status: 'idle' })
   emitUsageUpdate(session)
+  if (provider === 'antigravity') refreshAntigravityQuota(session)
   if (source === 'ssh') {
     restoreRemoteSession(session)
   } else if (session.provider === 'claude' || session.provider === 'codex') {
@@ -4996,11 +5000,63 @@ function claudeModelOption(value: unknown): AgentModelOption | undefined {
   }
 }
 
+function antigravityInfoArgs(session: AgentSession, args: string[]): string[] {
+  if (session.source !== 'ssh') return args
+  if (!session.ssh) throw new Error('SSH 연결 정보가 없습니다.')
+  const command = `cd ${shq(session.cwd)} && exec env PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH" agy ${args.map(shq).join(' ')}`
+  return [...sshArgs(session.ssh), `exec $SHELL -ilc ${shq(command)}`]
+}
+
+function antigravityQuotaLimits(stdout: string): AgentRateLimitUsage[] {
+  const limits: AgentRateLimitUsage[] = []
+  let report
+  try { report = JSON.parse(stdout) } catch { return limits }
+  if (report?.status !== 'SUCCESS' || report?.command?.name !== 'usage') return limits
+  for (const group of unknownArray(report.command.data?.groups).map(asRecord)) {
+    for (const bucket of unknownArray(group?.buckets).map(asRecord)) {
+      if (!bucket || bucket.disabled === true) continue
+      const fraction = numberValue(bucket.remaining_fraction)
+      const amount = numberValue(bucket.remaining_amount)
+      const remainingPercent = fraction !== undefined && fraction >= 0 && fraction <= 1 ? fraction * 100 : undefined
+      const remainingAmount = amount !== undefined && amount >= 0 ? amount : undefined
+      if (remainingPercent === undefined && remainingAmount === undefined) continue
+      const label = [...new Set([group?.name, bucket.name, bucket.window].map(stringValue).filter(Boolean))].join(' · ')
+      const reset = Date.parse(stringValue(bucket.reset_time) ?? '')
+      limits.push({
+        rateLimitType: `antigravity:${label || stringValue(bucket.id) || '한도'}`,
+        remainingPercent, remainingAmount,
+        resetsAt: Number.isFinite(reset) ? reset : undefined,
+        status: (remainingPercent ?? remainingAmount) === 0 ? 'rejected' : 'allowed',
+        updatedAt: Date.now()
+      })
+    }
+  }
+  return limits
+}
+
+function refreshAntigravityQuota(session: AgentSession): void {
+  session.antigravityQuotaProbe?.abort()
+  const probe = new AbortController()
+  session.antigravityQuotaProbe = probe
+  const remote = session.source === 'ssh'
+  const args = antigravityInfoArgs(session, ['--output-format', 'json', '--print', '/usage'])
+  execFile(remote ? sshBin : antigravityExecutable(), args, {
+    cwd: remote ? undefined : session.cwd, env: cleanEnv(), signal: probe.signal,
+    timeout: 15_000, windowsHide: true, maxBuffer: 256 * 1024
+  }, (error, stdout) => {
+    if (probe.signal.aborted || sessions.get(session.id) !== session) return
+    session.antigravityQuotaProbe = undefined
+    const limits = error ? [] : antigravityQuotaLimits(cleanProcessText(stdout))
+    session.rateLimitUsages = new Map(limits.map(limit => [rateLimitUsageKey(limit), limit]))
+    session.rateLimitUsage = primaryRateLimitUsage(limits)
+    emitUsageUpdate(session)
+  }).stdin?.end()
+}
+
 function listAntigravityModels(session: AgentSession): Promise<AgentModelListResult> {
   const remote = session.source === 'ssh'
   if (remote && !session.ssh) return Promise.resolve({ ok: false, error: 'SSH 연결 정보가 없습니다.' })
-  const command = `cd ${shq(session.cwd)} && exec env PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH" agy models`
-  const args = remote ? [...sshArgs(session.ssh!), `exec $SHELL -ilc ${shq(command)}`] : ['models']
+  const args = antigravityInfoArgs(session, ['models'])
   return new Promise(resolve => {
     execFile(remote ? sshBin : antigravityExecutable(), args, {
       cwd: remote ? undefined : session.cwd, env: cleanEnv(), timeout: 30_000, windowsHide: true, maxBuffer: 256 * 1024
@@ -6055,6 +6111,7 @@ export function closeAgentSession(sessionId: string, webContents?: WebContents):
   }
   flushWorkSummary(session)
   clearTimeout(session.remoteRestoreTimer)
+  session.antigravityQuotaProbe?.abort()
   session.commandProbe?.abort()
   if (session.source === 'ssh' && !remoteProject) {
     // Closing the app/tab detaches; only the Stop action cancels remote work.

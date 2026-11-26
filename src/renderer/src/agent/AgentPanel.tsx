@@ -831,6 +831,7 @@ function rateLimitUsageFromEvent(value: unknown): AgentRateLimitUsageView | unde
     rateLimitType: stringValue(record.rateLimitType),
     utilization: numberValue(record.utilization),
     remainingPercent: numberValue(record.remainingPercent),
+    remainingAmount: numberValue(record.remainingAmount),
     resetsAt: numberValue(record.resetsAt),
     isUsingOverage: typeof record.isUsingOverage === 'boolean' ? record.isUsingOverage : undefined,
     updatedAt: numberValue(record.updatedAt) ?? Date.now()
@@ -2473,7 +2474,7 @@ export default function AgentPanel({
         setUsage((current) => ({
           tokens: tokens ?? current.tokens,
           context: Object.prototype.hasOwnProperty.call(event, 'context') ? context : current.context,
-          rateLimit: rateLimit ?? rateLimits?.[0] ?? current.rateLimit,
+          rateLimit: rateLimit ?? (hasRateLimits ? rateLimits?.[0] : current.rateLimit),
           rateLimits: hasRateLimits ? (rateLimits ?? []) : current.rateLimits
         }))
       }
@@ -5328,8 +5329,8 @@ export default function AgentPanel({
           <span>출력 {tokenCount(tokensKnown ? usage.tokens.outputTokens : undefined)}</span>
           {tokensKnown && cacheTokens > 0 && <span>캐시 {tokenCount(cacheTokens)}</span>}
           <span>{contextLabel}</span>
-          {limitLabels.length > 0 &&
-            limitLabels.map(({ label, tone }) => <span key={label} className={tone}>{label}</span>)}
+          {limitLabels.map(({ label, tone }) => <span key={label} className={tone}>{label}</span>)}
+          {isAntigravity && limitLabels.length === 0 && <span>잔여 한도 확인 불가</span>}
           {provider === 'codex' && usage.tokens.totalCostUsd !== undefined && (
             <span>{costFormatter.format(usage.tokens.totalCostUsd)}</span>
           )}
