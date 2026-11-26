@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createRequire } from 'node:module'
 import { build } from 'esbuild'
-import { boardInstructionCost, boardMutationIssue, boardRevision, boardRoutineDue, isBoardReport } from '../src/shared/workBoard.ts'
+import { boardInstructionCost, boardMutationIssue, boardRevision, boardRoutineDue, boardWorkLogReviewBody, isBoardReport } from '../src/shared/workBoard.ts'
 
 const dir = await mkdtemp(join(tmpdir(), 'work-board-departments-'))
 const office = join(dir, 'office-departments')
@@ -253,6 +253,7 @@ try {
     if (title === '부서 없이 맡김') return { text: '## 결론\nNO_TEAMS_DIRECT' }
     if (title === '맞는 부서 없음') return { text: '## 결론\nDIRECT_FINAL' }
     if (title === '매일 점검') return { text: '## 결론\nROUTINE_REPORT' }
+    if (title.startsWith('저녁 정리')) return { text: '## 결론\nEVENING_REPORT' }
     if (title === '보류 점검') return { blocked: true, text: '## 결재 필요\n\nBash(ls)' }
     if (title === '정지 확인') return { text: '1건 배분', costUsd: 0.4, assignments: [{ member: 'law', title: '정지 하위', instruction: '작성', after: [] }] }
     throw Error('unexpected chief run ' + title)
@@ -333,6 +334,20 @@ try {
   tasks = await until(ts => ts.some(t => t.title === '정지 하위' && t.status === 'blocked'))
   assert.match(tasks.find(t => t.title === '정지 하위').log.at(-1).text, /비용 정지선 도달 · 작성부/)
   assert.equal(chiefRuns.some(r => r.title === '정지 하위'), false)
+
+  // The evening work log routine: the head reads today's sessions for its department and writes it up itself.
+  mod.exports.setBoardWorkLogReader(async team => [{ 시각: '10:00–10:30', 사건: '2026가합1', 분류: '추천 확정', 한일: 'DIGEST_FOR_' + team }])
+  await board.add([{ title: '저녁 정리', body: boardWorkLogReviewBody, team: '조사부', approval: 'none' }])
+  tasks = await until(ts => ts.some(t => t.title === '저녁 정리' && t.status === 'done'))
+  const evening = chiefRuns.find(r => r.title === '저녁 정리')
+  assert.match(evening.prompt, /오늘 작업일지 중 조사부 부서 일로 분류된 세션 1건/)
+  assert.match(evening.prompt, /DIGEST_FOR_조사부/)
+  assert.equal(evening.delegation, undefined, 'the head summarizes the work log itself')
+  assert.equal(tasks.some(t => t.delegatedBy === tasks.find(x => x.title === '저녁 정리').id), false)
+  mod.exports.setBoardWorkLogReader(undefined)
+  await board.add([{ title: '저녁 정리 2', body: boardWorkLogReviewBody, team: '조사부', approval: 'none' }])
+  await until(ts => ts.some(t => t.title === '저녁 정리 2' && t.status === 'done'))
+  assert.match(chiefRuns.find(r => r.title === '저녁 정리 2').prompt, /오늘 작업일지를 읽지 못했습니다/)
 
   // Stage 3: department routines become ordinary cards at their time, once a day, on their own board only.
   assert.equal(boardRoutineDue({ time: '09:00', days: 'weekdays' }, undefined, new Date('2026-11-28T01:00:00Z')), undefined, 'Saturday in Korea')

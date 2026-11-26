@@ -55,6 +55,52 @@ export interface WorkLogScanSource {
 
 export type WorkLogStatus = 'done' | 'unfinished' | 'pending' | 'running' | 'continued'
 
+// 세션의 부서 표시. direct·confirmed·none은 사람이 정한 것이라 추천이 덮어쓰지 않는다.
+// suggested는 요약을 만들 때 부서 설명으로 고른 추천이고, 부서 없이 suggested면 "맞는 부서 없음" 추천이다.
+// card는 업무 보드 카드의 담당 부서다.
+export type DepartmentSource = 'direct' | 'confirmed' | 'none' | 'suggested' | 'card'
+
+export interface SessionDepartment {
+  department?: string
+  departmentSource?: DepartmentSource
+  departmentReason?: string
+}
+
+const HUMAN_DEPARTMENT = new Set<DepartmentSource>(['direct', 'confirmed', 'none'])
+
+export function isHumanDepartment(source?: DepartmentSource): boolean {
+  return !!source && HUMAN_DEPARTMENT.has(source)
+}
+
+// 저장된 부서 표시에 새 값을 합친다. 사람이 정한 것은 추천으로 바뀌지 않는다.
+export function mergeDepartment(previous: SessionDepartment, next: SessionDepartment): SessionDepartment {
+  if (!next.departmentSource) return pickDepartment(previous)
+  if (next.departmentSource === 'suggested' && isHumanDepartment(previous.departmentSource)) return pickDepartment(previous)
+  if (next.departmentSource === 'none') return { departmentSource: 'none', departmentReason: next.departmentReason }
+  if (next.departmentSource !== 'suggested' && !next.department) return pickDepartment(previous)
+  return pickDepartment(next)
+}
+
+function pickDepartment(value: SessionDepartment): SessionDepartment {
+  return {
+    department: value.department?.trim() || undefined,
+    departmentSource: value.departmentSource,
+    departmentReason: value.departmentReason?.trim().slice(0, 200) || undefined
+  }
+}
+
+// 요약 응답의 셋째 줄 "부서: 송무팀 · 이유"를 읽는다. 목록에 없는 이름은 버린다.
+export function parseDepartmentLine(line: string | undefined, names: string[]): SessionDepartment | undefined {
+  const match = /^부서\s*[:：]\s*(.+)$/.exec(line?.trim() ?? '')
+  if (!match) return undefined
+  const [rawName, ...rest] = match[1].split(/\s*[·|—]\s*|\s+-\s+/)
+  const name = rawName.replace(/["'“”‘’]/g, '').trim()
+  const reason = rest.join(' · ').trim() || undefined
+  if (/^(없음|해당\s*없음|부서\s*없음)$/.test(name)) return { departmentSource: 'suggested', departmentReason: reason }
+  const known = names.find((n) => n === name) ?? names.find((n) => n.replace(/\s+/g, '') === name.replace(/\s+/g, ''))
+  return known ? { department: known, departmentSource: 'suggested', departmentReason: reason } : undefined
+}
+
 export interface WorkLogBoardChild {
   cardId: string
   who: string
@@ -86,6 +132,8 @@ export interface WorkLogItem {
   lastTs: number
   who?: string // 일반 대화 / 업무 보드 · … / 정기 업무 · …
   departments?: string[]
+  departmentSource?: DepartmentSource
+  departmentReason?: string
   files?: WorkLogFile[]
   status?: WorkLogStatus
   statusReason?: string
@@ -302,7 +350,7 @@ export function daysFromTranscriptContent(content: string): { cwd?: string; days
   return { cwd, days: [...days.values()].sort((a, b) => (a.date < b.date ? -1 : 1)), end }
 }
 
-type IndexedMeta = CaseActivityMetaLike & { sourceKey?: string; costByDay?: Record<string, number> }
+type IndexedMeta = CaseActivityMetaLike & SessionDepartment & { sourceKey?: string; costByDay?: Record<string, number> }
 
 function metaTitle(meta?: IndexedMeta): string | undefined {
   if (!meta) return undefined
@@ -342,6 +390,15 @@ function childWho(card: WorkLogBoardCard): string {
   if (card.delegatedBy) return `${card.delegatorTeam ? card.delegatorTeam + ' ' : ''}부서원 · ${card.agent ?? '기본 세션'}`
   if (card.routedBy) return `${card.team} 부서장`
   return card.agent ?? '기본 세션'
+}
+
+function chatDepartment(meta?: SessionDepartment): Pick<WorkLogItem, 'departments' | 'departmentSource' | 'departmentReason'> {
+  if (!meta?.departmentSource) return {}
+  return {
+    departments: meta.department ? [meta.department] : undefined,
+    departmentSource: meta.departmentSource,
+    departmentReason: meta.departmentReason
+  }
 }
 
 function roundUsd(n: number): number {
@@ -450,6 +507,7 @@ export function mergeWorkLog(
           firstTs: day.firstTs,
           lastTs: day.lastTs,
           who: '일반 대화',
+          ...chatDepartment(meta),
           files: day.files,
           status: status.status,
           statusReason: status.reason,
@@ -472,6 +530,7 @@ export function mergeWorkLog(
       count: tree.length,
       who: rootWho(root),
       departments: departments.length ? departments : undefined,
+      departmentSource: departments.length ? 'card' : undefined,
       workSummary: reportSummary(root.report),
       status: status.status,
       statusReason: status.reason,
@@ -517,6 +576,7 @@ export function mergeWorkLog(
       count: 0,
       lastTs: ts,
       who: '일반 대화',
+      ...chatDepartment(meta),
       costUsd: typeof cost === 'number' && cost > 0 ? roundUsd(cost) : undefined
     })
   }
@@ -527,5 +587,31 @@ export function mergeWorkLog(
       date,
       epoch: epochOfDateKey(date),
       items: items.sort((a, b) => b.lastTs - a.lastTs)
+    }))
+}
+
+const DIGEST_STATUS: Record<WorkLogStatus, string> = { done: '완료', unfinished: '하다 만 일', pending: '결재 대기', running: '진행 중', continued: '이어서 진행' }
+const DIGEST_SOURCE: Record<DepartmentSource, string> = { direct: '직접 지정', confirmed: '추천 확정', none: '부서 없음', suggested: '추천', card: '카드 담당' }
+
+function digestTime(ms: number): string {
+  const d = new Date(ms)
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
+}
+
+// 부서 저녁 정리용: 그날 그 부서 일로 분류된 세션을 짧은 사실만으로 추린다.
+export function departmentDayDigest(days: WorkLogDay[], team: string, date: string): Record<string, unknown>[] {
+  const day = days.find((d) => d.date === date)
+  return (day?.items ?? [])
+    .filter((e) => e.departments?.includes(team))
+    .map((e) => ({
+      시각: e.firstTs ? `${digestTime(e.firstTs)}–${digestTime(e.lastTs)}` : digestTime(e.lastTs),
+      사건: [e.caseNumber, e.caseName].filter(Boolean).join(' ') || e.folderName || '(사건 미지정)',
+      누가: e.who ?? '일반 대화',
+      분류: e.departmentSource ? DIGEST_SOURCE[e.departmentSource] : undefined,
+      시킨일: e.firstText,
+      한일: e.workSummary,
+      상태: e.status ? DIGEST_STATUS[e.status] + (e.statusReason ? ` · ${e.statusReason}` : '') : undefined,
+      바뀐파일: e.files?.map((f) => f.path),
+      하위업무: e.board?.children.map((c) => `${c.who} · ${c.title} · ${DIGEST_STATUS[c.status]}`)
     }))
 }

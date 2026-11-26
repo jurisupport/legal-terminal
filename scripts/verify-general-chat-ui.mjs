@@ -124,6 +124,8 @@ function runApp({ root, temp, screenshotDir, provider, mode, remote, restart }) 
     if (channel === 'workspace:autoSave') return { ok: true }
     if (channel === 'workspace:autoObserve') return
     if (channel === 'workspace:list') return { ok: true, entries: [] }
+    // No office departments in these fixtures: the composer shows no department picker.
+    if (channel === 'agent:departments') return { ok: true, teams: [] }
     if (channel === 'agent:models') return { ok: true, models: agents.get(args[0])?.provider === 'antigravity'
       ? Array.from({ length: 36 }, (_, i) => ({
         id: `gemini-${i}`, model: `gemini-${i}`, displayName: `Gemini ${i}`

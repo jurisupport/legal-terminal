@@ -5209,6 +5209,7 @@ export default function AgentPanel({
             >
               {modelButtonLabel}
             </button>
+            {provider === 'claude' && <AgentDepartmentSelect sessionId={id} ready={sessionReady} />}
             {usesAgentAuth && (
               <button
                 className="agent-auth-btn"
@@ -5337,5 +5338,69 @@ export default function AgentPanel({
         </div>
       </footer>
     </div>
+  )
+}
+
+// 이 대화를 어느 부서 일로 볼지 고른다. 작업일지의 분류 표시만 바뀌고, 부서 규칙·도구 권한은 대화에 적용되지 않는다.
+function AgentDepartmentSelect({ sessionId, ready }: { sessionId: string; ready: boolean }): JSX.Element | null {
+  const [teams, setTeams] = useState<{ name: string; color: string; description?: string }[]>([])
+  const [value, setValue] = useState('')
+  const [suggested, setSuggested] = useState<string | undefined>()
+  const [error, setError] = useState('')
+  useEffect(() => {
+    if (!ready) return
+    let alive = true
+    void window.lt.agent
+      .departments(sessionId)
+      .then((result) => {
+        if (!alive || !result.ok) return
+        setTeams(result.teams ?? [])
+        const current = result.current
+        if (current?.departmentSource === 'direct' || current?.departmentSource === 'confirmed') setValue(current.department ?? '')
+        else if (current?.departmentSource === 'none') setValue('__none')
+        else setValue('')
+        setSuggested(current?.departmentSource === 'suggested' ? current.department : undefined)
+      })
+      .catch(() => {})
+    return () => {
+      alive = false
+    }
+  }, [sessionId, ready])
+  if (!teams.length) return null
+  return (
+    <select
+      className="agent-department-select"
+      aria-label="이 대화의 부서"
+      title={error || '작업일지에서 이 대화를 어느 부서 일로 볼지 정합니다. 부서 규칙·도구 권한은 대화에 적용되지 않습니다.'}
+      value={value}
+      onChange={(event) => {
+        const next = event.target.value
+        if (!next) return
+        const previous = value
+        setValue(next)
+        setError('')
+        void window.lt.agent
+          .setDepartment(sessionId, next === '__none' ? undefined : next)
+          .then((result) => {
+            if (result.ok) return
+            setValue(previous)
+            setError(result.error ?? '부서를 저장하지 못했습니다.')
+          })
+          .catch((reason: unknown) => {
+            setValue(previous)
+            setError(String(reason))
+          })
+      }}
+    >
+      <option value="" disabled>
+        {suggested ? `부서: ${suggested} 추천` : '부서: 자동 추천'}
+      </option>
+      {teams.map((team) => (
+        <option key={team.name} value={team.name} title={team.description}>
+          부서: {team.name}
+        </option>
+      ))}
+      <option value="__none">부서 없음</option>
+    </select>
   )
 }

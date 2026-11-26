@@ -451,11 +451,36 @@ export interface WorkLogItem {
   lastTs: number
   who?: string
   departments?: string[]
+  departmentSource?: DepartmentSource
+  departmentReason?: string
   files?: WorkLogFile[]
   status?: WorkLogStatus
   statusReason?: string
   costUsd?: number
   board?: WorkLogBoard
+}
+
+export type DepartmentSource = 'direct' | 'confirmed' | 'none' | 'suggested' | 'card'
+
+export interface WorkLogDepartment {
+  name: string
+  color: string
+  description?: string
+}
+
+export interface SessionDepartmentInput {
+  sessionId: string
+  cwd: string
+  profileId?: string
+  department?: string
+  source: 'direct' | 'confirmed' | 'none'
+}
+
+export interface AgentDepartmentsResult {
+  ok: boolean
+  teams?: WorkLogDepartment[]
+  current?: { department?: string; departmentSource?: DepartmentSource; departmentReason?: string }
+  error?: string
 }
 
 export interface WorkLogFile {
@@ -1170,6 +1195,8 @@ export interface LtApi {
     remember: (input: SessionRememberInput) => Promise<{ ok: boolean; error?: string }>
     byCase: (q: CaseActivityQuery) => Promise<Record<string, CaseActivity>>
     workLog: (days?: number) => Promise<WorkLogDay[]>
+    workLogDepartments: () => Promise<WorkLogDepartment[]>
+    setDepartment: (input: SessionDepartmentInput) => Promise<{ ok: boolean; error?: string }>
     byFolder: (q: CaseActivityQuery) => Promise<FolderActivity[]>
   }
   agent: {
@@ -1178,6 +1205,8 @@ export interface LtApi {
     worktreeFork: (input: AgentWorktreeForkInput) => Promise<AgentWorktreeForkResult>
     send: (sessionId: string, input: AgentSendInput) => Promise<AgentCommandResult>
     models: (sessionId: string) => Promise<AgentModelListResult>
+    departments: (sessionId: string) => Promise<AgentDepartmentsResult>
+    setDepartment: (sessionId: string, department?: string) => Promise<{ ok: boolean; error?: string }>
     setModel: (sessionId: string, model?: string, reasoningEffort?: string) => Promise<AgentCommandResult>
     slashCommand: (sessionId: string, command: string, argument?: string) => Promise<AgentCommandResult>
     mcpStatus: (sessionId: string) => Promise<AgentCommandResult>

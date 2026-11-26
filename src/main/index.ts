@@ -1,4 +1,6 @@
 import { boardWorkLogCards, registerWorkBoards } from './workBoardIpc'
+import { setBoardWorkLogReader } from './workBoard'
+import { dateKeyLocal, departmentDayDigest } from './workLogData'
 import { applySharedUi, readSharedUi } from './sharedUi'
 import type { SharedUiOperation } from '../shared/sharedUiState'
 import { openRemotionPreview, closeRemotionPreview, disposeRemotionPreviews } from './remotionPreview'
@@ -80,6 +82,8 @@ import {
   listSessions,
   listSessionsByCase,
   listWorkLog,
+  listWorkLogDepartments,
+  setSessionDepartment,
   readSessionTranscript,
   rememberSessionMeta,
   scheduleCasePairingPush,
@@ -1002,6 +1006,13 @@ ipcMain.handle('sessions:remember', (_e, p: Parameters<typeof rememberSessionMet
 // 사건 대시보드: 세션 인덱스를 사건별로 그룹핑한 최근 작업 이력
 ipcMain.handle('sessions:byCase', (_e, q: CaseActivityQuery) => listSessionsByCase(q))
 // 날짜별 작업일지: 최근 세션 전체 목록
+// 부서 저녁 정리 정기 업무가 읽는 오늘 작업일지(그 부서 일로 분류된 세션만).
+setBoardWorkLogReader(async (team) => {
+  const days = await listWorkLog(1, await boardWorkLogCards(Date.now() - 86_400_000))
+  return departmentDayDigest(days, team, dateKeyLocal(Date.now()))
+})
+ipcMain.handle('sessions:workLogDepartments', () => listWorkLogDepartments())
+ipcMain.handle('sessions:setDepartment', (_e, input: Parameters<typeof setSessionDepartment>[0]) => setSessionDepartment(input))
 ipcMain.handle('sessions:workLog', async (_e, p: { days?: number } | undefined) => {
   const days = p?.days ?? 30
   return listWorkLog(days, await boardWorkLogCards(Date.now() - days * 86_400_000))

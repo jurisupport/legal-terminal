@@ -7,7 +7,8 @@ import { mkdir, realpath } from 'fs/promises'
 import { tmpdir } from 'os'
 import { createRequire } from 'module'
 import { basename, dirname, join, relative } from 'path'
-import { readSessionTokenUsage, rememberSessionMeta } from '../sessions'
+import { readSessionTokenUsage, rememberSessionMeta, sessionDepartment } from '../sessions'
+import type { SessionDepartment } from '../workLogData'
 import {
   query,
   type EffortLevel,
@@ -199,6 +200,8 @@ interface AgentSession {
   titleGeneratedAtTurn?: number
   generatedTitle?: string
   workSummaryRunning?: boolean
+  // 입력창에서 고른 부서. 세션 ID가 생기기 전이면 첫 턴 결과에서 저장한다.
+  pendingDepartment?: SessionDepartment
   workSummaryAtTurn?: number
   workSummaryTimer?: NodeJS.Timeout
 }
@@ -2596,6 +2599,7 @@ function handleResultMessage(session: AgentSession, message: Record<string, unkn
   rememberClaudeUsageSummary(session, stringValue(message.result))
   accumulateResultUsage(session, message)
   recordTurnCost(session, message)
+  if (session.pendingDepartment) void flushPendingDepartment(session).catch(() => {})
   if (Array.isArray(message.permission_denials)) {
     for (const denialValue of message.permission_denials) {
       const denial = asRecord(denialValue)
@@ -2869,11 +2873,19 @@ async function generateWorkSummary(session: AgentSession, turns: number): Promis
   const assistantText =
     session.assistantText.get(session.turnAssistantMessageId ?? '') ??
     session.assistantText.get(session.activeAssistantMessageId ?? '')
+  // 사람이 부서를 정하지 않은 세션이면 같은 호출에서 부서도 추천받는다(추가 호출 없음).
+  // 부서 규칙 모듈은 요약을 만들 때만 읽는다.
+  const { isHumanDepartment, parseDepartmentLine } = await import('../workLogData')
+  const current = session.resumeSessionId
+    ? await sessionDepartment(session.resumeSessionId, session.source === 'ssh' ? session.ssh : undefined).catch(() => ({}) as SessionDepartment)
+    : {}
+  const teams = isHumanDepartment(current.departmentSource) ? [] : await sessionTeams(session).catch(() => [])
   const parts = [
     '아래 법률사무 에이전트 대화의 진행 상황을 요약해줘.',
-    '- 정확히 두 줄로만 출력:',
+    teams.length ? '- 정확히 세 줄로만 출력:' : '- 정확히 두 줄로만 출력:',
     '한 일: <이번 세션에서 완료한 작업, 30자 내>',
     '다음: <남은 일이나 다음 단계, 없으면 "없음", 30자 내>',
+    teams.length ? '부서: <아래 부서 목록 중 이 대화의 일에 맞는 부서 이름 하나, 맞는 부서가 없으면 "없음"> · <고른 이유, 20자 내>' : '',
     '- 명사형으로 간결하게. 따옴표·머리기호 없이.',
     '',
     `[작업 폴더] ${basename(session.cwd)}`,
@@ -2883,11 +2895,16 @@ async function generateWorkSummary(session: AgentSession, turns: number): Promis
     session.lastUserText && session.lastUserText !== session.firstUserText
       ? `[최근 요청] ${clipForTitlePrompt(session.lastUserText, 400)}`
       : '',
-    assistantText ? `[답변 발췌] ${clipForTitlePrompt(assistantText, 1200)}` : ''
+    assistantText ? `[답변 발췌] ${clipForTitlePrompt(assistantText, 1200)}` : '',
+    ...(teams.length ? ['', '[부서 목록]', ...teams.map((team) => `- ${team.name}: ${clipForTitlePrompt(team.description || '(설명 없음)', 160)}`)] : [])
   ].filter(Boolean)
 
-  const summary = sanitizeWorkSummary(await runSideQuery(session, parts.join('\n')))
+  const raw = await runSideQuery(session, parts.join('\n'))
+  const lines = (raw ?? '').split('\n').map((l) => l.trim()).filter(Boolean)
+  const departmentLine = lines.find((l) => /^부서\s*[:：]/.test(l))
+  const summary = sanitizeWorkSummary(lines.filter((l) => l !== departmentLine).join('\n'))
   if (!summary || !session.resumeSessionId) return
+  const suggested = teams.length ? parseDepartmentLine(departmentLine, teams.map((team) => team.name)) : undefined
   session.workSummaryAtTurn = turns
   await rememberSessionMeta({
     sessionId: session.resumeSessionId,
@@ -2895,8 +2912,73 @@ async function generateWorkSummary(session: AgentSession, turns: number): Promis
     workSummary: summary,
     workSummaryAt: Date.now(),
     workSummaryAtTurn: turns,
+    ...(suggested ?? {}),
     ssh: session.source === 'ssh' ? session.ssh : undefined
   })
+}
+
+// 이 세션이 쓰는 사무소의 부서: 로컬 대화는 이 컴퓨터, SSH 대화는 그 서버의 부서. 잠시 캐시한다.
+const SESSION_TEAMS_TTL_MS = 5 * 60_000
+const sessionTeamsCache = new Map<string, { at: number; teams: { name: string; color: string; description?: string }[] }>()
+
+async function sessionTeams(session: AgentSession): Promise<{ name: string; color: string; description?: string }[]> {
+  const key = sideQueryKey(session)
+  const cached = sessionTeamsCache.get(key)
+  if (cached && Date.now() - cached.at < SESSION_TEAMS_TTL_MS) return cached.teams
+  let workspace = session.cwd
+  if (session.source === 'ssh') {
+    const ssh = session.ssh
+    if (!ssh) return []
+    const { getSettings } = await import('../settings')
+    const profile = (await getSettings()).sshProfiles?.find(
+      (p) => p.host === ssh.host && p.user === ssh.user && (p.port ?? 22) === (ssh.port ?? 22)
+    )
+    if (!profile) return []
+    workspace = `ssh://${profile.id}/`
+  }
+  const { Departments } = await import('../departments')
+  const teams = (await (await Departments.forWorkspace(workspace)).teams()).map((team) => ({ name: team.name, color: team.color, description: team.description }))
+  sessionTeamsCache.set(key, { at: Date.now(), teams })
+  return teams
+}
+
+// 입력창의 부서 선택: 이 세션이 쓰는 사무소의 부서 목록과 지금 표시.
+async function listSessionDepartments(sessionId: string): Promise<{ ok: boolean; teams?: { name: string; color: string; description?: string }[]; current?: SessionDepartment; error?: string }> {
+  const session = sessions.get(sessionId)
+  if (!session) return { ok: false, error: '세션을 찾을 수 없습니다.' }
+  try {
+    const teams = await sessionTeams(session)
+    const current = session.pendingDepartment ?? (session.resumeSessionId
+      ? await sessionDepartment(session.resumeSessionId, session.source === 'ssh' ? session.ssh : undefined)
+      : {})
+    return { ok: true, teams, current }
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error) }
+  }
+}
+
+// 입력창에서 부서를 고르면 분류 표시만 바뀐다. 부서 규칙·도구 권한은 대화에 적용하지 않는다.
+async function setSessionDepartmentFromComposer(sessionId: string, department?: string): Promise<{ ok: boolean; error?: string }> {
+  const session = sessions.get(sessionId)
+  if (!session) return { ok: false, error: '세션을 찾을 수 없습니다.' }
+  const choice: SessionDepartment = department?.trim()
+    ? { department: department.trim(), departmentSource: 'direct' }
+    : { departmentSource: 'none', departmentReason: '직접 지정' }
+  session.pendingDepartment = choice
+  return flushPendingDepartment(session)
+}
+
+async function flushPendingDepartment(session: AgentSession): Promise<{ ok: boolean; error?: string }> {
+  const choice = session.pendingDepartment
+  if (!choice || !session.resumeSessionId) return { ok: true }
+  const saved = await rememberSessionMeta({
+    sessionId: session.resumeSessionId,
+    cwd: session.cwd,
+    ...choice,
+    ssh: session.source === 'ssh' ? session.ssh : undefined
+  })
+  if (saved.ok && session.pendingDepartment === choice) session.pendingDepartment = undefined
+  return saved
 }
 
 function handleSdkMessage(session: AgentSession, sdkMessage: unknown): void {
@@ -6251,6 +6333,10 @@ export function registerAgentIpc(ipcMain: IpcMain): void {
     sendAgentMessage(p.sessionId, p.input)
   )
   ipcMain.handle('agent:models', (_e, sessionId: string) => listAgentModels(sessionId))
+  ipcMain.handle('agent:departments', (_e, sessionId: string) => listSessionDepartments(sessionId))
+  ipcMain.handle('agent:setDepartment', (_e, p: { sessionId: string; department?: string }) =>
+    setSessionDepartmentFromComposer(p.sessionId, p.department)
+  )
   ipcMain.handle('agent:setModel', (_e, p: { sessionId: string; model?: string; reasoningEffort?: string }) =>
     setAgentModel(p.sessionId, p.model, p.reasoningEffort)
   )

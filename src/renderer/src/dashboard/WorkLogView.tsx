@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useMemo, useState } from 'react'
-import type { SessionTranscript, SshProfile, WorkLogDay, WorkLogFile, WorkLogItem, WorkLogStatus } from '../env'
+import type { DepartmentSource, SessionTranscript, SshProfile, WorkLogDay, WorkLogDepartment, WorkLogFile, WorkLogItem, WorkLogStatus } from '../env'
 
 const WORK_LOG_DAYS = 30
 const WEEKDAY_KO = ['일', '월', '화', '수', '목', '금', '토']
@@ -97,6 +97,83 @@ function FileChips({ files, onOpen }: { files?: WorkLogFile[]; onOpen?: (path: s
   )
 }
 
+type DepartmentChoice = { department?: string; departmentSource: DepartmentSource; departmentReason?: string }
+
+const DEPARTMENT_NOTE: Partial<Record<DepartmentSource, string>> = { card: '카드 담당', direct: '직접 지정', confirmed: '추천 확정' }
+
+function itemKey(e: WorkLogItem): string {
+  return `${e.profileId ?? 'local'}:${e.sessionId}`
+}
+
+// 부서 표시: 카드 담당·직접 지정·추천 확정은 진한 칩, 추천은 점선 칩과 [확정], 부서 없음은 회색 글씨.
+function DepartmentBadge({
+  e,
+  colors,
+  onConfirm
+}: {
+  e: WorkLogItem
+  colors: Map<string, string>
+  onConfirm?: () => void
+}): JSX.Element | null {
+  const source = e.departmentSource
+  if (!source) return null
+  const dot = (name: string): JSX.Element => <span className="wlog-dot" style={{ background: colors.get(name) ?? '#9d9d9d' }} aria-hidden="true" />
+  if (source === 'none') return <span className="wlog-muted">부서 없음</span>
+  if (source === 'suggested') {
+    const name = e.departments?.[0]
+    if (!name) return <span className="wlog-muted" title={e.departmentReason}>맞는 부서 없음 · 추천</span>
+    return (
+      <span className="wlog-dept-row">
+        <span className="wlog-dept suggested" title={e.departmentReason}>{dot(name)}{name} 추천</span>
+        {onConfirm && (
+          <button
+            type="button"
+            className="wlog-mini primary"
+            onClick={(event) => {
+              event.stopPropagation()
+              onConfirm()
+            }}
+          >
+            확정
+          </button>
+        )}
+      </span>
+    )
+  }
+  return (
+    <span className="wlog-dept-row">
+      {(e.departments ?? []).map((name) => (
+        <span key={name} className="wlog-dept">{dot(name)}{name}</span>
+      ))}
+      {DEPARTMENT_NOTE[source] && <span className="wlog-muted">{DEPARTMENT_NOTE[source]}</span>}
+    </span>
+  )
+}
+
+// 부서 필터: 추천을 집계에서 빼면 추천 세션은 "부서 없음·미확정"으로 센다.
+function departmentMatches(e: WorkLogItem, filter: string, includeSuggested: boolean): boolean {
+  if (filter === 'all') return true
+  const counted = e.departmentSource !== 'suggested' || includeSuggested
+  const names = counted ? e.departments ?? [] : []
+  if (filter === 'none') return names.length === 0
+  return names.includes(filter)
+}
+
+// 이어서·후속 업무로 넘길 지시 초안. 변호사가 업무 보드 양식에서 고쳐 등록한다.
+export function handoffText(e: WorkLogItem, mode: 'continue' | 'followUp'): string {
+  const asked = (e.firstText || e.title || '').trim()
+  const lines = [
+    mode === 'continue' ? `이어서 처리: ${asked}` : `다음 결과를 바탕으로 후속 업무를 진행해 줘: ${asked}`,
+    '',
+    `- 사건: ${caseLabel(e)}`,
+    e.status ? `- 이전 세션 상태: ${STATUS_LABEL[e.status]}${e.statusReason ? ` · ${e.statusReason}` : ''}` : '',
+    e.workSummary ? `- 한 일: ${e.workSummary}` : '',
+    e.files?.length ? `- 바뀐 파일: ${e.files.map((f) => f.path).join(', ')}` : '',
+    `- 이전 세션: ${e.sessionId} (${new Date(e.lastTs).toLocaleString('ko-KR')})`
+  ]
+  return lines.filter((line, i) => line || i === 1).join('\n')
+}
+
 /**
  * 날짜별 작업일지. 세션 한 줄에 언제·어디서·누가·시킨 일·한 일·바뀐 파일·상태·비용을 보인다.
  * 업무 보드 카드가 연 세션은 원 지시 한 줄 아래에 하위 카드로 묶인다.
@@ -107,13 +184,16 @@ export default function WorkLogView({
   full = false,
   sshProfiles = [],
   onOpenFile,
-  onOpenBoard
+  onOpenBoard,
+  onHandoff
 }: {
   onResume?: (e: WorkLogItem, options?: { newTab?: boolean }) => void
   full?: boolean
   sshProfiles?: SshProfile[]
   onOpenFile?: (path: string, e: WorkLogItem) => void
   onOpenBoard?: (workspace: string) => void
+  /** Opens the work board form with a drafted instruction, and the department to start with. */
+  onHandoff?: (e: WorkLogItem, text: string, team?: string) => void
 }): JSX.Element {
   const [daysData, setDaysData] = useState<WorkLogDay[] | null>(null)
   const [failed, setFailed] = useState(false)
@@ -123,7 +203,12 @@ export default function WorkLogView({
   const [period, setPeriod] = useState<Period>(full ? 'today' : 'month')
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('all')
   const [caseFilter, setCaseFilter] = useState('')
-  const [selected, setSelected] = useState<{ item: WorkLogItem; date: string } | null>(null)
+  const [selected, setSelected] = useState<{ key: string; date: string } | null>(null)
+  const [departments, setDepartments] = useState<WorkLogDepartment[]>([])
+  const [departmentFilter, setDepartmentFilter] = useState('all')
+  const [includeSuggested, setIncludeSuggested] = useState(true)
+  const [overrides, setOverrides] = useState<Record<string, DepartmentChoice>>({})
+  const [departmentError, setDepartmentError] = useState('')
 
   useEffect(() => {
     let alive = true
@@ -143,6 +228,17 @@ export default function WorkLogView({
       alive = false
     }
   }, [windowDays])
+  useEffect(() => {
+    if (!full) return
+    let alive = true
+    window.lt.sessions
+      .workLogDepartments()
+      .then((list) => alive && setDepartments(list))
+      .catch(() => {})
+    return () => {
+      alive = false
+    }
+  }, [full])
   useEffect(() => {
     if (!menu) return
     const close = (): void => setMenu(null)
@@ -164,14 +260,40 @@ export default function WorkLogView({
       .filter((d) => d.epoch >= start)
       .map((d) => ({
         ...d,
-        items: d.items.filter(
-          (e) =>
-            (statusFilter === 'all' || e.status === statusFilter) &&
-            (!caseFilter || caseLabel(e) === caseFilter)
-        )
+        items: d.items
+          .map((e) => {
+            const choice = e.board ? undefined : overrides[itemKey(e)]
+            return choice
+              ? { ...e, departments: choice.department ? [choice.department] : undefined, departmentSource: choice.departmentSource, departmentReason: choice.departmentReason }
+              : e
+          })
+          .filter(
+            (e) =>
+              (statusFilter === 'all' || e.status === statusFilter) &&
+              (!caseFilter || caseLabel(e) === caseFilter) &&
+              departmentMatches(e, departmentFilter, includeSuggested)
+          )
       }))
       .filter((d) => !full || d.items.length > 0)
-  }, [daysData, period, statusFilter, caseFilter, full])
+  }, [daysData, period, statusFilter, caseFilter, departmentFilter, includeSuggested, overrides, full])
+  const colors = useMemo(() => new Map(departments.map((d) => [d.name, d.color])), [departments])
+  const departmentNames = useMemo(() => {
+    const names = new Set(departments.map((d) => d.name))
+    for (const day of daysData ?? []) for (const e of day.items) for (const name of e.departments ?? []) names.add(name)
+    return [...names]
+  }, [departments, daysData])
+  const chooseDepartment = async (e: WorkLogItem, choice: DepartmentChoice & { departmentSource: 'direct' | 'confirmed' | 'none' }): Promise<void> => {
+    if (!e.cwd) return
+    setDepartmentError('')
+    const saved = await window.lt.sessions
+      .setDepartment({ sessionId: e.sessionId, cwd: e.cwd, profileId: e.profileId, department: choice.department, source: choice.departmentSource })
+      .catch((error: unknown) => ({ ok: false, error: String(error) }))
+    if (!saved.ok) {
+      setDepartmentError(saved.error ?? '부서를 저장하지 못했습니다.')
+      return
+    }
+    setOverrides((prev) => ({ ...prev, [itemKey(e)]: choice }))
+  }
   const summary = useMemo(() => {
     const items = shown.flatMap((d) => d.items)
     const count = (status: WorkLogStatus): number => items.filter((e) => e.status === status).length
@@ -205,14 +327,14 @@ export default function WorkLogView({
           </div>
           {day.items.map((e) => {
             const span = spanLabel(e)
-            const isSelected = selected?.item === e
+            const isSelected = selected?.key === itemKey(e) && selected.date === day.date
             return (
               <div
                 key={`${e.board ? 'board:' + e.board.cardId : e.sessionId}-${day.date}`}
                 className={`wlog-row${onResume || full ? ' clickable' : ''}${isSelected ? ' selected' : ''}`}
                 title={full ? '클릭 → 상세' : onResume ? '클릭 → 열기 · Control/Command 클릭 또는 우클릭 → 새 탭' : undefined}
                 onClick={(event) => {
-                  if (full) setSelected({ item: e, date: day.date })
+                  if (full) setSelected({ key: itemKey(e), date: day.date })
                   else onResume?.(e, { newTab: event.ctrlKey || event.metaKey })
                 }}
                 onContextMenu={(event) => {
@@ -232,9 +354,11 @@ export default function WorkLogView({
                 </div>
                 <div className="wlog-who">
                   <span>{e.who ?? '일반 대화'}</span>
-                  {e.departments?.map((d) => (
-                    <span key={d} className="wlog-dept">{d}</span>
-                  ))}
+                  <DepartmentBadge
+                    e={e}
+                    colors={colors}
+                    onConfirm={full && e.departments?.[0] ? () => void chooseDepartment(e, { department: e.departments![0], departmentSource: 'confirmed', departmentReason: e.departmentReason }) : undefined}
+                  />
                 </div>
                 <div className="wlog-what">
                   <div className="wlog-asked">
@@ -259,6 +383,19 @@ export default function WorkLogView({
                 <div className="wlog-state">
                   <StatusBadge status={e.status} reason={e.statusReason} />
                   {e.costUsd !== undefined && <span className="wlog-muted">{usd(e.costUsd)}</span>}
+                  {full && onHandoff && e.status === 'unfinished' && !e.board && e.cwd && (
+                    <button
+                      type="button"
+                      className="wlog-mini primary"
+                      onClick={(event) => {
+                        event.stopPropagation()
+                        const team = e.departmentSource !== 'none' ? e.departments?.[0] : undefined
+                        onHandoff(e, handoffText(e, 'continue'), team)
+                      }}
+                    >
+                      {e.departmentSource !== 'none' && e.departments?.[0] ? `${e.departments[0]}에 이어서 맡기기` : '부서에 이어서 맡기기'}
+                    </button>
+                  )}
                 </div>
               </div>
             )
@@ -295,6 +432,10 @@ export default function WorkLogView({
   if (!full) return list
 
   const chip = (on: boolean): string => `wlog-chip${on ? ' on' : ''}`
+  const selectedItem = selected
+    ? (shown.find((d) => d.date === selected.date)?.items.find((e) => itemKey(e) === selected.key) ??
+      (daysData ?? []).find((d) => d.date === selected.date)?.items.find((e) => itemKey(e) === selected.key))
+    : undefined
   return (
     <div className="wlog-page">
       <div className="wlog-main">
@@ -327,6 +468,22 @@ export default function WorkLogView({
               </button>
             ))}
           </div>
+          {departmentNames.length > 0 && (
+            <div className="wlog-group" role="group" aria-label="부서">
+              {[['all', '전체'], ...departmentNames.map((name) => [name, name]), ['none', '부서 없음·미확정']].map(([value, label]) => (
+                <button key={value} type="button" className={chip(departmentFilter === value)} aria-pressed={departmentFilter === value} onClick={() => setDepartmentFilter(value)}>
+                  {value !== 'all' && value !== 'none' && <span className="wlog-dot" style={{ background: colors.get(value) ?? '#9d9d9d' }} aria-hidden="true" />}
+                  {label}
+                </button>
+              ))}
+            </div>
+          )}
+          {departmentNames.length > 0 && (
+            <label className="wlog-toggle">
+              <input type="checkbox" checked={includeSuggested} onChange={(event) => setIncludeSuggested(event.target.checked)} />
+              추천 부서도 포함해 집계
+            </label>
+          )}
           <label className="wlog-case-filter">
             사건
             <select value={caseFilter} onChange={(event) => setCaseFilter(event.target.value)}>
@@ -346,18 +503,23 @@ export default function WorkLogView({
           <div><span>결재 대기</span><b className="wlog-status-pending">{summary.pending}건</b></div>
           <div title="Claude가 결과에 보고한 API 기준 금액. 앱 밖에서 실행한 세션은 빠집니다."><span>비용</span><b>{usd(summary.cost)}</b></div>
         </div>
+        {departmentError && <p role="alert" className="wlog-error">{departmentError}</p>}
         {list}
       </div>
-      {selected && (
+      {selectedItem && selected && (
         <WorkLogDetail
-          key={`${selected.item.sessionId}-${selected.date}`}
-          item={selected.item}
+          key={`${selected.key}-${selected.date}`}
+          item={selectedItem}
           date={selected.date}
-          ssh={sshProfiles.find((p) => p.id === selected.item.profileId)}
+          ssh={sshProfiles.find((p) => p.id === selectedItem.profileId)}
+          colors={colors}
+          departmentNames={departmentNames}
           onClose={() => setSelected(null)}
           onResume={onResume}
-          onOpenFile={openFile?.(selected.item)}
+          onOpenFile={openFile?.(selectedItem)}
           onOpenBoard={onOpenBoard}
+          onDepartment={(choice) => void chooseDepartment(selectedItem, choice)}
+          onHandoff={onHandoff}
         />
       )}
     </div>
@@ -368,18 +530,26 @@ function WorkLogDetail({
   item,
   date,
   ssh,
+  colors,
+  departmentNames,
   onClose,
   onResume,
   onOpenFile,
-  onOpenBoard
+  onOpenBoard,
+  onDepartment,
+  onHandoff
 }: {
   item: WorkLogItem
   date: string
   ssh?: SshProfile
+  colors: Map<string, string>
+  departmentNames: string[]
   onClose: () => void
   onResume?: (e: WorkLogItem, options?: { newTab?: boolean }) => void
   onOpenFile?: (path: string) => void
   onOpenBoard?: (workspace: string) => void
+  onDepartment: (choice: DepartmentChoice & { departmentSource: 'direct' | 'confirmed' | 'none' }) => void
+  onHandoff?: (e: WorkLogItem, text: string, team?: string) => void
 }): JSX.Element {
   const [transcript, setTranscript] = useState<SessionTranscript | null | undefined>(item.board ? null : undefined)
   useEffect(() => {
@@ -395,7 +565,7 @@ function WorkLogDetail({
     return () => {
       alive = false
     }
-  }, [item, ssh])
+  }, [item.sessionId, item.board, item.profileId, ssh])
   const asked = (transcript?.messages ?? []).filter(
     (m) => m.role === 'user' && m.timestamp !== undefined && dayKeyIso(m.timestamp) === date
   )
@@ -415,15 +585,46 @@ function WorkLogDetail({
           ×
         </button>
       </header>
-      {item.departments && item.departments.length > 0 && (
-        <section>
+      {(item.board ? !!item.departments?.length : departmentNames.length > 0 || !!item.departmentSource) && (
+        <section className={item.departmentSource === 'suggested' ? 'wlog-detail-dept suggested' : 'wlog-detail-dept'}>
           <h3>부서</h3>
           <div className="wlog-who">
-            {item.departments.map((d) => (
-              <span key={d} className="wlog-dept">{d}</span>
-            ))}
-            <span className="wlog-muted">카드 담당</span>
+            {item.departmentSource ? <DepartmentBadge e={item} colors={colors} /> : <span className="wlog-muted">아직 정하지 않음</span>}
           </div>
+          {item.departmentReason && item.departmentSource === 'suggested' && <p>추천 이유: {item.departmentReason}</p>}
+          {!item.board && (
+            <div className="wlog-detail-dept-actions">
+              {item.departmentSource === 'suggested' && item.departments?.[0] && (
+                <button type="button" className="primary" onClick={() => onDepartment({ department: item.departments![0], departmentSource: 'confirmed', departmentReason: item.departmentReason })}>
+                  {item.departments[0]}으로 확정
+                </button>
+              )}
+              <label>
+                {item.departmentSource === 'suggested' || !item.departmentSource ? '부서 고르기' : '다른 부서'}
+                <select
+                  value=""
+                  onChange={(event) => {
+                    if (event.target.value) onDepartment({ department: event.target.value, departmentSource: 'direct' })
+                  }}
+                >
+                  <option value="">선택</option>
+                  {departmentNames
+                    .filter((name) => !(item.departmentSource !== 'suggested' && item.departments?.includes(name)))
+                    .map((name) => (
+                      <option key={name} value={name}>
+                        {name}
+                      </option>
+                    ))}
+                </select>
+              </label>
+              {item.departmentSource !== 'none' && (
+                <button type="button" onClick={() => onDepartment({ departmentSource: 'none', departmentReason: '직접 지정' })}>
+                  해당 부서 없음
+                </button>
+              )}
+            </div>
+          )}
+          {!item.board && <p className="wlog-muted">직접 정하거나 확정한 부서는 추천이 바꾸지 않습니다.</p>}
         </section>
       )}
       <section>
@@ -511,6 +712,11 @@ function WorkLogDetail({
         {onResume && (
           <button type="button" className={item.board ? undefined : 'primary'} onClick={() => onResume(item)}>
             세션 이어서 열기
+          </button>
+        )}
+        {onHandoff && item.cwd && (
+          <button type="button" onClick={() => onHandoff(item, handoffText(item, 'followUp'))}>
+            이 결과로 부서에 후속 업무 맡기기
           </button>
         )}
       </footer>

@@ -421,6 +421,27 @@ interface WorkLogDay {
   items: WorkLogItem[]
 }
 
+interface WorkLogDepartment {
+  name: string
+  color: string
+  description?: string
+}
+
+interface SessionDepartmentInput {
+  sessionId: string
+  cwd: string
+  profileId?: string
+  department?: string
+  source: 'direct' | 'confirmed' | 'none'
+}
+
+interface AgentDepartmentsResult {
+  ok: boolean
+  teams?: WorkLogDepartment[]
+  current?: { department?: string; departmentSource?: string; departmentReason?: string }
+  error?: string
+}
+
 interface FolderActivity {
   key: string
   folderName: string
@@ -1275,6 +1296,9 @@ const api = {
       ipcRenderer.invoke('sessions:byCase', q),
     workLog: (days?: number): Promise<WorkLogDay[]> =>
       ipcRenderer.invoke('sessions:workLog', { days }),
+    workLogDepartments: (): Promise<WorkLogDepartment[]> => ipcRenderer.invoke('sessions:workLogDepartments'),
+    setDepartment: (input: SessionDepartmentInput): Promise<{ ok: boolean; error?: string }> =>
+      ipcRenderer.invoke('sessions:setDepartment', input),
     byFolder: (q: CaseActivityQuery): Promise<FolderActivity[]> =>
       ipcRenderer.invoke('sessions:byFolder', q)
   },
@@ -1289,6 +1313,10 @@ const api = {
       ipcRenderer.invoke('agent:send', { sessionId, input }),
     models: (sessionId: string): Promise<AgentModelListResult> =>
       ipcRenderer.invoke('agent:models', sessionId),
+    departments: (sessionId: string): Promise<AgentDepartmentsResult> =>
+      ipcRenderer.invoke('agent:departments', sessionId),
+    setDepartment: (sessionId: string, department?: string): Promise<{ ok: boolean; error?: string }> =>
+      ipcRenderer.invoke('agent:setDepartment', { sessionId, department }),
     setModel: (sessionId: string, model?: string, reasoningEffort?: string): Promise<AgentCommandResult> =>
       ipcRenderer.invoke('agent:setModel', { sessionId, model, reasoningEffort }),
     slashCommand: (sessionId: string, command: string, argument?: string): Promise<AgentCommandResult> =>

@@ -77,6 +77,7 @@ function runApp({ root, temp, screenshotDir }) {
     if (channel === 'workspace:autoObserve') return
     if (channel === 'workspace:list') return { ok: true, entries: [] }
     if (channel === 'agent:models') return { ok: true, models: [] }
+    if (channel === 'agent:departments') return { ok: true, teams: [] }
     if (channel === 'agent:create') {
       const options = args[0]
       agents.set(options.id, options)

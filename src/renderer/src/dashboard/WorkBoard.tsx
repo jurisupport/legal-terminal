@@ -1,4 +1,4 @@
-import { boardDelegates, maxDepartmentRoutines, boardRouted, boardChildren, isBoardChiefTask, boardDepartmentTools, boardInstructionCost, descriptionsOverlap, formatUsd, isBoardDepartmentTask, boardFollowUpRevision, boardRequestsTodoRead, boardResultKind, isBoardReport, isBoardDecisionPending, canRetryAsReport, boardReferencePaths, boardDocumentPaths, boardMutationIssue, boardReportAvailable, boardRevision, requestsCurrentBoardCase, isBoardTodoReview } from '../../../shared/workBoard'
+import { boardDelegates, maxDepartmentRoutines, boardRouted, boardChildren, isBoardChiefTask, boardDepartmentTools, boardInstructionCost, descriptionsOverlap, formatUsd, isBoardDepartmentTask, boardFollowUpRevision, boardRequestsTodoRead, boardResultKind, isBoardReport, isBoardDecisionPending, canRetryAsReport, boardReferencePaths, boardDocumentPaths, boardMutationIssue, boardReportAvailable, boardRevision, requestsCurrentBoardCase, isBoardTodoReview, boardWorkLogReviewBody } from '../../../shared/workBoard'
 import DOMPurify from 'dompurify'
 import { marked, Renderer } from 'marked'
 import { createPortal } from 'react-dom'
@@ -29,6 +29,8 @@ interface Props {
   bulkSeed?: string
   /** The seed is one instruction for a department or the chief of staff, not a list to split. */
   bulkDepartment?: boolean
+  /** A department to start the one instruction with, e.g. the department of a work log session handed on. */
+  bulkTeam?: string
   boundCase?: { id: string; label: string }
 }
 const statusLabel: Record<BoardStatus, string> = {
@@ -211,6 +213,7 @@ function InstructionForm({
   teams = [],
   seed,
   whole = false,
+  team,
   existing,
   followUp = false,
   issue,
@@ -221,6 +224,7 @@ function InstructionForm({
   teams?: BoardTeam[]
   seed?: string
   whole?: boolean
+  team?: string
   existing?: BoardTask
   followUp?: boolean
   issue?: string
@@ -238,7 +242,7 @@ function InstructionForm({
     after_approval: boardResultKind(existing) === 'action' ? existing.after_approval : undefined,
     allowed_tools: boardResultKind(existing) === 'action' ? existing.allowed_tools : undefined
   }] : followUp ? [{ title: '', body: '', resultKind: 'report' }]
-    : whole && seed?.trim() ? [{ title: seed.trim().split(/\r?\n/, 1)[0].slice(0, 120), body: seed.trim(), resultKind: 'report', auto: true }] : [])
+    : whole && seed?.trim() ? [{ title: seed.trim().split(/\r?\n/, 1)[0].slice(0, 120), body: seed.trim(), resultKind: 'report', ...(team ? { team } : { auto: true as const }) }] : [])
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const update = (index: number, patch: Partial<FormDraft>) =>
@@ -691,6 +695,10 @@ function RoutineEditor({ workspace, routines, change }: { workspace: string; rou
         <button type="button" className="wb-btn" disabled={full || !workspace} onClick={() => change([...routines,
           { id: routineId(), title: '매일 할일 점검', body: '할일 점검', time: '09:00', days: 'weekdays', workspace, todoScope: { kind: 'all' } }])}>
           매일 할일 점검 추가
+        </button>
+        <button type="button" className="wb-btn" disabled={full || !workspace} onClick={() => change([...routines,
+          { id: routineId(), title: '오늘 작업일지 정리', body: boardWorkLogReviewBody, time: '18:00', days: 'weekdays', workspace }])}>
+          저녁 작업일지 정리 추가
         </button>
       </div>
     </div>
@@ -1546,7 +1554,7 @@ function Details({
 export function WorkBoard(props: Props) {
   return <BoardWorkspace key={props.workspace} {...props} />
 }
-function BoardWorkspace({ workspace, view, onView, bulkSeed, bulkDepartment, boundCase, onOpenFile }: Props) {
+function BoardWorkspace({ workspace, view, onView, bulkSeed, bulkDepartment, bulkTeam, boundCase, onOpenFile }: Props) {
   const api = window.lt.workBoard
   const [data, setData] = useState<BoardSnapshot | null>(null)
   const [error, setError] = useState('')
@@ -1830,6 +1838,7 @@ function BoardWorkspace({ workspace, view, onView, bulkSeed, bulkDepartment, bou
                 teams={data.teams}
                 seed={bulkSeed}
                 whole={bulkDepartment}
+                team={bulkTeam}
                 scopeOptions={scopeOptions}
                 submit={async (drafts, batchId) => {
                   await api.add(workspace, drafts, batchId)

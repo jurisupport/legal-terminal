@@ -289,7 +289,7 @@ const NOTIFICATION_TONES: Record<Exclude<NotificationSound, 'none'>, Notificatio
   ]
 }
 
-interface OpenBoard { workspace: string; view: WorkBoardView; bulkSeed?: string; bulkDepartment?: boolean; boundCase?: { id: string; label: string } }
+interface OpenBoard { workspace: string; view: WorkBoardView; bulkSeed?: string; bulkDepartment?: boolean; bulkTeam?: string; boundCase?: { id: string; label: string } }
 
 const normalizePasteForPty = (text: string): string =>
   text.replace(/\r\n/g, '\n').replace(/\r/g, '\n').replace(/\n/g, '\r')
@@ -4788,13 +4788,13 @@ export default function App(): JSX.Element {
   const sessionCaseSource = currentCaseSessionSource(currentCase, sshProfiles)
   const boardSource = activeTermTab ?? sessionCaseSource
   const boardSourceFolder = boardTermFolder(boardSource)
-  const selectBoard = (workspace: string, view: WorkBoardView, source = boardSource, bulkSeed?: string, bulkDepartment?: boolean): void => {
+  const selectBoard = (workspace: string, view: WorkBoardView, source = boardSource, bulkSeed?: string, bulkDepartment?: boolean, bulkTeam?: string): void => {
     const boundCase = workspace === board?.workspace ? board.boundCase
       : source?.jsId && resolveAgentContextKind(source) === 'case' && workspace === boardTermFolder(source)
         ? { id: source.jsId, label: [source.caseNumber, source.caseName].filter(Boolean).join(' · ') || source.jsId }
         : undefined
     setWorkLogOpen(false)
-    setBoard({ workspace, view, bulkSeed, bulkDepartment, boundCase })
+    setBoard({ workspace, view, bulkSeed, bulkDepartment, bulkTeam, boundCase })
   }
   const pickBoardFolder = async (view: WorkBoardView, profileId?: string, startPath?: string): Promise<void> => {
     if (profileId) {
@@ -9769,6 +9769,11 @@ export default function App(): JSX.Element {
           void window.lt.app.newWindow({ docOnly: true, tabs: [{ kind: 'doc', path: target, title: fileNameFromPath(path) }] })
         }}
         onOpenBoard={workspace => selectBoard(workspace, 'board')}
+        onHandoff={(e, text, team) => {
+          if (!e.cwd) return
+          // 이전 세션의 작업 폴더 보드에 지시 하나로 올린다. 부서가 있으면 그 부서로, 없으면 자동 배분으로 시작한다.
+          selectBoard(e.profileId ? remoteUri(e.profileId, e.cwd) : e.cwd, 'bulk', boardSource, text, true, team)
+        }}
       />
     </dialog>)}
     {board && (
@@ -9796,7 +9801,7 @@ export default function App(): JSX.Element {
         </label>
       </header>
       <WorkBoard key={board.workspace} {...board}
-        onView={view => setBoard({ ...board, view, bulkSeed: undefined, bulkDepartment: undefined })}
+        onView={view => setBoard({ ...board, view, bulkSeed: undefined, bulkDepartment: undefined, bulkTeam: undefined })}
         onOpenFile={path => window.lt.app.newWindow({ docOnly: true, tabs: [{ kind: 'doc', path, title: fileNameFromPath(path) }] })}
       />
     </dialog>)}

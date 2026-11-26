@@ -27,7 +27,10 @@ import {
 import {
   cleanUserInstruction,
   daysFromTranscriptContent,
+  mergeDepartment,
   mergeWorkLog,
+  type DepartmentSource,
+  type SessionDepartment,
   type DayActivity,
   type SessionDayScan,
   type SessionEnd,
@@ -116,6 +119,10 @@ export interface SessionMetaInput extends SessionSearchContext {
   costByDay?: Record<string, number>
   // 이번에 더할 비용. 저장할 때 costByDay에 합치고 이 키는 남기지 않는다.
   costDelta?: { date: string; usd: number }
+  // 작업일지 부서 표시. 사람이 정한 것(direct·confirmed·none)은 추천(suggested)으로 바뀌지 않는다.
+  department?: string
+  departmentSource?: DepartmentSource
+  departmentReason?: string
   mtime?: number
   ssh?: SshConn
 }
@@ -378,11 +385,12 @@ export async function rememberSessionMeta(raw: SessionMetaInput): Promise<{ ok: 
             workSummaryAtTurn: input.workSummaryAtTurn ?? previous.workSummaryAtTurn,
             costByDay: addCost(previous.costByDay, input.costDelta),
             costDelta: undefined,
+            ...mergeDepartment(previous, input),
             mtime: input.mtime ?? previous.mtime,
             folderName: input.folderName || previous.folderName,
             ssh: input.ssh || previous.ssh
           })
-        : { ...nextMeta, costByDay: addCost(undefined, input.costDelta), costDelta: undefined }
+        : { ...nextMeta, costByDay: addCost(undefined, input.costDelta), costDelta: undefined, ...mergeDepartment({}, input) }
       await writeSessionIndex([merged, ...entries.filter((entry) => entry.key !== merged.key)])
     })
     // 원격 세션 메타는 그 호스트의 공유 인덱스에도 반영해 다른 기기에서 보이게 한다.
@@ -1608,4 +1616,66 @@ export async function currentSession(
     }
   }
   return null
+}
+
+// ── 작업일지 부서 표시 ──
+
+export async function sessionDepartment(sessionId: string, ssh?: SshConn): Promise<SessionDepartment> {
+  const meta = (await readSessionIndex()).find((m) => m.sessionId === sessionId && sameSource(m, ssh))
+  return { department: meta?.department, departmentSource: meta?.departmentSource, departmentReason: meta?.departmentReason }
+}
+
+function sshProfileConn(profiles: SshProfile[] | undefined, profileId?: string): SshConn | undefined {
+  if (!profileId) return undefined
+  const profile = profiles?.find((p) => p.id === profileId)
+  if (!profile) throw new Error('SSH 연결 프로필을 찾을 수 없습니다.')
+  return { host: profile.host, user: profile.user, port: profile.port, identityFile: profile.identityFile }
+}
+
+// 작업일지에서 사람이 부서를 정한다: 직접 지정, 추천 확정, 해당 부서 없음.
+export async function setSessionDepartment(input: {
+  sessionId: string
+  cwd: string
+  profileId?: string
+  department?: string
+  source: 'direct' | 'confirmed' | 'none'
+}): Promise<{ ok: boolean; error?: string }> {
+  if (!input?.sessionId || !input.cwd || !['direct', 'confirmed', 'none'].includes(input.source)) return { ok: false, error: '부서 지정 형식을 확인해 주세요.' }
+  if (input.source !== 'none' && !input.department?.trim()) return { ok: false, error: '부서를 골라 주세요.' }
+  const settings = await getSettings().catch(() => ({}) as { sshProfiles?: SshProfile[] })
+  const ssh = sshProfileConn(settings.sshProfiles, input.profileId)
+  return rememberSessionMeta({
+    sessionId: input.sessionId,
+    cwd: input.cwd,
+    ssh,
+    department: input.source === 'none' ? undefined : input.department!.trim(),
+    departmentSource: input.source,
+    departmentReason: input.source === 'none' ? '직접 지정' : undefined
+  })
+}
+
+export interface WorkLogDepartment {
+  name: string
+  color: string
+  description?: string
+}
+
+// 작업일지 부서 필터용: 이 컴퓨터와 각 SSH 서버의 사무소 부서를 이름으로 합친다. 못 읽은 곳은 건너뛴다.
+export async function listWorkLogDepartments(): Promise<WorkLogDepartment[]> {
+  const { Departments } = await import('./departments')
+  const settings = await getSettings().catch(() => ({}) as { sshProfiles?: SshProfile[] })
+  const sources = ['', ...(settings.sshProfiles ?? []).map((p) => `ssh://${p.id}/`)]
+  const lists = await Promise.all(
+    sources.map(async (workspace) => {
+      try {
+        const office = await Departments.forWorkspace(workspace || homedir())
+        return await Promise.race([office.teams(), new Promise<never>((_, reject) => setTimeout(() => reject(new Error('timeout')), 15_000))])
+      } catch {
+        return []
+      }
+    })
+  )
+  const byName = new Map<string, WorkLogDepartment>()
+  for (const team of lists.flat()) if (!byName.has(team.name)) byName.set(team.name, { name: team.name, color: team.color, description: team.description })
+  return [...byName.values()]
 }

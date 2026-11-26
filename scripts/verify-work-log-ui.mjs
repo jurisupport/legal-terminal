@@ -18,7 +18,7 @@ async function checkWorkLog({ root, temp, output, channels }) {
   const { app, BrowserWindow, ipcMain, session } = require('electron')
   const fs = require('node:fs'), path = require('node:path'), assert = require('node:assert/strict')
   app.setPath('userData', path.join(temp, 'profile'))
-  const errors = [], opened = []
+  const errors = [], opened = [], departmentCalls = [], boardAdds = []
   let markRendererReady
   const rendererReady = new Promise(resolve => { markRendererReady = resolve })
   const noon = new Date().setHours(12, 0, 0, 0)
@@ -30,21 +30,22 @@ async function checkWorkLog({ root, temp, output, channels }) {
       { sessionId: 'chat-1', cwd: '/cases/김손해배상', caseNumber: '2026가합10234', caseName: '김○○ 손해배상', who: '일반 대화', count: 3,
         firstText: '상대방 준비서면 반박 포인트 정리해 줘', firstTs: noon - 40 * 60_000, lastTs: noon - 8 * 60_000,
         workSummary: '상대방 주장 4개를 쟁점별로 나누고 반박 초안을 작성함', files: [{ path: '/cases/김손해배상/반박초안.md', kind: 'write' }, { path: '/cases/김손해배상/쟁점정리.md', kind: 'edit' }],
-        status: 'unfinished', statusReason: '사용자가 중지함', costUsd: 0.84 },
+        status: 'unfinished', statusReason: '사용자가 중지함', costUsd: 0.84,
+        departments: ['송무팀'], departmentSource: 'suggested', departmentReason: '반박서면 작성' },
       { sessionId: 'chief-s', cwd: '/cases/박임대차', caseNumber: '2026가단55012', caseName: '박○○ 임대차보증금', sshLabel: '사무실 서버', profileId: 'office', who: '업무 보드 · 자동 배분(비서실장)', count: 3,
         title: '임차권 신청', firstText: '임차권등기명령 관련 판례 조사 후 신청서 작성', firstTs: noon - 3 * 3600_000, lastTs: noon - 2 * 3600_000,
-        workSummary: '판례 6건 조사 후 신청서 초안 완성', files: [{ path: '/cases/박임대차/임차권등기명령신청서.hwpx', kind: 'write' }], departments: ['조사부', '작성부'],
+        workSummary: '판례 6건 조사 후 신청서 초안 완성', files: [{ path: '/cases/박임대차/임차권등기명령신청서.hwpx', kind: 'write' }], departments: ['조사부', '작성부'], departmentSource: 'card',
         status: 'pending', costUsd: 1.92,
         board: { workspace: 'ssh://office/cases/박임대차', cardId: 'root', children: [
           { cardId: 'c1', who: '조사부 부서장', title: '판례 조사', status: 'done', costUsd: 0.61 },
           { cardId: 'c2', who: '작성부 부서원 · law', title: '신청서 작성', status: 'done', costUsd: 0.98 }
         ] } },
       { sessionId: 'chat-2', cwd: '/cases/공사대금', folderName: '공사대금', who: '일반 대화', count: 1, firstText: '감정서 쟁점 표로 정리해 줘',
-        lastTs: noon - 4 * 3600_000, status: 'running' }
+        lastTs: noon - 4 * 3600_000, status: 'running', departments: ['조사부'], departmentSource: 'suggested', departmentReason: '감정서 조사' }
     ] },
     { date: key(noon - D), epoch: epoch(noon - D), items: [
       { sessionId: 'chat-3', cwd: '/cases/공사대금', folderName: '공사대금', who: '일반 대화', count: 2, firstText: '항소이유서 목차 잡아 줘',
-        firstTs: noon - D - 45 * 60_000, lastTs: noon - D, status: 'done', costUsd: 0.67 }
+        firstTs: noon - D - 45 * 60_000, lastTs: noon - D, status: 'done', costUsd: 0.67, departments: ['송무팀'], departmentSource: 'direct' }
     ] }
   ]
   const transcript = { sessionId: 'chat-1', model: 'claude-fixture', mtime: noon, messages: [
@@ -57,6 +58,14 @@ async function checkWorkLog({ root, temp, output, channels }) {
   for (const channel of channels) ipcMain.handle(channel, (_event, ...args) => {
     if (channel === 'tabs:ready') { markRendererReady(); return }
     if (channel === 'sessions:workLog') return days
+    if (channel === 'sessions:workLogDepartments') return [{ name: '송무팀', color: '#4f8ef7', description: '소송 서면' }, { name: '조사부', color: '#e8a64a' }, { name: '작성부', color: '#4ec9b0' }]
+    if (channel === 'sessions:setDepartment') { departmentCalls.push(args[0]); return { ok: true } }
+    if (channel === 'workBoard:open' || channel === 'workBoard:snapshot') return {
+      workspace: args[0], tasks: [], settings: { concurrency: 1, restart: 'requeue', maxReviews: 2, dailyTime: '18:00' },
+      teams: [{ name: '송무팀', color: '#4f8ef7', agents: [] }, { name: '조사부', color: '#e8a64a', agents: [] }],
+      departments: { home: '/office', history: [], usage: {}, legacy: [], overlaps: [] }, agents: [], folder: args[0] + '/_업무지시'
+    }
+    if (channel === 'workBoard:add') { boardAdds.push(args); return 'added' }
     if (channel === 'sessions:transcript') return args[0]?.sessionId === 'chat-1' ? transcript : null
     if (channel === 'window:new') { opened.push(args[0]); return }
     if (channel === 'workBoard:counts') return {}
@@ -145,6 +154,52 @@ async function checkWorkLog({ root, temp, output, channels }) {
     assert.equal(opened.at(-1)?.tabs?.[0]?.path, 'ssh://office/cases/박임대차/임차권등기명령신청서.hwpx', 'remote files open through the SSH profile')
     await capture('detail-board')
 
+    // Departments: a suggestion is confirmed in place, filters count suggestions only when asked, people change it in the detail.
+    await click('.wlog-chip', '오늘')
+    await wait("document.querySelectorAll('.wlog-row').length === 3", 'back to today')
+    const rowText = text => run(`return [...document.querySelectorAll('.wlog-row')].find(r => r.textContent.includes(${JSON.stringify(text)})).innerText`)
+    assert.ok((await rowText('반박 포인트')).includes('송무팀 추천'))
+    assert.ok((await rowText('임차권등기명령')).includes('카드 담당'))
+    await run(`[...document.querySelectorAll('.wlog-row')].find(r => r.textContent.includes('반박 포인트')).querySelector('.wlog-mini.primary').click()`)
+    await wait(`[...document.querySelectorAll('.wlog-row')].find(r => r.textContent.includes('반박 포인트')).innerText.includes('추천 확정')`, 'confirmed in place')
+    assert.deepEqual(JSON.parse(JSON.stringify(departmentCalls.at(-1))), { sessionId: 'chat-1', cwd: '/cases/김손해배상', department: '송무팀', source: 'confirmed' })
+    await click('[aria-label="부서"] .wlog-chip', '조사부')
+    await wait("document.querySelectorAll('.wlog-row').length === 2", 'department filter with suggestions')
+    await run(`document.querySelector('.wlog-toggle input').click()`)
+    await wait("document.querySelectorAll('.wlog-row').length === 1", 'suggestions left out')
+    await click('[aria-label="부서"] .wlog-chip', '부서 없음·미확정')
+    await wait("document.querySelectorAll('.wlog-row').length === 1 && document.querySelector('.wlog-row').innerText.includes('감정서')", 'unconfirmed counted as none')
+    await run(`document.querySelector('.wlog-toggle input').click()`)
+    await click('[aria-label="부서"] .wlog-chip', '전체')
+    await wait("document.querySelectorAll('.wlog-row').length === 3", 'all departments')
+
+    await click('.wlog-row', '감정서 쟁점')
+    await wait("document.querySelector('.wlog-detail')?.innerText.includes('추천 이유: 감정서 조사')", 'suggestion detail')
+    assert.ok(await run(`return [...document.querySelectorAll('.wlog-detail-dept-actions button')].some(b => b.textContent === '조사부으로 확정')`))
+    await run(`const select = document.querySelector('.wlog-detail-dept-actions select'); select.value = '작성부'; select.dispatchEvent(new Event('change', { bubbles: true }))`)
+    await wait(`${'[...document.querySelectorAll(".wlog-row")]'}.find(r => r.textContent.includes('감정서')).innerText.includes('직접 지정')`, 'changed to direct')
+    assert.deepEqual(JSON.parse(JSON.stringify(departmentCalls.at(-1))), { sessionId: 'chat-2', cwd: '/cases/공사대금', department: '작성부', source: 'direct' })
+    await click('.wlog-detail-dept-actions button', '해당 부서 없음')
+    await wait(`[...document.querySelectorAll('.wlog-row')].find(r => r.textContent.includes('감정서')).innerText.includes('부서 없음')`, 'set to none')
+    assert.equal(departmentCalls.at(-1).source, 'none')
+    await capture('departments')
+
+    // Handing unfinished work to its department opens the board form with the drafted instruction and that department.
+    await run(`[...document.querySelectorAll('.wlog-row')].find(r => r.textContent.includes('반박 포인트')).querySelector('.wlog-state .wlog-mini.primary').click()`)
+    await wait("!document.querySelector('.work-log-window') && !!document.querySelector('.work-board-window[open] .wb-draft textarea')", 'board form opened')
+    const draft = await run(`return document.querySelector('.wb-draft textarea').value`)
+    for (const text of ['이어서 처리: 상대방 준비서면 반박 포인트 정리해 줘', '사용자가 중지함', '/cases/김손해배상/반박초안.md', 'chat-1']) assert.ok(draft.includes(text), 'handoff draft has ' + text)
+    assert.equal(await run(`return [...document.querySelectorAll('.wb-draft label')].find(el => el.textContent.trim().startsWith('담당')).querySelector('select').value`), 'team:송무팀')
+    await capture('handoff-form')
+    await run(`[...document.querySelectorAll('.wb-dialog button')].find(b => b.textContent.includes('건 등록')).click()`)
+    await wait(`${JSON.stringify(true)}`)
+    await new Promise(resolve => setTimeout(resolve, 300))
+    assert.equal(boardAdds.at(-1)?.[0], '/cases/김손해배상')
+    assert.equal(boardAdds.at(-1)?.[1]?.[0]?.team, '송무팀')
+    await run(`document.querySelector('.work-board-window button[aria-label="작업 공간으로 돌아가기"]').click()`)
+    await click('.work-board-links button', '작업일지')
+    await wait("document.querySelectorAll('.work-log-window[open] .wlog-row').length > 0", 'work log reopened')
+
     // Narrow window: rows stack and nothing scrolls sideways.
     w.setContentSize(820, 900)
     await wait('innerWidth === 820')
@@ -156,7 +211,7 @@ async function checkWorkLog({ root, temp, output, channels }) {
     await click('.work-log-window > header > button', '작업 공간')
     await wait("!document.querySelector('.work-log-window')", 'closed')
     if (errors.length) throw Error('Renderer errors: ' + errors.join('\n'))
-    console.log('PASS 작업일지 · 오늘·상태·기간·사건 필터 · 요약 숫자 · 일반 대화/업무 보드 묶음 · 상세(그날 지시·파일 열기·원격 경로) · 좁은 창')
+    console.log('PASS 작업일지 · 오늘·상태·기간·사건 필터 · 요약 숫자 · 일반 대화/업무 보드 묶음 · 상세(그날 지시·파일 열기·원격 경로) · 부서 추천 확정·필터·변경·해당 없음 · 이어서 맡기기 · 좁은 창')
     app.exit(0)
   } catch (error) {
     await capture('failure').catch(() => {})

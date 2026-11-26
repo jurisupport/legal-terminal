@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { buildCaseActivity, buildFolderActivity } from '../src/main/caseActivityData.ts'
-import { cleanUserInstruction, daysFromTranscriptContent, isEphemeralCwd, mergeWorkLog } from '../src/main/workLogData.ts'
+import { cleanUserInstruction, daysFromTranscriptContent, departmentDayDigest, isEphemeralCwd, mergeDepartment, mergeWorkLog, parseDepartmentLine } from '../src/main/workLogData.ts'
 
 const now = Date.now()
 const iso = (msAgo) => new Date(now - msAgo).toISOString()
@@ -276,6 +276,52 @@ assert.equal(
   const log = mergeWorkLog([{ sourceKey: 'local', sessions: [{ sessionId: 'title-gen', cwd: temp, days: [{ date: dateKey(now), count: 1, firstText: '아래 대화에 붙일 간결한 한국어 제목을 지어줘.', lastTs: now }], end: { state: 'error', ts: now } }] }],
     [meta({ sessionId: 'title-gen-2', cwd: temp, mtime: now, sourceKey: 'local' })], now, 30)
   assert.equal(log.length, 0)
+}
+
+// 8e) 부서 표시: 사람이 정한 것은 추천이 덮어쓰지 않고, 추천 줄은 목록에 있는 부서만 받는다.
+{
+  const suggested = { department: '송무팀', departmentSource: 'suggested', departmentReason: '서면 작성' }
+  assert.deepEqual(mergeDepartment({}, suggested), suggested)
+  assert.deepEqual(mergeDepartment({ department: '자문팀', departmentSource: 'direct' }, suggested), { department: '자문팀', departmentSource: 'direct', departmentReason: undefined })
+  assert.equal(mergeDepartment({ department: '자문팀', departmentSource: 'confirmed' }, suggested).department, '자문팀')
+  assert.equal(mergeDepartment({ departmentSource: 'none' }, suggested).departmentSource, 'none')
+  // 사람이 바꾸면 바뀌고, 다음 추천은 이전 추천을 바꾼다. 부서 없는 추천은 "맞는 부서 없음" 추천이다.
+  assert.deepEqual(mergeDepartment(suggested, { department: '자문팀', departmentSource: 'direct' }), { department: '자문팀', departmentSource: 'direct', departmentReason: undefined })
+  assert.deepEqual(mergeDepartment({ department: '자문팀', departmentSource: 'direct' }, { departmentSource: 'none', departmentReason: '직접 지정' }), { departmentSource: 'none', departmentReason: '직접 지정' })
+  assert.deepEqual(mergeDepartment(suggested, { departmentSource: 'suggested', departmentReason: '맞는 부서 없음' }), { department: undefined, departmentSource: 'suggested', departmentReason: '맞는 부서 없음' })
+  // 다른 메타 저장(제목·비용)은 부서를 건드리지 않는다. 이름 없는 직접 지정은 무시한다.
+  assert.deepEqual(mergeDepartment(suggested, {}), suggested)
+  assert.deepEqual(mergeDepartment(suggested, { departmentSource: 'direct' }), suggested)
+
+  const names = ['송무팀', '자문 팀']
+  assert.deepEqual(parseDepartmentLine('부서: 송무팀 · 준비서면 반박', names), { department: '송무팀', departmentSource: 'suggested', departmentReason: '준비서면 반박' })
+  assert.deepEqual(parseDepartmentLine('부서： "자문팀" - 계약 검토', names), { department: '자문 팀', departmentSource: 'suggested', departmentReason: '계약 검토' })
+  assert.deepEqual(parseDepartmentLine('부서: 없음 · 개인 일정', names), { departmentSource: 'suggested', departmentReason: '개인 일정' })
+  assert.equal(parseDepartmentLine('부서: 세무팀 · 목록에 없음', names), undefined)
+  assert.equal(parseDepartmentLine('다음: 없음', names), undefined)
+
+  const D = 86_400_000
+  const noon = new Date(now).setHours(12, 0, 0, 0)
+  const today = dateKey(noon)
+  const scans = [{ sourceKey: 'local', sessions: [
+    { sessionId: 'a', cwd: '/c/A', days: [{ date: today, count: 2, firstText: '반박 정리', firstTs: noon - 600_000, lastTs: noon - 60_000 }], end: { state: 'done', ts: noon - 60_000 } },
+    { sessionId: 'b', cwd: '/c/B', days: [{ date: today, count: 1, firstText: '계약 검토', lastTs: noon - 120_000 }], end: { state: 'interrupted', ts: noon - 120_000 } },
+    { sessionId: 'c', cwd: '/c/C', days: [{ date: today, count: 1, firstText: '문자 다듬기', lastTs: noon - 180_000 }], end: { state: 'done', ts: noon - 180_000 } }
+  ] }]
+  const index = [
+    meta({ sessionId: 'a', sourceKey: 'local', caseNumber: '2026가합1', department: '송무팀', departmentSource: 'confirmed', workSummary: '한 일: 반박 초안 · 다음: 없음' }),
+    meta({ sessionId: 'b', sourceKey: 'local', department: '송무팀', departmentSource: 'suggested', departmentReason: '서면' }),
+    meta({ sessionId: 'c', sourceKey: 'local', departmentSource: 'none' })
+  ]
+  const log = mergeWorkLog(scans, index, noon, 30)
+  const item = (id) => log[0].items.find((e) => e.sessionId === id)
+  assert.deepEqual([item('a').departments, item('a').departmentSource], [['송무팀'], 'confirmed'])
+  assert.deepEqual([item('b').departments, item('b').departmentSource, item('b').departmentReason], [['송무팀'], 'suggested', '서면'])
+  assert.deepEqual([item('c').departments, item('c').departmentSource], [undefined, 'none'])
+  const digest = departmentDayDigest(log, '송무팀', today)
+  assert.deepEqual(digest.map((e) => [e.사건, e.분류, e.상태]), [['2026가합1', '추천 확정', '완료'], ['B', '추천', '하다 만 일 · 사용자가 중지함']])
+  assert.equal(digest[0].한일, '한 일: 반박 초안 · 다음: 없음')
+  assert.deepEqual(departmentDayDigest(log, '송무팀', dateKey(noon - D)), [])
 }
 
 function dateKey(ts) {

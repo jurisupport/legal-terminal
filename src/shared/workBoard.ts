@@ -200,6 +200,13 @@ export function isBoardDepartmentTask(task: Pick<BoardTask, 'team' | 'parentId' 
   return !!task.team && !task.parentId && !task.delegatedBy
 }
 
+/** A department's evening routine: the app attaches today's work log sessions for that department. */
+export const boardWorkLogReviewBody = '오늘 작업일지 정리: 오늘 우리 부서 일로 분류된 세션을 읽고 완료한 일, 하다 만 일, 내일 이어서 할 일을 정리해 줘. 하다 만 일은 사건과 이유를 함께 적어 줘.'
+
+export function isBoardWorkLogReview(body: string): boolean {
+  return /오늘\s*작업일지\s*정리/.test(body)
+}
+
 export function isBoardChiefTask(task: Pick<BoardTask, 'chief' | 'parentId' | 'delegatedBy' | 'routedBy'>): boolean {
   return !!task.chief && !task.parentId && !task.delegatedBy && !task.routedBy
 }
