@@ -229,6 +229,7 @@ try {
   let researchSyntheses = 0
   globalThis.boardRunFixture = async i => {
     chiefRuns.push({ title: i.task.title, routing: i.routing, delegation: i.delegation, budgetUsd: i.budgetUsd, prompt: i.prompt })
+    i.onProgress('세션 시작', 'session-' + chiefRuns.length)
     const title = i.task.title
     if (i.routing) {
       if (title === '복합 업무') return { text: '2개 부서 배분', costUsd: 0.1, routes: [
@@ -301,6 +302,16 @@ try {
   assert.equal(board.unreadReportCount(), 2, 'the chief report and the earlier no-department report')
   assert.equal(boardInstructionCost(chiefTask, tasks), 0.35)
   assert.match(boardMutationIssue(chiefTask, tasks, 'remove'), /비서실장이 배분한/)
+  // The work log sees every card of the instruction under its root, with the sessions each card ran.
+  const logCards = await board.workLogCards(0)
+  const tree = logCards.filter(card => card.rootId === chiefTask.id)
+  assert.deepEqual(tree.map(card => card.title).sort(), ['복합 업무', '조사', '조사 보완', '조사 하위', '작성'].sort())
+  assert.ok(tree.every(card => card.sessions.length > 0 && card.sessions.every(id => /^session-\d+$/.test(id))))
+  assert.equal(tree.find(card => card.id === chiefTask.id).chief, true)
+  assert.match(tree.find(card => card.id === chiefTask.id).report, /CHIEF_FINAL/)
+  assert.equal(tree.find(card => card.title === '조사 하위').delegatorTeam, '조사부')
+  assert.equal(tree.find(card => card.title === '조사').report, undefined, 'only the root report is read')
+  assert.ok(chiefTask.sessions.length >= 2, 'the chief routed, then combined: two sessions on one card')
 
   // A single department's report is passed on without another chief session.
   await board.add([{ title: '단일 업무', body: '조사만', chief: true, approval: 'none' }])

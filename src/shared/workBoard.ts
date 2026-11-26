@@ -64,6 +64,8 @@ export interface BoardTask extends BoardDraft {
   routine?: string
   /** Estimated spend in USD of this card's own sessions. A department instruction adds its members' cards. */
   cost?: number
+  /** Every agent session this card started, oldest first, so the work log can show it under the card. */
+  sessions?: string[]
 }
 export interface BoardSettings {
   concurrency: number

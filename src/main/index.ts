@@ -1,4 +1,4 @@
-import { registerWorkBoards } from './workBoardIpc'
+import { boardWorkLogCards, registerWorkBoards } from './workBoardIpc'
 import { applySharedUi, readSharedUi } from './sharedUi'
 import type { SharedUiOperation } from '../shared/sharedUiState'
 import { openRemotionPreview, closeRemotionPreview, disposeRemotionPreviews } from './remotionPreview'
@@ -1000,7 +1000,10 @@ ipcMain.handle('sessions:remember', (_e, p: Parameters<typeof rememberSessionMet
 // 사건 대시보드: 세션 인덱스를 사건별로 그룹핑한 최근 작업 이력
 ipcMain.handle('sessions:byCase', (_e, q: CaseActivityQuery) => listSessionsByCase(q))
 // 날짜별 작업일지: 최근 세션 전체 목록
-ipcMain.handle('sessions:workLog', (_e, p: { days?: number } | undefined) => listWorkLog(p?.days))
+ipcMain.handle('sessions:workLog', async (_e, p: { days?: number } | undefined) => {
+  const days = p?.days ?? 30
+  return listWorkLog(days, await boardWorkLogCards(Date.now() - days * 86_400_000))
+})
 // 사건 미연결 폴더 작업 그룹
 ipcMain.handle('sessions:byFolder', (_e, q: CaseActivityQuery) => listFolderActivity(q))
 

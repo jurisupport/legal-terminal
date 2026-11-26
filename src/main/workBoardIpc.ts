@@ -8,6 +8,14 @@ import { readBoardDocumentText } from './workBoardDocumentText'
 import { boardTodoCaseIds } from './workBoardScope'
 import { isRemote, makeRemote, parseRemote, rfsRealpath } from './remoteFs'
 import type { BoardDecision, BoardDraft, BoardSettings, BoardTeam, BoardTodoScope } from '../shared/workBoard'
+import type { WorkLogBoardCard } from './workLogData'
+
+let workLogSource: ((since: number) => Promise<WorkLogBoardCard[]>) | undefined
+
+/** Cards of every board this app has open whose sessions ran since `since`. A board that fails to answer is skipped. */
+export async function boardWorkLogCards(since: number): Promise<WorkLogBoardCard[]> {
+  return workLogSource ? workLogSource(since).catch(() => []) : []
+}
 
 export function registerWorkBoards(): () => void {
   const privateDir = join(app.getPath('userData'), 'work-boards')
@@ -181,8 +189,10 @@ export function registerWorkBoards(): () => void {
   }
   void ready.then(restore).catch(e => console.error('[work-board]', e))
   const retry = setInterval(() => { void ready.then(restore).catch(() => {}) }, 60_000)
+  workLogSource = async since => (await Promise.all([...boards.values()].map(board => board.workLogCards(since).catch(() => [])))).flat()
   return () => {
     closing = true
+    workLogSource = undefined
     clearInterval(retry)
     for (const board of boards.values()) board.stop()
   }

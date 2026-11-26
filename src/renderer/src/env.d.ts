@@ -445,9 +445,38 @@ export interface WorkLogItem {
   folderName?: string
   title?: string
   workSummary?: string
-  count: number // 그날 사용자 지시 수 (인덱스 폴백 행은 0)
+  count: number // 그날 사용자 지시 수 (인덱스 폴백 행은 0). 업무 보드 묶음은 카드 수
   firstText?: string // 그날 첫 지시
+  firstTs?: number
   lastTs: number
+  who?: string
+  departments?: string[]
+  files?: WorkLogFile[]
+  status?: WorkLogStatus
+  statusReason?: string
+  costUsd?: number
+  board?: WorkLogBoard
+}
+
+export interface WorkLogFile {
+  path: string
+  kind: 'write' | 'edit'
+}
+
+export type WorkLogStatus = 'done' | 'unfinished' | 'pending' | 'running' | 'continued'
+
+export interface WorkLogBoardChild {
+  cardId: string
+  who: string
+  title: string
+  status: WorkLogStatus
+  costUsd?: number
+}
+
+export interface WorkLogBoard {
+  workspace: string
+  cardId: string
+  children: WorkLogBoardChild[]
 }
 
 export interface WorkLogDay {

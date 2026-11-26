@@ -44,6 +44,9 @@ export function followUpSnapshot(input: unknown, childId: string): NonNullable<B
   return { id: value.id, title: value.title, body: value.body, ...(report !== undefined && {report}) }
 }
 
+/** A card keeps at most this many session IDs; older ones fall off first. */
+export const maxCardSessions = 50
+
 function parseTask(id: string, source: string, fallbackDate = new Date().toISOString()): BoardTask | null {
   if (!/^\uFEFF?---\r?\n/.test(source)) return null
   const match = /^\uFEFF?---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)([\s\S]*)$/.exec(source)
@@ -68,11 +71,12 @@ function parseTask(id: string, source: string, fallbackDate = new Date().toISOSt
     if (v[key] != null && (!Number.isSafeInteger(v[key]) || Number(v[key]) < 0)) throw new Error('숫자 속성을 확인해 주세요: ' + key)
   }
   if (v.cost != null && (typeof v.cost !== 'number' || !Number.isFinite(v.cost) || v.cost < 0)) throw new Error('비용 기록을 확인해 주세요.')
+  if (v.sessions != null && (!strings(v.sessions) || v.sessions.length > maxCardSessions || !v.sessions.every(s => /^[\w-]{1,80}$/.test(s)))) throw new Error('세션 기록을 확인해 주세요.')
   for (const key of ['createdAt', 'updatedAt']) if (v[key] != null && !date(v[key])) throw new Error('날짜 속성을 확인해 주세요: ' + key)
   if (v.editedNeedsRun !== undefined && v.editedNeedsRun !== true) throw new Error('수정 후 재실행 상태를 확인해 주세요.')
   if (v.log != null && (!Array.isArray(v.log) || !v.log.every(e => e && date(e.at) && typeof e.text === 'string'))) throw new Error('진행 기록의 형식을 확인해 주세요.')
   // YAML null is common in unfilled optional fields.
-  const optionalKeys = ['agent', 'team', 'chief', 'delegatedBy', 'routedBy', 'routine', 'review_agent', 'due', 'after_approval', 'sessionId', 'parentId', 'depends_on', 'allowed_tools', 'approval', 'order', 'attempts', 'cost', 'createdAt', 'updatedAt', 'editedNeedsRun']
+  const optionalKeys = ['agent', 'team', 'chief', 'delegatedBy', 'routedBy', 'routine', 'review_agent', 'due', 'after_approval', 'sessionId', 'parentId', 'depends_on', 'allowed_tools', 'approval', 'order', 'attempts', 'cost', 'sessions', 'createdAt', 'updatedAt', 'editedNeedsRun']
   const fields = Object.fromEntries(optionalKeys.filter(k => v[k] != null).map(k => [k, v[k]]))
   if (v.followUp != null) fields.followUp = followUpSnapshot(v.followUp, id)
   if (v.reportReceipt != null) {

@@ -5,12 +5,13 @@ import type { BoardAgent, BoardDecision, BoardDepartments, BoardDraft, BoardSett
 import { boardDelegates, boardRoutineDue, boardRouted, isBoardChiefTask, boardInstructionCost, formatUsd, isBoardDepartmentTask, boardDocumentPaths, boardFollowUpContext, boardFollowUpRevision, boardReferencePaths, boardMutationIssue, boardReportAvailable, boardRequestsTodoRead, boardResultKind, boardRevision, canRetryAsReport, isBoardReport, isBoardDecisionPending, isBoardDocumentPath, isBoardTodoReview } from '../shared/workBoard'
 import { workspaceDocumentPath } from '../shared/workBoardDocuments'
 import { kstDateKey } from '../shared/todoSummary'
-import { WorkBoardStore, followUpSnapshot, unreadReportReceipt } from './workBoardStore'
+import { WorkBoardStore, followUpSnapshot, maxCardSessions, unreadReportReceipt } from './workBoardStore'
 import { boardRunCost, runBoardAgent, listBoardAgents, type BoardDepartmentContext } from './workBoardRunner'
 import { Departments, departmentOverlaps, fromLegacyTeams, suggestedDepartments } from './departments'
 import { getBoardTodoAccount, readBoardMcpTodos, readBoardTodos } from './workBoardTodos'
 import { verifyBoardTodoScope } from './workBoardScope'
 import { buildBoardDaily, boardReportDue } from './workBoardDaily'
+import type { WorkLogBoardCard } from './workLogData'
 
 const defaults: BoardSettings = { concurrency: 1, restart: 'requeue', maxReviews: 2, dailyTime: '18:00' }
 
@@ -300,6 +301,38 @@ export class WorkBoard {
       workspace: this.workspace, tasks: structuredClone(this.tasks), settings: { ...this.prefs }, agents: this.agents,
       teams: this.teams, departments: structuredClone(this.departmentInfo), folder: this.folder, warnings: [...this.store.warnings], readOnly: !this.writable, ownerRevision: this.observedOwner ? ownerRevision(this.observedOwner) : undefined
     }
+  }
+
+  /** Cards whose sessions ran since `since`, with every card of the same instruction, for the work log. */
+  async workLogCards(since: number): Promise<WorkLogBoardCard[]> {
+    await this.tail
+    const tasks = this.tasks
+    const byId = new Map(tasks.map(task => [task.id, task]))
+    const rootOf = (task: BoardTask): BoardTask => {
+      let current = task
+      for (let depth = 0; depth < 8; depth++) {
+        const up = current.parentId ?? current.delegatedBy ?? current.routedBy
+        const parent = up ? byId.get(up) : undefined
+        if (!parent) break
+        current = parent
+      }
+      return current
+    }
+    const roots = new Set(tasks.filter(task => task.sessions?.length && Date.parse(task.updatedAt) >= since).map(task => rootOf(task).id))
+    const cards: WorkLogBoardCard[] = []
+    for (const task of tasks) {
+      const root = rootOf(task)
+      if (!roots.has(root.id)) continue
+      const report = task.id === root.id ? (await this.store.readText(task.id + '.report.md').catch(() => null)) ?? undefined : undefined
+      cards.push({
+        id: task.id, rootId: root.id, workspace: this.workspace, title: task.title, body: task.body, status: task.status,
+        team: task.team, agent: task.agent, chief: task.chief, routine: !!task.routine,
+        delegatedBy: task.delegatedBy, routedBy: task.routedBy, parentId: task.parentId,
+        delegatorTeam: task.delegatedBy ? byId.get(task.delegatedBy)?.team : undefined,
+        cost: task.cost, sessions: task.sessions ?? [], createdAt: task.createdAt, report: report?.slice(0, 4000)
+      })
+    }
+    return cards
   }
 
   approvalCount() { return this.tasks.filter(isBoardDecisionPending).length }
@@ -1146,6 +1179,7 @@ export class WorkBoard {
         if (this.active.get(task.id) !== controller || controller.signal.aborted) return
         const current = structuredClone(this.find(task.id))
         if (sessionId && !mcpTodo) current.sessionId = sessionId
+        if (sessionId && !current.sessions?.includes(sessionId)) current.sessions = [...(current.sessions ?? []), sessionId].slice(-maxCardSessions)
         if (message) append(current, message.slice(0, 1200))
         await this.save(current)
       }).catch(err => this.changed('진행 기록 저장 오류 · ' + String(err)))

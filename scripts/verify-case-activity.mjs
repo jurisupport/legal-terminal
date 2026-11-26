@@ -125,7 +125,9 @@ const meta = (over) => ({
 // 8) 트랜스크립트 날짜별 분해: 여러 날 세션은 날짜마다 집계, 사이드체인·메타·caveat 제외
 {
   const line = (obj) => JSON.stringify(obj)
-  const iso = (msAgo) => new Date(now - msAgo).toISOString()
+  // 정오 기준: 자정 가까이 실행해도 "이틀 전 + 1시간"이 다른 날로 넘어가지 않게 한다.
+  const noon = new Date(now).setHours(12, 0, 0, 0)
+  const iso = (msAgo) => new Date(noon - msAgo).toISOString()
   const D = 86_400_000
   const content = [
     line({ type: 'queue-operation', timestamp: iso(2 * D) }),
@@ -187,6 +189,83 @@ assert.equal(
   assert.equal(log[1].items[0].sessionId, 's2')
   assert.equal(log[1].items[0].count, 0) // 폴백 행 표식
 }
+// 8c) 바뀐 파일·마지막 상태·업무 보드 묶음·비용
+{
+  const line = (obj) => JSON.stringify(obj)
+  const noon = new Date(now).setHours(12, 0, 0, 0)
+  const iso = (msAgo) => new Date(noon - msAgo).toISOString()
+  const D = 86_400_000
+  const tool = (name, input) => ({ type: 'tool_use', id: name, name, input })
+  const content = [
+    line({ type: 'user', timestamp: iso(D), cwd: '/drafts/사건A', message: { content: '감정서 정리해줘' } }),
+    line({ type: 'assistant', timestamp: iso(D - 1000), message: { content: [tool('Edit', { file_path: '/drafts/사건A/메모.md' })] } }),
+    line({ type: 'user', timestamp: iso(5000), message: { content: '반박 초안 써줘' } }),
+    line({ type: 'assistant', timestamp: iso(4000), message: { content: [tool('Write', { file_path: '/drafts/사건A/반박초안.md' }), tool('Read', { file_path: '/drafts/사건A/소장.md' })] } }),
+    line({ type: 'assistant', timestamp: iso(3500), message: { content: [tool('Edit', { file_path: '/drafts/사건A/반박초안.md' })] } }),
+    line({ type: 'assistant', timestamp: iso(3400), isSidechain: true, message: { content: [tool('Write', { file_path: '/drafts/사건A/sub.md' })] } }),
+    line({ type: 'assistant', timestamp: iso(3000), message: { content: [{ type: 'text', text: '작성했습니다.' }] } })
+  ].join('\n')
+  const scan = daysFromTranscriptContent(content)
+  assert.deepEqual(scan.days[0].files, [{ path: '/drafts/사건A/메모.md', kind: 'edit' }])
+  // 같은 날 새로 쓴 뒤 고친 파일은 '작성'으로 남고, 읽기 도구·사이드체인은 빠진다.
+  assert.deepEqual(scan.days[1].files, [{ path: '/drafts/사건A/반박초안.md', kind: 'write' }])
+  assert.equal(scan.days[1].firstTs, noon - 5000)
+  assert.equal(scan.days[1].lastTs, noon - 3500)
+  assert.deepEqual(scan.end, { state: 'done', ts: noon - 3000 })
+  const endOf = (...lines) => daysFromTranscriptContent(lines.map(line).join('\n')).end?.state
+  assert.equal(endOf({ type: 'user', timestamp: iso(1), message: { content: '해줘' } }, { type: 'user', timestamp: iso(0), message: { content: [{ type: 'text', text: '[Request interrupted by user]' }] } }), 'interrupted')
+  assert.equal(endOf({ type: 'assistant', timestamp: iso(0), isApiErrorMessage: true, message: { content: [{ type: 'text', text: 'API Error' }] } }), 'error')
+  assert.equal(endOf({ type: 'assistant', timestamp: iso(0), message: { content: [tool('Bash', { command: 'ls' })] } }), 'open')
+  // 끝낸 뒤 /usage 같은 명령을 실행해도 끊긴 것으로 보지 않는다.
+  assert.equal(endOf({ type: 'assistant', timestamp: iso(2), message: { content: [{ type: 'text', text: '끝' }] } },
+    { type: 'user', timestamp: iso(1), message: { content: '<command-name>/usage</command-name>' } },
+    { type: 'user', timestamp: iso(0), message: { content: '<local-command-stdout>사용량</local-command-stdout>' } }), 'done')
+
+  const today = dateKey(noon), yesterday = dateKey(noon - D)
+  const scans = [{ sourceKey: 'local', sessions: [
+    { sessionId: 'chat', cwd: '/drafts/사건A', days: [{ date: yesterday, count: 1, firstText: '어제 일', lastTs: noon - D }, { date: today, count: 2, firstText: '오늘 일', firstTs: noon - 600_000, lastTs: noon - 60_000, files: [{ path: '/drafts/사건A/a.md', kind: 'write' }] }], end: { state: 'interrupted', ts: noon - 60_000 } },
+    { sessionId: 'open-old', cwd: '/drafts/사건B', days: [{ date: today, count: 1, firstText: '끊긴 일', lastTs: noon - 3_600_000 }], end: { state: 'open', ts: noon - 3_600_000 } },
+    { sessionId: 'open-new', cwd: '/drafts/사건B', days: [{ date: today, count: 1, firstText: '하는 중', lastTs: noon - 60_000 }], end: { state: 'open', ts: noon - 60_000 } },
+    { sessionId: 'chief-s', cwd: '/drafts/사건C', days: [{ date: today, count: 1, firstText: '조립된 긴 프롬프트', firstTs: noon - 900_000, lastTs: noon - 800_000 }], end: { state: 'done', ts: noon - 800_000 } },
+    { sessionId: 'member-s', cwd: '/drafts/사건C', days: [{ date: today, count: 1, firstText: '부서원 프롬프트', firstTs: noon - 700_000, lastTs: noon - 300_000, files: [{ path: '/drafts/사건C/신청서.hwpx', kind: 'write' }] }], end: { state: 'done', ts: noon - 300_000 } }
+  ] }]
+  const cards = [
+    { id: 'root', rootId: 'root', workspace: '/drafts/사건C', title: '임차권 신청', body: '판례 조사 후 신청서 작성', status: 'awaiting_approval', chief: true, cost: 0.1, sessions: ['chief-s'], createdAt: '2026-11-26T01:00:00Z', report: '# 보고\n\n## 결론\n\n신청서 **초안** 완성.\n\n## 근거\n...' },
+    { id: 'dept', rootId: 'root', workspace: '/drafts/사건C', title: '조사', body: '판례 조사', status: 'done', team: '조사부', routedBy: 'root', cost: 0.2, sessions: [], createdAt: '2026-11-26T01:01:00Z' },
+    { id: 'member', rootId: 'root', workspace: '/drafts/사건C', title: '판례 수집', body: '수집', status: 'done', agent: 'fact', delegatedBy: 'dept', delegatorTeam: '조사부', cost: 0.3, sessions: ['member-s'], createdAt: '2026-11-26T01:02:00Z' }
+  ]
+  const index = [meta({ sessionId: 'chat', caseNumber: '2026가합1', sourceKey: 'local', costByDay: { [today]: 0.42, [yesterday]: 0.1 } })]
+  const log = mergeWorkLog(scans, index, noon, 30, cards)
+  const items = log.find((d) => d.date === today).items
+  const chat = items.find((e) => e.sessionId === 'chat')
+  assert.equal(chat.status, 'unfinished')
+  assert.equal(chat.statusReason, '사용자가 중지함')
+  assert.equal(chat.costUsd, 0.42)
+  assert.equal(chat.who, '일반 대화')
+  assert.deepEqual(chat.files, [{ path: '/drafts/사건A/a.md', kind: 'write' }])
+  // 이전 날짜는 이어서 진행한 것으로 보고, 비용은 그날 것만
+  const before = log.find((d) => d.date === yesterday).items[0]
+  assert.equal(before.status, 'continued')
+  assert.equal(before.costUsd, 0.1)
+  assert.equal(items.find((e) => e.sessionId === 'open-old').statusReason, '응답 없이 끊김')
+  assert.equal(items.find((e) => e.sessionId === 'open-new').status, 'running')
+  // 업무 보드 세션 두 개는 원 지시 한 줄로 묶이고 따로 나오지 않는다.
+  const board = items.filter((e) => e.board)
+  assert.equal(board.length, 1)
+  assert.ok(!items.some((e) => !e.board && (e.sessionId === 'chief-s' || e.sessionId === 'member-s')))
+  assert.equal(board[0].title, '임차권 신청')
+  assert.equal(board[0].firstText, '판례 조사 후 신청서 작성')
+  assert.equal(board[0].who, '업무 보드 · 자동 배분(비서실장)')
+  assert.equal(board[0].status, 'pending')
+  assert.equal(board[0].costUsd, 0.6)
+  assert.equal(board[0].firstTs, noon - 900_000)
+  assert.equal(board[0].lastTs, noon - 300_000)
+  assert.deepEqual(board[0].departments, ['조사부'])
+  assert.equal(board[0].workSummary, '신청서 초안 완성.')
+  assert.deepEqual(board[0].files, [{ path: '/drafts/사건C/신청서.hwpx', kind: 'write' }])
+  assert.deepEqual(board[0].board.children.map((c) => [c.who, c.status, c.costUsd]), [['조사부 부서장', 'done', 0.2], ['조사부 부서원 · fact', 'done', 0.3]])
+}
+
 function dateKey(ts) {
   const d = new Date(ts)
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`

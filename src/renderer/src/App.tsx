@@ -72,6 +72,7 @@ import MarkdownEditor, {
 import { markdownToPlainText, writeMarkdownClipboard } from './markdownClipboard'
 import FindBar from './search/FindBar'
 import CasesDashboard, { JS_TOKEN_UPDATED_EVENT } from './dashboard/CasesDashboard'
+import WorkLogView from './dashboard/WorkLogView'
 import type { ClaudeAskOptions, ClaudeSelectionSource, SendClaudeOptions } from '../../shared/claudeAsk'
 import SetupChecklist from './welcome/SetupChecklist'
 import { clearCaseListCache } from './dashboard/caseListCache'
@@ -4741,6 +4742,11 @@ export default function App(): JSX.Element {
   const [boardPicker, setBoardPicker] = useState<{ profile: SshProfile; startPath?: string; view: WorkBoardView } | null>(null)
   const [{ approvals: boardCounts, reports: unreadReportCounts }, setBoardCounts] = useState<{ approvals: Record<string, number>; reports: Record<string, number> }>({ approvals: {}, reports: {} })
   const boardDialog = useRef<HTMLDialogElement>(null)
+  const [workLogOpen, setWorkLogOpen] = useState(false)
+  const workLogDialog = useRef<HTMLDialogElement>(null)
+  useEffect(() => {
+    if (workLogOpen) workLogDialog.current?.showModal()
+  }, [workLogOpen])
   useEffect(() => {
     const api = window.lt.workBoard
     if (!api || docOnly) return
@@ -4786,6 +4792,7 @@ export default function App(): JSX.Element {
       : source?.jsId && resolveAgentContextKind(source) === 'case' && workspace === boardTermFolder(source)
         ? { id: source.jsId, label: [source.caseNumber, source.caseName].filter(Boolean).join(' · ') || source.jsId }
         : undefined
+    setWorkLogOpen(false)
     setBoard({ workspace, view, bulkSeed, bulkDepartment, boundCase })
   }
   const pickBoardFolder = async (view: WorkBoardView, profileId?: string, startPath?: string): Promise<void> => {
@@ -9734,6 +9741,7 @@ export default function App(): JSX.Element {
   const unreadReports = inboxBadge(unreadReportCounts)
   const boardNavigation = (
     <nav className="work-board-links" aria-label="업무지시">
+      <button type="button" aria-pressed={workLogOpen} onClick={() => { setBoard(null); setWorkLogOpen(true) }}>작업일지</button>
       <button type="button" aria-pressed={board?.view === 'board' || board?.view === 'bulk'} disabled={!workspaceSettingsReady} onClick={() => void openBoard('board')}>업무 보드</button>
       <button type="button" aria-pressed={board?.view === 'reports'} disabled={!workspaceSettingsReady} onClick={() => void openBoard('reports')}>보고서함{unreadReports > 0 && <> <span className="work-board-unread" aria-label={`미확인 보고서 ${unreadReports}건`}>{unreadReports}</span></>}</button>
       <button type="button" aria-pressed={board?.view === 'approvals'} disabled={!workspaceSettingsReady} onClick={() => void openBoard('approvals')}>결재함 <span>{approvalCount}</span></button>
@@ -9741,6 +9749,26 @@ export default function App(): JSX.Element {
     </nav>
   )
   const boardPanel = <>
+    {workLogOpen && (
+    <dialog ref={workLogDialog} className="work-log-window" aria-label="작업일지" onCancel={event => { if (event.target === event.currentTarget) setWorkLogOpen(false) }}>
+      <header>
+        <b>legal-terminal</b>
+        <button type="button" onClick={() => setWorkLogOpen(false)} aria-label="작업 공간으로 돌아가기">작업 공간</button>
+        {boardNavigation}
+      </header>
+      <WorkLogView full sshProfiles={sshProfiles}
+        onResume={(e, options) => {
+          if (!e.cwd) return
+          setWorkLogOpen(false)
+          void resumePathSession(e.sessionId, e.cwd, e.title, e.profileId, options?.newTab, e.originDevice)
+        }}
+        onOpenFile={(path, e) => {
+          const target = e.profileId ? remoteUri(e.profileId, path) : path
+          void window.lt.app.newWindow({ docOnly: true, tabs: [{ kind: 'doc', path: target, title: fileNameFromPath(path) }] })
+        }}
+        onOpenBoard={workspace => selectBoard(workspace, 'board')}
+      />
+    </dialog>)}
     {board && (
     <dialog ref={boardDialog} className="work-board-window" aria-label="업무지시" onCancel={event => { if (event.target === event.currentTarget) setBoard(null) }}>
       <header>

@@ -139,6 +139,7 @@
     "verify:segmented-recorder": "node scripts/verify-segmented-recorder.mjs",
     "verify:transcription-safety": "npm run verify:agent-dictation && npm run verify:dictation-recovery && npm run verify:segmented-recorder",
     "verify:agent-panel-width": "node scripts/verify-agent-panel-width.mjs",
+    "verify:work-log-ui": "node scripts/verify-work-log-ui.mjs",
     "verify:agent-interaction": "npm run verify:agent-tool-display && npm run verify:agent-dialog && node --experimental-strip-types --no-warnings scripts/verify-agent-dialog-runtime.mjs && node scripts/verify-agent-interaction-ui.mjs",
     "verify:agent-tool-display": "node --experimental-strip-types --no-warnings scripts/verify-agent-tool-display.mjs",
     "verify:agent-live-history": "node --experimental-strip-types --no-warnings scripts/verify-agent-live-history.mjs && node scripts/verify-agent-tab-handover-ui.mjs",

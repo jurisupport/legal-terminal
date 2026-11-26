@@ -2576,11 +2576,26 @@ function handleSystemMessage(session: AgentSession, message: Record<string, unkn
   }
 }
 
+// 작업일지에 세션 비용을 보이도록 턴마다 결과의 금액을 날짜별로 더해 둔다. 한 턴이 query 하나다.
+function recordTurnCost(session: AgentSession, message: Record<string, unknown>): void {
+  const usd = numberValue(message.total_cost_usd) ?? costUsdFromModelUsage(message.modelUsage)
+  if (!usd || usd <= 0 || !session.resumeSessionId) return
+  const now = new Date()
+  const date = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`
+  void rememberSessionMeta({
+    sessionId: session.resumeSessionId,
+    cwd: session.cwd,
+    costDelta: { date, usd },
+    ssh: session.source === 'ssh' ? session.ssh : undefined
+  }).catch(() => {})
+}
+
 function handleResultMessage(session: AgentSession, message: Record<string, unknown>): void {
   const subtype = stringValue(message.subtype)
   const isError = message.is_error === true || subtype !== 'success'
   rememberClaudeUsageSummary(session, stringValue(message.result))
   accumulateResultUsage(session, message)
+  recordTurnCost(session, message)
   if (Array.isArray(message.permission_denials)) {
     for (const denialValue of message.permission_denials) {
       const denial = asRecord(denialValue)

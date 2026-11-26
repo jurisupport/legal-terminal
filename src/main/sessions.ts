@@ -30,6 +30,8 @@ import {
   mergeWorkLog,
   type DayActivity,
   type SessionDayScan,
+  type SessionEnd,
+  type WorkLogBoardCard,
   type WorkLogDay,
   type WorkLogScanSource
 } from './workLogData'
@@ -110,6 +112,10 @@ export interface SessionMetaInput extends SessionSearchContext {
   workSummary?: string
   workSummaryAt?: number
   workSummaryAtTurn?: number
+  // 날짜(로컬 YYYY-MM-DD)별 비용. Claude가 결과에 보고한 API 기준 금액을 앱이 더한다.
+  costByDay?: Record<string, number>
+  // 이번에 더할 비용. 저장할 때 costByDay에 합치고 이 키는 남기지 않는다.
+  costDelta?: { date: string; usd: number }
   mtime?: number
   ssh?: SshConn
 }
@@ -335,6 +341,14 @@ function buildSessionMeta(input: SessionMetaInput): SessionMeta {
   }
 }
 
+function addCost(previous: Record<string, number> | undefined, delta?: { date: string; usd: number }): Record<string, number> | undefined {
+  if (!delta || !/^\d{4}-\d\d-\d\d$/.test(delta.date) || !Number.isFinite(delta.usd) || delta.usd <= 0) return previous
+  const next = { ...(previous ?? {}) }
+  next[delta.date] = Math.round(((next[delta.date] ?? 0) + delta.usd) * 10_000) / 10_000
+  // 오래된 날짜는 90일치만 남긴다.
+  return Object.fromEntries(Object.entries(next).sort((a, b) => (a[0] < b[0] ? 1 : -1)).slice(0, 90))
+}
+
 export async function rememberSessionMeta(raw: SessionMetaInput): Promise<{ ok: boolean; error?: string }> {
   try {
     // undefined 필드는 "값 없음"이지 "지워라"가 아니다 — 스프레드 병합에서 기존 사건 연결
@@ -362,11 +376,13 @@ export async function rememberSessionMeta(raw: SessionMetaInput): Promise<{ ok: 
             workSummary: input.workSummary || previous.workSummary,
             workSummaryAt: input.workSummaryAt ?? previous.workSummaryAt,
             workSummaryAtTurn: input.workSummaryAtTurn ?? previous.workSummaryAtTurn,
+            costByDay: addCost(previous.costByDay, input.costDelta),
+            costDelta: undefined,
             mtime: input.mtime ?? previous.mtime,
             folderName: input.folderName || previous.folderName,
             ssh: input.ssh || previous.ssh
           })
-        : nextMeta
+        : { ...nextMeta, costByDay: addCost(undefined, input.costDelta), costDelta: undefined }
       await writeSessionIndex([merged, ...entries.filter((entry) => entry.key !== merged.key)])
     })
     // 원격 세션 메타는 그 호스트의 공유 인덱스에도 반영해 다른 기기에서 보이게 한다.
@@ -1243,7 +1259,7 @@ export async function listFolderActivity(q: CaseActivityQuery): Promise<FolderAc
 // 세션 인덱스(마지막 활동 시각)만으로는 여러 날에 걸친 작업이 마지막 날에만 보이고,
 // 인덱스가 유실돼도 트랜스크립트는 남아 있으므로 파일을 직접 스캔한다.
 
-const WORK_LOG_SCAN_VERSION = 2 // 지시 정리 규칙이 바뀌면 올린다 (캐시 전체 재스캔)
+const WORK_LOG_SCAN_VERSION = 3 // 지시 정리 규칙이 바뀌면 올린다 (캐시 전체 재스캔). 3: 바뀐 파일·마지막 상태
 const REMOTE_WORK_LOG_TTL_MS = 10 * 60_000
 const REMOTE_WORK_LOG_TIMEOUT_MS = 25_000
 
@@ -1251,6 +1267,7 @@ interface WorkLogScanCacheEntry {
   mtime: number
   cwd?: string
   days: DayActivity[]
+  end?: SessionEnd
 }
 
 function workLogCachePath(): string {
@@ -1292,16 +1309,16 @@ async function scanLocalWorkLog(days: number): Promise<SessionDayScan[]> {
     const cached = cache[ref.sessionId]
     if (cached && cached.mtime === ref.mtime) {
       nextCache[ref.sessionId] = cached
-      out.push({ sessionId: ref.sessionId, cwd: cached.cwd, days: cached.days })
+      out.push({ sessionId: ref.sessionId, cwd: cached.cwd, days: cached.days, end: cached.end })
       continue
     }
     try {
       const read = await readTail(ref.file)
       const scan = daysFromTranscriptContent(read.content)
-      const entry: WorkLogScanCacheEntry = { mtime: ref.mtime, cwd: scan.cwd, days: scan.days }
+      const entry: WorkLogScanCacheEntry = { mtime: ref.mtime, cwd: scan.cwd, days: scan.days, end: scan.end }
       nextCache[ref.sessionId] = entry
       changed = true
-      if (scan.days.length) out.push({ sessionId: ref.sessionId, cwd: scan.cwd, days: scan.days })
+      if (scan.days.length) out.push({ sessionId: ref.sessionId, cwd: scan.cwd, days: scan.days, end: scan.end })
     } catch {
       /* 깨진 파일은 건너뛴다 */
     }
@@ -1348,36 +1365,87 @@ def text_of(msg):
     if isinstance(c, list):
         return ' '.join(x.get('text', '') for x in c if isinstance(x, dict) and x.get('type') == 'text')
     return None
+FILE_TOOLS = {'Write': 'write', 'Edit': 'edit', 'MultiEdit': 'edit', 'NotebookEdit': 'edit'}
+def parse_ts(ts):
+    try: return datetime.datetime.fromisoformat(ts.replace('Z', '+00:00')).astimezone()
+    except Exception: return None
+def day_of(days, dt):
+    key = dt.strftime('%Y-%m-%d')
+    ms = int(dt.timestamp() * 1000)
+    e = days.get(key)
+    if not e:
+        e = {'date': key, 'count': 0, 'lastTs': ms}
+        days[key] = e
+    return e, ms
+def end_of(d):
+    ts = d.get('timestamp')
+    dt = parse_ts(ts) if isinstance(ts, str) else None
+    if dt is None: return None
+    ms = int(dt.timestamp() * 1000)
+    if d.get('type') == 'user':
+        t = (text_of(d.get('message')) or '').strip()
+        return {'state': 'interrupted' if t.startswith('[Request interrupted') else 'open', 'ts': ms}
+    if d.get('type') != 'assistant': return None
+    if d.get('isApiErrorMessage') is True or isinstance(d.get('error'), str): return {'state': 'error', 'ts': ms}
+    c = (d.get('message') or {}).get('content')
+    tool = isinstance(c, list) and any(isinstance(x, dict) and x.get('type') == 'tool_use' for x in c)
+    return {'state': 'open' if tool else 'done', 'ts': ms}
 out = []
 for f in glob.glob(ROOT + '/*/*.jsonl'):
     try:
         if os.path.getmtime(f) < CUTOFF: continue
         sid = os.path.basename(f)[:-6]
         cwd = None
+        last = None
         days = {}
         with open(f, encoding='utf-8', errors='ignore') as fh:
             for line in fh:
-                if '"type":"user"' not in line and (cwd or '"cwd"' not in line): continue
+                is_user = '"type":"user"' in line
+                is_asst = (not is_user) and '"type":"assistant"' in line
+                command_only = is_user and ('<local-command' in line or '<command-name>' in line)
+                if (is_user or is_asst) and not command_only and '"isSidechain":true' not in line and '"isMeta":true' not in line: last = line
+                file_line = is_asst and any(('"name":"' + n + '"') in line for n in FILE_TOOLS)
+                if not is_user and not file_line and (cwd or '"cwd"' not in line): continue
                 try: d = json.loads(line)
                 except Exception: continue
                 if cwd is None and isinstance(d.get('cwd'), str): cwd = d['cwd']
-                if d.get('type') != 'user' or d.get('isMeta') is True or d.get('isSidechain') is True: continue
+                if d.get('isMeta') is True or d.get('isSidechain') is True: continue
                 ts = d.get('timestamp')
                 if not isinstance(ts, str): continue
-                try: dt = datetime.datetime.fromisoformat(ts.replace('Z', '+00:00')).astimezone()
-                except Exception: continue
+                dt = parse_ts(ts)
+                if dt is None: continue
+                if file_line and d.get('type') == 'assistant':
+                    c = (d.get('message') or {}).get('content')
+                    if not isinstance(c, list): continue
+                    for b in c:
+                        if not isinstance(b, dict) or b.get('type') != 'tool_use': continue
+                        kind = FILE_TOOLS.get(b.get('name'))
+                        inp = b.get('input') or {}
+                        p = inp.get('file_path') or inp.get('notebook_path')
+                        if not kind or not isinstance(p, str) or not p: continue
+                        e, ms = day_of(days, dt)
+                        fl = e.setdefault('files', [])
+                        k = next((x for x in fl if x['path'] == p), None)
+                        if k:
+                            if kind == 'write': k['kind'] = 'write'
+                        elif len(fl) < 30: fl.append({'path': p, 'kind': kind})
+                        e['lastTs'] = max(e['lastTs'], ms)
+                    continue
+                if d.get('type') != 'user': continue
                 t = clean(text_of(d.get('message')))
                 if not t: continue
-                key = dt.strftime('%Y-%m-%d')
-                ms = int(dt.timestamp() * 1000)
-                e = days.get(key)
-                if e:
-                    e['count'] += 1
-                    e['lastTs'] = max(e['lastTs'], ms)
-                else:
-                    days[key] = {'date': key, 'count': 1, 'firstText': t[:200], 'lastTs': ms}
+                e, ms = day_of(days, dt)
+                e['count'] += 1
+                if 'firstText' not in e or ms < e.get('firstTs', ms + 1):
+                    e['firstText'] = t[:200]
+                    e['firstTs'] = ms
+                e['lastTs'] = max(e['lastTs'], ms)
+        end = None
+        if last:
+            try: end = end_of(json.loads(last))
+            except Exception: end = None
         if days:
-            out.append({'sessionId': sid, 'cwd': cwd, 'days': sorted(days.values(), key=lambda x: x['date'])})
+            out.append({'sessionId': sid, 'cwd': cwd, 'days': sorted(days.values(), key=lambda x: x['date']), 'end': end})
     except Exception:
         pass
 print(json.dumps(out, ensure_ascii=False))
@@ -1487,11 +1555,11 @@ function syntheticScanMetas(
 }
 
 // 날짜별 작업일지: 로컬+원격 트랜스크립트 스캔을 합치고, 스캔이 닿지 못한 세션은 인덱스로 폴백.
-export async function listWorkLog(days = 30): Promise<WorkLogDay[]> {
+export async function listWorkLog(days = 30, cards: WorkLogBoardCard[] = []): Promise<WorkLogDay[]> {
   const scans = await collectWorkLogScans(days, true)
   // 인덱스는 원격 동기화(collectWorkLogScans 내)가 끝난 뒤 읽어야 방금 당겨온 제목·요약이 보인다.
   const entries = await readSessionIndex()
-  return mergeWorkLog(scans, entries, Date.now(), days)
+  return mergeWorkLog(scans, entries, Date.now(), days, cards)
 }
 
 // 주어진 cwd의 claude 세션 제목. since가 주어지면 그 시각 이후 갱신된 transcript만 본다
