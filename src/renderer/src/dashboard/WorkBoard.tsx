@@ -194,7 +194,8 @@ function ScopeField({ options, value, change }: { options: ScopeList; value?: Bo
   )
 }
 
-type FormDraft = BoardDraft & { resultKind: ReturnType<typeof boardResultKind> }
+// `auto`: a new instruction nobody has assigned yet. With departments it goes to the chief of staff, who routes it.
+type FormDraft = BoardDraft & { resultKind: ReturnType<typeof boardResultKind>; auto?: true }
 const resultLabels = { report: '보고서 받기', final: '최종안 승인받기', action: '승인 후 실행' } as const
 
 function approvalLabel(instruction: string) {
@@ -237,7 +238,7 @@ function InstructionForm({
     after_approval: boardResultKind(existing) === 'action' ? existing.after_approval : undefined,
     allowed_tools: boardResultKind(existing) === 'action' ? existing.allowed_tools : undefined
   }] : followUp ? [{ title: '', body: '', resultKind: 'report' }]
-    : whole && seed?.trim() ? [{ title: seed.trim().split(/\r?\n/, 1)[0].slice(0, 120), body: seed.trim(), resultKind: 'report' }] : [])
+    : whole && seed?.trim() ? [{ title: seed.trim().split(/\r?\n/, 1)[0].slice(0, 120), body: seed.trim(), resultKind: 'report', auto: true }] : [])
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const update = (index: number, patch: Partial<FormDraft>) =>
@@ -247,10 +248,12 @@ function InstructionForm({
     setDrafts(rows => rows.map(({ todoScope, ...draft }) => draft))
   })
   const DraftSettings = followUp ? 'details' : 'div'
-  const ready: BoardDraft[] = drafts.map(({ resultKind, todoScope, after_approval, allowed_tools, ...draft }, i) => {
+  const routed = (d: FormDraft) => !!d.chief || (!!d.auto && teams.length > 0 && !d.team && !d.agent)
+  const ready: BoardDraft[] = drafts.map(({ resultKind, todoScope, after_approval, allowed_tools, auto, ...draft }, i) => {
     const originalMode = existing && resultKind === boardResultKind(existing)
     return {
       ...draft,
+      chief: routed({ ...draft, resultKind, auto }) || undefined,
       title: followUp ? draft.body.trim().split(/\r?\n/, 1)[0].slice(0, 120) : draft.title,
       approval: resultKind === 'report' ? 'none' : 'required',
       after_approval: resultKind === 'action' ? after_approval : originalMode ? existing.after_approval : undefined,
@@ -261,8 +264,6 @@ function InstructionForm({
   const emptyFollowUp = followUp && !drafts[0]?.body.trim()
   const missingAction = drafts.some(d => d.resultKind === 'action' && !d.after_approval?.trim())
   const missingScope = ready.some((d, i) => reviewRows[i] && !d.todoScope)
-  // Sent from a conversation to a department: the lawyer picks the department or the chief of staff.
-  const missingDepartment = whole && drafts.some(d => !d.team && !d.chief)
   const options = agents.map((a) => (
     <option key={a.name} value={a.name} title={a.description}>
       {a.name}
@@ -280,11 +281,11 @@ function InstructionForm({
             .map((line) => line.trim())
             .filter(Boolean)
           setDrafts(
-            parts.map((body) => ({ body, title: body.split('\n')[0].slice(0, 120), resultKind: 'report' }))
+            parts.map((body) => ({ body, title: body.split('\n')[0].slice(0, 120), resultKind: 'report', auto: true }))
           )
           return
         }
-        if (busy || issue || emptyFollowUp || missingScope || missingAction || missingDepartment) return
+        if (busy || issue || emptyFollowUp || missingScope || missingAction) return
         setBusy(true)
         setError('')
         try {
@@ -333,14 +334,15 @@ function InstructionForm({
               <div className="wb-fields">
               <label>
                 담당
-                <select value={d.chief ? 'chief' : d.team ? 'team:' + d.team : d.agent || ''} onChange={(e) => {
+                <select value={routed(d) ? 'chief' : d.team ? 'team:' + d.team : d.agent || ''} onChange={(e) => {
                   const value = e.target.value
-                  update(i, value === 'chief' ? { chief: true, team: undefined, agent: undefined }
-                    : value.startsWith('team:') ? { team: value.slice(5), agent: undefined, chief: undefined } : { agent: value || undefined, team: undefined, chief: undefined })
+                  update(i, value === 'chief' ? { chief: true, team: undefined, agent: undefined, auto: undefined }
+                    : value.startsWith('team:') ? { team: value.slice(5), agent: undefined, chief: undefined, auto: undefined }
+                    : { agent: value || undefined, team: undefined, chief: undefined, auto: undefined })
                 }}>
-                  <option value="">기본 세션</option>
+                  <option value="">{teams.length ? '기본 세션 · 부서 없이 직접 처리' : '기본 세션'}</option>
                   {!existing?.delegatedBy && !existing?.routedBy && (teams.length > 0 || d.chief) &&
-                    <option value="chief">비서실장에게 맡김 · 부서를 골라 순서대로 맡김</option>}
+                    <option value="chief">자동 배분 · 비서실장이 맞는 부서를 골라 맡김</option>}
                   {!existing?.delegatedBy && (teams.length > 0 || d.team) && <optgroup label="부서 · 부서장이 나눠 맡김">
                     {d.team && !teams.some(team => team.name === d.team) && <option value={'team:' + d.team}>{d.team} (현재 미등록)</option>}
                     {teams.map(team => <option key={team.name} value={'team:' + team.name}>
@@ -353,7 +355,7 @@ function InstructionForm({
                   </optgroup>
                 </select>
                 {d.team && <small>부서장이 업무를 나눠 부서원에게 하위 업무로 맡기고, 부서원 보고서를 모아 최종 보고서를 씁니다.</small>}
-                {d.chief && <small>비서실장이 맡을 부서를 고르고, 여러 부서가 필요하면 순서대로 맡긴 뒤 부서 보고서를 모아 최종 보고서를 씁니다.</small>}
+                {routed(d) && <small>비서실장이 맡을 부서를 고르고, 여러 부서가 필요하면 순서대로 맡긴 뒤 부서 보고서를 모아 최종 보고서를 씁니다.</small>}
               </label>
               <label>
                 기한
@@ -437,8 +439,7 @@ function InstructionForm({
       {existing && <p className="wb-muted">내용을 변경하면 확인 필요 상태로 저장됩니다. 수정한 지시를 수행하려면 다시 대기열에 넣으세요.</p>}
       <div className="wb-actions">
         {ready.some(d => d.todoScope?.kind === 'all') && <small>{allTodosNotice}</small>}
-        {missingDepartment && <small role="status">{teams.length ? '담당에서 맡을 부서나 비서실장을 고르세요.' : '부서가 없습니다. 조직도의 부서 관리에서 부서를 먼저 만드세요.'}</small>}
-        <button disabled={busy || !!issue || emptyFollowUp || (!existing && !followUp && !raw.trim()) || missingScope || missingAction || missingDepartment} className="wb-btn wb-primary">
+        <button disabled={busy || !!issue || emptyFollowUp || (!existing && !followUp && !raw.trim()) || missingScope || missingAction} className="wb-btn wb-primary">
           {existing ? '변경 저장' : followUp ? '추가 지시 등록' : drafts.length ? drafts.length + '건 등록' : '지시 내용 확인'}
         </button>
       </div>

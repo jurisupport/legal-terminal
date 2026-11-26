@@ -5227,7 +5227,7 @@ export default function AgentPanel({
               </button>
             )}
             {onBulkInstructions && attachments.length === 0 && !quotedMessage && input.trim() && (
-              <button type="button" title="작성한 내용을 지시 하나로 업무 보드에 올리고 맡을 부서나 비서실장을 고릅니다" onClick={() => onBulkInstructions(input, true)}>
+              <button type="button" title="작성한 내용을 지시 하나로 업무 보드에 올립니다. 담당을 고르지 않으면 비서실장이 맞는 부서에 배분합니다" onClick={() => onBulkInstructions(input, true)}>
                 부서에 맡기기
               </button>
             )}

@@ -249,6 +249,8 @@ try {
     if (title === '작성') return { text: '## 결론\nWRITE_FINAL', costUsd: 0.25 }
     if (title === '복합 업무') return { text: '## 결론\nCHIEF_FINAL' }
     if (title === '단일 조사') return { text: '## 결론\nSINGLE_FINAL' }
+    if (title === '부서 없이 맡김') return { text: '## 결론\nNO_TEAMS_DIRECT' }
+    if (title === '맞는 부서 없음') return { text: '## 결론\nDIRECT_FINAL' }
     if (title === '매일 점검') return { text: '## 결론\nROUTINE_REPORT' }
     if (title === '보류 점검') return { blocked: true, text: '## 결재 필요\n\nBash(ls)' }
     if (title === '정지 확인') return { text: '1건 배분', costUsd: 0.4, assignments: [{ member: 'law', title: '정지 하위', instruction: '작성', after: [] }] }
@@ -258,7 +260,14 @@ try {
   board.stop()
   board = chiefBoard
   await board.start()
-  await assert.rejects(board.add([{ title: 'x', body: 'x', chief: true }]), /부서가 하나 이상/)
+  // With no department yet, work given to the chief of staff is still done, by the default session.
+  await board.add([{ title: '부서 없이 맡김', body: '조사해 줘', chief: true, approval: 'none' }])
+  tasks = await until(ts => ts.some(t => t.title === '부서 없이 맡김' && t.status === 'done'))
+  const noTeams = tasks.find(t => t.title === '부서 없이 맡김')
+  assert.equal(noTeams.chief, undefined)
+  assert.ok(noTeams.log.some(e => e.text === '비서실장 · 등록된 부서가 없어 기본 세션이 직접 처리'))
+  assert.deepEqual(chiefRuns.filter(r => r.title === '부서 없이 맡김').map(r => !!r.routing), [false])
+  assert.match((await board.detail(noTeams.id)).report, /NO_TEAMS_DIRECT/)
   await assert.rejects(board.add([{ title: 'x', body: 'x', chief: true, team: '조사부' }]), /하나만/)
   await board.saveTeams([
     { name: '조사부', color: '#376ac6', description: '판결과 문헌 조사', agents: ['fact'] },
@@ -289,7 +298,7 @@ try {
   // Only the chief's report reaches the lawyer.
   assert.equal(isBoardReport(research), false)
   assert.equal(isBoardReport(chiefTask), true)
-  assert.equal(board.unreadReportCount(), 1)
+  assert.equal(board.unreadReportCount(), 2, 'the chief report and the earlier no-department report')
   assert.equal(boardInstructionCost(chiefTask, tasks), 0.35)
   assert.match(boardMutationIssue(chiefTask, tasks, 'remove'), /비서실장이 배분한/)
 
@@ -299,10 +308,14 @@ try {
   assert.equal(chiefRuns.filter(r => r.title === '단일 업무').length, 1)
   assert.match((await board.detail(tasks.find(t => t.title === '단일 업무').id)).report, /SINGLE_FINAL/)
 
-  // No fitting department: the chief stops with its reason instead of guessing.
-  await board.add([{ title: '맞는 부서 없음', body: '세무 신고', chief: true }])
-  tasks = await until(ts => ts.some(t => t.title === '맞는 부서 없음' && t.status === 'blocked'))
-  assert.match((await board.detail(tasks.find(t => t.title === '맞는 부서 없음').id)).report, /NO_DEPARTMENT/)
+  // No fitting department: the chief records why, and the default session does the work instead of stopping.
+  await board.add([{ title: '맞는 부서 없음', body: '세무 신고', chief: true, approval: 'none' }])
+  tasks = await until(ts => ts.some(t => t.title === '맞는 부서 없음' && t.status === 'done'))
+  const unrouted = tasks.find(t => t.title === '맞는 부서 없음')
+  assert.equal(unrouted.chief, undefined)
+  assert.ok(unrouted.log.some(e => e.text.startsWith('비서실장 · 맞는 부서 없음 · ') && e.text.includes('NO_DEPARTMENT')))
+  assert.deepEqual(chiefRuns.filter(r => r.title === '맞는 부서 없음').map(r => !!r.routing), [true, false])
+  assert.match((await board.detail(unrouted.id)).report, /DIRECT_FINAL/)
 
   // Past the stop line, a member's session does not start.
   await board.add([{ title: '정지 확인', body: '작성', team: '작성부', approval: 'none' }])

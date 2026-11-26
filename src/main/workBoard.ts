@@ -80,6 +80,13 @@ async function replace(file: string, text: string) {
   await rename(tmp, file)
 }
 
+function withoutChief(task: BoardTask, text: string): BoardTask {
+  const next = structuredClone(task)
+  delete next.chief
+  append(next, text)
+  return next
+}
+
 function append(task: BoardTask, text: string) {
   task.updatedAt = new Date().toISOString()
   task.log.push({ at: task.updatedAt, text })
@@ -501,7 +508,6 @@ export class WorkBoard {
     this.teams = await (await this.departments()).teams()
     for (const input of inputs) {
       if (input.team && !this.teams.some(team => team.name === input.team)) throw new Error('등록되지 않은 부서입니다: ' + input.team)
-      if (input.chief && !this.teams.length) throw new Error('비서실장에게 맡기려면 부서가 하나 이상 있어야 합니다.')
     }
   }
 
@@ -1043,7 +1049,7 @@ export class WorkBoard {
         if (members.length) delegation = { team: team.name, members, supplement: true }
       }
     }
-    const chief = phase === 'work' && isBoardChiefTask(task)
+    let chief = phase === 'work' && isBoardChiefTask(task)
     let routing: { teams: { name: string; description?: string; members: number }[] } | undefined
     let routed: BoardTask[] = []
     if (chief) {
@@ -1054,10 +1060,11 @@ export class WorkBoard {
       }
       if (!routed.length) {
         if (!this.teams.length) {
-          await this.transition(task, 'blocked', '맡길 부서가 없습니다. 조직도의 부서 관리에서 부서를 만든 뒤 다시 실행해 주세요.')
-          return
-        }
-        routing = { teams: this.teams.map(team => ({ name: team.name, description: team.description, members: team.agents.length })) }
+          // With no department to route to, the work still gets done: the default session takes it directly.
+          task = withoutChief(task, '비서실장 · 등록된 부서가 없어 기본 세션이 직접 처리')
+          await this.save(task)
+          chief = false
+        } else routing = { teams: this.teams.map(team => ({ name: team.name, description: team.description, members: team.agents.length })) }
       }
     }
     // A department's stop line covers its whole instruction, members included.
@@ -1182,8 +1189,9 @@ export class WorkBoard {
           await this.recordCost(current, result.costUsd)
           if (chief && !result.blocked && !routed.length) {
             if (!result.routes?.length) {
-              await this.store.writeText(task.id + '.report.md', '## 비서실장 · 맡길 부서를 정하지 못함\n\n' + result.text)
-              await this.transition(current, 'blocked', '비서실장이 맡길 부서를 정하지 못했습니다. 보고서의 사유를 확인하고 부서를 직접 지정해 주세요.')
+              // No department fits: rather than stopping, the default session does the work itself.
+              const reason = result.text.trim().replace(/\s+/g, ' ').slice(0, 300)
+              await this.transition(withoutChief(current, '비서실장 · 맞는 부서 없음' + (reason ? ' · ' + reason : '')), 'queued', '기본 세션이 직접 처리')
               return
             }
             const ids: string[] = []

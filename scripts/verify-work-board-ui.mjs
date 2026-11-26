@@ -404,11 +404,12 @@ function run({ root, workspace, board, temp, home, profile, screenshot, bulk, fo
     await evaluate(`(() => { const input = [...document.querySelectorAll('.agent-composer textarea')].find(el=>el.offsetWidth)
       Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value').set.call(input, ${JSON.stringify(bulk)})
       input.dispatchEvent(new Event('input', {bubbles:true})) })()`)
-    // "부서에 맡기기" sends the whole text as one instruction and waits for a department or the chief of staff.
+    // "부서에 맡기기" sends the whole text as one instruction; unassigned, the chief of staff routes it.
     await click('.agent-composer button', '부서에 맡기기')
     await wait(() => evaluate("document.querySelectorAll('.wb-dialog .wb-draft').length === 1"), 'one department instruction')
     assert.equal(await evaluate("document.querySelector('.wb-dialog .wb-draft textarea').value"), bulk.trim())
-    assert.equal(await evaluate("document.querySelector('.wb-dialog .wb-primary').disabled"), true, 'a department must be chosen')
+    assert.equal(await evaluate("document.querySelector('.wb-dialog .wb-primary').disabled"), false, 'no department needs choosing')
+    assert.equal(await evaluate("[...document.querySelectorAll('.wb-draft label')].find(el=>el.textContent.trim().startsWith('담당')).querySelector('select').value"), 'chief')
     assert.deepEqual(JSON.parse(await evaluate("JSON.stringify([...[...document.querySelectorAll('.wb-draft label')].find(el=>el.textContent.trim().startsWith('담당')).querySelector('select').options].map(o=>o.value).filter(v=>v==='chief'||v.startsWith('team:')))")),
       ['chief', 'team:송무팀'])
     await click('.wb-dialog button', '닫기')
@@ -426,7 +427,10 @@ function run({ root, workspace, board, temp, home, profile, screenshot, bulk, fo
         const choice = field(draft,'업무 결과')
         if (!choice.offsetWidth || choice.value !== 'report') throw Error('새 지시는 보이는 업무 결과 선택란에서 보고서 받기로 시작해야 합니다.')
       }
+      for (const draft of drafts) if (field(draft,'담당').value !== 'chief') throw Error('담당을 고르지 않은 새 지시는 자동 배분으로 시작해야 합니다.')
       set(field(drafts[0],'담당'),'compliance')
+      set(field(drafts[1],'담당'),'')
+      set(field(drafts[2],'담당'),'')
       set(field(drafts[1],'업무 결과'),'final')
       set(field(drafts[2],'업무 결과'),'action')
     })()`)
@@ -589,6 +593,9 @@ function run({ root, workspace, board, temp, home, profile, screenshot, bulk, fo
       })()`)
       await inputText('.wb-dialog textarea', '할일 검토')
       await click('.wb-dialog button', '지시 내용 확인')
+      // These checks are about the default session's todo review, not routing.
+      await evaluate(`(() => { const select = [...document.querySelectorAll('.wb-draft label')].find(el=>el.textContent.trim().startsWith('담당'))?.querySelector('select')
+        if (select && select.value === 'chief') { select.value = ''; select.dispatchEvent(new Event('change', {bubbles:true})) } })()`)
       const notice = "document.querySelector('.wb-dialog .wb-primary').parentElement.textContent.includes('이 보드 폴더에 보고서로 저장')"
       if (choice === 'pinned') {
         await wait(() => evaluate("document.querySelector('.wb-draft')?.textContent.includes('할일 검토 범위 · case-a')"), 'linked case is fixed')
