@@ -172,7 +172,15 @@ function freshApp(usageHydration) {
       if (name === './agentPrompt') return { prependAgentContext: (_context, text) => text }
       if (name === '../../shared/media') return {}
       if (name === '@anthropic-ai/claude-agent-sdk') return { query: () => { throw new Error('Unexpected real model query') } }
-      if (name === 'child_process') return { spawn: () => { throw new Error('Unexpected unmanaged subprocess') } }
+      if (name === 'child_process') return {
+        spawn: () => { throw new Error('Unexpected unmanaged subprocess') },
+        execFile(bin, args, _options, done) {
+          assert.match(bin, /ssh(?:\.exe)?$/i)
+          assert.ok(args.at(-1).includes('/usage'), 'only the remote quota query can run outside the transport')
+          done(null, JSON.stringify({ status: 'SUCCESS', command: { name: 'usage', data: { groups: [] } } }))
+          return {}
+        }
+      }
       if (name.startsWith('.')) throw new Error(`Unexpected dependency ${name}`)
       return require(name)
     }
