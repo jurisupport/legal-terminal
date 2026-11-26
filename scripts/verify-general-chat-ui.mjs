@@ -329,7 +329,7 @@ function runApp({ root, temp, screenshotDir, provider, mode, remote, restart }) 
       })()`), true, 'the visible remote picker receives pointer input above the board')
       await evaluate(`[...document.querySelectorAll('.remote-picker button')].find(b => b.textContent.includes('이 폴더로 업무 보드 열기')).click()`)
     }
-    await evaluate(`document.querySelector('.workspace-todo-header .work-board-links button').click()`)
+    await evaluate(`[...document.querySelectorAll('.workspace-todo-header .work-board-links button')].find(b => b.textContent.trim() === '업무 보드').click()`)
     if (fromPicker) await pickRemote()
     else await wait(() => evaluate(`${boardSelect}?.value === ${JSON.stringify('ssh://phone-host' + remoteCwd)}`), 'remote general chat board')
     await setFolder('')

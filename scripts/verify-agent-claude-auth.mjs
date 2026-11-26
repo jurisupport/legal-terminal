@@ -37,7 +37,7 @@ const context = vm.createContext({
   remoteClaudeAuthCommand: () => 'remote auth login', stopClaudeAuthCallbackForward() {},
   emitAuthOutput() {}, emitCurrentSessionStatus() {},
   handleAssistantMessage() {}, handleResultMessage() {}, emitProcessEvent() {},
-  rememberClaudeUsageSummary() {}, accumulateResultUsage() {}, hasRunningClaudeTasks: () => false,
+  rememberClaudeUsageSummary() {}, accumulateResultUsage() {}, recordTurnCost() {}, hasRunningClaudeTasks: () => false,
   maybeGenerateSessionTitle() {}, scheduleWorkSummary() {},
   projectSessionError() {}, isEmptyAgentInput: input => !input.text,
   startAgentTurn: (session, input) => turns.push({ session, input })
