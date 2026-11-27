@@ -1013,9 +1013,9 @@ setBoardWorkLogReader(async (team) => {
 })
 ipcMain.handle('sessions:workLogDepartments', () => listWorkLogDepartments())
 ipcMain.handle('sessions:setDepartment', (_e, input: Parameters<typeof setSessionDepartment>[0]) => setSessionDepartment(input))
-ipcMain.handle('sessions:workLog', async (_e, p: { days?: number } | undefined) => {
+ipcMain.handle('sessions:workLog', async (_e, p: { days?: number; quick?: boolean } | undefined) => {
   const days = p?.days ?? 30
-  return listWorkLog(days, await boardWorkLogCards(Date.now() - days * 86_400_000))
+  return listWorkLog(days, await boardWorkLogCards(Date.now() - days * 86_400_000), { quick: p?.quick === true })
 })
 // 사건 미연결 폴더 작업 그룹
 ipcMain.handle('sessions:byFolder', (_e, q: CaseActivityQuery) => listFolderActivity(q))

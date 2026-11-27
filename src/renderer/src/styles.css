@@ -1521,6 +1521,7 @@ body {
 .wlog-chip:hover { background: var(--bg-activity); }
 .wlog-chip.on { color: #fff; background: var(--accent); border-color: #1a85d0; }
 .wlog-case-filter { display: flex; align-items: center; gap: 6px; font-size: 12px; margin-left: auto; }
+.wlog-refreshing { font-style: normal; color: #9d9d9d; }
 .wlog-case-filter select { font: inherit; font-size: 12px; color: var(--fg); background: #2d2d2d; border: 1px solid #3c3c3c; border-radius: 6px; padding: 3px 6px; max-width: 280px; }
 .wlog-summary { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 8px; }
 .wlog-summary > div { display: flex; flex-direction: column; background: var(--bg-alt); border: 1px solid #2f2f31; border-radius: 8px; padding: 8px 12px; }

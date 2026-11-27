@@ -18,7 +18,8 @@ async function checkWorkLog({ root, temp, output, channels }) {
   const { app, BrowserWindow, ipcMain, session } = require('electron')
   const fs = require('node:fs'), path = require('node:path'), assert = require('node:assert/strict')
   app.setPath('userData', path.join(temp, 'profile'))
-  const errors = [], opened = [], departmentCalls = [], boardAdds = []
+  const errors = [], opened = [], departmentCalls = [], boardAdds = [], workLogCalls = []
+  let holdWorkLog = null
   let markRendererReady
   const rendererReady = new Promise(resolve => { markRendererReady = resolve })
   const noon = new Date().setHours(12, 0, 0, 0)
@@ -57,7 +58,10 @@ async function checkWorkLog({ root, temp, output, channels }) {
   const settings = { sshProfiles: [{ id: 'office', label: '사무실 서버', host: 'office.invalid', user: 'fixture' }], notifyDone: false, agentDefaultProvider: 'claude' }
   for (const channel of channels) ipcMain.handle(channel, (_event, ...args) => {
     if (channel === 'tabs:ready') { markRendererReady(); return }
-    if (channel === 'sessions:workLog') return days
+    if (channel === 'sessions:workLog') {
+      workLogCalls.push(args[0] ?? {})
+      return !args[0]?.quick && holdWorkLog ? holdWorkLog.then(() => days) : days
+    }
     if (channel === 'sessions:workLogDepartments') return [{ name: '송무팀', color: '#4f8ef7', description: '소송 서면' }, { name: '조사부', color: '#e8a64a' }, { name: '작성부', color: '#4ec9b0' }]
     if (channel === 'sessions:setDepartment') { departmentCalls.push(args[0]); return { ok: true } }
     if (channel === 'workBoard:open' || channel === 'workBoard:snapshot') return {
@@ -112,6 +116,13 @@ async function checkWorkLog({ root, temp, output, channels }) {
     await wait("[...document.querySelectorAll('.work-board-links button')].some(b => b.textContent === '작업일지')", 'work log button')
     await click('.work-board-links button', '작업일지')
     await wait("document.querySelectorAll('.work-log-window[open] .wlog-row').length > 0", 'work log rows')
+
+    // A first open draws from what the app already kept for remote servers, then waits for the fresh scan.
+    assert.ok(workLogCalls.some(call => call.quick === true), 'first open asks for the quick result')
+    assert.ok(workLogCalls.some(call => !call.quick), 'and the fresh one')
+
+    await wait("!document.querySelector('.wlog-refreshing')", 'first refresh done')
+    const caseFilterTop = await run(`return document.querySelector('.wlog-case-filter').getBoundingClientRect().top`)
 
     // Today by default: three rows, the board instruction counted with its two sub-cards.
     assert.equal(await rows(), 3)
@@ -197,8 +208,19 @@ async function checkWorkLog({ root, temp, output, channels }) {
     assert.equal(boardAdds.at(-1)?.[0], '/cases/김손해배상')
     assert.equal(boardAdds.at(-1)?.[1]?.[0]?.team, '송무팀')
     await run(`document.querySelector('.work-board-window button[aria-label="작업 공간으로 돌아가기"]').click()`)
+    // Reopening shows the last result at once while the fresh scan is still out, then drops the notice.
+    const callsBefore = workLogCalls.length
+    let release
+    holdWorkLog = new Promise(resolve => { release = resolve })
     await click('.work-board-links button', '작업일지')
-    await wait("document.querySelectorAll('.work-log-window[open] .wlog-row').length > 0", 'work log reopened')
+    await wait("document.querySelectorAll('.work-log-window[open] .wlog-row').length > 0 && !!document.querySelector('.wlog-refreshing')", 'work log reopened from memory')
+    assert.ok(!(await run(`return document.body.innerText.includes('작업 기록을 모으는 중')`)), 'no empty loading state on reopen')
+    assert.equal(await run(`return document.querySelector('.wlog-case-filter').getBoundingClientRect().top`), caseFilterTop, 'the notice does not push the filters around')
+    assert.ok(workLogCalls.slice(callsBefore).every(call => !call.quick), 'reopen goes straight to the fresh scan')
+    await capture('reopen-refreshing')
+    release()
+    holdWorkLog = null
+    await wait("!document.querySelector('.wlog-refreshing')", 'refresh notice cleared')
 
     // Narrow window: rows stack and nothing scrolls sideways.
     w.setContentSize(820, 900)
@@ -211,7 +233,7 @@ async function checkWorkLog({ root, temp, output, channels }) {
     await click('.work-log-window > header > button', '작업 공간')
     await wait("!document.querySelector('.work-log-window')", 'closed')
     if (errors.length) throw Error('Renderer errors: ' + errors.join('\n'))
-    console.log('PASS 작업일지 · 오늘·상태·기간·사건 필터 · 요약 숫자 · 일반 대화/업무 보드 묶음 · 상세(그날 지시·파일 열기·원격 경로) · 부서 추천 확정·필터·변경·해당 없음 · 이어서 맡기기 · 좁은 창')
+    console.log('PASS 작업일지 · 오늘·상태·기간·사건 필터 · 요약 숫자 · 일반 대화/업무 보드 묶음 · 상세(그날 지시·파일 열기·원격 경로) · 부서 추천 확정·필터·변경·해당 없음 · 이어서 맡기기 · 다시 열면 즉시 표시 · 좁은 창')
     app.exit(0)
   } catch (error) {
     await capture('failure').catch(() => {})

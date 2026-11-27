@@ -1294,8 +1294,8 @@ const api = {
       ipcRenderer.invoke('sessions:remember', input),
     byCase: (q: CaseActivityQuery): Promise<Record<string, CaseActivity>> =>
       ipcRenderer.invoke('sessions:byCase', q),
-    workLog: (days?: number): Promise<WorkLogDay[]> =>
-      ipcRenderer.invoke('sessions:workLog', { days }),
+    workLog: (days?: number, options?: { quick?: boolean }): Promise<WorkLogDay[]> =>
+      ipcRenderer.invoke('sessions:workLog', { days, quick: options?.quick }),
     workLogDepartments: (): Promise<WorkLogDepartment[]> => ipcRenderer.invoke('sessions:workLogDepartments'),
     setDepartment: (input: SessionDepartmentInput): Promise<{ ok: boolean; error?: string }> =>
       ipcRenderer.invoke('sessions:setDepartment', input),

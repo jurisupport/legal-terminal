@@ -1194,7 +1194,7 @@ export interface LtApi {
     transcript: (sessionId: string, ssh?: SshConn) => Promise<SessionTranscript | null>
     remember: (input: SessionRememberInput) => Promise<{ ok: boolean; error?: string }>
     byCase: (q: CaseActivityQuery) => Promise<Record<string, CaseActivity>>
-    workLog: (days?: number) => Promise<WorkLogDay[]>
+    workLog: (days?: number, options?: { quick?: boolean }) => Promise<WorkLogDay[]>
     workLogDepartments: () => Promise<WorkLogDepartment[]>
     setDepartment: (input: SessionDepartmentInput) => Promise<{ ok: boolean; error?: string }>
     byFolder: (q: CaseActivityQuery) => Promise<FolderActivity[]>

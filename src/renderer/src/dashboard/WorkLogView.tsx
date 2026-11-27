@@ -2,6 +2,11 @@ import { Fragment, useEffect, useMemo, useState } from 'react'
 import type { DepartmentSource, SessionTranscript, SshProfile, WorkLogDay, WorkLogDepartment, WorkLogFile, WorkLogItem, WorkLogStatus } from '../env'
 
 const WORK_LOG_DAYS = 30
+
+// 작업일지를 닫았다 다시 열 때 빈 화면으로 기다리지 않도록 마지막 결과를 기억한다 (기간별).
+// 다시 열면 이 결과를 먼저 보이고, 뒤에서 새로 모은 결과로 바꾼다.
+const workLogMemo = new Map<number, WorkLogDay[]>()
+let departmentsMemo: WorkLogDepartment[] | null = null
 const WEEKDAY_KO = ['일', '월', '화', '수', '목', '금', '토']
 
 function dayKey(ms: number): string {
@@ -195,16 +200,17 @@ export default function WorkLogView({
   /** Opens the work board form with a drafted instruction, and the department to start with. */
   onHandoff?: (e: WorkLogItem, text: string, team?: string) => void
 }): JSX.Element {
-  const [daysData, setDaysData] = useState<WorkLogDay[] | null>(null)
+  const [daysData, setDaysData] = useState<WorkLogDay[] | null>(() => workLogMemo.get(WORK_LOG_DAYS) ?? null)
   const [failed, setFailed] = useState(false)
   const [windowDays, setWindowDays] = useState(WORK_LOG_DAYS)
   const [extending, setExtending] = useState(false)
+  const [refreshing, setRefreshing] = useState(false)
   const [menu, setMenu] = useState<{ x: number; y: number; item: WorkLogItem } | null>(null)
   const [period, setPeriod] = useState<Period>(full ? 'today' : 'month')
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('all')
   const [caseFilter, setCaseFilter] = useState('')
   const [selected, setSelected] = useState<{ key: string; date: string } | null>(null)
-  const [departments, setDepartments] = useState<WorkLogDepartment[]>([])
+  const [departments, setDepartments] = useState<WorkLogDepartment[]>(() => departmentsMemo ?? [])
   const [departmentFilter, setDepartmentFilter] = useState('all')
   const [includeSuggested, setIncludeSuggested] = useState(true)
   const [overrides, setOverrides] = useState<Record<string, DepartmentChoice>>({})
@@ -212,17 +218,41 @@ export default function WorkLogView({
 
   useEffect(() => {
     let alive = true
-    setExtending(true)
+    let settled = false
+    const memo = workLogMemo.get(windowDays)
+    const show = (r: WorkLogDay[]): void => {
+      workLogMemo.set(windowDays, r)
+      if (!alive) return
+      setDaysData(r)
+      setFailed(false)
+      setExtending(false)
+    }
+    if (memo) setDaysData(memo)
+    else setExtending(true)
+    setRefreshing(true)
+    // 기억한 결과가 없으면 원격은 앱이 저장해 둔 결과로 먼저 그린다 — 서버를 다시 읽는 동안 비워 두지 않는다.
+    if (!memo) {
+      window.lt.sessions
+        .workLog(windowDays, { quick: true })
+        .then((r) => {
+          if (!settled) show(r)
+        })
+        .catch(() => {})
+    }
     window.lt.sessions
       .workLog(windowDays)
       .then((r) => {
-        if (alive) setDaysData(r)
+        settled = true
+        show(r)
       })
       .catch(() => {
-        if (alive) setFailed(true)
+        settled = true
+        if (alive && !workLogMemo.has(windowDays)) setFailed(true)
       })
       .finally(() => {
-        if (alive) setExtending(false)
+        if (!alive) return
+        setExtending(false)
+        setRefreshing(false)
       })
     return () => {
       alive = false
@@ -233,7 +263,10 @@ export default function WorkLogView({
     let alive = true
     window.lt.sessions
       .workLogDepartments()
-      .then((list) => alive && setDepartments(list))
+      .then((list) => {
+        departmentsMemo = list
+        if (alive) setDepartments(list)
+      })
       .catch(() => {})
     return () => {
       alive = false
@@ -497,7 +530,17 @@ export default function WorkLogView({
           </label>
         </div>
         <div className="wlog-summary" aria-label="요약">
-          <div><span>세션</span><b>{summary.sessions}개</b></div>
+          <div>
+            <span>
+              세션
+              {refreshing && daysData && (
+                <em className="wlog-refreshing" role="status">
+                  {' '}· 새 기록 확인 중…
+                </em>
+              )}
+            </span>
+            <b>{summary.sessions}개</b>
+          </div>
           <div><span>완료</span><b className="wlog-status-done">{summary.done}건</b></div>
           <div><span>하다 만 일</span><b className="wlog-status-unfinished">{summary.unfinished}건</b></div>
           <div><span>결재 대기</span><b className="wlog-status-pending">{summary.pending}건</b></div>

@@ -1267,9 +1267,9 @@ export async function listFolderActivity(q: CaseActivityQuery): Promise<FolderAc
 // 세션 인덱스(마지막 활동 시각)만으로는 여러 날에 걸친 작업이 마지막 날에만 보이고,
 // 인덱스가 유실돼도 트랜스크립트는 남아 있으므로 파일을 직접 스캔한다.
 
-const WORK_LOG_SCAN_VERSION = 3 // 지시 정리 규칙이 바뀌면 올린다 (캐시 전체 재스캔). 3: 바뀐 파일·마지막 상태
+const WORK_LOG_SCAN_VERSION = 4 // 지시 정리 규칙이 바뀌면 올린다 (캐시 전체 재스캔). 3: 바뀐 파일·마지막 상태, 4: 원격도 작업 범위 블록 제거
 const REMOTE_WORK_LOG_TTL_MS = 10 * 60_000
-const REMOTE_WORK_LOG_TIMEOUT_MS = 25_000
+const REMOTE_WORK_LOG_TIMEOUT_MS = 45_000 // 서버 캐시가 비어 있으면 전체를 읽는다 (5천 개 기준 약 10초)
 
 interface WorkLogScanCacheEntry {
   mtime: number
@@ -1338,7 +1338,53 @@ async function scanLocalWorkLog(days: number): Promise<SessionDayScan[]> {
 }
 
 // 원격 트랜스크립트 스캔 — 파일을 내려받지 않고 원격에서 python3로 집계해 JSON만 받는다.
-const remoteWorkLogCache = new Map<string, { fetchedAt: number; sessions: SessionDayScan[] }>()
+// 서버 쪽은 ~/.cache/legal-terminal에 파일별 결과를 기억해 바뀐 파일만 다시 읽는다.
+// 받은 결과는 앱 쪽에도 디스크로 남겨, 앱을 다시 켠 직후에도 작업일지가 바로 뜬다.
+interface RemoteWorkLogCacheEntry {
+  fetchedAt: number
+  days: number
+  sessions: SessionDayScan[]
+}
+const remoteWorkLogCache = new Map<string, RemoteWorkLogCacheEntry>()
+let remoteWorkLogCacheLoaded: Promise<void> | null = null
+let remoteWorkLogCacheWrite: Promise<void> = Promise.resolve()
+
+function remoteWorkLogCachePath(): string {
+  return join(app.getPath('userData'), 'worklog-remote.json')
+}
+
+function loadRemoteWorkLogCache(): Promise<void> {
+  remoteWorkLogCacheLoaded ??= readFile(remoteWorkLogCachePath(), 'utf8')
+    .then((raw) => {
+      const parsed = JSON.parse(raw) as { version?: number; remote?: Record<string, RemoteWorkLogCacheEntry> }
+      if (parsed.version !== WORK_LOG_SCAN_VERSION || !parsed.remote) return
+      for (const [key, entry] of Object.entries(parsed.remote)) {
+        if (remoteWorkLogCache.has(key)) continue
+        if (typeof entry?.fetchedAt === 'number' && typeof entry.days === 'number' && Array.isArray(entry.sessions)) {
+          remoteWorkLogCache.set(key, entry)
+        }
+      }
+    })
+    .catch(() => {})
+  return remoteWorkLogCacheLoaded
+}
+
+function saveRemoteWorkLogCache(): void {
+  remoteWorkLogCacheWrite = remoteWorkLogCacheWrite.then(async () => {
+    try {
+      const file = remoteWorkLogCachePath()
+      const tmp = `${file}.${process.pid}.tmp`
+      await writeFile(tmp, JSON.stringify({ version: WORK_LOG_SCAN_VERSION, remote: Object.fromEntries(remoteWorkLogCache) }), 'utf8')
+      await rename(tmp, file)
+    } catch {
+      /* 저장 실패는 다음 실행의 첫 화면이 조금 늦어질 뿐이다. */
+    }
+  })
+}
+
+function freshRemoteWorkLog(entry: RemoteWorkLogCacheEntry | undefined, days: number): boolean {
+  return !!entry && entry.days >= days && Date.now() - entry.fetchedAt < REMOTE_WORK_LOG_TTL_MS
+}
 
 function remoteWorkLogScript(days: number): string {
   const windowDays = Math.max(1, Math.min(365, Math.floor(days)))
@@ -1348,6 +1394,7 @@ python3 - <<'PY'
 import json, os, glob, re, datetime
 ROOT = os.path.expanduser('~/.claude/projects')
 CUTOFF = datetime.datetime.now().timestamp() - ${windowDays} * 86400
+VERSION = ${WORK_LOG_SCAN_VERSION}
 NOISE = {'/usage','/context','/cost','/compact','/clear','/exit','/login','/logout','/model','/status','/help','/doctor','/resume'}
 def clean(t):
     t = (t or '').strip()
@@ -1361,7 +1408,18 @@ def clean(t):
         return (m.group(1) + (' ' + arg if arg else '')).strip()
     if re.search(r'<local-command-caveat>|<local-command-stdout>|<command-message>', t): return None
     if t.startswith('[Request interrupted'): return None
-    if 'transcript입니다' in t: return None
+    if '원본 대화 transcript입니다' in t: return None
+    # 앱이 덧붙인 작업 범위·규칙 블록은 빼고 사용자가 실제로 쓴 지시만 남긴다 (workLogData.cleanUserInstruction과 같은 규칙).
+    m = re.search(r'<legal-terminal-user-request>\\s*([\\s\\S]*?)\\s*</legal-terminal-user-request>', t, re.I)
+    if m: t = m.group(1)
+    t = re.sub(r'^사용자가 진행 중인 작업을 중단하고 방향 전환을 요청했습니다\\. 아래 지시를 최우선으로 반영하세요\\.\\s*', '', t)
+    if '진행하던 대화 transcript입니다' in t:
+        i = t.rfind('지금 처리할 사용자 지시:')
+        if i >= 0: t = t[i + len('지금 처리할 사용자 지시:'):]
+    if '다음은 사용자가 인용한 이전 에이전트 답변입니다' in t:
+        i = t.rfind('</quoted-agent-response>')
+        if i >= 0: t = t[i + len('</quoted-agent-response>'):]
+    t = re.sub(r'(?:^|(?:\\r?\\n){2,})\\[legal-terminal attachments\\][\\s\\S]*$', '', t)
     t = re.sub(r'<system-reminder>[\\s\\S]*?</system-reminder>', ' ', t)
     t = re.sub(r'<ide_selection>[\\s\\S]*?</ide_selection>', ' ', t)
     t = re.sub(r'</?[A-Za-z][A-Za-z0-9_-]*>', ' ', t)
@@ -1398,62 +1456,88 @@ def end_of(d):
     c = (d.get('message') or {}).get('content')
     tool = isinstance(c, list) and any(isinstance(x, dict) and x.get('type') == 'tool_use' for x in c)
     return {'state': 'open' if tool else 'done', 'ts': ms}
+def scan(f):
+    sid = os.path.basename(f)[:-6]
+    cwd = None
+    last = None
+    days = {}
+    with open(f, encoding='utf-8', errors='ignore') as fh:
+        for line in fh:
+            is_user = '"type":"user"' in line
+            is_asst = (not is_user) and '"type":"assistant"' in line
+            command_only = is_user and ('<local-command' in line or '<command-name>' in line)
+            if (is_user or is_asst) and not command_only and '"isSidechain":true' not in line and '"isMeta":true' not in line: last = line
+            file_line = is_asst and any(('"name":"' + n + '"') in line for n in FILE_TOOLS)
+            if not is_user and not file_line and (cwd or '"cwd"' not in line): continue
+            try: d = json.loads(line)
+            except Exception: continue
+            if cwd is None and isinstance(d.get('cwd'), str): cwd = d['cwd']
+            if d.get('isMeta') is True or d.get('isSidechain') is True: continue
+            ts = d.get('timestamp')
+            if not isinstance(ts, str): continue
+            dt = parse_ts(ts)
+            if dt is None: continue
+            if file_line and d.get('type') == 'assistant':
+                c = (d.get('message') or {}).get('content')
+                if not isinstance(c, list): continue
+                for b in c:
+                    if not isinstance(b, dict) or b.get('type') != 'tool_use': continue
+                    kind = FILE_TOOLS.get(b.get('name'))
+                    inp = b.get('input') or {}
+                    p = inp.get('file_path') or inp.get('notebook_path')
+                    if not kind or not isinstance(p, str) or not p: continue
+                    e, ms = day_of(days, dt)
+                    fl = e.setdefault('files', [])
+                    k = next((x for x in fl if x['path'] == p), None)
+                    if k:
+                        if kind == 'write': k['kind'] = 'write'
+                    elif len(fl) < 30: fl.append({'path': p, 'kind': kind})
+                    e['lastTs'] = max(e['lastTs'], ms)
+                continue
+            if d.get('type') != 'user': continue
+            t = clean(text_of(d.get('message')))
+            if not t: continue
+            e, ms = day_of(days, dt)
+            e['count'] += 1
+            if 'firstText' not in e or ms < e.get('firstTs', ms + 1):
+                e['firstText'] = t[:200]
+                e['firstTs'] = ms
+            e['lastTs'] = max(e['lastTs'], ms)
+    end = None
+    if last:
+        try: end = end_of(json.loads(last))
+        except Exception: end = None
+    if not days: return None
+    return {'sessionId': sid, 'cwd': cwd, 'days': sorted(days.values(), key=lambda x: x['date']), 'end': end}
+CACHE = os.path.expanduser('~/.cache/legal-terminal/worklog-scan-v%d.json' % VERSION)
+try:
+    with open(CACHE, encoding='utf-8') as fh: cache = json.load(fh)
+    if not isinstance(cache, dict): cache = {}
+except Exception:
+    cache = {}
+next_cache = {}
+changed = False
 out = []
 for f in glob.glob(ROOT + '/*/*.jsonl'):
     try:
-        if os.path.getmtime(f) < CUTOFF: continue
-        sid = os.path.basename(f)[:-6]
-        cwd = None
-        last = None
-        days = {}
-        with open(f, encoding='utf-8', errors='ignore') as fh:
-            for line in fh:
-                is_user = '"type":"user"' in line
-                is_asst = (not is_user) and '"type":"assistant"' in line
-                command_only = is_user and ('<local-command' in line or '<command-name>' in line)
-                if (is_user or is_asst) and not command_only and '"isSidechain":true' not in line and '"isMeta":true' not in line: last = line
-                file_line = is_asst and any(('"name":"' + n + '"') in line for n in FILE_TOOLS)
-                if not is_user and not file_line and (cwd or '"cwd"' not in line): continue
-                try: d = json.loads(line)
-                except Exception: continue
-                if cwd is None and isinstance(d.get('cwd'), str): cwd = d['cwd']
-                if d.get('isMeta') is True or d.get('isSidechain') is True: continue
-                ts = d.get('timestamp')
-                if not isinstance(ts, str): continue
-                dt = parse_ts(ts)
-                if dt is None: continue
-                if file_line and d.get('type') == 'assistant':
-                    c = (d.get('message') or {}).get('content')
-                    if not isinstance(c, list): continue
-                    for b in c:
-                        if not isinstance(b, dict) or b.get('type') != 'tool_use': continue
-                        kind = FILE_TOOLS.get(b.get('name'))
-                        inp = b.get('input') or {}
-                        p = inp.get('file_path') or inp.get('notebook_path')
-                        if not kind or not isinstance(p, str) or not p: continue
-                        e, ms = day_of(days, dt)
-                        fl = e.setdefault('files', [])
-                        k = next((x for x in fl if x['path'] == p), None)
-                        if k:
-                            if kind == 'write': k['kind'] = 'write'
-                        elif len(fl) < 30: fl.append({'path': p, 'kind': kind})
-                        e['lastTs'] = max(e['lastTs'], ms)
-                    continue
-                if d.get('type') != 'user': continue
-                t = clean(text_of(d.get('message')))
-                if not t: continue
-                e, ms = day_of(days, dt)
-                e['count'] += 1
-                if 'firstText' not in e or ms < e.get('firstTs', ms + 1):
-                    e['firstText'] = t[:200]
-                    e['firstTs'] = ms
-                e['lastTs'] = max(e['lastTs'], ms)
-        end = None
-        if last:
-            try: end = end_of(json.loads(last))
-            except Exception: end = None
-        if days:
-            out.append({'sessionId': sid, 'cwd': cwd, 'days': sorted(days.values(), key=lambda x: x['date']), 'end': end})
+        st = os.stat(f)
+        if st.st_mtime < CUTOFF: continue
+        c = cache.get(f)
+        if isinstance(c, dict) and c.get('m') == st.st_mtime and c.get('s') == st.st_size:
+            r = c.get('r')
+        else:
+            r = scan(f)
+            changed = True
+        next_cache[f] = {'m': st.st_mtime, 's': st.st_size, 'r': r}
+        if r: out.append(r)
+    except Exception:
+        pass
+if changed or len(next_cache) != len(cache):
+    try:
+        os.makedirs(os.path.dirname(CACHE), exist_ok=True)
+        tmp = CACHE + '.' + str(os.getpid()) + '.tmp'
+        with open(tmp, 'w', encoding='utf-8') as fh: json.dump(next_cache, fh, ensure_ascii=False)
+        os.replace(tmp, CACHE)
     except Exception:
         pass
 print(json.dumps(out, ensure_ascii=False))
@@ -1465,49 +1549,53 @@ const remoteWorkLogInflight = new Map<string, Promise<SessionDayScan[]>>()
 
 async function scanRemoteWorkLog(ssh: SshConn, days: number): Promise<SessionDayScan[]> {
   const key = remoteSourceKey(ssh)
+  await loadRemoteWorkLogCache()
   const cached = remoteWorkLogCache.get(key)
-  if (cached && Date.now() - cached.fetchedAt < REMOTE_WORK_LOG_TTL_MS) return cached.sessions
-  const inflight = remoteWorkLogInflight.get(key)
+  if (cached && freshRemoteWorkLog(cached, days)) return cached.sessions
+  const inflightKey = `${key}#${days}`
+  const inflight = remoteWorkLogInflight.get(inflightKey)
   if (inflight) return inflight
-  const run = new Promise<SessionDayScan[]>((resolve) => {
+  const run = new Promise<SessionDayScan[] | null>((resolve) => {
     execFile(
       sshBin,
       [...buildSshArgs(ssh, { usage: 'oneshot' }), remoteWorkLogScript(days)],
       { timeout: REMOTE_WORK_LOG_TIMEOUT_MS, windowsHide: true, maxBuffer: 64 * 1024 * 1024 },
       (err, stdout) => {
         if (err) {
-          resolve([])
+          resolve(null)
           return
         }
         try {
           const parsed = JSON.parse(stdout.trim() || '[]') as SessionDayScan[]
-          resolve(Array.isArray(parsed) ? parsed : [])
+          resolve(Array.isArray(parsed) ? parsed : null)
         } catch {
-          resolve([])
+          resolve(null)
         }
       }
     )
   })
     .then((sessions) => {
-      if (sessions.length) remoteWorkLogCache.set(key, { fetchedAt: Date.now(), sessions })
+      // 연결 실패면 옛 결과라도 돌려준다 — 서버가 잠깐 끊겼다고 원격 기록이 통째로 사라지지 않게.
+      if (!sessions) return remoteWorkLogCache.get(key)?.sessions ?? []
+      remoteWorkLogCache.set(key, { fetchedAt: Date.now(), days, sessions })
+      saveRemoteWorkLogCache()
       return sessions
     })
     .finally(() => {
-      remoteWorkLogInflight.delete(key)
+      remoteWorkLogInflight.delete(inflightKey)
     })
-  remoteWorkLogInflight.set(key, run)
+  remoteWorkLogInflight.set(inflightKey, run)
   return run
 }
 
 // 캐시가 신선하면 그대로, 아니면 배경에서 갱신을 시작하고 옛 캐시(없으면 빈 목록)를 즉시 돌려준다.
 // 사건 대시보드처럼 응답 지연이 곤란한 호출자용.
-function cachedRemoteWorkLog(ssh: SshConn, days: number): Promise<SessionDayScan[]> {
+async function cachedRemoteWorkLog(ssh: SshConn, days: number): Promise<SessionDayScan[]> {
+  await loadRemoteWorkLogCache()
   const cached = remoteWorkLogCache.get(remoteSourceKey(ssh))
-  if (cached && Date.now() - cached.fetchedAt < REMOTE_WORK_LOG_TTL_MS) {
-    return Promise.resolve(cached.sessions)
-  }
+  if (cached && freshRemoteWorkLog(cached, days)) return cached.sessions
   void scanRemoteWorkLog(ssh, days).catch(() => {})
-  return Promise.resolve(cached?.sessions ?? [])
+  return cached?.sessions ?? []
 }
 
 // 작업일지·사건별 이력 공용 transcript 스캔 수집.
@@ -1563,8 +1651,13 @@ function syntheticScanMetas(
 }
 
 // 날짜별 작업일지: 로컬+원격 트랜스크립트 스캔을 합치고, 스캔이 닿지 못한 세션은 인덱스로 폴백.
-export async function listWorkLog(days = 30, cards: WorkLogBoardCard[] = []): Promise<WorkLogDay[]> {
-  const scans = await collectWorkLogScans(days, true)
+// quick이면 원격은 기억해 둔 결과로 바로 답하고 갱신은 배경에서 한다 (작업일지를 다시 열 때 첫 화면용).
+export async function listWorkLog(
+  days = 30,
+  cards: WorkLogBoardCard[] = [],
+  options: { quick?: boolean } = {}
+): Promise<WorkLogDay[]> {
+  const scans = await collectWorkLogScans(days, !options.quick)
   // 인덱스는 원격 동기화(collectWorkLogScans 내)가 끝난 뒤 읽어야 방금 당겨온 제목·요약이 보인다.
   const entries = await readSessionIndex()
   return mergeWorkLog(scans, entries, Date.now(), days, cards)
