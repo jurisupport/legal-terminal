@@ -3,6 +3,7 @@ export interface SharedUiActivity {
   sequence: number
   status: 'working' | 'done' | 'question' | 'idle'
   attention: boolean
+  hasReply?: boolean
   notice?: { title: string; body: string }
 }
 
@@ -45,6 +46,7 @@ const tab = (v: unknown): v is SharedUiTab => object(v) &&
     (v.kind === 'view' && (v.id === 'files' || v.id === 'records' || v.id === 'hearing')))
 const activity = (v: unknown): v is unknown & SharedUiActivity => object(v) && text(v.runId) && sequence(v.sequence) &&
   (v.status === 'working' || v.status === 'done' || v.status === 'question' || v.status === 'idle') && typeof v.attention === 'boolean' &&
+  (v.hasReply === undefined || typeof v.hasReply === 'boolean') &&
   (v.notice === undefined || (object(v.notice) && text(v.notice.title) && text(v.notice.body)))
 
 export function isSharedNotificationEntry(v: unknown): v is SharedNotificationEntry {
@@ -112,7 +114,7 @@ export function applySharedUiOperation(state: SharedUiState, operation: SharedUi
       if ((operation.start && (previous?.runId ?? null) === operation.expectedRunId) ||
           (!operation.start && previous?.runId === operation.runId && operation.sequence > previous.sequence)) {
         c.activity[operation.agentId] = { runId: operation.runId, sequence: operation.sequence,
-          status: operation.status, attention: operation.attention, ...(operation.notice && { notice: operation.notice }) }
+          status: operation.status, attention: operation.attention, ...(operation.hasReply !== undefined && { hasReply: operation.hasReply }), ...(operation.notice && { notice: operation.notice }) }
       }
     } else {
       const previous = c.activity[operation.agentId]

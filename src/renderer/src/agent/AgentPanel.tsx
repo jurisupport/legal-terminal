@@ -156,7 +156,7 @@ interface AgentPanelProps {
   attachmentRequests?: AgentAttachmentRequest[]
   onAttachmentRequestsHandled?: (requestIds: string[]) => void
   onDraftChange?: (draft: AgentDraftState) => void
-  onStatus?: (status: AgentRunStatus, detail?: string) => void
+  onStatus?: (status: AgentRunStatus, detail?: string, hasReply?: boolean) => void
   onFork?: () => void
   onForkAndSend?: (handoff?: AgentProviderHandoff) => Promise<void>
   onProviderChange?: (provider: AgentProvider, handoff?: AgentProviderHandoff) => void
@@ -2016,7 +2016,8 @@ function agentNoticeDetail(context: NoticeContext, event: AgentEvent): string | 
       const id = stringValue(event.messageId)
       const before = event.type === 'message:assistant_delta' && id === context.messageId ? context.reply : ''
       context.messageId = id
-      context.reply = ((before ?? '') + (stringValue(event.text) ?? '').slice(0, 512)).slice(0, 512)
+      const text = stringValue(event.text) ?? ''
+      context.reply = before ? (before + text.slice(0, 512)).slice(0, 512) : text.trimStart().slice(0, 512)
       break
     }
     case 'permission:request': {
@@ -2439,6 +2440,7 @@ export default function AgentPanel({
   useEffect(() => {
     const off = window.lt.agent.onEvent((event) => {
       if (eventSessionId(event) !== id) return
+      const hasReply = event.type === 'status' && event.status === 'done' && !!noticeContextRef.current.reply?.trim()
       const noticeDetail = agentNoticeDetail(noticeContextRef.current, event)
       if (event.type === 'session:restored') {
         restoredTurnStartedAtRef.current = numberValue(event.startedAt)
@@ -2528,7 +2530,7 @@ export default function AgentPanel({
           setStatus(next)
           if (next === 'working') onStatus?.('working')
           else if (next === 'waiting_permission' || next === 'waiting_user') onStatus?.('question', noticeDetail)
-          else if (next === 'done') onStatus?.('done', noticeDetail)
+          else if (next === 'done') onStatus?.('done', noticeDetail, hasReply)
           else onStatus?.('question', noticeDetail)
         } else if (next === 'idle') {
           setStatus('idle')
@@ -3672,7 +3674,7 @@ export default function AgentPanel({
     setAuthActive(false)
     setItems((current) => interruptedTimelineItems(current))
     setStatus('idle')
-    onStatus?.('done', '작업이 중지되었습니다')
+    onStatus?.('done', '작업이 중지되었습니다', false)
   }, [disarmEscInterrupt, id, onStatus])
 
   useEffect(() => {

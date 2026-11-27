@@ -372,11 +372,6 @@ interface DocScrollPosition {
   left: number
 }
 
-interface CaseDocumentUpdates {
-  paths: string[]
-  latestAt: number
-}
-
 interface DirtyDocTarget {
   id: string
   title: string
@@ -438,6 +433,7 @@ interface TermTab {
 type WorkTabKind = 'doc' | 'terminal'
 type WorkTabKey = `${WorkTabKind}:${string}`
 type TermRunStatus = 'idle' | 'working' | 'done' | 'question'
+type TermDisplayStatus = TermRunStatus | 'doneWithoutReply'
 
 const docSide = (tab?: DocTab): DockSide => tab?.side ?? 'left'
 const termSide = (tab?: TermTab): DockSide => tab?.side ?? 'right'
@@ -889,7 +885,7 @@ const describeRecordsStatus = (
   return undefined
 }
 
-const describeTermStatus = (term: TermTab | undefined, status?: TermRunStatus): string | undefined => {
+const describeTermStatus = (term: TermTab | undefined, status?: TermDisplayStatus): string | undefined => {
   if (!term) return undefined
   const agent = isAgentTab(term)
   const terminalLabel = term.autoAgent ? agentProviderLabels[term.autoAgent] : term.autoClaude ? 'Claude' : '터미널'
@@ -902,7 +898,7 @@ const describeTermStatus = (term: TermTab | undefined, status?: TermRunStatus): 
         ? agent
           ? 'Agent 확인 대기'
           : `${terminalLabel} 질문 대기`
-        : status === 'done'
+        : status === 'done' || status === 'doneWithoutReply'
           ? agent
             ? 'Agent 완료'
             : `${terminalLabel} 완료`
@@ -1663,7 +1659,6 @@ export default function App(): JSX.Element {
   const [documentAgentTabs, setDocumentAgentTabs] = useState<Record<string, string>>({})
   // 실제 파일에 저장되지 않은 변경사항이 있는 문서 id 집합 — 닫기 전 확인용
   const [dirtyDocs, setDirtyDocs] = useState<Set<string>>(new Set())
-  const [caseDocumentUpdates, setCaseDocumentUpdates] = useState<Record<string, CaseDocumentUpdates>>({})
   const docTabsRef = useRef<DocTab[]>(docTabs)
   const dirtyDocsRef = useRef<Set<string>>(dirtyDocs)
   const [mediaReveals, setMediaReveals] = useState<Record<string, { selection: MediaSelection; nonce: number }>>({})
@@ -1724,12 +1719,7 @@ export default function App(): JSX.Element {
       const added = ids.filter((id) => !order.includes(id))
       return added.length ? [...order, ...added] : order
     })
-    const liveIds = new Set(ids)
     caseTabCycleOrderRef.current = ids
-    setCaseDocumentUpdates((updates) => {
-      const next = Object.fromEntries(Object.entries(updates).filter(([id]) => liveIds.has(id)))
-      return Object.keys(next).length === Object.keys(updates).length ? updates : next
-    })
   }, [caseTabs, caseOrder])
   useEffect(() => {
     try { localStorage.setItem(CASE_ORDER_KEY, JSON.stringify(caseOrder)) } catch { /* Keep the order for this window. */ }
@@ -2141,7 +2131,6 @@ export default function App(): JSX.Element {
     const sharedCase = sharedUiCase(caseTabIdValue)
     const path = sharedCase && sharedUiDocumentPath(tab?.path, sharedCase)
     if (path) shareSelection(sharedCase, { kind: 'document', id: path })
-    clearCaseDocumentUpdates(caseTabIdValue, tab?.path)
     setActiveDoc(id)
     const side = docSide(tab)
     const key = docKey(id)
@@ -2621,52 +2610,6 @@ export default function App(): JSX.Element {
     setWorkActive('left', docKey(tab.id))
   }
 
-  const clearCaseDocumentUpdates = (caseTabIdValue: string | undefined, path: string | undefined): void => {
-    if (!caseTabIdValue || !path) return
-    setCaseDocumentUpdates((updates) => {
-      const current = updates[caseTabIdValue]
-      if (!current?.paths.includes(path)) return updates
-      const next = { ...updates }
-      const paths = current.paths.filter((item) => item !== path)
-      if (paths.length) next[caseTabIdValue] = { ...current, paths }
-      else delete next[caseTabIdValue]
-      return next
-    })
-  }
-
-  useEffect(() => {
-    const liveCaseTabIds = new Set(caseTabs.map((tab) => tab.id))
-    const onDocumentChanged = (event: Event): void => {
-      const detail = (event as CustomEvent<{ paths?: unknown; caseTabId?: unknown }>).detail
-      const paths = Array.isArray(detail?.paths)
-        ? detail.paths.filter((item): item is string => typeof item === 'string')
-        : []
-      if (paths.length === 0) return
-      const explicitCaseTabId = typeof detail?.caseTabId === 'string' ? detail.caseTabId : undefined
-      setCaseDocumentUpdates((updates) => {
-        const next = { ...updates }
-        const now = Date.now()
-        let changed = false
-        for (const path of paths) {
-          const caseTabIdValue = explicitCaseTabId ?? inferCaseTabIdForPath(path, caseTabs)
-          if (!caseTabIdValue || !liveCaseTabIds.has(caseTabIdValue)) continue
-          const visible = caseTabIdValue === activeCaseTabId && docTabs.some((doc) =>
-            doc.path === path && caseIdForDoc(doc) === caseTabIdValue &&
-            activeWorkKeyForSide(docSide(doc)) === docKey(doc.id))
-          if (visible && document.hasFocus()) continue
-          const current = next[caseTabIdValue]
-          const pathSet = new Set(current?.paths ?? [])
-          pathSet.add(path)
-          next[caseTabIdValue] = { paths: [...pathSet], latestAt: now }
-          changed = true
-        }
-        return changed ? next : updates
-      })
-    }
-    window.addEventListener(REMOTE_FILE_CHANGED_EVENT, onDocumentChanged)
-    return () => window.removeEventListener(REMOTE_FILE_CHANGED_EVENT, onDocumentChanged)
-  }, [activeCaseTabId, activeWork, caseTabs, docTabs, termTabs])
-
   const openFile = (
     path: string,
     name: string,
@@ -2684,7 +2627,6 @@ export default function App(): JSX.Element {
       activateDocTab(existing.id)
       return existing.id
     }
-    clearCaseDocumentUpdates(caseTabIdValue, path)
     const kind = docKindForPath(path)
     const tab: DocTab = { id: newId(), title: name, kind, caseTabId: caseTabIdValue, path, side }
     shareDocument(tab, true)
@@ -4186,7 +4128,6 @@ export default function App(): JSX.Element {
         if (docSide(linkedDoc) !== termSide(tab)) {
           nextWork[docSide(linkedDoc)] = docKey(linkedDoc.id)
           setWorkActive(docSide(linkedDoc), docKey(linkedDoc.id))
-          clearCaseDocumentUpdates(caseIdForDoc(linkedDoc), linkedDoc.path)
         }
       }
     }
@@ -4219,10 +4160,12 @@ export default function App(): JSX.Element {
   // 터미널 작업 상태(진행중/완료/질문대기).
   // 컨벤션: 보고 있는 작업(탭 표시 + 창 포커스)은 조용히 넘어가고, 그 외에는 알린다.
   // 창 포커스 중 → 앱 내 알림음 + 토스트. 비포커스 → OS 네이티브 알림(소리·집중 모드는 OS가 결정) + 독 주목.
-  const onTermStatus = (id: string, status: TermRunStatus, detail?: string): void => {
+  const onTermStatus = (id: string, status: TermRunStatus, detail?: string, hasReply = true): void => {
     const previousStatus = termStatusRef.current.get(id)
     // 같은 렌더 사이에 done → idle이 도착해도 최신 완료 상태를 유지한다.
-    const nextStatus = status === 'idle' && previousStatus === 'done' ? 'done' : status
+    const wasDone = previousStatus === 'done' || previousStatus === 'doneWithoutReply'
+    const nextStatus = wasDone && (status === 'idle' || status === 'done') ? previousStatus
+      : status === 'done' && !hasReply ? 'doneWithoutReply' : status
     const term = termTabsRef.current.find((item) => item.id === id)
     const notice = status === 'done' || status === 'question'
       ? { title: notificationTitle(term), body: detail?.trim().slice(0, 4096) || notificationBody(status) }
@@ -4236,10 +4179,11 @@ export default function App(): JSX.Element {
       sharedUiRunsRef.current.set(id, run)
     }
     if (sharedCase && run && (start || previousStatus !== nextStatus)) {
-      const attention = (nextStatus === 'done' || nextStatus === 'question') &&
+      const attention = (status === 'done' || status === 'question') &&
         !(isTermVisibleInCurrentWorkspace(id) && document.hasFocus())
       const expectedRunId = sharedUiActivitiesRef.current.get(sharedCase.id)?.[activityId]?.runId ?? null
-      const activity = { runId: run.runId, sequence: ++run.sequence, status: nextStatus, attention, ...(attention && notice && { notice }) }
+      const activity = { runId: run.runId, sequence: ++run.sequence, status, attention,
+        ...(nextStatus === 'doneWithoutReply' && { hasReply: false }), ...(attention && notice && { notice }) }
       sharedUiActivitiesRef.current.set(sharedCase.id, { ...sharedUiActivitiesRef.current.get(sharedCase.id), [activityId]: activity })
       sharedUiSendRef.current(sharedCase, { id: newId(), type: 'activity', caseKey: sharedUiCaseKey(sharedCase),
         agentId: activityId, ...activity, ...(start ? { start: true, expectedRunId } : { start: false }) })
@@ -4262,7 +4206,7 @@ export default function App(): JSX.Element {
       window.lt.app.dismissNotify(id)
     }
     if (status === 'idle') {
-      if (nextStatus !== 'done') clearNotices()
+      if (!wasDone) clearNotices()
       return
     }
     if (status === 'working') {
@@ -4273,7 +4217,7 @@ export default function App(): JSX.Element {
       clearNotices()
       return
     }
-    if (status === 'done' && previousStatus === 'done') return
+    if (status === 'done' && wasDone) return
     setTermAttention((s) => new Set(s).add(id))
     if (status === 'done' && !notifyDone) {
       dismissToastForTerm(id)
@@ -5886,7 +5830,8 @@ export default function App(): JSX.Element {
         const localRun = sharedUiRunsRef.current.get(term.id)
         if (localRun && ((localRun.runId === activity.runId && localRun.sequence > activity.sequence) ||
           (localRun.runId !== activity.runId && ['working', 'question'].includes(termStatusRef.current.get(term.id) ?? '')))) continue
-        setTermStatus((current) => current.get(term.id) === activity.status ? current : new Map(current).set(term.id, activity.status))
+        const displayStatus = activity.status === 'done' && activity.hasReply === false ? 'doneWithoutReply' : activity.status
+        setTermStatus((current) => current.get(term.id) === displayStatus ? current : new Map(current).set(term.id, displayStatus))
         setTermAttention((current) => {
           if (current.has(term.id) === activity.attention) return current
           const next = new Set(current)
@@ -7226,7 +7171,7 @@ export default function App(): JSX.Element {
   const [sessionFilter, setSessionFilter] = useState<string>('all')
   // claude 완료 주목 표시가 필요한 터미널 id 집합 + 진행중/완료 상태
   const [termAttention, setTermAttention] = useState<Set<string>>(new Set())
-  const [termStatus, setTermStatus] = useState<Map<string, TermRunStatus>>(new Map())
+  const [termStatus, setTermStatus] = useState<Map<string, TermDisplayStatus>>(new Map())
   const termStatusRef = useRef(termStatus)
   termStatusRef.current = termStatus
   const [notificationHistoryInitial] = useState(() => {
@@ -7339,70 +7284,41 @@ export default function App(): JSX.Element {
   const caseTabRows = orderedCaseTabs.map((tab) => {
     const terms = termsForCaseTab(tab)
     const docs = docsForCaseTab(tab)
-    const documentUpdates = caseDocumentUpdates[tab.id]
     const active =
       tab.id === activeCaseTabId ||
       terms.some((term) => term.id === activeTerm) ||
       docs.some((doc) => doc.id === activeDoc)
-    const noticeTerms = terms.filter((term) => termStatus.get(term.id) === 'question' ||
-      (termAttention.has(term.id) && termStatus.get(term.id) === 'done'))
-    const documentUpdateCount = documentUpdates?.paths.length ?? 0
     const unloadedActivities = Object.entries(sharedUiActivities.get(tab.id) ?? {})
-      .filter(([id]) => !terms.some((term) => sharedUiActivityId(term) === id)).map(([, activity]) => activity)
-    const working = terms.some((term) => termStatus.get(term.id) === 'working') || unloadedActivities.some((activity) => activity.status === 'working')
-    const questionTaskCount = noticeTerms.filter((term) => termStatus.get(term.id) === 'question').length +
-      unloadedActivities.filter((activity) => activity.status === 'question').length
-    const doneTaskCount = noticeTerms.filter((term) => termStatus.get(term.id) === 'done').length +
-      unloadedActivities.filter((activity) => activity.status === 'done' && activity.attention).length
+      .filter(([id]) => !terms.some((term) => sharedUiActivityId(term) === id))
+    const activities = [
+      ...terms.map((term) => ({ id: sharedUiActivityId(term), term, status: termStatus.get(term.id), attention: termAttention.has(term.id) })),
+      ...unloadedActivities.map(([id, activity]) => ({ id, term: undefined, status: activity.status, attention: activity.attention && activity.hasReply !== false }))
+    ]
+    const noticeSessions = activities.filter(({ status, attention }) => status === 'question' || (status === 'done' && attention))
+    const questionTaskCount = noticeSessions.filter(({ status }) => status === 'question').length
+    const doneTaskCount = noticeSessions.length - questionTaskCount
     const tabCount = terms.length + docs.length
-    return {
-      tab,
-      terms,
-      docs,
-      noticeTerms,
-      active,
-      documentUpdateCount,
-      documentUpdateLatestAt: documentUpdates?.latestAt,
-      questionTaskCount,
-      doneTaskCount,
-      status: documentUpdateCount
-        ? `업데이트 ${documentUpdateCount}개`
-        : questionTaskCount
-          ? `확인 대기 ${questionTaskCount}개`
-          : working
-            ? '작업 중'
-            : doneTaskCount
-              ? `완료 ${doneTaskCount}개`
-            : tabCount
-              ? `${tabCount}개 탭`
-              : '작업 탭 없음'
-      }
+    const status = joinStatus([
+      questionTaskCount ? `확인 대기 ${questionTaskCount}개` : undefined,
+      doneTaskCount ? `새 답변 ${doneTaskCount}개` : undefined
+    ]) || (activities.some((activity) => activity.status === 'working') ? '작업 중' : tabCount ? `${tabCount}개 탭` : '작업 탭 없음')
+    return { tab, active, noticeSessions, questionTaskCount, doneTaskCount, status }
   })
-  const totalCaseDocumentUpdateCount = caseTabRows.reduce((sum, row) => sum + row.documentUpdateCount, 0)
   const totalCaseDoneTaskCount = caseTabRows.reduce((sum, row) => sum + row.doneTaskCount, 0)
   const totalCaseQuestionTaskCount = caseTabRows.reduce((sum, row) => sum + row.questionTaskCount, 0)
-  const totalCaseNoticeCount =
-    totalCaseDocumentUpdateCount + totalCaseQuestionTaskCount + totalCaseDoneTaskCount
+  const totalCaseNoticeCount = totalCaseQuestionTaskCount + totalCaseDoneTaskCount
   const caseTabsShortcut = platform === 'darwin' ? '⌘0' : 'Ctrl+0'
   const closeCaseTabShortcut = platform === 'darwin' ? '⌘⇧W' : 'Ctrl+Shift+W / Ctrl+Alt+W'
   const caseTabActivityTitle =
     totalCaseNoticeCount > 0
       ? `사건별 작업 · ${[
-          totalCaseDocumentUpdateCount > 0 ? `업데이트 ${totalCaseDocumentUpdateCount}개` : undefined,
           totalCaseQuestionTaskCount > 0 ? `확인 대기 ${totalCaseQuestionTaskCount}개` : undefined,
-          totalCaseDoneTaskCount > 0 ? `완료 작업 ${totalCaseDoneTaskCount}개` : undefined
+          totalCaseDoneTaskCount > 0 ? `새 답변 ${totalCaseDoneTaskCount}개` : undefined
         ]
           .filter(Boolean)
           .join(' · ')} (${caseTabsShortcut})`
       : `사건별 작업 (${caseTabsShortcut})`
-  const caseTabActivityBadgeClass =
-    totalCaseDocumentUpdateCount > 0
-      ? 'update'
-      : totalCaseQuestionTaskCount > 0
-        ? 'question'
-        : totalCaseDoneTaskCount > 0
-          ? 'done'
-          : ''
+  const caseTabActivityBadgeClass = totalCaseQuestionTaskCount ? 'question' : totalCaseDoneTaskCount ? 'update' : ''
   const caseTabTitle = (tab: CaseWorkspaceTab): string =>
     [
       tab.meta?.court ? abbrevCourt(tab.meta.court) : undefined,
@@ -7462,12 +7378,8 @@ export default function App(): JSX.Element {
       subtitle: caseTabSubtitle(tab),
       open: !!row,
       openOrder: row ? orderedCaseTabs.findIndex((item) => item.id === tab.id) : undefined,
-      status: row ? joinStatus([
-        row.documentUpdateCount ? `업데이트 ${row.documentUpdateCount}개` : undefined,
-        row.questionTaskCount ? `확인 대기 ${row.questionTaskCount}개` : undefined,
-        row.doneTaskCount ? `완료 ${row.doneTaskCount}개` : undefined
-      ]) || row.status : undefined,
-      noticeCount: row ? row.documentUpdateCount + row.questionTaskCount + row.doneTaskCount : 0,
+      status: row?.status,
+      noticeCount: row?.noticeSessions.length ?? 0,
       active: tab.id === activeCaseTabId,
       updatedAt: tab.updatedAt ?? 0,
       historyKey: sessionListKey(tab.remotePath ?? tab.drafts, tab.ssh, sessionContextForTerm(currentCaseSessionSource(tab, sshProfiles))),
@@ -7481,7 +7393,7 @@ export default function App(): JSX.Element {
         active: tab.id === activeCaseTabId && isTermVisibleInCurrentWorkspace(term.id),
         status: termStatus.get(term.id) === 'working' ? '작업 중'
           : termStatus.get(term.id) === 'question' ? '확인 대기'
-            : termAttention.has(term.id) ? '완료' : undefined
+            : termStatus.get(term.id) === 'done' && termAttention.has(term.id) ? '새 답변' : undefined
       }))
     }
   })
@@ -7613,9 +7525,6 @@ export default function App(): JSX.Element {
       dismissToastForTerm(term.id)
       window.lt.app.dismissNotify(term.id)
     }
-    for (const doc of docs) {
-      if (nextWork[docSide(doc)] === docKey(doc.id)) clearCaseDocumentUpdates(tab.id, doc.path)
-    }
     updateCaseTabActivity(tab.id, {
       activeDocId: target?.kind === 'doc' ? target.id : preferredDoc?.id ?? tab.activeDocId,
       activeTermId: preferred?.id ?? tab.activeTermId,
@@ -7634,12 +7543,8 @@ export default function App(): JSX.Element {
   }
 
   const openNextCaseAttention = (): void => {
-    const targets = caseTabRows.flatMap(({ tab, noticeTerms }) => [
-      ...noticeTerms.map((term) => ({ key: termKeyOf(term.id), tab, term, path: undefined as string | undefined })),
-      ...(caseDocumentUpdates[tab.id]?.paths ?? []).map((path) => ({
-        key: `${tab.id}:path:${path}`, tab, term: undefined as TermTab | undefined, path
-      }))
-    ])
+    const targets = caseTabRows.flatMap(({ tab, noticeSessions }) =>
+      noticeSessions.map(({ id, term }) => ({ key: JSON.stringify([tab.id, id]), tab, id, term })))
     if (!targets.length) return
     // 읽은 완료가 목록에서 사라져도, 아직 남은 질문과 다른 사건을 차례로 방문한다.
     const pending = new Map(targets.map((target) => [target.key, target]))
@@ -7651,11 +7556,9 @@ export default function App(): JSX.Element {
       selectTerm(target.term.id)
       openCaseTab(target.tab, { side: termSide(target.term), key: termKeyOf(target.term.id) })
       focusWorkTargetSoon(termSide(target.term), termKeyOf(target.term.id), true)
-    } else if (target.path) {
-      const id = openFile(target.path, pathLeaf(target.path) ?? target.path, 'left', target.tab.id)
-      const side = docSide(docTabs.find((doc) => doc.id === id))
-      openCaseTab(target.tab, { side, key: docKey(id) })
-      focusWorkTargetSoon(side, docKey(id), true)
+    } else {
+      openCaseTab(target.tab, undefined, true)
+      if (!target.id.startsWith('terminal:')) shareSelection(target.tab, { kind: 'agent', id: target.id })
     }
   }
 
@@ -9015,7 +8918,7 @@ export default function App(): JSX.Element {
                 onAttachmentRequestsHandled={(requestIds) =>
                   handleAgentAttachmentRequestsHandled(t.id, requestIds)
                 }
-                onStatus={(s, detail) => onTermStatus(t.id, s, detail)}
+                onStatus={(s, detail, hasReply) => onTermStatus(t.id, s, detail, hasReply)}
                 onFork={t.agentProvider === 'antigravity' ? undefined : () => void forkAgentTab(t.id, termSide(t))}
                 onForkAndSend={(handoff) => forkAgentTab(t.id, termSide(t), { handoff })}
                 onProviderChange={(provider, handoff) => changeAgentProvider(t.id, provider, handoff)}
@@ -9409,7 +9312,7 @@ export default function App(): JSX.Element {
                   onAttachmentRequestsHandled={(requestIds) =>
                     handleAgentAttachmentRequestsHandled(t.id, requestIds)
                   }
-                  onStatus={(s, detail) => onTermStatus(t.id, s, detail)}
+                  onStatus={(s, detail, hasReply) => onTermStatus(t.id, s, detail, hasReply)}
                   onFork={t.agentProvider === 'antigravity' ? undefined : () => void forkAgentTab(t.id, side)}
                   onForkAndSend={(handoff) => forkAgentTab(t.id, side, { handoff })}
                   onProviderChange={(provider, handoff) => changeAgentProvider(t.id, provider, handoff)}
@@ -9924,17 +9827,7 @@ export default function App(): JSX.Element {
           ))}
           <button
             className={`activity-item case-sidebar-trigger ${explorerVisible && sidebarView === 'cases' ? 'active' : ''} ${
-              totalCaseDocumentUpdateCount > 0 ? 'has-updates' : ''
-            } ${
-              totalCaseDocumentUpdateCount === 0 && totalCaseQuestionTaskCount > 0
-                ? 'has-question'
-                : ''
-            } ${
-              totalCaseDocumentUpdateCount === 0 &&
-              totalCaseQuestionTaskCount === 0 &&
-              totalCaseDoneTaskCount > 0
-                ? 'has-done'
-                : ''
+              totalCaseQuestionTaskCount ? 'has-question' : totalCaseDoneTaskCount ? 'has-updates' : ''
             }`}
             title={caseTabActivityTitle}
             aria-label={caseTabActivityTitle}

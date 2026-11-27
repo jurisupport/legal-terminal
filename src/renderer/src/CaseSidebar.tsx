@@ -350,7 +350,7 @@ export default function CaseSidebar({ cases, sessionVisits, onRemoveRecent, onAd
       (a.open && b.open ? (a.openOrder ?? 0) - (b.openOrder ?? 0) : b.updatedAt - a.updatedAt))
   const count = Math.max(visibleCases, orderedCases.filter((item) => item.open).length)
   const recentTasks = recentSidebarTasks(cases, sessionVisits)
-    .filter(({ item, task }) => (!attentionOnly || item.noticeCount > 0) &&
+    .filter(({ item, task }) => (!attentionOnly || task.status === '새 답변' || task.status === '확인 대기') &&
       matchesSearch([task.title, item.title, item.participants, item.court, item.division, item.subtitle], search))
 
   return (
@@ -420,6 +420,7 @@ export default function CaseSidebar({ cases, sessionVisits, onRemoveRecent, onAd
                 <span className="case-sidebar-task-title">{task.title}</span>
                 <span className="case-sidebar-task-divider" aria-hidden="true">|</span>
                 <span className="case-sidebar-task-case">{item.title}</span>
+                {task.status && <span className="case-sidebar-task-status">{task.status}</span>}
               </button>
               <button type="button" className="case-sidebar-recent-remove"
                 title="최근 세션 목록에서 삭제" aria-label={`${task.title} 최근 세션 목록에서 삭제`}

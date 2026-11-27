@@ -209,10 +209,19 @@ async function electronCheck({ root, temp, output, channels, pdf }) {
     await status('fixture-b', 'idle')
     await wait("!!document.querySelector('.case-sidebar-empty')", 'Resolved tasks leave empty attention view')
     await run(`check(document.querySelector('.case-sidebar-empty').textContent.includes('확인이 필요한 작업 없음') && document.querySelector('.case-sidebar-filter button').disabled, 'Empty attention view disables next action')`)
+    await run(`
+      window.dispatchEvent(new CustomEvent('lt:remote-file-changed', { detail: { paths: ['/synthetic/case-a/서면.md', '/synthetic/case-a/의견.md'] } }));
+      await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+      check(!document.querySelector('.case-sidebar-trigger .activity-badge'), 'File changes alone keep the session badge clear');
+    `)
     await status('fixture-a', 'idle')
     await status('fixture-a', 'working')
     await status('fixture-a', 'done')
-    await wait("document.querySelector('.case-sidebar-trigger')?.title.includes('완료 작업 1개')", 'Unread completion badge')
+    await run(`check(!document.querySelector('.case-sidebar-trigger .activity-badge'), 'Completion without a reply leaves the badge clear')`)
+    await status('fixture-a', 'working')
+    w.webContents.send('agent:event', { type: 'message:assistant_delta', sessionId: 'fixture-a', messageId: 'reply-one', text: '검토했습니다.' })
+    await status('fixture-a', 'done')
+    await wait("document.querySelector('.case-sidebar-trigger')?.title.includes('새 답변 1개')", 'Unread completion badge')
     assert.equal(badgeCounts.at(-1), 1, 'Dock badge counts the unread completion')
     await run(`click('.case-sidebar-case[title*="/synthetic/case-a"]')`)
     await wait("!document.querySelector('.case-sidebar-trigger .activity-badge')", 'Viewing completion clears badge')
@@ -226,8 +235,9 @@ async function electronCheck({ root, temp, output, channels, pdf }) {
     await run(`check(!document.querySelector('.case-sidebar-trigger .activity-badge'), 'Repeated completion stays read after switching cases')`)
     assert.equal(badgeCounts.at(-1), 0, 'Repeated completion cannot restore the Dock badge')
     await status('fixture-a', 'working')
+    w.webContents.send('agent:event', { type: 'message:assistant_delta', sessionId: 'fixture-a', messageId: 'reply-code', text: '```sh\npwd\n```' })
     await status('fixture-a', 'done')
-    await wait("document.querySelector('.case-sidebar-trigger')?.title.includes('완료 작업 1개')", 'New turn gets a completion badge')
+    await wait("document.querySelector('.case-sidebar-trigger')?.title.includes('새 답변 1개')", 'New turn gets a completion badge')
     await run(`openCases(); click('.case-sidebar-case[title*="/synthetic/case-a"]')`)
     await wait("!document.querySelector('.case-sidebar-trigger .activity-badge')", 'Reading new completion clears badge')
     await run(`openCases(); click('.case-sidebar-filter input')`)
