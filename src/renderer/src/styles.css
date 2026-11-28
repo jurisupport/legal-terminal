@@ -1562,12 +1562,12 @@ body {
 .wlog-detail-facts { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
 .wlog-detail-facts > div { display: flex; flex-direction: column; gap: 2px; background: var(--bg); border: 1px solid #2f2f31; border-radius: 6px; padding: 6px 10px; }
 .wlog-detail-facts span:first-child { color: #9d9d9d; font-size: 12px; }
-.wlog-detail footer { margin-top: auto; display: flex; flex-direction: column; gap: 8px; }
-.wlog-detail footer button, .wlog-detail-files button {
+.wlog-detail-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.wlog-detail-actions button, .wlog-detail-files button {
   font: inherit; font-size: 12px; color: var(--fg); background: #2d2d2d; border: 1px solid #3c3c3c; border-radius: 6px; padding: 6px 12px; cursor: pointer;
 }
 .wlog-detail-files button { flex: none; white-space: nowrap; }
-.wlog-detail footer button.primary { color: #fff; background: var(--accent); border-color: var(--accent); }
+.wlog-detail-actions button.primary { color: #fff; background: var(--accent); border-color: var(--accent); }
 .dash-err {
   color: #e8a0a0;
 }

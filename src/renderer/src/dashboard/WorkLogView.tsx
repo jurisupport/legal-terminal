@@ -628,6 +628,25 @@ function WorkLogDetail({
           ×
         </button>
       </header>
+      {((item.board && onOpenBoard) || onResume || (onHandoff && item.cwd)) && (
+        <div className="wlog-detail-actions">
+          {item.board && onOpenBoard && (
+            <button type="button" className="primary" onClick={() => onOpenBoard(item.board!.workspace)}>
+              업무 보드에서 보기
+            </button>
+          )}
+          {onResume && (
+            <button type="button" className={item.board ? undefined : 'primary'} onClick={() => onResume(item)}>
+              세션 이어서 열기
+            </button>
+          )}
+          {onHandoff && item.cwd && (
+            <button type="button" onClick={() => onHandoff(item, handoffText(item, 'followUp'))}>
+              이 결과로 부서에 후속 업무 맡기기
+            </button>
+          )}
+        </div>
+      )}
       {(item.board ? !!item.departments?.length : departmentNames.length > 0 || !!item.departmentSource) && (
         <section className={item.departmentSource === 'suggested' ? 'wlog-detail-dept suggested' : 'wlog-detail-dept'}>
           <h3>부서</h3>
@@ -746,23 +765,6 @@ function WorkLogDetail({
           <b>{transcript?.model ?? '-'}</b>
         </div>
       </section>
-      <footer>
-        {item.board && onOpenBoard && (
-          <button type="button" className="primary" onClick={() => onOpenBoard(item.board!.workspace)}>
-            업무 보드에서 보기
-          </button>
-        )}
-        {onResume && (
-          <button type="button" className={item.board ? undefined : 'primary'} onClick={() => onResume(item)}>
-            세션 이어서 열기
-          </button>
-        )}
-        {onHandoff && item.cwd && (
-          <button type="button" onClick={() => onHandoff(item, handoffText(item, 'followUp'))}>
-            이 결과로 부서에 후속 업무 맡기기
-          </button>
-        )}
-      </footer>
     </aside>
   )
 }

@@ -151,6 +151,7 @@ async function checkWorkLog({ root, temp, output, channels }) {
     const detail = await run(`return document.querySelector('.wlog-detail').innerText`)
     assert.ok(!detail.includes('어제 한 지시'), 'other days are left out')
     for (const text of ['2번 쟁점은 판례로 보강해 줘', '반박초안.md', '/cases/김손해배상/쟁점정리.md', 'claude-fixture', '$0.84', '세션 이어서 열기']) assert.ok(detail.includes(text), 'detail shows ' + text)
+    assert.ok(await run(`const d = document.querySelector('.wlog-detail'); return d.querySelector('header').nextElementSibling?.classList.contains('wlog-detail-actions') && d.querySelector('.wlog-detail-actions').getBoundingClientRect().bottom < d.getBoundingClientRect().top + 200`), 'session actions sit right under the header')
     await capture('detail-chat')
     await click('.wlog-detail-files button', '열기')
     await new Promise(resolve => setTimeout(resolve, 200))
