@@ -5,6 +5,7 @@ import { createPortal } from 'react-dom'
 import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react'
 import type {
   BoardAgent,
+  BoardAgentFile,
   BoardDecision,
   BoardDraft,
   BoardSettings,
@@ -705,15 +706,112 @@ function RoutineEditor({ workspace, routines, change }: { workspace: string; rou
   )
 }
 
-function TeamEditor({ data, save, close, restore, importLegacy, suggest }: {
+const memberTemplate = `당신은 법률사무소의 ○○ 담당입니다.
+
+## 할 일
+- 
+
+## 지켜야 할 것
+- 법령·판례는 확인한 출처만 인용하고 출처를 적는다.
+- 확인하지 못한 내용은 추정이라고 밝힌다.
+
+## 보고 형식
+- `
+
+const memberModels: [string, string][] = [['', '앱 기본값'], ['opus', 'Opus (법리 판단)'], ['sonnet', 'Sonnet (정리·초안)'], ['haiku', 'Haiku (단순 정리, 저렴)']]
+
+export interface BoardMemberFiles {
+  read(name: string): Promise<BoardAgentFile>
+  save(file: BoardAgentFile, mode: 'create' | 'update'): Promise<void>
+  remove(name: string): Promise<void>
+}
+
+/** Writes one member's specialist file: who they are, what they take on, and how they work. */
+function MemberEditor({ mode, initial, files, close, saved, removed }: {
+  mode: 'create' | 'update'
+  initial: BoardAgentFile
+  files: BoardMemberFiles
+  close: () => void
+  saved: (name: string) => void
+  removed: (name: string) => void
+}) {
+  const [file, setFile] = useState(initial)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+  const set = (patch: Partial<BoardAgentFile>) => setFile((current) => ({ ...current, ...patch }))
+  const run = async (work: () => Promise<void>) => {
+    if (busy) return
+    setBusy(true)
+    setError('')
+    try { await work() } catch (err) {
+      setError(errMsg(err).replace(/^Error invoking remote method '[^']+': (?:Error: )?/, ''))
+    } finally { setBusy(false) }
+  }
+  const models = file.model && !memberModels.some(([value]) => value === file.model) ? [...memberModels, [file.model, file.model] as [string, string]] : memberModels
+  return (
+    <form className="wb-member-editor" aria-label={mode === 'create' ? '새 부서원 만들기' : '부서원 고치기'} onSubmit={(e) => {
+      e.preventDefault()
+      void run(async () => {
+        const name = file.name.trim()
+        await files.save({ ...file, name, model: file.model || undefined }, mode)
+        saved(name)
+      })
+    }}>
+      <h3>{mode === 'create' ? '새 부서원 만들기' : `부서원 고치기 · ${file.name}`}</h3>
+      <fieldset className="wb-fields" disabled={busy}>
+        <label>
+          이름 <small>한글·영문·숫자·-·_ (띄어쓰기 없이)</small>
+          <input required maxLength={100} value={file.name} disabled={mode === 'update'} placeholder="예: 판례조사원"
+            onChange={(e) => set({ name: e.target.value.replace(/\s+/g, '-') })} />
+        </label>
+        <label>
+          모델
+          <select value={file.model ?? ''} onChange={(e) => set({ model: e.target.value || undefined })}>
+            {models.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+          </select>
+        </label>
+        <label className="wb-wide">
+          맡는 일 <small>부서장이 이 설명을 보고 일을 맡깁니다. 같은 부서의 다른 부서원과 겹치지 않게 적으세요.</small>
+          <input required maxLength={500} value={file.description} placeholder="예: 사건 쟁점에 맞는 대법원 판례를 찾아 요지를 표로 정리"
+            onChange={(e) => set({ description: e.target.value })} />
+        </label>
+        <label className="wb-wide">
+          일하는 방법 <small>이 부서원이 매번 받는 지침입니다.</small>
+          <textarea required rows={12} maxLength={20000} value={file.prompt} onChange={(e) => set({ prompt: e.target.value })} />
+        </label>
+      </fieldset>
+      <p className="wb-muted">이 업무를 실행하는 컴퓨터의 <code>~/.claude/agents/{file.name.trim() || '이름'}.md</code> 파일로 저장됩니다. 고치거나 지우기 전 내용은 부서 폴더의 <code>agent-history</code>에 남습니다.</p>
+      {error && <p className="wb-error" role="alert">{error}</p>}
+      <div className="wb-actions">
+        {mode === 'update' && (
+          <button type="button" className="wb-btn wb-remove" disabled={busy} onClick={() => {
+            if (!window.confirm(`부서원 「${file.name}」의 파일을 지울까요?`)) return
+            void run(async () => {
+              await files.remove(file.name)
+              removed(file.name)
+            })
+          }}>부서원 지우기</button>
+        )}
+        <button type="button" className="wb-btn" disabled={busy} onClick={close}>돌아가기</button>
+        <button className="wb-btn wb-primary" disabled={busy}>{mode === 'create' ? '부서원 만들기' : '부서원 저장'}</button>
+      </div>
+    </form>
+  )
+}
+
+function TeamEditor({ data, save, close, restore, importLegacy, suggest, members }: {
   data: BoardSnapshot
   save: (teams: BoardTeam[]) => Promise<void>
   close: () => void
   restore: (versionId: string) => Promise<void>
   importLegacy: () => Promise<void>
   suggest: () => Promise<{ teams: BoardTeam[]; missing: string[] }>
+  members: BoardMemberFiles
 }) {
   const [rows, setRows] = useState<BoardTeam[]>(() => data.teams.map((team) => structuredClone(team)))
+  // One department at a time: the list shows them all, a click opens one.
+  const [opened, setOpened] = useState<number | null>(null)
+  const [member, setMember] = useState<{ mode: 'create' | 'update'; file: BoardAgentFile } | null>(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
@@ -746,133 +844,207 @@ function TeamEditor({ data, save, close, restore, importLegacy, suggest }: {
       setError(errMsg(err).replace(/^Error invoking remote method '[^']+': (?:Error: )?/, ''))
     } finally { setBusy(false) }
   }
+  const addDepartment = () => {
+    setRows((current) => [...current, { name: '', color: teamColors[current.length % teamColors.length], agents: [] }])
+    setOpened(rows.length)
+  }
   const history = data.departments?.history ?? []
   const legacy = data.departments?.legacy ?? []
+  const row = opened === null ? undefined : rows[opened]
+  if (member) {
+    return (
+      <Dialog title="부서 관리" close={() => setMember(null)}>
+        <MemberEditor mode={member.mode} initial={member.file} files={members} close={() => setMember(null)}
+          saved={(name) => {
+            if (member.mode === 'create' && opened !== null) update(opened, { agents: [...new Set([...rows[opened].agents, name])] })
+            setNotice(member.mode === 'create' ? `부서원 「${name}」을(를) 만들었습니다.${opened !== null ? ' 부서 저장을 눌러야 이 부서에 들어갑니다.' : ''}` : `부서원 「${name}」을(를) 고쳤습니다.`)
+            setMember(null)
+          }}
+          removed={(name) => {
+            setRows((current) => current.map((team) => ({ ...team, agents: team.agents.filter((agent) => agent !== name) })))
+            setNotice(`부서원 「${name}」을(를) 지웠습니다.`)
+            setMember(null)
+          }} />
+      </Dialog>
+    )
+  }
+  const memberRow = (index: number, team: BoardTeam, name: string) => (
+    <div className="wb-member-row" key={name}>
+      <label className="wb-check" title={describe(name)}>
+        <input type="checkbox" checked={team.agents.includes(name)} onChange={(e) =>
+          update(index, { agents: e.target.checked ? [...team.agents, name] : team.agents.filter((agent) => agent !== name) })} />
+        <span>{name}{!names.includes(name) && ' (파일 없음)'}{describe(name) && <small> · {describe(name)}</small>}</span>
+      </label>
+      {!name.includes(':') && names.includes(name) && (
+        <button type="button" className="wb-btn" disabled={busy} onClick={() => void run(async () => {
+          setMember({ mode: 'update', file: await members.read(name) })
+        })}>고치기</button>
+      )}
+    </div>
+  )
   return (
     <Dialog title="부서 관리" close={() => { if (!busy) close() }}>
       <form onSubmit={(e) => {
         e.preventDefault()
         if (issue) return
         void run(async () => {
-          await save(rows.map((row) => ({ ...row, name: row.name.trim() })))
+          await save(rows.map((team) => ({ ...team, name: team.name.trim() })))
           close()
         })
       }}>
-        <p className="wb-muted">
-          부서는 사무소 전체에 한 벌입니다. 부서에 업무를 맡기면 앱의 부서장이 필요한 부서원에게만 하위 업무를 나눠 맡기고, 부서원 보고서를 모아 최종 보고서를 보고서함이나 결재함으로 보냅니다.
-          {data.departments?.home && <> 저장 위치: <code>{data.departments.home}</code></>}
-        </p>
-        {!names.length && (
-          <p className="wb-muted">
-            등록된 전문가가 없습니다. 이 업무를 실행하는 컴퓨터의 Claude 설정 폴더(~/.claude/agents)나 켜 둔 플러그인에 전문가 정의 파일(.md)이 있어야 부서원으로 고를 수 있습니다.
-          </p>
-        )}
-        {!rows.length && (
-          <div className="wb-actions wb-team-start">
-            <button type="button" className="wb-btn" disabled={busy} onClick={() => void run(async () => {
-              const { teams, missing } = await suggest()
-              setRows(teams)
-              setNotice(missing.length ? `전문가 파일이 없어 빼고 불러온 부서원 ${missing.length}명: ${missing.join(', ')}` : '제안 구성을 불러왔습니다. 확인 후 저장하세요.')
-            })}>제안 구성 불러오기</button>
-            {legacy.length > 0 && !data.teams.length && (
-              <button type="button" className="wb-btn" disabled={busy} onClick={() => void run(async () => {
-                await importLegacy()
-                close()
-              })}>이 보드의 기존 부서 {legacy.length}개 가져오기</button>
+        {opened === null || !row ? (
+          <>
+            <p className="wb-muted">
+              부서를 만들고 부서원을 넣은 뒤 「부서 저장」을 누르세요. 부서에 업무를 맡기면 부서장이 필요한 부서원에게만 일을 나눠 맡기고 보고서를 모아 올립니다.
+            </p>
+            {rows.length > 0 && (
+              <ul className="wb-team-list" aria-label="부서 목록">
+                {rows.map((team, i) => (
+                  <li key={i}>
+                    <button type="button" className="wb-team-item" onClick={() => setOpened(i)}>
+                      <i style={{ backgroundColor: team.color }} />
+                      <span>
+                        <b>{team.name.trim() || '새 부서'}</b>
+                        <small>{team.description || '설명 없음'}</small>
+                        <small>{team.agents.length ? `부서원 ${team.agents.length}명 · ${team.agents.join(', ')}` : '부서원 없음 · 부서장이 직접 처리'}</small>
+                      </span>
+                      <em>편집 ›</em>
+                    </button>
+                  </li>
+                ))}
+              </ul>
             )}
-          </div>
+            <div className="wb-actions wb-team-start">
+              <button type="button" className="wb-btn" disabled={busy} onClick={addDepartment}>＋ 부서 추가</button>
+              {!rows.length && (
+                <button type="button" className="wb-btn" disabled={busy} onClick={() => void run(async () => {
+                  const { teams, missing } = await suggest()
+                  setRows(teams)
+                  setNotice(missing.length ? `부서원 파일이 없어 빼고 불러온 부서원 ${missing.length}명: ${missing.join(', ')}` : '제안 구성을 불러왔습니다. 확인 후 저장하세요.')
+                })}>제안 구성 불러오기</button>
+              )}
+              {!rows.length && legacy.length > 0 && !data.teams.length && (
+                <button type="button" className="wb-btn" disabled={busy} onClick={() => void run(async () => {
+                  await importLegacy()
+                  close()
+                })}>이 보드의 기존 부서 {legacy.length}개 가져오기</button>
+              )}
+            </div>
+          </>
+        ) : (
+          <>
+            <div className="wb-actions wb-team-start">
+              <button type="button" className="wb-btn" onClick={() => setOpened(null)}>‹ 부서 목록</button>
+            </div>
+            <fieldset className="wb-draft" disabled={busy}>
+              <legend>{row.name.trim() || '새 부서'}</legend>
+              <div className="wb-fields">
+                <label>
+                  부서 이름
+                  <input required maxLength={40} value={row.name} onChange={(e) => update(opened, { name: e.target.value })} />
+                </label>
+                <label>
+                  색상
+                  <input type="color" value={row.color} onChange={(e) => update(opened, { color: e.target.value })} />
+                </label>
+                <label className="wb-wide">
+                  부서 설명
+                  <input maxLength={300} value={row.description ?? ''} placeholder="이 부서가 맡는 일. 다른 부서와 겹치지 않게 적으세요."
+                    onChange={(e) => update(opened, { description: e.target.value || undefined })} />
+                </label>
+                <div className="wb-wide wb-members" role="group" aria-label={(row.name.trim() || '새 부서') + ' 부서원'}>
+                  <span>부서원 <small>체크한 부서원에게만 부서장이 일을 나눠 줍니다.</small></span>
+                  {(() => {
+                    const own = [...new Set([...names, ...row.agents])].filter((name) => !name.includes(':'))
+                    const plugin = [...new Set([...names, ...row.agents])].filter((name) => name.includes(':'))
+                    return (
+                      <>
+                        {own.map((name) => memberRow(opened, row, name))}
+                        {!own.length && <small>아직 만든 부서원이 없습니다. 아래 버튼으로 만드세요.</small>}
+                        <div className="wb-actions wb-team-start">
+                          <button type="button" className="wb-btn" onClick={() => setMember({ mode: 'create', file: { name: '', description: '', prompt: memberTemplate } })}>
+                            ＋ 새 부서원 만들기
+                          </button>
+                        </div>
+                        {plugin.length > 0 && (
+                          <details className="wb-plugin-members" open={plugin.some((name) => row.agents.includes(name))}>
+                            <summary>플러그인 전문가 {plugin.length}명</summary>
+                            {plugin.map((name) => memberRow(opened, row, name))}
+                          </details>
+                        )}
+                      </>
+                    )
+                  })()}
+                </div>
+              </div>
+              <details className="wb-team-advanced">
+                <summary>고급 설정 <small>부서 규칙 · 부서장 지침 · 도구 권한 · 비용 경고선 · 정기 업무</small></summary>
+                <div className="wb-fields">
+                  <label className="wb-wide">
+                    부서 규칙 <small>부서원 모두의 지침 앞에 붙습니다.</small>
+                    <textarea rows={4} maxLength={20000} value={row.rules ?? ''} placeholder="예: 사건 폴더의 _사건개요.md를 먼저 읽는다. 광고 문구는 변호사법·변호사 광고 규정을 지킨다."
+                      onChange={(e) => update(opened, { rules: e.target.value || undefined })} />
+                  </label>
+                  <label className="wb-wide">
+                    부서장 추가 지침 <small>앱 기본 부서장 지침에 덧붙습니다.</small>
+                    <textarea rows={3} maxLength={20000} value={row.leadGuide ?? ''} placeholder="예: 서면 초안은 반드시 법리 검토 뒤에 맡긴다."
+                      onChange={(e) => update(opened, { leadGuide: e.target.value || undefined })} />
+                  </label>
+                  <div className="wb-wide wb-team-tools" role="group" aria-label={(row.name.trim() || '새 부서') + ' 도구 권한'}>
+                    <span>도구 권한</span>
+                    {boardDepartmentTools.map((tool) => (
+                      <label key={tool.key}>
+                        {tool.label}
+                        <select value={row.tools?.[tool.key] ?? 'off'} onChange={(e) => {
+                          const tools = { ...row.tools, [tool.key]: e.target.value as BoardToolLevel }
+                          if (e.target.value === 'off') delete tools[tool.key]
+                          update(opened, { tools: Object.keys(tools).length ? tools : undefined })
+                        }}>
+                          {(tool.readOnly ? ['allow', 'off'] as const : ['ask', 'off'] as const).map((level) =>
+                            <option key={level} value={level}>{toolLevelLabel[level]}</option>)}
+                        </select>
+                      </label>
+                    ))}
+                    <small>결재 없이 허용할 수 있는 것은 읽기 전용 도구뿐입니다. 꺼 둔 도구는 결재 요청도 만들지 않습니다.</small>
+                  </div>
+                  <label>
+                    지시 1건 경고선 (USD)
+                    <input type="number" min="0.01" step="0.01" value={usdInput(row.warnInstructionUsd)}
+                      onChange={(e) => update(opened, { warnInstructionUsd: e.target.value ? Number(e.target.value) : undefined })} />
+                  </label>
+                  <label>
+                    지시 1건 정지선 (USD)
+                    <input type="number" min="0.01" step="0.01" value={usdInput(row.stopInstructionUsd)} title="닿으면 업무를 멈추고 확인 필요로 표시합니다. 실제 사용량을 본 뒤 정하세요."
+                      onChange={(e) => update(opened, { stopInstructionUsd: e.target.value ? Number(e.target.value) : undefined })} />
+                  </label>
+                  <label>
+                    월간 경고선 (USD)
+                    <input type="number" min="0.01" step="0.01" value={usdInput(row.warnMonthlyUsd)}
+                      onChange={(e) => update(opened, { warnMonthlyUsd: e.target.value ? Number(e.target.value) : undefined })} />
+                  </label>
+                </div>
+                <RoutineEditor workspace={data.workspace ?? ''} routines={row.routines ?? []}
+                  change={(routines) => update(opened, { routines: routines.length ? routines : undefined })} />
+              </details>
+              <div className="wb-actions">
+                <button type="button" className="wb-btn wb-remove" onClick={() => {
+                  setRows((current) => current.filter((_, j) => j !== opened))
+                  setOpened(null)
+                }}>
+                  부서 삭제
+                </button>
+              </div>
+            </fieldset>
+          </>
         )}
         {notice && <p className="wb-muted" role="status">{notice}</p>}
-        {rows.map((row, i) => (
-          <fieldset className="wb-draft" key={i} disabled={busy}>
-            <legend>{row.name.trim() || '새 부서'}</legend>
-            <div className="wb-fields">
-              <label>
-                부서 이름
-                <input required maxLength={40} value={row.name} onChange={(e) => update(i, { name: e.target.value })} />
-              </label>
-              <label>
-                색상
-                <input type="color" value={row.color} onChange={(e) => update(i, { color: e.target.value })} />
-              </label>
-              <label className="wb-wide">
-                부서 설명
-                <input maxLength={300} value={row.description ?? ''} placeholder="이 부서가 맡는 일. 다른 부서와 겹치지 않게 적으세요."
-                  onChange={(e) => update(i, { description: e.target.value || undefined })} />
-              </label>
-              <div className="wb-wide wb-members" role="group" aria-label={(row.name.trim() || '새 부서') + ' 부서원'}>
-                <span>부서원</span>
-                {[...new Set([...names, ...row.agents])].map((name) => (
-                  <label className="wb-check" key={name} title={describe(name)}>
-                    <input type="checkbox" checked={row.agents.includes(name)} onChange={(e) =>
-                      update(i, { agents: e.target.checked ? [...row.agents, name] : row.agents.filter((agent) => agent !== name) })} />
-                    {name}{!names.includes(name) && ' (현재 미등록)'}{describe(name) && <small> · {describe(name)}</small>}
-                  </label>
-                ))}
-                {!names.length && !row.agents.length && <small>고를 수 있는 전문가가 없습니다.</small>}
-              </div>
-              <label className="wb-wide">
-                부서 규칙 <small>부서원 모두의 지침 앞에 붙습니다.</small>
-                <textarea rows={4} maxLength={20000} value={row.rules ?? ''} placeholder="예: 사건 폴더의 _사건개요.md를 먼저 읽는다. 광고 문구는 변호사법·변호사 광고 규정을 지킨다."
-                  onChange={(e) => update(i, { rules: e.target.value || undefined })} />
-              </label>
-              <label className="wb-wide">
-                부서장 추가 지침 <small>앱 기본 부서장 지침에 덧붙습니다.</small>
-                <textarea rows={3} maxLength={20000} value={row.leadGuide ?? ''} placeholder="예: 서면 초안은 반드시 법리 검토 뒤에 맡긴다."
-                  onChange={(e) => update(i, { leadGuide: e.target.value || undefined })} />
-              </label>
-              <div className="wb-wide wb-team-tools" role="group" aria-label={(row.name.trim() || '새 부서') + ' 도구 권한'}>
-                <span>도구 권한</span>
-                {boardDepartmentTools.map((tool) => (
-                  <label key={tool.key}>
-                    {tool.label}
-                    <select value={row.tools?.[tool.key] ?? 'off'} onChange={(e) => {
-                      const tools = { ...row.tools, [tool.key]: e.target.value as BoardToolLevel }
-                      if (e.target.value === 'off') delete tools[tool.key]
-                      update(i, { tools: Object.keys(tools).length ? tools : undefined })
-                    }}>
-                      {(tool.readOnly ? ['allow', 'off'] as const : ['ask', 'off'] as const).map((level) =>
-                        <option key={level} value={level}>{toolLevelLabel[level]}</option>)}
-                    </select>
-                  </label>
-                ))}
-                <small>결재 없이 허용할 수 있는 것은 읽기 전용 도구뿐입니다. 꺼 둔 도구는 결재 요청도 만들지 않습니다.</small>
-              </div>
-              <label>
-                지시 1건 경고선 (USD)
-                <input type="number" min="0.01" step="0.01" value={usdInput(row.warnInstructionUsd)}
-                  onChange={(e) => update(i, { warnInstructionUsd: e.target.value ? Number(e.target.value) : undefined })} />
-              </label>
-              <label>
-                지시 1건 정지선 (USD)
-                <input type="number" min="0.01" step="0.01" value={usdInput(row.stopInstructionUsd)} title="닿으면 업무를 멈추고 확인 필요로 표시합니다. 실제 사용량을 본 뒤 정하세요."
-                  onChange={(e) => update(i, { stopInstructionUsd: e.target.value ? Number(e.target.value) : undefined })} />
-              </label>
-              <label>
-                월간 경고선 (USD)
-                <input type="number" min="0.01" step="0.01" value={usdInput(row.warnMonthlyUsd)}
-                  onChange={(e) => update(i, { warnMonthlyUsd: e.target.value ? Number(e.target.value) : undefined })} />
-              </label>
-            </div>
-            <RoutineEditor workspace={data.workspace ?? ''} routines={row.routines ?? []}
-              change={(routines) => update(i, { routines: routines.length ? routines : undefined })} />
-            <div className="wb-actions">
-              <button type="button" className="wb-btn wb-remove" onClick={() => setRows((current) => current.filter((_, j) => j !== i))}>
-                부서 삭제
-              </button>
-            </div>
-          </fieldset>
-        ))}
-        <div className="wb-actions">
-          <button type="button" className="wb-btn" disabled={busy} onClick={() =>
-            setRows((current) => [...current, { name: '', color: teamColors[current.length % teamColors.length], agents: [] }])}>
-            ＋ 부서 추가
-          </button>
-        </div>
+        {!names.length && opened === null && rows.length > 0 && (
+          <p className="wb-muted">아직 부서원이 없습니다. 부서를 눌러 「＋ 새 부서원 만들기」로 만드세요. 부서원이 없어도 부서장이 직접 처리합니다.</p>
+        )}
         {overlaps.length > 0 && <ul className="wb-warning" aria-label="설명 겹침">{overlaps.map((text) => <li key={text}>{text}</li>)}</ul>}
-        {history.length > 0 && (
+        {opened === null && history.length > 0 && (
           <details className="wb-team-history">
-            <summary>변경 이력 {history.length}건</summary>
+            <summary>변경 이력 {history.length}건{data.departments?.home && <> · 저장 위치 <code>{data.departments.home}</code></>}</summary>
             <ol>
               {history.map((version) => (
                 <li key={version.id}>
@@ -1878,6 +2050,17 @@ function BoardWorkspace({ workspace, view, onView, bulkSeed, bulkDepartment, bul
                 await refresh()
               }}
               suggest={() => api.suggestedTeams(workspace)}
+              members={{
+                read: (name) => api.agentFile(workspace, name),
+                save: async (file, mode) => {
+                  await api.saveAgentFile(workspace, file, mode)
+                  await refresh()
+                },
+                remove: async (name) => {
+                  await api.removeAgentFile(workspace, name)
+                  await refresh()
+                }
+              }}
             />
           )}
           {task && (

@@ -127,6 +127,8 @@ export function boardRoutineDue(routine: Pick<BoardRoutine, 'time' | 'days'>, la
   return now.getTime() >= Date.parse(`${today}T${routine.time}:00+09:00`) ? today : undefined
 }
 export interface BoardAgent { name: string; description: string }
+/** One of the lawyer's own specialist files as the department screen edits it. */
+export interface BoardAgentFile { name: string; description: string; prompt: string; model?: string }
 /** A saved version of the office departments, newest first. */
 export interface BoardTeamVersion { id: string; at: string; teams: number }
 export interface BoardDepartments {
@@ -169,6 +171,10 @@ export interface BoardApi {
   restoreTeams(workspace: string, versionId: string): Promise<void>
   importLegacyTeams(workspace: string): Promise<void>
   suggestedTeams(workspace: string): Promise<{ teams: BoardTeam[]; missing: string[] }>
+  /** Reads, writes or removes ~/.claude/agents/<name>.md on the machine that runs the departments. */
+  agentFile(workspace: string, name: string): Promise<BoardAgentFile>
+  saveAgentFile(workspace: string, file: BoardAgentFile, mode: 'create' | 'update'): Promise<void>
+  removeAgentFile(workspace: string, name: string): Promise<void>
   detail(workspace: string, id: string): Promise<{report: string; review: string}>
   documentPath(workspace: string, id: string, path: string): Promise<string>
   downloadDocument(workspace: string, id: string, path: string): Promise<boolean>

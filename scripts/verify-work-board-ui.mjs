@@ -314,8 +314,40 @@ function run({ root, workspace, board, temp, home, profile, screenshot, bulk, fo
     await click('.wb-dialog button', '취소')
     await evaluate(`window.lt.workBoard.saveTeams(${JSON.stringify(workspace)}, [{name:'송무팀',color:'#376ac6',agents:[]}])`)
     await wait(() => evaluate("[...document.querySelectorAll('.wb-org .wb-org-lead')].some(el => el.textContent.includes('부서장 · 앱 기본 지침'))"), 'department head row')
-    // The editor offers rules, the head's extra guide, per-tool levels and warning lines; bash can only ask or stay off.
+    // The editor lists departments; one opens at a time with name, description and members in front.
     await click('.wb-org button', '부서 관리')
+    await click('.wb-dialog .wb-team-item', '송무팀')
+    await wait(() => evaluate("!!document.querySelector('.wb-dialog [aria-label=\"송무팀 부서원\"]')"), 'department members')
+    // A new member is written as ~/.claude/agents/<name>.md and checked into the open department.
+    const setField = (selector, value) => evaluate(`(() => {
+      const input = document.querySelector(${JSON.stringify(selector)})
+      const proto = input.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : input.tagName === 'SELECT' ? HTMLSelectElement.prototype : HTMLInputElement.prototype
+      Object.getOwnPropertyDescriptor(proto, 'value').set.call(input, ${JSON.stringify(value)})
+      input.dispatchEvent(new Event(input.tagName === 'SELECT' ? 'change' : 'input', { bubbles: true }))
+    })()`)
+    await click('.wb-dialog button', '새 부서원 만들기')
+    await visible('.wb-member-editor')
+    assert.equal(await evaluate("document.querySelector('.wb-member-editor textarea').value.startsWith('당신은 법률사무소의')"), true)
+    await setField('.wb-member-editor input[maxlength=\"100\"]', '판례 조사원')
+    await setField('.wb-member-editor input[maxlength=\"500\"]', '쟁점별 대법원 판례 요지 정리')
+    await setField('.wb-member-editor textarea', '쟁점마다 판례를 찾아 표로 정리합니다.')
+    await setField('.wb-member-editor select', 'sonnet')
+    await click('.wb-member-editor button', '부서원 만들기')
+    await wait(() => evaluate("!!document.querySelector('.wb-dialog [aria-label=\"송무팀 부서원\"]') && [...document.querySelectorAll('.wb-member-row')].some(r => r.textContent.includes('판례-조사원') && r.querySelector('input').checked)"), 'new member checked')
+    const memberPath = path.join(home, '.claude/agents/판례-조사원.md')
+    const memberFile = fs.readFileSync(memberPath, 'utf8')
+    assert.match(memberFile, /^---\nname: 판례-조사원\ndescription: 쟁점별 대법원 판례 요지 정리\nmodel: sonnet\n---\n\n쟁점마다 판례를 찾아 표로 정리합니다.\n$/)
+    // Editing keeps frontmatter the screen does not show.
+    fs.writeFileSync(memberPath, memberFile.replace('model: sonnet\n', 'model: sonnet\nmaxTurns: 7\n'))
+    await evaluate("[...document.querySelectorAll('.wb-member-row')].find(r => r.textContent.includes('판례-조사원')).querySelector('button').click()")
+    await wait(() => evaluate("document.querySelector('.wb-member-editor h3')?.textContent.includes('판례-조사원')"), 'member editor for the new member')
+    await setField('.wb-member-editor textarea', '쟁점마다 판례 3건 이내로 정리합니다.')
+    await click('.wb-member-editor button', '부서원 저장')
+    await wait(() => fs.readFileSync(memberPath, 'utf8').includes('판례 3건 이내'), 'member edited')
+    assert.match(fs.readFileSync(memberPath, 'utf8'), /maxTurns: 7/)
+    fs.writeFileSync(screenshot.replace(/board\.png$/, 'department-members.png'), (await win.webContents.capturePage()).toPNG())
+    // Rules, the head's extra guide, per-tool levels and warning lines sit under 고급 설정; bash can only ask or stay off.
+    await evaluate("document.querySelector('.wb-team-advanced').open = true")
     await wait(() => evaluate("!!document.querySelector('.wb-dialog [aria-label=\"송무팀 도구 권한\"]')"), 'department tool levels')
     assert.deepEqual(JSON.parse(await evaluate("JSON.stringify([...document.querySelectorAll('.wb-dialog [aria-label=\"송무팀 도구 권한\"] select')].map(s => [...s.options].map(o => o.value)))")),
       [['allow', 'off'], ['allow', 'off'], ['allow', 'off'], ['ask', 'off'], ['ask', 'off']])

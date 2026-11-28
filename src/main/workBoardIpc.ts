@@ -161,6 +161,9 @@ export function registerWorkBoards(): () => void {
   handle('restoreTeams', async (w: string, id: string) => (await open(w)).restoreTeams(id))
   handle('importLegacyTeams', async (w: string) => (await open(w)).importLegacyTeams())
   handle('suggestedTeams', async (w: string) => (await open(w)).suggestedTeams())
+  handle('agentFile', async (w: string, name: string) => (await open(w)).agentFile(name))
+  handle('saveAgentFile', async (w: string, file: unknown, mode: unknown) => (await open(w)).saveAgentFile(file, mode === 'create' ? 'create' : 'update'))
+  handle('removeAgentFile', async (w: string, name: string) => (await open(w)).removeAgentFile(name))
   handle('detail', async (w: string, id: string) => (await open(w)).detail(id))
   handle('documentPath', async (w: string, id: string, path: string) => (await open(w)).documentPath(id, path))
   handle('documentText', async (w: string, id: string, path: string, offset: number = 0) =>

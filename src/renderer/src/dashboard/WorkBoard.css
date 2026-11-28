@@ -180,7 +180,7 @@ details.wb-draft-options > .wb-fields { margin-top: 8px; }
 .wb-delegates ol { margin: 4px 0; padding-left: 20px; display: flex; flex-direction: column; gap: 4px; }
 .wb-delegates .wb-btn { text-align: left; }
 .wb-team-description { margin: 0 0 4px; font-size: 12px; }
-.wb-team-start { justify-content: flex-start; }
+.wb-team-start, .wb-dialog .wb-team-start { justify-content: flex-start; }
 .wb-team-tools { display: flex; flex-direction: column; gap: 6px; }
 .wb-team-tools > span { font-weight: 600; }
 .wb-team-tools label { display: flex; justify-content: space-between; align-items: center; gap: 10px; font-weight: 400; }
@@ -195,3 +195,22 @@ details.wb-draft-options > .wb-fields { margin-top: 8px; }
 .wb-routines > span small { color: var(--wb-muted); font-weight: 400; }
 .wb-routine { border: 1px dashed #cbd1da; border-radius: 6px; padding: 8px; }
 .wb-org-routine { font-size: 12px; color: var(--wb-muted); }
+.wb-team-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.wb-team-item { width: 100%; display: flex; align-items: center; gap: 10px; text-align: left; background: white; border: 1px solid var(--wb-border); border-radius: 6px; padding: 9px 12px; cursor: pointer; font: inherit; color: inherit; }
+.wb-team-item:hover { border-color: #8d9bb0; background: #f7f9fc; }
+.wb-team-item > i { flex: none; width: 10px; height: 10px; border-radius: 50%; }
+.wb-team-item > span { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.wb-team-item small { color: var(--wb-muted); font-size: 12px; overflow-wrap: anywhere; }
+.wb-team-item > em { flex: none; font-style: normal; color: #233e69; font-size: 12px; }
+.wb-member-row { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.wb-member-row .wb-btn { flex: none; font-size: 12px; padding: 2px 8px; }
+.wb-plugin-members > summary, .wb-team-advanced > summary { cursor: pointer; font-size: 12px; color: #414d61; }
+.wb-plugin-members { margin-top: 4px; display: flex; flex-direction: column; gap: 4px; }
+.wb-team-advanced { margin-top: 10px; border-top: 1px dashed var(--wb-border); padding-top: 8px; }
+.wb-team-advanced > summary { font-weight: 600; }
+.wb-team-advanced > summary small { color: var(--wb-muted); font-weight: 400; }
+.wb-team-advanced > .wb-fields { margin-top: 8px; }
+.wb-member-editor { display: grid; gap: 12px; }
+.wb-member-editor h3 { margin: 0; }
+.wb-member-editor fieldset { border: 0; padding: 0; margin: 0; min-width: 0; }
+.wb-member-editor textarea { font-family: inherit; }

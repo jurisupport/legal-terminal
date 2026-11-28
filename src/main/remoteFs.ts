@@ -1497,21 +1497,40 @@ async function remoteBoardAgents(workspace: string): Promise<RemoteBoardAgents> 
   }
 }
 
-async function loadRemoteBoardAgents(profileId: string, sftp: SFTPWrapper): Promise<RemoteBoardAgents> {
+/** The server's Claude Code config folder (CLAUDE_CONFIG_DIR or ~/.claude), not yet resolved. */
+async function remoteClaudeConfig(profileId: string, sftp: SFTPWrapper, request: SftpCall): Promise<string> {
   // SFTP-only accounts expose their home through realpath(".") even when exec is unavailable.
   const { boardRemoteShell } = await import('./agent/boardRemoteShell')
   const lookup = boardRemoteShell('printf %s "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"')
   const override = await execRemoteCommand(profileId, lookup, {
     timeoutMs: 3000, maxOutputBytes: 4096, timeoutMessage: '원격 Claude 설정 위치 조회 시간 초과'
   }).then(result => result.code === 0 ? result.stdout.toString('utf8') : '', () => '')
+  const config = override || posix.join(await request<string>(done => sftp.realpath('.', done)), '.claude')
+  if (!posix.isAbsolute(config) || /[\x00-\x1f]/u.test(config)) throw new Error('원격 Claude 설정 경로를 확인해 주세요.')
+  return config
+}
+
+/** The server folder that holds the lawyer's own specialist files, as a remote URI. */
+export async function rfsBoardAgentDirectory(workspace: string): Promise<string> {
+  const {profileId} = parseRemote(workspace)
+  const sftp = await getSftp(profileId)
+  return makeRemote(profileId, posix.join(await remoteClaudeConfig(profileId, sftp, op => sftpRequest(sftp, op, 15_000)), 'agents'))
+}
+
+/** Drops the cached specialist list so a file the app just wrote is read again. */
+export async function rfsForgetBoardAgents(workspace: string): Promise<void> {
+  const {profileId} = parseRemote(workspace)
+  boardAgentCache.delete((await getConnection(profileId)).client)
+}
+
+async function loadRemoteBoardAgents(profileId: string, sftp: SFTPWrapper): Promise<RemoteBoardAgents> {
   const deadline = Date.now() + 15_000
   const request = <T>(op: (done: (err?: Error | null, value?: T) => void) => void): Promise<T> => {
     const remaining = deadline - Date.now()
     if (remaining <= 0) return Promise.reject(new Error('원격 에이전트 목록 조회 시간이 초과되었습니다.'))
     return sftpRequest(sftp, op, remaining)
   }
-  const config = override || posix.join(await request<string>(done => sftp.realpath('.', done)), '.claude')
-  if (!posix.isAbsolute(config) || /[\x00-\x1f]/u.test(config)) throw new Error('원격 Claude 설정 경로를 확인해 주세요.')
+  const config = await remoteClaudeConfig(profileId, sftp, request)
   const canonicalConfig = await request<string>(done => sftp.realpath(config, done)).catch(error => {
     if (error.code === 2) return null
     throw error

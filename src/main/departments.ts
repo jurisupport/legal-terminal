@@ -312,6 +312,12 @@ export class Departments {
     return this.save(teams)
   }
 
+  /** Keeps the previous text of a member file the app changed or removed, under agent-history/. */
+  keepAgent(name: string, text: string): Promise<void> {
+    const at = new Date().toISOString().replace(/[-:.]/g, '')
+    return this.serial(() => this.files.write('agent-history/' + fileStem(name) + '-' + at + '.md', text))
+  }
+
   async usage(month = seoulMonth()): Promise<Record<string, number>> {
     const source = await this.files.read('usage/' + month + '.json')
     if (source === null) return {}

@@ -8,6 +8,7 @@ import { kstDateKey } from '../shared/todoSummary'
 import { WorkBoardStore, followUpSnapshot, maxCardSessions, unreadReportReceipt } from './workBoardStore'
 import { boardRunCost, runBoardAgent, listBoardAgents, type BoardDepartmentContext } from './workBoardRunner'
 import { Departments, departmentOverlaps, fromLegacyTeams, suggestedDepartments } from './departments'
+import { readBoardAgentFile, removeBoardAgentFile, writeBoardAgentFile } from './boardAgentFiles'
 import { getBoardTodoAccount, readBoardMcpTodos, readBoardTodos } from './workBoardTodos'
 import { verifyBoardTodoScope } from './workBoardScope'
 import { buildBoardDaily, boardReportDue } from './workBoardDaily'
@@ -580,6 +581,35 @@ export class WorkBoard {
 
   async suggestedTeams() {
     return suggestedDepartments(this.agents)
+  }
+
+  async agentFile(name: string) {
+    return readBoardAgentFile(this.workspace, name)
+  }
+
+  /** Writes one of the lawyer's own specialist files and lists the specialists again at once. */
+  async saveAgentFile(input: unknown, mode: 'create' | 'update') {
+    await this.serialOwner(async () => {
+      const previous = await writeBoardAgentFile(this.workspace, input, mode, this.agents.map(agent => agent.name))
+      if (previous !== null) await (await this.departments()).keepAgent((input as { name: string }).name, previous)
+      await this.reloadAgents()
+    })
+  }
+
+  async removeAgentFile(name: string) {
+    await this.serialOwner(async () => {
+      const office = await this.departments()
+      const using = (await office.teams()).filter(team => team.agents.includes(name)).map(team => team.name)
+      if (using.length) throw new Error(`이 부서원이 들어 있는 부서가 있습니다. 먼저 부서에서 빼고 저장해 주세요: ${using.join(', ')}`)
+      await office.keepAgent(name, await removeBoardAgentFile(this.workspace, name))
+      await this.reloadAgents()
+    })
+  }
+
+  private async reloadAgents() {
+    this.agents = await listBoardAgents(this.workspace)
+    this.departmentInfo = (await this.loadDepartments(this.agents)).departments
+    this.changed()
   }
 
   async configure(patch: Partial<BoardSettings>) {
